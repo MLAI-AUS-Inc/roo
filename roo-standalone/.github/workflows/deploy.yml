@@ -1,0 +1,34 @@
+name: Deploy to Digital Ocean
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DO_HOST }}
+          username: ${{ secrets.DO_USERNAME }}
+          key: ${{ secrets.DO_SSH_KEY }}
+          script: |
+            # Stop if any command fails
+            set -e
+            
+            # Go to the project directory
+            cd /root/roo-standalone
+            
+            # Get the latest code
+            git pull origin main
+            
+            # Restart the app
+            # --build: recompiles the code
+            # --remove-orphans: cleans up old containers
+            docker compose up -d --build --remove-orphans
+            
+            # Clean up space
+            docker image prune -f
