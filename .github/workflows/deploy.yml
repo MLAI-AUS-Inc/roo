@@ -19,15 +19,23 @@ jobs:
             # Stop if any command fails
             set -e
             
-            # Go to the project directory
-            cd /root/roo-standalone
+            # Define deployment directory
+            DEPLOY_DIR="/root/roo"
             
-            # Get the latest code
-            git pull origin main
+            # Clone repo if it doesn't exist, otherwise pull
+            if [ ! -d "$DEPLOY_DIR" ]; then
+              echo "Cloning repository..."
+              git clone https://github.com/MLAI-AUS-Inc/roo.git "$DEPLOY_DIR"
+            else
+              echo "Updating repository..."
+              cd "$DEPLOY_DIR"
+              git pull origin main
+            fi
+            
+            # Go to the sub-project directory
+            cd "$DEPLOY_DIR/roo-standalone"
             
             # Restart the app
-            # --build: recompiles the code
-            # --remove-orphans: cleans up old containers
             docker compose up -d --build --remove-orphans
             
             # Clean up space
