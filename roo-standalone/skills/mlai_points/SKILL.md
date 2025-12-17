@@ -36,9 +36,10 @@ This skill enables Roo to interact with the MLAI Points System via API, allowing
 - **action**: The action to perform (required) - e.g., "balance", "book", "claim", "submit", "award"
 - **task_id**: Task ID number for task-related actions
 - **date**: Date for coworking bookings (YYYY-MM-DD format)
-- **points**: Point amount for awards/deductions
-- **reason**: Reason for manual point adjustments
-- **target_user**: Slack mention (@user) for admin actions targeting another user
+- **points**: The number of points to award/deduct (integer)
+- **reason**: A short description of why the points are being awarded
+- **target_user**: The Slack User ID or mention (@user) of the person receiving points
+- **target_slack_id**: (Alias for target_user) The Slack User ID of the person receiving points
 - **submission_text**: Description of work completed for task submissions
 - **reward_code**: Code for reward redemption requests
 

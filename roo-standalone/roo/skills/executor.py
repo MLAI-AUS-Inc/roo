@@ -351,7 +351,8 @@ Keep the response concise but informative."""
             
             client = ClientClass(
                 base_url=settings.MLAI_BACKEND_URL,
-                api_key=settings.MLAI_API_KEY
+                api_key=settings.MLAI_API_KEY,
+                internal_api_key=settings.INTERNAL_API_KEY
             )
             
             # Determine action from params or text
@@ -693,14 +694,18 @@ Keep the response concise but informative."""
         
         elif action in ["award_points", "deduct_points"]:
             target_user = params.get("target_user", "")
+            target_slack_id_param = params.get("target_slack_id", "")
             points = params.get("points", 0)
             reason = params.get("reason", "Manual adjustment")
             
             # Extract target Slack ID from mention
+            target_slack_id = ""
             import re
             mention_match = re.search(r'<@([A-Z0-9]+)>', text)
             if mention_match:
                 target_slack_id = mention_match.group(1)
+            elif target_slack_id_param:
+                target_slack_id = target_slack_id_param.strip("<@>")
             elif target_user:
                 target_slack_id = target_user.strip("<@>")
             else:

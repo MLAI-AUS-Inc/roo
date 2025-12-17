@@ -18,7 +18,11 @@ from client import PointsClient
 @pytest.fixture
 def client():
     """Create a PointsClient instance for testing."""
-    return PointsClient(base_url="http://test-api.mlai.au", api_key="test-key")
+    return PointsClient(
+        base_url="http://test-api.mlai.au", 
+        api_key="test-key",
+        internal_api_key="secure-key"
+    )
 
 
 class TestMemberEndpoints:

@@ -12,16 +12,18 @@ from datetime import date
 class PointsClient:
     """Client for MLAI Points API."""
     
-    def __init__(self, base_url: str, api_key: Optional[str] = None):
+    def __init__(self, base_url: str, api_key: Optional[str] = None, internal_api_key: Optional[str] = None):
         """
         Initialize the Points client.
         
         Args:
             base_url: Base URL of mlai-backend (e.g., https://api.mlai.au)
-            api_key: Optional API key for authentication
+            api_key: Optional API key for user authentication
+            internal_api_key: Optional secure key for admin operations
         """
         self.base_url = base_url.rstrip('/')
         self.api_key = api_key
+        self.internal_api_key = internal_api_key
         self._points_base = f"{self.base_url}/api/v1/points"
         
         # Cache admin status to reduce API calls
@@ -32,6 +34,14 @@ class PointsClient:
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["X-API-Key"] = self.api_key
+        return headers
+        
+    @property
+    def admin_headers(self) -> dict:
+        """Headers for admin endpoints using internal secure key."""
+        headers = {"Content-Type": "application/json"}
+        if self.internal_api_key:
+            headers["X-API-Key"] = self.internal_api_key
         return headers
     
     # =========================================================================
@@ -324,7 +334,7 @@ class PointsClient:
             response = await client.post(
                 f"{self._points_base}/tasks/",
                 json=payload,
-                headers=self.headers,
+                headers=self.admin_headers,
                 timeout=10.0
             )
             response.raise_for_status()
@@ -345,7 +355,7 @@ class PointsClient:
             response = await client.post(
                 f"{self._points_base}/tasks/{task_id}/approve/",
                 json=payload,
-                headers=self.headers,
+                headers=self.admin_headers,
                 timeout=15.0
             )
             response.raise_for_status()
@@ -370,7 +380,7 @@ class PointsClient:
             response = await client.post(
                 f"{self._points_base}/tasks/{task_id}/reject/",
                 json=payload,
-                headers=self.headers,
+                headers=self.admin_headers,
                 timeout=10.0
             )
             response.raise_for_status()
@@ -391,7 +401,7 @@ class PointsClient:
             response = await client.post(
                 f"{self._points_base}/tasks/{task_id}/award/",
                 json=payload,
-                headers=self.headers,
+                headers=self.admin_headers,
                 timeout=15.0
             )
             response.raise_for_status()
@@ -415,7 +425,7 @@ class PointsClient:
             response = await client.post(
                 f"{self._points_base}/admin/award/",
                 json=payload,
-                headers=self.headers,
+                headers=self.admin_headers,
                 timeout=15.0
             )
             response.raise_for_status()
@@ -435,7 +445,7 @@ class PointsClient:
             response = await client.post(
                 f"{self._points_base}/rewards/approve/",
                 json=payload,
-                headers=self.headers,
+                headers=self.admin_headers,
                 timeout=10.0
             )
             response.raise_for_status()
@@ -447,7 +457,7 @@ class PointsClient:
             response = await client.get(
                 f"{self._points_base}/rewards/pending/",
                 params={"slack_user_id": admin_slack_id},
-                headers=self.headers,
+                headers=self.admin_headers,
                 timeout=10.0
             )
             response.raise_for_status()
