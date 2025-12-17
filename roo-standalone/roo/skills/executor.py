@@ -784,7 +784,7 @@ Keep the response concise but informative."""
             
             return f"Task #{task_id} rejected. The volunteer can resubmit if needed."
         
-        elif action in ["award_points", "deduct_points"]:
+        elif action in ["award_points", "deduct_points", "award", "deduct"]:
             points = params.get("points", 0)
             reason = params.get("reason", "Manual adjustment")
             
@@ -837,7 +837,7 @@ Keep the response concise but informative."""
                     return "How many points? (e.g., \"award @user +5 for helping out\")"
             
             # Make negative for deduct action
-            if action == "deduct_points" and points > 0:
+            if action in ["deduct_points", "deduct"] and points > 0:
                 points = -points
             
             # Award points to each target user
