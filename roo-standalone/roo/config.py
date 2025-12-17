@@ -34,6 +34,11 @@ class Settings(BaseSettings):
     MLAI_BACKEND_URL: Optional[str] = None
     MLAI_API_KEY: Optional[str] = None
     INTERNAL_API_KEY: Optional[str] = None
+
+    # GitHub OAuth
+    GITHUB_CLIENT_ID: Optional[str] = None
+    GITHUB_CLIENT_SECRET: Optional[str] = None
+    SLACK_APP_URL: Optional[str] = None  # e.g. https://api.yourbot.com
     
     # Application
     DEBUG: bool = False

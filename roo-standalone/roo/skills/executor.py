@@ -72,6 +72,8 @@ class SkillExecutor:
                 result = await self._execute_connect_users(skill, text, params, user_id)
             elif skill.name == "mlai-points":
                 result = await self._execute_mlai_points(skill, text, params, user_id, channel_id, thread_ts)
+            elif skill.name == "github-integration":
+                result = await self._execute_github_integration(skill, text, params, user_id, channel_id, thread_ts)
             else:
                 # Generic LLM-based execution
                 result = await self._execute_with_llm(skill, text, params, user_id)
@@ -229,6 +231,94 @@ Keep the response concise but informative."""
             
             return f"I can help write that article! To get started, I just need to know the {' and '.join(missing)}."
         
+        # Check for GitHub Token (required for publishing updates)
+        db = get_db()
+        github_token = await db.get_github_token(user_id)
+        
+        if not github_token:
+             # Send Auth Button
+            settings = get_settings()
+            auth_url = f"{settings.SLACK_APP_URL}/auth/github/login?state={user_id}"
+            
+            blocks = [
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": "I need permission to access your GitHub to publish articles. Click the button below to connect your account."
+                    }
+                },
+                {
+                    "type": "actions",
+                    "elements": [
+                        {
+                            "type": "button",
+                            "text": {
+                                "type": "plain_text",
+                                "text": "Connect GitHub Account",
+                                "emoji": True
+                            },
+                            "url": auth_url,
+                            "action_id": "connect_github",
+                            "style": "primary"
+                        }
+                    ]
+                }
+            ]
+            
+            # Save pending intent before asking for auth
+            import json
+            intent_data = json.dumps({
+                "skill": "content-factory",
+                "params": params,
+                "text": text,
+                "channel": channel_id,
+                "ts": thread_ts
+            })
+            await db.save_pending_intent(user_id, intent_data)
+            
+            if channel_id:
+                post_message(channel_id, "Please connect GitHub", thread_ts=thread_ts, blocks=blocks)
+                return "I've sent a button to connect your GitHub account. 🔌"
+            return f"Please connect your GitHub account here: {auth_url}"
+
+        # 2. Check for Project Scanned status
+        integration = await db.get_integration(user_id)
+        if not integration or not integration.get("project_scanned"):
+            # Only allow if user specifically requested a scan or we can infer it? 
+            # Ideally we redirect them to scan first.
+            
+            blocks = [
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": f"I see you're connected, but I need to scan your repository **{github_token}** (placeholder - strictly we need repo name) to understand the structure first."
+                    }
+                },
+                {
+                    "type": "actions",
+                    "elements": [
+                        {
+                            "type": "button",
+                            "text": {
+                                "type": "plain_text",
+                                "text": "Scan Repository",
+                                "emoji": True
+                            },
+                            "action_id": "scan_repo_trigger", 
+                            "value": "scan_repo", # We need a way to trigger this logic
+                            "style": "primary"
+                        }
+                    ]
+                }
+            ]
+            # Ideally we'd just automatically trigger the scan if we knew the repo name.
+            # But we might lack the repo name in the params here if they just said "generate article".
+            # For now, let's just ask them to run the scan command.
+            
+            return "Hold your horses! 🐎 I need to scan your repository first to understand your project structure.\n\nPlease run: `@Roo scan repo <owner>/<repo>`"
+
         # Get client from skill's implementation module
         ClientClass = skill.get_client_class("ContentFactoryClient")
         
@@ -247,13 +337,14 @@ Keep the response concise but informative."""
                 domain=domain,
                 topic=topic,
                 target_keyword=target_keyword,
-                context=text
+                context=text,
+                github_token=github_token
             )
             
             # Launch background monitoring task
             if channel_id:
                 asyncio.create_task(
-                    self._monitor_generation(client, job_id, channel_id, thread_ts)
+                    self._monitor_generation(client, job_id, channel_id, thread_ts, github_token)
                 )
             
             return f"You beauty! I've started writing the article '{topic}' for {domain}. (Job ID: {job_id})\nI'll keep you posted on the progress right here! 🚀"
@@ -267,7 +358,8 @@ Keep the response concise but informative."""
         client,
         job_id: str,
         channel_id: str,
-        thread_ts: Optional[str]
+        thread_ts: Optional[str],
+        github_token: str
     ):
         """Monitor job progress and post updates to Slack."""
         last_progress = -1
@@ -300,7 +392,7 @@ Keep the response concise but informative."""
             # Publish
             post_message(channel_id, "✨ Article generated! Publishing now...", thread_ts)
             
-            publish_result = await client.publish_article(job_id)
+            publish_result = await client.publish_article(job_id, github_token)
             
             preview_url = publish_result.get("preview_url")
             pr_url = publish_result.get("pr_url")
@@ -734,3 +826,87 @@ Keep the response concise but informative."""
         else:
             # Fall back to LLM for unrecognized actions
             return await self._execute_with_llm(skill, text, params, user_id)
+
+    async def _execute_github_integration(
+        self,
+        skill: Skill,
+        text: str,
+        params: dict,
+        user_id: str,
+        channel_id: Optional[str],
+        thread_ts: Optional[str]
+    ) -> str:
+        """Execute the GitHub Integration skill."""
+        
+        # 1. Check for token
+        db = get_db()
+        token = await db.get_github_token(user_id)
+        
+        if not token:
+            # Send Auth Button
+            settings = get_settings()
+            auth_url = f"{settings.SLACK_APP_URL}/auth/github/login?state={user_id}"
+            
+            blocks = [
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": "I need permission to access your GitHub repository first. Click the button below to connect your account."
+                    }
+                },
+                {
+                    "type": "actions",
+                    "elements": [
+                        {
+                            "type": "button",
+                            "text": {
+                                "type": "plain_text",
+                                "text": "Connect GitHub Account",
+                                "emoji": True
+                            },
+                            "url": auth_url,
+                            "action_id": "connect_github",
+                            "style": "primary"
+                        }
+                    ]
+                }
+            ]
+            
+            # Post interactive message
+            if channel_id:
+                post_message(channel_id, "Please connect GitHub", thread_ts=thread_ts, blocks=blocks)
+                return "I've sent a button to connect your GitHub account. 🔌"
+            return f"Please connect your GitHub account here: {auth_url}"
+
+        # 2. Token exists, assume action is scan_repo (main use case for now)
+        repo_name = params.get("repo_name")
+        domain = params.get("domain")
+        
+        if not repo_name:
+            return "Which repository should I scan? (format: owner/repo)"
+            
+        # Get client
+        ClientClass = skill.get_client_class("GitHubIntegrationClient")
+        if not ClientClass:
+            return "Skill configuration error: Client not found."
+            
+        settings = get_settings()
+        client = ClientClass(
+            content_factory_url=settings.CONTENT_FACTORY_URL,
+            api_key=settings.CONTENT_FACTORY_API_KEY
+        )
+        
+        try:
+            result = await client.scan_repo(repo_name, token, domain)
+            
+            job_id = result.get("job_id")
+            
+            # Mark project as scanned on success
+            await db.mark_project_scanned(user_id, True)
+            
+            return f"Started scanning **{repo_name}**! (Job ID: {job_id})\nI'll let you know when it's done."
+            
+        except Exception as e:
+            print(f"GitHub Integration Error: {e}")
+            return f"Sorry mate, I had trouble connecting to your repository: {str(e)}"

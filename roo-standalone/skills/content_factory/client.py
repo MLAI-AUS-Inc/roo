@@ -39,7 +39,8 @@ class ContentFactoryClient:
         domain: str,
         topic: str,
         target_keyword: str,
-        context: Optional[str] = None
+        context: Optional[str] = None,
+        github_token: Optional[str] = None
     ) -> str:
         """
         Direct Mode: Generates an article for a specific topic/keyword.
@@ -60,6 +61,8 @@ class ContentFactoryClient:
         }
         if context:
             payload["context"] = context
+        if github_token:
+            payload["github_token"] = github_token
         
         async with httpx.AsyncClient() as client:
             response = await client.post(
@@ -185,7 +188,7 @@ class ContentFactoryClient:
         
         return await self.get_job_result(job_id)
     
-    async def publish_article(self, job_id: str) -> dict:
+    async def publish_article(self, job_id: str, github_token: Optional[str] = None) -> dict:
         """
         Publish a completed article via the publish endpoint.
         
@@ -204,6 +207,7 @@ class ContentFactoryClient:
         async with httpx.AsyncClient() as client:
             response = await client.post(
                 f"{self.base_url}/api/pipeline/publish/{job_id}",
+                json={"github_token": github_token} if github_token else {},
                 headers=self.headers,
                 timeout=60.0
             )
