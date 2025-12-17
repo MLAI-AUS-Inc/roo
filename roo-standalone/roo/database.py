@@ -45,6 +45,11 @@ class Database:
             class_=AsyncSession,
             expire_on_commit=False
         )
+        
+        # Ensure tables exist (simple migration)
+        import asyncio
+        # We can't await in __init__, so we'll need to do this carefully or rely on app startup
+        # For now, we'll expose an init method
 
     
     @asynccontextmanager
@@ -177,6 +182,96 @@ class Database:
             )
 
 
+    async def init_integrations_table(self):
+        """Initialize the user_integrations table."""
+        async with self.session() as session:
+            await session.execute(text("""
+                CREATE TABLE IF NOT EXISTS user_integrations (
+                    slack_user_id TEXT PRIMARY KEY,
+                    github_access_token TEXT,
+                    github_user_name TEXT,
+                    github_scopes TEXT[],
+                    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                    project_scanned BOOLEAN DEFAULT FALSE,
+                    pending_intent TEXT
+                )
+            """))
+
+    async def save_github_token(
+        self,
+        slack_user_id: str,
+        token: str,
+        user_name: str = None,
+        scopes: List[str] = None
+    ):
+        """Save or update a GitHub access token."""
+        async with self.session() as session:
+            await session.execute(
+                text("""
+                    INSERT INTO user_integrations (slack_user_id, github_access_token, github_user_name, github_scopes, updated_at)
+                    VALUES (:uid, :token, :name, :scopes, CURRENT_TIMESTAMP)
+                    ON CONFLICT (slack_user_id) 
+                    DO UPDATE SET 
+                        github_access_token = EXCLUDED.github_access_token,
+                        github_user_name = COALESCE(EXCLUDED.github_user_name, user_integrations.github_user_name),
+                        github_scopes = COALESCE(EXCLUDED.github_scopes, user_integrations.github_scopes),
+                        updated_at = CURRENT_TIMESTAMP
+                """),
+                {
+                    "uid": slack_user_id,
+                    "token": token,
+                    "name": user_name,
+                    "scopes": scopes
+                }
+            )
+
+    async def get_github_token(self, slack_user_id: str) -> Optional[str]:
+        """Retrieve GitHub access token for a user."""
+        async with self.session() as session:
+            result = await session.execute(
+                text("SELECT github_access_token FROM user_integrations WHERE slack_user_id = :uid"),
+                {"uid": slack_user_id}
+            )
+            return result.scalar_one_or_none()
+
+    async def get_integration(self, slack_user_id: str) -> Optional[Dict[str, Any]]:
+        """Retrieve full integration record."""
+        async with self.session() as session:
+            result = await session.execute(
+                text("SELECT * FROM user_integrations WHERE slack_user_id = :uid"),
+                {"uid": slack_user_id}
+            )
+            row = result.fetchone()
+            return dict(row._mapping) if row else None
+
+    async def save_pending_intent(self, slack_user_id: str, intent_data: str):
+        """Save a pending action to resume after auth."""
+        async with self.session() as session:
+            await session.execute(
+                text("""
+                    INSERT INTO user_integrations (slack_user_id, pending_intent)
+                    VALUES (:uid, :intent)
+                    ON CONFLICT (slack_user_id)
+                    DO UPDATE SET pending_intent = EXCLUDED.pending_intent
+                """),
+                {"uid": slack_user_id, "intent": intent_data}
+            )
+
+    async def clear_pending_intent(self, slack_user_id: str):
+        """Clear the pending intent."""
+        async with self.session() as session:
+            await session.execute(
+                text("UPDATE user_integrations SET pending_intent = NULL WHERE slack_user_id = :uid"),
+                {"uid": slack_user_id}
+            )
+
+    async def mark_project_scanned(self, slack_user_id: str, scanned: bool = True):
+        """Update the project_scanned status."""
+        async with self.session() as session:
+            await session.execute(
+                text("UPDATE user_integrations SET project_scanned = :scanned WHERE slack_user_id = :uid"),
+                {"uid": slack_user_id, "scanned": scanned}
+            )
 # Singleton database instance
 _db: Optional[Database] = None
 
