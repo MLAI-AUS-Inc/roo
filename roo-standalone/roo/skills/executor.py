@@ -70,6 +70,8 @@ class SkillExecutor:
                 result = await self._execute_content_factory(skill, text, params, user_id, channel_id, thread_ts)
             elif skill.name == "connect-users":
                 result = await self._execute_connect_users(skill, text, params, user_id)
+            elif skill.name == "mlai-points":
+                result = await self._execute_mlai_points(skill, text, params, user_id, channel_id, thread_ts)
             else:
                 # Generic LLM-based execution
                 result = await self._execute_with_llm(skill, text, params, user_id)
@@ -323,3 +325,407 @@ Keep the response concise but informative."""
         if match:
             return match.group(1).strip()
         return None
+    
+    async def _execute_mlai_points(
+        self,
+        skill: Skill,
+        text: str,
+        params: dict,
+        user_id: str,
+        channel_id: Optional[str],
+        thread_ts: Optional[str]
+    ) -> str:
+        """Execute the MLAI Points skill."""
+        import httpx
+        
+        # Get client from skill's implementation module
+        ClientClass = skill.get_client_class("PointsClient")
+        
+        if ClientClass is None:
+            return "Sorry mate, the Points skill isn't properly configured. Missing implementation."
+        
+        try:
+            settings = get_settings()
+            if not settings.MLAI_BACKEND_URL:
+                return "Sorry mate, the Points API isn't configured. Ask the team to set MLAI_BACKEND_URL."
+            
+            client = ClientClass(
+                base_url=settings.MLAI_BACKEND_URL,
+                api_key=settings.MLAI_API_KEY
+            )
+            
+            # Determine action from params or text
+            action = params.get("action", "").lower()
+            text_lower = text.lower()
+            
+            # Fallback action detection from text
+            if not action:
+                if any(w in text_lower for w in ["balance", "how many points", "my points"]):
+                    action = "balance"
+                elif "history" in text_lower:
+                    action = "history"
+                elif any(w in text_lower for w in ["tasks open", "open tasks", "available tasks", "tasks"]):
+                    action = "list_tasks"
+                elif "claim" in text_lower:
+                    action = "claim_task"
+                elif "submit" in text_lower:
+                    action = "submit_task"
+                elif any(w in text_lower for w in ["coworking check", "check coworking", "availability"]):
+                    action = "check_coworking"
+                elif any(w in text_lower for w in ["coworking book", "book coworking", "book me"]):
+                    action = "book_coworking"
+                elif "cancel" in text_lower and "coworking" in text_lower:
+                    action = "cancel_coworking"
+                elif any(w in text_lower for w in ["rewards", "perks"]):
+                    action = "list_rewards"
+                elif "reward" in text_lower and "request" in text_lower:
+                    action = "request_reward"
+                elif "task" in text_lower and "create" in text_lower:
+                    action = "create_task"
+                elif "approve" in text_lower:
+                    action = "approve_task"
+                elif "reject" in text_lower:
+                    action = "reject_task"
+                elif any(w in text_lower for w in ["award", "give points"]):
+                    action = "award_points"
+                elif any(w in text_lower for w in ["deduct", "remove points"]):
+                    action = "deduct_points"
+            
+            # Execute the appropriate action
+            return await self._handle_points_action(
+                client=client,
+                action=action,
+                params=params,
+                text=text,
+                user_id=user_id,
+                channel_id=channel_id,
+                thread_ts=thread_ts,
+                skill=skill
+            )
+            
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 403:
+                return "Sorry mate, you're not authorized to do that. Only Points Admins can perform that action. 🔒"
+            elif e.response.status_code == 404:
+                return "Hmm, couldn't find that. Double-check the ID or date and try again? 🤔"
+            else:
+                error_detail = ""
+                try:
+                    error_detail = e.response.json().get("error", "")
+                except Exception:
+                    pass
+                return f"Ran into a snag: {error_detail or str(e)}"
+        except Exception as e:
+            print(f"Points skill error: {e}")
+            import traceback
+            traceback.print_exc()
+            return f"Had some trouble with the points system: {str(e)}"
+    
+    async def _handle_points_action(
+        self,
+        client,
+        action: str,
+        params: dict,
+        text: str,
+        user_id: str,
+        channel_id: Optional[str],
+        thread_ts: Optional[str],
+        skill
+    ) -> str:
+        """Handle individual points actions."""
+        
+        # =====================================================================
+        # Member Actions
+        # =====================================================================
+        
+        if action == "balance":
+            data = await client.get_balance(user_id)
+            balance = data.get("balance", 0)
+            earned = data.get("lifetime_earned", 0)
+            spent = data.get("lifetime_spent", 0)
+            
+            return (
+                f"G'day mate! Here's your points summary:\n\n"
+                f"💰 **Current Balance:** {balance} points\n"
+                f"📈 **Lifetime Earned:** {earned} points\n"
+                f"📉 **Lifetime Spent:** {spent} points\n\n"
+                f"Nice work! Check out open tasks to earn more 🦘"
+            )
+        
+        elif action == "history":
+            limit = params.get("limit", 10)
+            entries = await client.get_history(user_id, limit)
+            
+            if not entries:
+                return "No transactions yet! Start earning points by claiming some tasks 💪"
+            
+            lines = ["📜 **Your Recent Transactions:**\n"]
+            for entry in entries[:10]:
+                delta = entry.get("delta", 0)
+                emoji = "➕" if delta > 0 else "➖"
+                desc = entry.get("description", "")[:50]
+                lines.append(f"{emoji} {delta:+d} pts - {desc}")
+            
+            return "\n".join(lines)
+        
+        elif action == "list_tasks":
+            status = params.get("status", "open")
+            portfolio = params.get("portfolio")
+            tasks = await client.list_tasks(status, portfolio)
+            
+            if not tasks:
+                return f"No {status} tasks at the moment. Check back soon! 🦘"
+            
+            lines = [f"📋 **{status.title()} Tasks:**\n"]
+            for task in tasks[:10]:
+                tid = task.get("id")
+                title = task.get("title", "Untitled")[:40]
+                pts = task.get("points", 0)
+                port = task.get("portfolio", "")
+                lines.append(f"• **#{tid}** - {title} ({pts} pts) 📂 {port}")
+            
+            lines.append("\nKeen to help? Just say \"claim task <id>\" to get started!")
+            return "\n".join(lines)
+        
+        elif action == "claim_task":
+            task_id = params.get("task_id")
+            if not task_id:
+                # Try to extract from text
+                import re
+                match = re.search(r'(?:task|#)\s*(\d+)', text, re.IGNORECASE)
+                if match:
+                    task_id = int(match.group(1))
+                else:
+                    return "Which task do you want to claim? Give me the task ID (e.g., \"claim task 42\")"
+            
+            result = await client.claim_task(int(task_id), user_id)
+            title = result.get("title", "")
+            pts = result.get("points", 0)
+            
+            return f"Ripper! 🎉 You've claimed **#{task_id} - {title}** ({pts} pts).\n\nWhen you're done, submit your work with \"task submit {task_id} <description>\""
+        
+        elif action == "submit_task":
+            task_id = params.get("task_id")
+            submission_text = params.get("submission_text", "")
+            submission_url = params.get("submission_url")
+            
+            if not task_id:
+                import re
+                match = re.search(r'(?:task|#)\s*(\d+)', text, re.IGNORECASE)
+                if match:
+                    task_id = int(match.group(1))
+                else:
+                    return "Which task are you submitting? Give me the task ID (e.g., \"submit task 42 done!\")"
+            
+            if not submission_text:
+                # Extract text after the task ID
+                import re
+                match = re.search(r'(?:task|#)\s*\d+\s+(.+)', text, re.IGNORECASE)
+                if match:
+                    submission_text = match.group(1)
+                else:
+                    submission_text = "Submitted via Slack"
+            
+            result = await client.submit_task(int(task_id), user_id, submission_text, submission_url)
+            
+            return f"Submitted! 📬 Task #{task_id} is now pending approval.\n\nA Points Admin will review your work soon. Legend! 🦘"
+        
+        elif action == "check_coworking":
+            check_date = params.get("date")
+            days = params.get("days", 7)
+            
+            availability = await client.check_coworking(check_date, days)
+            
+            if not availability:
+                return "Couldn't check availability right now. Try again in a tick?"
+            
+            lines = ["🏢 **Coworking Availability:**\n"]
+            for slot in availability[:7]:
+                date_str = slot.get("date", "")
+                avail = slot.get("available_slots", 0)
+                cost = slot.get("cost_points", 1)
+                emoji = "✅" if avail > 0 else "❌"
+                lines.append(f"{emoji} **{date_str}**: {avail} slots ({cost} pt)")
+            
+            lines.append("\nBook a day with \"coworking book <date>\"")
+            return "\n".join(lines)
+        
+        elif action == "book_coworking":
+            booking_date = params.get("date")
+            if not booking_date:
+                import re
+                match = re.search(r'(\d{4}-\d{2}-\d{2})', text)
+                if match:
+                    booking_date = match.group(1)
+                else:
+                    return "What date would you like to book? Use format YYYY-MM-DD (e.g., \"book 2025-12-20\")"
+            
+            result = await client.book_coworking(user_id, booking_date, channel_id)
+            cost = result.get("points_cost", 1)
+            
+            # Get new balance
+            balance_data = await client.get_balance(user_id)
+            new_balance = balance_data.get("balance", 0)
+            
+            return (
+                f"You beauty! 🎉\n\n"
+                f"Booked you in for **{booking_date}** at the coworking space.\n"
+                f"Cost: {cost} point (Balance remaining: {new_balance} points)\n\n"
+                f"See you there, legend!"
+            )
+        
+        elif action == "cancel_coworking":
+            booking_date = params.get("date")
+            booking_id = params.get("booking_id")
+            
+            if not booking_date and not booking_id:
+                import re
+                match = re.search(r'(\d{4}-\d{2}-\d{2})', text)
+                if match:
+                    booking_date = match.group(1)
+                else:
+                    return "Which booking do you want to cancel? Give me the date (e.g., \"cancel coworking 2025-12-20\")"
+            
+            result = await client.cancel_coworking(user_id, booking_id, booking_date)
+            refunded = result.get("refunded", False)
+            refund_amount = result.get("refund_amount", 0)
+            
+            if refunded:
+                return f"No worries! Cancelled your booking. {refund_amount} point refunded to your balance. 👍"
+            else:
+                return f"Booking cancelled. (No refund - cancellation after cutoff)"
+        
+        elif action == "list_rewards":
+            rewards = await client.list_rewards(user_id)
+            
+            if not rewards:
+                return "No rewards available at the moment. Check back soon! 🦘"
+            
+            lines = ["🎁 **Available Rewards:**\n"]
+            for reward in rewards:
+                code = reward.get("code", "")
+                name = reward.get("name", "")
+                cost = reward.get("cost_points", 0)
+                lines.append(f"• **{code}** - {name} ({cost} pts)")
+            
+            lines.append("\nRequest a reward with \"reward request <CODE>\"")
+            return "\n".join(lines)
+        
+        elif action == "request_reward":
+            reward_code = params.get("reward_code", "").upper()
+            quantity = params.get("quantity", 1)
+            
+            if not reward_code:
+                import re
+                match = re.search(r'request\s+(\w+)', text, re.IGNORECASE)
+                if match:
+                    reward_code = match.group(1).upper()
+                else:
+                    return "Which reward would you like? Give me the code (e.g., \"reward request HOTDESK_DAY\")"
+            
+            result = await client.request_reward(
+                user_id, reward_code, quantity,
+                slack_channel_id=channel_id,
+                slack_thread_ts=thread_ts
+            )
+            
+            return f"Request submitted! 🎉 Your request for **{reward_code}** is pending approval.\n\nAn admin will review it shortly."
+        
+        # =====================================================================
+        # Admin Actions
+        # =====================================================================
+        
+        elif action == "create_task":
+            title = params.get("title", "")
+            points = params.get("points", 1)
+            description = params.get("description", "")
+            portfolio = params.get("portfolio", "events")
+            due_date = params.get("due_date")
+            
+            if not title:
+                return "What's the task? I need at least a title (e.g., \"create task title='Fix docs' points=3\")"
+            
+            result = await client.create_task(
+                admin_slack_id=user_id,
+                title=title,
+                points=int(points),
+                description=description,
+                portfolio=portfolio,
+                due_date=due_date,
+                slack_channel_id=channel_id,
+                slack_thread_ts=thread_ts
+            )
+            
+            task_id = result.get("id")
+            return f"Task created! **#{task_id} - {title}** ({points} pts) 📂 {portfolio}\n\nVolunteers can claim it with \"task claim {task_id}\""
+        
+        elif action == "approve_task":
+            task_id = params.get("task_id")
+            
+            if not task_id:
+                import re
+                match = re.search(r'(?:task|#)\s*(\d+)', text, re.IGNORECASE)
+                if match:
+                    task_id = int(match.group(1))
+                else:
+                    return "Which task are you approving? Give me the task ID (e.g., \"approve task 42\")"
+            
+            result = await client.approve_task(int(task_id), user_id)
+            points_awarded = result.get("points_awarded", 0)
+            
+            return f"Approved! ✅ Task #{task_id} completed. {points_awarded} points awarded. 🎉"
+        
+        elif action == "reject_task":
+            task_id = params.get("task_id")
+            reason = params.get("reason", "")
+            
+            if not task_id:
+                import re
+                match = re.search(r'(?:task|#)\s*(\d+)', text, re.IGNORECASE)
+                if match:
+                    task_id = int(match.group(1))
+                else:
+                    return "Which task are you rejecting? Give me the task ID."
+            
+            result = await client.reject_task(int(task_id), user_id, reason)
+            
+            return f"Task #{task_id} rejected. The volunteer can resubmit if needed."
+        
+        elif action in ["award_points", "deduct_points"]:
+            target_user = params.get("target_user", "")
+            points = params.get("points", 0)
+            reason = params.get("reason", "Manual adjustment")
+            
+            # Extract target Slack ID from mention
+            import re
+            mention_match = re.search(r'<@([A-Z0-9]+)>', text)
+            if mention_match:
+                target_slack_id = mention_match.group(1)
+            elif target_user:
+                target_slack_id = target_user.strip("<@>")
+            else:
+                return "Who should I award points to? Mention them like @user"
+            
+            # Extract points amount
+            if not points:
+                pts_match = re.search(r'([+-]?\d+)\s*(?:points?|pts?)?', text)
+                if pts_match:
+                    points = int(pts_match.group(1))
+                else:
+                    return "How many points? (e.g., \"award @user +5 for helping out\")"
+            
+            # Make negative for deduct action
+            if action == "deduct_points" and points > 0:
+                points = -points
+            
+            result = await client.award_points(user_id, target_slack_id, int(points), reason)
+            new_balance = result.get("new_balance", 0)
+            
+            emoji = "🎉" if points > 0 else "📉"
+            verb = "Awarded" if points > 0 else "Deducted"
+            
+            return f"{emoji} {verb} {abs(points)} points to <@{target_slack_id}>.\n\nReason: {reason}\nTheir new balance: {new_balance} pts"
+        
+        else:
+            # Fall back to LLM for unrecognized actions
+            return await self._execute_with_llm(skill, text, params, user_id)
