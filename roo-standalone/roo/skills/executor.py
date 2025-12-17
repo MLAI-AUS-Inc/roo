@@ -496,11 +496,32 @@ Keep the response concise but informative."""
                 skill=skill
             )
             
+        except PermissionError:
+            return "Sorry mate, you're not authorized to do that. Only Points Admins can perform that action. 🔒"
+        except ValueError as e:
+            return str(e)
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 403:
                 return "Sorry mate, you're not authorized to do that. Only Points Admins can perform that action. 🔒"
             elif e.response.status_code == 404:
                 return "Hmm, couldn't find that. Double-check the ID or date and try again? 🤔"
+            elif e.response.status_code == 400:
+                # Handle bad requests (e.g. insufficient funds)
+                try:
+                    error_detail = e.response.json().get("error", "")
+                    
+                    # If it's a balance issue, fetch current balance to be helpful
+                    if "balance" in error_detail.lower() or "insufficient" in error_detail.lower():
+                        try:
+                            balance_data = await client.get_balance(user_id)
+                            current_balance = balance_data.get("balance", 0)
+                            return f"🛑 Computer says no: {error_detail}\n\nYour current balance is **{current_balance} points**."
+                        except Exception:
+                            pass
+                            
+                    return f"🛑 {error_detail}"
+                except Exception:
+                    return f"Ran into a snag with that request (400 Bad Request)."
             else:
                 error_detail = ""
                 try:

@@ -430,9 +430,19 @@ class PointsClient:
         reason: str
     ) -> dict:
         """Manually award or deduct points (admin only)."""
+        # 1. Pre-flight Admin Check
+        is_admin = await self.is_admin(admin_slack_id)
+        if not is_admin:
+            raise PermissionError(f"User {admin_slack_id} is not multiple Points Admin.")
+
+        # 2. Pre-flight Self-Award Check
+        cleaned_target = self._clean_slack_id(target_slack_id)
+        if admin_slack_id == cleaned_target and points > 0:
+            raise ValueError("Nice try! You can't award points to yourself. 😉")
+
         payload = {
             "admin_slack_id": admin_slack_id,
-            "target_slack_id": self._clean_slack_id(target_slack_id),
+            "target_slack_id": cleaned_target,
             "points": points,
             "reason": reason,
         }

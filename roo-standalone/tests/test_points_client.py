@@ -157,6 +157,9 @@ class TestAdminEndpoints:
             mock_client.__aexit__ = AsyncMock(return_value=None)
             MockClient.return_value = mock_client
             
+            # Mock is_admin to return True
+            client.is_admin = AsyncMock(return_value=True)
+            
             result = await client.award_points(
                 admin_slack_id="UADMIN",
                 target_slack_id="UTARGET",
@@ -218,5 +221,24 @@ class TestErrorHandling:
             mock_client.__aexit__ = AsyncMock(return_value=None)
             MockClient.return_value = mock_client
             
-            with pytest.raises(httpx.HTTPStatusError):
+            # Should raise PermissionError because is_admin returns False
+            with pytest.raises(PermissionError):
                 await client.award_points("UNOTADMIN", "UTARGET", 5, "test")
+
+    @pytest.mark.asyncio
+    async def test_self_award_raises_value_error(self, client):
+        """Test that self-awarding points raises ValueError."""
+        # Mock admin check to return True so we reach the self-award check
+        client.is_admin = AsyncMock(return_value=True)
+        
+        with pytest.raises(ValueError, match="Nice try"):
+            await client.award_points("UADMIN", "UADMIN", 5, "Self award")
+
+    @pytest.mark.asyncio
+    async def test_admin_access_required(self, client):
+        """Test that non-admins get PermissionError."""
+        # Mock admin check to return False
+        client.is_admin = AsyncMock(return_value=False)
+        
+        with pytest.raises(PermissionError):
+            await client.award_points("UNOTADMIN", "UTARGET", 5, "test")
