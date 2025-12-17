@@ -800,7 +800,17 @@ Keep the response concise but informative."""
                 target_slack_id = target_slack_id_param.strip("<@>")
             elif target_user:
                 target_slack_id = target_user.strip("<@>")
-            else:
+            
+            # Validation: Block common preposition mistakes
+            if target_slack_id.lower() in ["for", "to", "reason", "because", "points", "award"]:
+                # Try to re-scan text for a real mention that might have been missed
+                match = re.search(r'<@([A-Z0-9]+)>', text)
+                if match:
+                    target_slack_id = match.group(1)
+                else:
+                    return f"I see you want to award points, but '{target_slack_id}' doesn't look like a user. Please mention them like @name."
+
+            if not target_slack_id:
                 return "Who should I award points to? Mention them like @user"
             
             # Extract points amount
