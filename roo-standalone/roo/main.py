@@ -27,8 +27,8 @@ async def lifespan(app: FastAPI):
     
     # Initialize database
     from .database import get_db
-    db = get_db()
-    await db.init_integrations_table()
+    # db = get_db()
+    # await db.init_integrations_table()
     
     # Initialize agent on startup
     agent = get_agent()
