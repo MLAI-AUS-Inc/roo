@@ -432,13 +432,12 @@ class PointsClient:
         """Manually award or deduct points (admin only)."""
         payload = {
             "admin_slack_id": admin_slack_id,
-            "admin_slack_id": admin_slack_id,
             "target_slack_id": self._clean_slack_id(target_slack_id),
             "points": points,
-
             "reason": reason,
         }
         async with httpx.AsyncClient() as client:
+            print(f"🕵️ DEBUG: POST {self._points_base}/admin/award/ | Payload: {payload}")
             response = await client.post(
                 f"{self._points_base}/admin/award/",
                 json=payload,

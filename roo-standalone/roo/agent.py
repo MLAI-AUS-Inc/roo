@@ -93,15 +93,22 @@ class RooAgent:
             }
     
     def _clean_mention(self, text: str) -> str:
-        """Remove @Roo mention and clean up the message.
+        """Remove only Roo's @mention, preserving other user mentions.
         
-        Only removes the FIRST user mention (which is Roo's @mention).
-        Preserves all other user mentions for parameter extraction.
+        Gets Roo's bot user ID dynamically and removes only that mention,
+        regardless of where it appears in the message.
         """
         import re
-        # Only remove the FIRST Slack user mention (Roo's own mention)
-        # This preserves other user mentions like the target_user in award commands
-        cleaned = re.sub(r'<@[A-Z0-9]+>', '', text, count=1)
+        from .slack_client import get_bot_user_id
+        
+        try:
+            bot_id = get_bot_user_id()
+            # Only remove Roo's specific mention, preserve all others
+            cleaned = re.sub(rf'<@{bot_id}>', '', text)
+        except Exception:
+            # Fallback: remove first mention if we can't get bot ID
+            cleaned = re.sub(r'<@[A-Z0-9]+>', '', text, count=1)
+        
         # Remove extra whitespace
         cleaned = ' '.join(cleaned.split())
         return cleaned.strip()

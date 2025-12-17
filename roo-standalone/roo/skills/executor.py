@@ -444,7 +444,7 @@ Keep the response concise but informative."""
             client = ClientClass(
                 base_url=settings.MLAI_BACKEND_URL,
                 api_key=settings.MLAI_API_KEY,
-                internal_api_key=settings.INTERNAL_API_KEY
+                internal_api_key=settings.INTERNAL_API_KEY or settings.MLAI_API_KEY
             )
             
             # Determine action from params or text
@@ -785,35 +785,50 @@ Keep the response concise but informative."""
             return f"Task #{task_id} rejected. The volunteer can resubmit if needed."
         
         elif action in ["award_points", "deduct_points"]:
-            target_user = params.get("target_user", "")
-            target_slack_id_param = params.get("target_slack_id", "")
             points = params.get("points", 0)
             reason = params.get("reason", "Manual adjustment")
             
-            # Extract target Slack ID from mention
-            target_slack_id = ""
+            # Get Roo's bot ID to filter it from target users
+            from ..slack_client import get_bot_user_id
+            try:
+                bot_id = get_bot_user_id()
+            except Exception:
+                bot_id = None
+            
+            # Extract ALL user mentions from the text (excluding Roo)
             import re
-            mention_match = re.search(r'<@([A-Z0-9]+)>', text)
-            if mention_match:
-                target_slack_id = mention_match.group(1)
-            elif target_slack_id_param:
-                target_slack_id = target_slack_id_param.strip("<@>")
-            elif target_user:
-                target_slack_id = target_user.strip("<@>")
+            all_mentions = re.findall(r'<@([A-Z0-9]+)>', text)
+            target_slack_ids = [uid for uid in all_mentions if uid != bot_id]
             
-            # Validation: Block common preposition mistakes
-            if target_slack_id.lower() in ["for", "to", "reason", "because", "points", "award"]:
-                # Try to re-scan text for a real mention that might have been missed
-                match = re.search(r'<@([A-Z0-9]+)>', text)
-                if match:
-                    target_slack_id = match.group(1)
-                else:
-                    return f"I see you want to award points, but '{target_slack_id}' doesn't look like a user. Please mention them like @name."
-
-            if not target_slack_id:
-                return "Who should I award points to? Mention them like @user"
+            # Fallback to params if no mentions found in text
+            if not target_slack_ids:
+                target_users_param = params.get("target_users", [])
+                target_user_param = params.get("target_user", "")
+                target_slack_id_param = params.get("target_slack_id", "")
+                
+                if target_users_param:
+                    # Clean each ID
+                    for tu in target_users_param:
+                        cleaned = re.sub(r'[<@>]', '', str(tu))
+                        if cleaned and cleaned != bot_id:
+                            target_slack_ids.append(cleaned)
+                elif target_user_param:
+                    cleaned = re.sub(r'[<@>]', '', str(target_user_param))
+                    if cleaned and cleaned != bot_id:
+                        target_slack_ids.append(cleaned)
+                elif target_slack_id_param:
+                    cleaned = re.sub(r'[<@>]', '', str(target_slack_id_param))
+                    if cleaned and cleaned != bot_id:
+                        target_slack_ids.append(cleaned)
             
-            # Extract points amount
+            # Validate we have valid targets (not prepositions)
+            invalid_words = ["for", "to", "reason", "because", "points", "award", "give", "and"]
+            target_slack_ids = [uid for uid in target_slack_ids if uid.lower() not in invalid_words]
+            
+            if not target_slack_ids:
+                return "Who should I award points to? Mention them like @user (e.g., 'award 5 points to @Jasmine')"
+            
+            # Extract points amount if not in params
             if not points:
                 pts_match = re.search(r'([+-]?\d+)\s*(?:points?|pts?)?', text)
                 if pts_match:
@@ -825,13 +840,32 @@ Keep the response concise but informative."""
             if action == "deduct_points" and points > 0:
                 points = -points
             
-            result = await client.award_points(user_id, target_slack_id, int(points), reason)
-            new_balance = result.get("new_balance", 0)
+            # Award points to each target user
+            results = []
+            errors = []
+            for target_id in target_slack_ids:
+                try:
+                    result = await client.award_points(user_id, target_id, int(points), reason)
+                    new_balance = result.get("new_balance", 0)
+                    results.append({"user": target_id, "new_balance": new_balance})
+                except Exception as e:
+                    errors.append({"user": target_id, "error": str(e)})
             
+            # Build response
             emoji = "🎉" if points > 0 else "📉"
             verb = "Awarded" if points > 0 else "Deducted"
             
-            return f"{emoji} {verb} {abs(points)} points to <@{target_slack_id}>.\n\nReason: {reason}\nTheir new balance: {new_balance} pts"
+            if len(results) == 1 and not errors:
+                r = results[0]
+                return f"{emoji} {verb} {abs(points)} points to <@{r['user']}>.\n\nReason: {reason}\nTheir new balance: {r['new_balance']} pts"
+            
+            lines = [f"{emoji} {verb} {abs(points)} points each!\n\nReason: {reason}\n"]
+            for r in results:
+                lines.append(f"✅ <@{r['user']}>: now has {r['new_balance']} pts")
+            for e in errors:
+                lines.append(f"❌ <@{e['user']}>: {e['error']}")
+            
+            return "\n".join(lines)
         
         else:
             # Fall back to LLM for unrecognized actions

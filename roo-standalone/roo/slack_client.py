@@ -26,6 +26,24 @@ def get_slack_client():
     return _slack_client
 
 
+# Cache for bot user ID
+_bot_user_id = None
+
+
+def get_bot_user_id() -> str:
+    """Get Roo's own Slack user ID via auth.test.
+    
+    This is cached to avoid repeated API calls.
+    """
+    global _bot_user_id
+    if _bot_user_id is None:
+        client = get_slack_client()
+        response = client.auth_test()
+        _bot_user_id = response["user_id"]
+        print(f"🤖 Bot user ID: {_bot_user_id}")
+    return _bot_user_id
+
+
 def post_message(
     channel: str,
     text: str,

@@ -38,8 +38,9 @@ This skill enables Roo to interact with the MLAI Points System via API, allowing
 - **date**: Date for coworking bookings (YYYY-MM-DD format)
 - **points**: The number of points to award/deduct (integer)
 - **reason**: A short description of why the points are being awarded
-- **target_user**: The Slack User ID (e.g., U012ABC) or mention (e.g., <@U012ABC>) of the person receiving points. Look for the user mention immediately following words like "to" or "award". MUST NOT be a preposition or common word like "for", "to", "him", "her", "reason".
-- **target_slack_id**: (Alias for target_user) The Slack User ID of the person receiving points
+- **target_user**: A single Slack User ID (e.g., U012ABC) or mention (e.g., <@U012ABC>) of the person receiving points. For single-user awards.
+- **target_users**: A list of Slack User IDs extracted from mentions for multi-user awards. Extract ALL <@U...> patterns from the message. Example: ["U012ABC", "U034DEF"] or ["<@U012ABC>", "<@U034DEF>"]
+- **target_slack_id**: (Alias for target_user) A single Slack User ID
 - **submission_text**: Description of work completed for task submissions
 - **reward_code**: Code for reward redemption requests
 
