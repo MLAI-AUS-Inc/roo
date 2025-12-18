@@ -8,3 +8,6 @@ services:
     restart: unless-stopped
     volumes:
       - ./skills:/app/skills:ro
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
