@@ -578,3 +578,33 @@ class PointsClient:
             )
             response.raise_for_status()
             return response.json()
+
+    async def system_award_points(
+        self,
+        admin_slack_id: str,
+        target_slack_id: str,
+        points: int,
+        reason: str
+    ) -> dict:
+        """
+        System award points (bypasses client-side admin checks).
+        Use this for automated system awards where the 'admin' is the bot itself.
+        """
+        payload = {
+            "admin_slack_id": admin_slack_id,
+            "target_slack_id": self._clean_slack_id(target_slack_id),
+            "points": points,
+            "reason": reason,
+        }
+        
+        async with httpx.AsyncClient() as client:
+            # We use the same endpoint but skip the client-side pre-flight checks
+            # The backend must be configured to accept the internal API key
+            response = await client.post(
+                f"{self._points_base}/admin/award/",
+                json=payload,
+                headers=self.admin_headers,
+                timeout=15.0
+            )
+            response.raise_for_status()
+            return response.json()

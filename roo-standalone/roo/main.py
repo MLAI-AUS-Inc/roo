@@ -26,9 +26,11 @@ async def lifespan(app: FastAPI):
     print(f"   Skills Dir: {settings.SKILLS_DIR}")
     
     # Initialize database
+    # Initialize database
     from .database import get_db
-    # db = get_db()
-    # await db.init_integrations_table()
+    db = get_db()
+    # Initialize all tables (including channel tracking)
+    await db.init_tables()
     
     # Initialize agent on startup
     agent = get_agent()
@@ -109,6 +111,15 @@ async def slack_events(request: Request):
         return JSONResponse(status_code=200, content={})
     
     if event_type == "message" and not event.get("bot_id") and not event.get("subtype"):
+        # Check for posts in #_start_here
+        from .slack_client import get_channel_id
+        start_here_id = get_channel_id("_start_here")
+        
+        if start_here_id and event.get("channel") == start_here_id:
+            import asyncio
+            asyncio.create_task(_handle_start_here_post(event))
+            return JSONResponse(status_code=200, content={})
+
         is_dm = event.get("channel_type") == "im"
         if is_dm:
             print(f"📨 Received DM from {event.get('user')}")
@@ -347,3 +358,55 @@ async def github_callback(code: str, state: str):
             print(f"Failed to resume intent: {e}")
 
     return JSONResponse(content={"status": "success", "message": "GitHub connected! You can close this window."})
+
+
+async def _handle_start_here_post(event: dict):
+    """Handle a post in the start_here channel."""
+    user_id = event.get("user")
+    channel_id = event.get("channel")
+    ts = event.get("ts")
+    
+    from .database import get_db
+    db = get_db()
+    
+    # Check if user has posted before
+    has_posted = await db.has_posted_in_channel(user_id, channel_id)
+    if has_posted:
+        return
+        
+    print(f"🥳 First post by {user_id} in {channel_id}!")
+    
+    # Record post immediately
+    await db.record_channel_post(user_id, channel_id)
+    
+    # Award points
+    from .skills.mlai_points.client import PointsClient
+    from .config import get_settings
+    settings = get_settings()
+    
+    points_client = PointsClient(
+        base_url=settings.MLAI_BACKEND_URL,
+        api_key=settings.MLAI_API_KEY,
+        internal_api_key=settings.INTERNAL_API_KEY
+    )
+    
+    try:
+        from .slack_client import get_bot_user_id
+        bot_id = get_bot_user_id()
+        
+        await points_client.system_award_points(
+            admin_slack_id=bot_id,
+            target_slack_id=user_id,
+            points=2,
+            reason="First post in #_start_here"
+        )
+        
+        # Post welcome message
+        post_message(
+            channel=channel_id,
+            text=f"Welcome <@{user_id}>! 🎉 You've earned 2 points for your first post here.",
+            thread_ts=ts
+        )
+        
+    except Exception as e:
+        print(f"❌ Failed to award first post points: {e}")

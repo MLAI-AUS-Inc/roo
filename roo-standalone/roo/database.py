@@ -298,6 +298,45 @@ class Database:
                 text("UPDATE user_integrations SET project_scanned = :scanned WHERE slack_user_id = :uid"),
                 {"uid": slack_user_id, "scanned": scanned}
             )
+    async def init_channel_activity_table(self):
+        """Initialize the channel activity table."""
+        async with self.session() as session:
+            await session.execute(text("""
+                CREATE TABLE IF NOT EXISTS channel_first_posts (
+                    slack_user_id TEXT,
+                    channel_id TEXT,
+                    posted_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (slack_user_id, channel_id)
+                )
+            """))
+
+    async def has_posted_in_channel(self, slack_user_id: str, channel_id: str) -> bool:
+        """Check if a user has posted in a channel before."""
+        async with self.session() as session:
+            result = await session.execute(
+                text("SELECT 1 FROM channel_first_posts WHERE slack_user_id = :uid AND channel_id = :cid"),
+                {"uid": slack_user_id, "cid": channel_id}
+            )
+            return result.scalar() is not None
+
+    async def record_channel_post(self, slack_user_id: str, channel_id: str):
+        """Record a user's first post in a channel."""
+        async with self.session() as session:
+            await session.execute(
+                text("""
+                    INSERT INTO channel_first_posts (slack_user_id, channel_id)
+                    VALUES (:uid, :cid)
+                    ON CONFLICT DO NOTHING
+                """),
+                {"uid": slack_user_id, "cid": channel_id}
+            )
+
+    async def init_tables(self):
+        """Initialize all tables."""
+        await self.init_integrations_table()
+        await self.init_channel_activity_table()
+
+
 # Singleton database instance
 _db: Optional[Database] = None
 
