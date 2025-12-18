@@ -47,7 +47,7 @@ Example responses:
 
 ## Parameters
 
-- **action**: The action to perform (required) - e.g., "balance", "book", "claim", "submit", "award"
+- **action**: The action to perform (required) - e.g., "balance", "book_coworking", "claim_task", "submit_task", "award_points", "create_task"
 - **task_id**: Task ID number for task-related actions
 - **date**: Date for coworking bookings (YYYY-MM-DD format)
 - **points**: The number of points to award/deduct (integer)
@@ -78,8 +78,8 @@ Parse user messages to identify the action and parameters:
 | `rewards`, `points rewards` | list_rewards | "What rewards are available?", "@Roo points rewards" |
 | `reward request <code>` | request_reward | "I want to get the HOTDESK_DAY reward" |
 | `buy a <item>` | request_reward | "Can I buy a sticker?" (LLM infers code) |
-| `buy a <item>` | request_reward | "Can I buy a sticker?" (LLM infers code) |
-| `task create ...`, `make a task ...` | create_task | (Admin) "Create task called 'Fix docs' with 3 points" |
+| `task create <title> ...` | create_task | (Admin) "Create task called 'Fix docs' with 3 points" |
+| `create a task ...` | create_task | (Admin) "Create a task called 'Update README' and assign 5 points" |
 | `task approve <id>` | approve_task | (Admin) "Approve task 42" |
 | `points award @user +5 reason` | award_points | (Admin) "Give @sam 5 points for helping out" |
 | `reward @user for <activity>` | award_points | (Admin) "Reward @sam for newsletter" (suggests points from rate card) |

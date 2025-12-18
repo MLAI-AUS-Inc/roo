@@ -452,8 +452,17 @@ Keep the response concise but informative."""
             action = params.get("action", "").lower()
             text_lower = text.lower()
             
+            # Alias Handling for Common Mis-Extractions
+            if action == "book":
+                # LLM often extracts "book" instead of "book_coworking"
+                action = "book_coworking"
+            elif action in ["create", "task", "create_task"]:
+                # "task" or "create" often extracted for "create task"
+                if params.get("task_title") or "create" in text_lower:
+                    action = "create_task"
+            
             # Fallback action detection from text
-            if not action:
+            if not action or action == "task":
                 if any(w in text_lower for w in ["balance", "how many points", "my points"]):
                     action = "balance"
                 elif "history" in text_lower:
