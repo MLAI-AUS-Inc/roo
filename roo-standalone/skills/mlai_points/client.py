@@ -498,7 +498,11 @@ class PointsClient:
         if admin_slack_id == cleaned_target and points > 0:
             raise ValueError("Nice try! You can't award points to yourself. 😉")
 
-        # 3. Pre-flight Weekly Allowance Check (for positive awards only)
+        # 3. Pre-flight Negative Check
+        if points < 0:
+            raise ValueError("Point deductions are disabled. Only positive awards are allowed.")
+
+        # 4. Pre-flight Weekly Allowance Check (for positive awards only)
         if points > 0:
             allowance = await self.get_admin_allowance(admin_slack_id)
             if 'error' in allowance:

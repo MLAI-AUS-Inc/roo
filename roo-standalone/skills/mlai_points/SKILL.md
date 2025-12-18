@@ -28,7 +28,7 @@ This skill enables Roo to interact with the MLAI Points System via API, allowing
 ### Admin Actions (requires PointsAdmin role)
 - Create new tasks with point values
 - Approve or reject task submissions
-- Award or deduct points manually
+- Award points manually
 - Set coworking capacity overrides
 
 ### Admin Weekly Allowance
@@ -50,7 +50,7 @@ Example responses:
 - **action**: The action to perform (required) - e.g., "balance", "book_coworking", "claim_task", "submit_task", "award_points", "create_task"
 - **task_id**: Task ID number for task-related actions
 - **date**: Date for coworking bookings (YYYY-MM-DD format)
-- **points**: The number of points to award/deduct (integer)
+- **points**: The number of points to award (integer, positive only)
 - **reason**: A short description of why the points are being awarded
 - **target_user**: A single Slack User ID (e.g., U012ABC) or mention (e.g., <@U012ABC>) of the person receiving points. For single-user awards.
 - **target_users**: A list of Slack User IDs extracted from mentions for multi-user awards. Extract ALL <@U...> patterns from the message. Example: ["U012ABC", "U034DEF"] or ["<@U012ABC>", "<@U034DEF>"]
@@ -93,7 +93,7 @@ Parse the user's message to determine which action they want:
 - For admin actions, verify the Slack mention format
 
 ### Step 2: Permission Check
-For admin-only actions (create, approve, award, deduct):
+For admin-only actions (create, approve, award):
 - The API will validate the requester's Slack ID
 - If 403 returned, respond with friendly denial
 

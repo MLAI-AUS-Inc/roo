@@ -153,6 +153,32 @@ class Database:
             )
             return result.scalar_one_or_none()
     
+    async def get_user_by_email(self, email: str) -> Optional[int]:
+        """Get user ID by email (case-insensitive)."""
+        async with self.session() as session:
+            result = await session.execute(
+                text("SELECT id FROM core_user WHERE lower(email) = lower(:email)"),
+                {"email": email}
+            )
+            return result.scalar_one_or_none()
+
+    async def link_user_slack_id(self, user_id: int, slack_id: str):
+        """Link a Slack ID to an existing user by updating personas."""
+        async with self.session() as session:
+            # We use jsonb_set to update the slack_id within the personas JSONB column
+            # If personas is null, we treat it as empty dict
+            await session.execute(
+                text("""
+                    UPDATE core_user 
+                    SET personas = jsonb_set(COALESCE(personas, '{}'), '{slack_id}', to_jsonb(:slack_id::text))
+                    WHERE id = :user_id
+                """),
+                {
+                    "user_id": user_id,
+                    "slack_id": slack_id
+                }
+            )
+    
     async def add_user_expertise(
         self,
         user_id: int,

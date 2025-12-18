@@ -290,6 +290,15 @@ class TestErrorHandling:
             await client.award_points("UADMIN", "UADMIN", 5, "Self award")
 
     @pytest.mark.asyncio
+    async def test_negative_points_raises_value_error(self, client):
+        """Test that awarding negative points raises ValueError."""
+        # Mock admin check to return True
+        client.is_admin = AsyncMock(return_value=True)
+        
+        with pytest.raises(ValueError, match="Point deductions are disabled"):
+            await client.award_points("UADMIN", "UTARGET", -5, "Deduction attempt")
+
+    @pytest.mark.asyncio
     async def test_admin_access_required(self, client):
         """Test that non-admins get PermissionError."""
         # Mock admin check to return False

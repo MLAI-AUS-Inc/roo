@@ -869,7 +869,10 @@ Keep the response concise but informative."""
             
             return f"Task #{task_id} rejected. The volunteer can resubmit if needed."
         
-        elif action in ["award_points", "deduct_points", "award", "deduct"]:
+        elif action in ["deduct_points", "deduct"]:
+            return "Sorry mate, I can only award points, not deduct them! 🚫"
+            
+        elif action in ["award_points", "award"]:
             # Early allowance check for award actions (before LLM/rate card lookup)
             if action in ["award_points", "award"]:
                 try:
@@ -992,15 +995,35 @@ Keep the response concise but informative."""
 
                 return "How many points should I award? (e.g., \"award @user 5 points\")"
             
-            # Make negative for deduct action
-            if action in ["deduct_points", "deduct"] and points > 0:
-                points = -points
+            # Validate positive points
+            if points < 0:
+                return "Crikey! I can only award positive points. 🚫"
             
             # Award points to each target user
             results = []
             errors = []
             for target_id in target_slack_ids:
                 try:
+                    # Deduplication: Link Slack ID to existing email user if needed
+                    try:
+                        db = get_db()
+                        # Check if this Slack ID is already known
+                        existing_user_id = await db.get_user_by_slack_id(target_id)
+                        
+                        if not existing_user_id:
+                            # Not found by Slack ID -> Check if we know this user by email
+                            from ..slack_client import get_user_info
+                            u_info = get_user_info(target_id)
+                            u_email = u_info.get("email")
+                            
+                            if u_email:
+                                email_user_id = await db.get_user_by_email(u_email)
+                                if email_user_id:
+                                    print(f"🔗 Found existing user {email_user_id} for email {u_email}. Linking Slack ID {target_id}...")
+                                    await db.link_user_slack_id(email_user_id, target_id)
+                    except Exception as e:
+                        print(f"⚠️ User linking failed (continuing to award): {e}")
+
                     result = await client.award_points(user_id, target_id, int(points), reason)
                     new_balance = result.get("new_balance", 0)
                     results.append({"user": target_id, "new_balance": new_balance})
