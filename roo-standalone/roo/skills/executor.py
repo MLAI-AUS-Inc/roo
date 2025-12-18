@@ -869,7 +869,10 @@ Keep the response concise but informative."""
             
             return f"Task #{task_id} rejected. The volunteer can resubmit if needed."
         
-        elif action in ["award_points", "deduct_points", "award", "deduct"]:
+        elif action in ["deduct_points", "deduct"]:
+            return "Sorry mate, I can only award points, not deduct them! 🚫"
+            
+        elif action in ["award_points", "award"]:
             # Early allowance check for award actions (before LLM/rate card lookup)
             if action in ["award_points", "award"]:
                 try:
@@ -992,9 +995,9 @@ Keep the response concise but informative."""
 
                 return "How many points should I award? (e.g., \"award @user 5 points\")"
             
-            # Make negative for deduct action
-            if action in ["deduct_points", "deduct"] and points > 0:
-                points = -points
+            # Validate positive points
+            if points < 0:
+                return "Crikey! I can only award positive points. 🚫"
             
             # Award points to each target user
             results = []
