@@ -868,11 +868,49 @@ Keep the response concise but informative."""
             
             # Extract points amount if not in params
             if not points:
-                pts_match = re.search(r'([+-]?\d+)\s*(?:points?|pts?)?', text)
-                if pts_match:
-                    points = int(pts_match.group(1))
-                else:
-                    return "How many points? (e.g., \"award @user +5 for helping out\")"
+                # --- Smart Awards Logic (Rate Card) ---
+                if reason:
+                    print(f"🕵️ No points specified. Checking Rate Card for '{reason}'...")
+                    try:
+                        rate_card = await client.get_rate_card()
+                        matched_item = None
+                        reason_lower = reason.lower()
+                        for item in rate_card:
+                            alias = item.get("alias", "").lower()
+                            name = item.get("name", "").lower()
+                            if alias and alias == reason_lower:
+                                matched_item = item
+                                break
+                            if name and name in reason_lower:
+                                matched_item = item
+                                break
+                        if matched_item:
+                            points = matched_item.get("points")
+                            print(f"✅ Found match: {matched_item['name']} ({points} pts)")
+                            if matched_item['name'].lower() not in reason_lower:
+                                reason = f"{reason} ({matched_item['name']})"
+                    except Exception as e:
+                        print(f"⚠️ Smart award lookup failed: {e}")
+
+                # If still no points, try regex fallback
+                if not points:
+                    # Look for isolated numbers or numbers followed by 'points'
+                    # Avoid matching inside words/IDs (like U12345)
+                    pts_match = re.search(r'(?<![a-zA-Z])([+-]?\d+)\s*(?:points?|pts?)?', text)
+                    
+                    if pts_match:
+                        # Check if this number is likely a user ID part (e.g. if we are looking at "U12345" and matched "12345")
+                        # Simple heuristic: points are usually small (<1000) or explicitly labeled "points"
+                        found_val = int(pts_match.group(1))
+                        
+                        # Only accept raw numbers if they are smallish (to avoid IDs) OR if "points" keyword is present
+                        has_keyword = "point" in pts_match.group(0).lower() or "pts" in pts_match.group(0).lower()
+                        
+                        if has_keyword or abs(found_val) < 1000:
+                            points = found_val
+                    
+                    if not points:
+                        return "How many points? (e.g., \"award @user +5 for helping out\")"
             
             # Make negative for deduct action
             if action in ["deduct_points", "deduct"] and points > 0:

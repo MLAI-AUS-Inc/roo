@@ -61,10 +61,10 @@ Parse user messages to identify the action and parameters:
 | `rewards`, `points rewards` | list_rewards | "What rewards are available?", "@Roo points rewards" |
 | `reward request <code>` | request_reward | "I want to get the HOTDESK_DAY reward" |
 | `buy a <item>` | request_reward | "Can I buy a sticker?" (LLM infers code) |
-| `reward request <code>` | request_reward | "I want to get the HOTDESK_DAY reward" |
 | `task create ...` | create_task | (Admin) "Create task: Fix docs, 3 points" |
 | `task approve <id>` | approve_task | (Admin) "Approve task 42" |
 | `points award @user +5 reason` | award_points | (Admin) "Give @sam 5 points for helping out" |
+| `reward @user for <activity>` | award_points | (Admin) "Reward @sam for newsletter" (points auto-detected from reason) |
 
 ## Workflow
 

@@ -247,6 +247,29 @@ class PointsClient:
             response.raise_for_status()
             return response.json()
     
+    async def get_rate_card(self) -> List[dict]:
+        """
+        Get the automated rate card for point awards.
+        
+        Returns:
+            List of dicts with 'alias', 'name', 'points'.
+        """
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    f"{self._points_base}/rate-card/",
+                    headers=self.headers,
+                    timeout=5.0
+                )
+                if response.status_code == 404:
+                    print("⚠️ Rate card endpoint not found (backend might be outdated).")
+                    return []
+                response.raise_for_status()
+                return response.json()
+        except Exception as e:
+            print(f"❌ Failed to fetch rate card: {e}")
+            return []
+
     async def list_rewards(self, slack_user_id: Optional[str] = None) -> List[dict]:
         """List available rewards."""
         params = {}
