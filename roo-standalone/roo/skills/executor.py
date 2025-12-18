@@ -783,7 +783,20 @@ Keep the response concise but informative."""
             title = params.get("task_title") or params.get("title") or params.get("submission_text")
             points = params.get("points")
             description = params.get("description", "")
-            portfolio = params.get("portfolio", "general")
+            
+            # Default portfolio logic: Param > Admin's Portfolio > "events"
+            portfolio = params.get("portfolio")
+            if not portfolio:
+                try:
+                    admin_details = await client.get_admin_details(user_id)
+                    if admin_details:
+                        portfolio = admin_details.get("portfolio")
+                except Exception as e:
+                    print(f"⚠️ Failed to lookup admin portfolio: {e}")
+            
+            if not portfolio:
+                portfolio = "events" # Fallback if lookup fails
+
             due_date = params.get("due_date")
             assigned_to = params.get("assigned_to_user_id") or params.get("target_user")
             

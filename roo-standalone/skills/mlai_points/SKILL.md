@@ -58,7 +58,7 @@ Example responses:
 - **submission_text**: Description of work completed for task submissions
 - **reward_code**: Code for reward redemption requests
 - **task_title**: (Admin) Title for a new task
-- **portfolio**: (Admin) Portfolio for a new task (tech, marketing, events, general, governance)
+- **portfolio**: (Admin) Portfolio for a new task (tech, marketing, events, general, governance). Defaults to the admin's assigned portfolio if omitted.
 - **assigned_to_user_id**: (Admin) Optional Slack User ID to assign a new task to (e.g. U012ABC or @alice)
 
 ## Command Recognition
