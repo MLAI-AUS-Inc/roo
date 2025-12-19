@@ -221,7 +221,7 @@ Keep the response concise but informative."""
         api_client = PointsClient(
             base_url=settings.MLAI_BACKEND_URL,
             api_key=settings.MLAI_API_KEY,
-            internal_api_key=settings.INTERNAL_API_KEY
+            internal_api_key=settings.INTERNAL_API_KEY or settings.MLAI_API_KEY
         )
         
         # Check for GitHub Token (required for publishing updates)
@@ -1068,7 +1068,7 @@ Keep the response concise but informative."""
         api_client = PointsClient(
             base_url=settings.MLAI_BACKEND_URL,
             api_key=settings.MLAI_API_KEY,
-            internal_api_key=settings.INTERNAL_API_KEY
+            internal_api_key=settings.INTERNAL_API_KEY or settings.MLAI_API_KEY
         )
         
         # 1. Check for token

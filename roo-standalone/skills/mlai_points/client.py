@@ -53,8 +53,11 @@ class PointsClient:
     def admin_headers(self) -> dict:
         """Headers for admin endpoints using internal secure key."""
         headers = {"Content-Type": "application/json"}
-        if self.internal_api_key:
-            headers["X-API-Key"] = self.internal_api_key
+        # Prefer the internal key, but fall back to the standard API key so
+        # admin endpoints still authenticate when only one key is configured.
+        api_key = self.internal_api_key or self.api_key
+        if api_key:
+            headers["X-API-Key"] = api_key
         return headers
     
     # =========================================================================

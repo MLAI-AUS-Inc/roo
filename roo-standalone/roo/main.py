@@ -325,7 +325,7 @@ async def github_callback(code: str, state: str):
     points_client = PointsClient(
         base_url=settings.MLAI_BACKEND_URL,
         api_key=settings.MLAI_API_KEY,
-        internal_api_key=settings.INTERNAL_API_KEY
+        internal_api_key=settings.INTERNAL_API_KEY or settings.MLAI_API_KEY
     )
     
     await points_client.save_github_token(
@@ -378,7 +378,7 @@ async def _handle_start_here_post(event: dict):
     points_client = PointsClient(
         base_url=settings.MLAI_BACKEND_URL,
         api_key=settings.MLAI_API_KEY,
-        internal_api_key=settings.INTERNAL_API_KEY
+        internal_api_key=settings.INTERNAL_API_KEY or settings.MLAI_API_KEY
     )
     
     # Check if user has posted before
