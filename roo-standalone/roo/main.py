@@ -317,7 +317,7 @@ async def github_callback(code: str, state: str):
             user_name = user_data.get("login", "unknown")
 
     # Save via API
-    from .skills.mlai_points.client import PointsClient
+    from skills.mlai_points.client import PointsClient
     
     # state param contains the slack_user_id
     slack_user_id = state
@@ -371,7 +371,7 @@ async def _handle_start_here_post(event: dict):
     ts = event.get("ts")
     
     # Use API client instead of direct DB
-    from .skills.mlai_points.client import PointsClient
+    from skills.mlai_points.client import PointsClient
     from .config import get_settings
     settings = get_settings()
     
