@@ -195,13 +195,31 @@ def send_dm(user_id: str, text: str, **kwargs) -> Optional[Dict[str, Any]]:
 def get_channel_id(channel_name: str) -> Optional[str]:
     """Get channel ID by name."""
     client = get_slack_client()
+    target_name = channel_name.lstrip('#')
+    
     try:
-        # Handling public channels - caching results
-        result = client.conversations_list(types="public_channel", limit=1000)
-        for channel in result["channels"]:
-            if channel["name"] == channel_name.lstrip('#'):
-                return channel["id"]
+        # Check public and private channels, with pagination
+        cursor = None
+        while True:
+            result = client.conversations_list(
+                types="public_channel,private_channel",
+                limit=1000,
+                cursor=cursor
+            )
+            
+            for channel in result["channels"]:
+                if channel["name"] == target_name:
+                    print(f"✅ Found channel #{target_name}: {channel['id']}")
+                    return channel["id"]
+            
+            cursor = result.get("response_metadata", {}).get("next_cursor")
+            if not cursor:
+                break
+                
+        print(f"⚠️ Channel #{target_name} not found")
         return None
+        
     except Exception as e:
         print(f"❌ Failed to lookup channel {channel_name}: {e}")
         return None
+

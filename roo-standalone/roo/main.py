@@ -104,10 +104,16 @@ async def slack_events(request: Request):
         return JSONResponse(status_code=200, content={})
     
     if event_type == "message" and not event.get("bot_id") and not event.get("subtype"):
-        # Check for posts in #_start_here
+        # Check for posts in #_start-here
         from .slack_client import get_channel_id
-        start_here_id = get_channel_id("_start_here")
+        start_here_id = get_channel_id("_start-here")
         
+        # DEBUG LOGGING
+        if start_here_id:
+             print(f"🕵️ Match check: Event channel {event.get('channel')} vs Start Here {start_here_id}")
+        else:
+             print("⚠️ Start Here channel ID not found")
+
         if start_here_id and event.get("channel") == start_here_id:
             import asyncio
             asyncio.create_task(_handle_start_here_post(event))
