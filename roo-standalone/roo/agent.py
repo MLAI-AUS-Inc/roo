@@ -111,7 +111,6 @@ class RooAgent:
         Regex matches specific high-frequency commands.
         """
         import re
-        from datetime import date, timedelta
         
         text_lower = text.lower().strip()
         
@@ -131,7 +130,7 @@ class RooAgent:
 
         # 4. Coworking Book Today: "coworking book today"
         if re.match(r'^coworking\s+book\s+today$', text_lower):
-            today = date.today().isoformat()
+            today = self._get_today().isoformat()
             return await self._execute_fast_points(
                 user_id, "book_coworking", 
                 date=today, channel_id=channel_id
@@ -141,13 +140,18 @@ class RooAgent:
         if re.match(r'^coworking\s+cancel$', text_lower):
             # For "cancel", we might need to handle logic in the client or pass a flag
             # The user requirement was "will cancel booking for today"
-            today = date.today().isoformat()
+            today = self._get_today().isoformat()
             return await self._execute_fast_points(
                 user_id, "cancel_coworking", 
                 date=today
             )
             
         return None
+
+    def _get_today(self):
+        """Get today's date respecting the configured timezone."""
+        from roo.utils import get_current_date
+        return get_current_date()
 
     async def _execute_fast_points(self, user_id: str, action: str, **kwargs) -> Dict[str, Any]:
         """Execute a Points action directly."""
