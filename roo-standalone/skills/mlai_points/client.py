@@ -198,9 +198,19 @@ class PointsClient:
         slack_channel_id: Optional[str] = None
     ) -> dict:
         """Book a coworking day."""
+        # Inject current server time (in configured timezone) to help backend validation
+        try:
+            from roo.utils import get_current_datetime
+            current_time = get_current_datetime().isoformat()
+        except ImportError:
+            # Fallback if roo.utils not available (e.g. strict isolation)
+            from datetime import datetime
+            current_time = datetime.now().isoformat()
+
         payload = {
             "slack_user_id": slack_user_id,
             "date": booking_date,
+            "current_time": current_time,
         }
         if slack_channel_id:
             payload["slack_channel_id"] = slack_channel_id

@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     DEBUG: bool = False
     LOG_LEVEL: str = "INFO"
     SKILLS_DIR: str = "skills"
+    TIMEZONE: str = "Australia/Melbourne"
     
     @property
     def default_llm_provider(self) -> str:

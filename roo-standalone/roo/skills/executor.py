@@ -671,11 +671,14 @@ Keep the response concise but informative."""
             
             # Normalize date aliases
             if booking_date:
-                from datetime import date, timedelta
+                from datetime import timedelta
+                from roo.utils import get_current_date
+                today = get_current_date()
+
                 if booking_date.lower() == "today":
-                    booking_date = date.today().isoformat()
+                    booking_date = today.isoformat()
                 elif booking_date.lower() == "tomorrow":
-                    booking_date = (date.today() + timedelta(days=1)).isoformat()
+                    booking_date = (today + timedelta(days=1)).isoformat()
             
             if not booking_date:
                 import re
@@ -705,11 +708,14 @@ Keep the response concise but informative."""
             
             # Normalize date aliases
             if booking_date:
-                from datetime import date, timedelta
+                from datetime import timedelta
+                from roo.utils import get_current_date
+                today = get_current_date()
+
                 if booking_date.lower() == "today":
-                    booking_date = date.today().isoformat()
+                    booking_date = today.isoformat()
                 elif booking_date.lower() == "tomorrow":
-                    booking_date = (date.today() + timedelta(days=1)).isoformat()
+                    booking_date = (today + timedelta(days=1)).isoformat()
             
             if not booking_date and not booking_id:
                 import re
