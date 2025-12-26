@@ -4,13 +4,22 @@ MLAI Quests System
 This module implements simple quests for user engagement.
 """
 import asyncio
+import re
+from datetime import datetime
 from typing import Dict, List, Optional
+try:
+    import zoneinfo
+except ImportError:
+    # Backport for python < 3.9
+    from backports import zoneinfo
+
 from .config import get_settings
 from skills.mlai_points.client import PointsClient
-from .slack_client import get_bot_user_id, post_message
+from .slack_client import get_bot_user_id, post_message, get_channel_id
 
 # Configuration for quests
 QUESTS = {
+    # Existing
     "connector": {
         "name": "Connector",
         "description": "React to 5 messages",
@@ -23,7 +32,7 @@ QUESTS = {
         "description": "Reply to 3 threads",
         "target_count": 3,
         "points": 5,
-        "event_type": "message" # specifically thread replies
+        "event_type": "message"
     },
     "first_contact": {
         "name": "First Contact",
@@ -32,12 +41,75 @@ QUESTS = {
         "points": 2,
         "event_type": "message",
         "channel_name": "_start-here"
+    },
+    # New Quests
+    "paper_trail": {
+        "name": "Paper Trail",
+        "points": 5,
+        "target_count": 1,
+        "pattern": r"arxiv\.org",
+    },
+    "git_pusher": {
+        "name": "Git Pusher",
+        "points": 5,
+        "target_count": 1,
+        "pattern": r"github\.com",
+    },
+    "model_citizen": {
+        "name": "Model Citizen",
+        "points": 5,
+        "target_count": 1,
+        "pattern": r"huggingface\.co",
+    },
+    "code_blooded": {
+        "name": "Code Blooded",
+        "points": 2,
+        "target_count": 1,
+        "pattern": r"```",
+    },
+    "show_off": {
+        "name": "Show Off",
+        "points": 10,
+        "target_count": 1,
+        "channel_name": "showcase"
+    },
+    "bug_basher": {
+        "name": "Bug Basher",
+        "points": 10,
+        "target_count": 1,
+        "channel_name": "bugs"
+    },
+    "melb_coffee": {
+        "name": "Melb Coffee",
+        "points": 1,
+        "target_count": 1,
+        "emojis": ["coffee", "flat_white", "espresso"]
+    },
+    "kangaroo_court": {
+        "name": "Kangaroo Court",
+        "points": 1,
+        "target_count": 1,
+        "emojis": ["kangaroo"]
+    },
+    "warm_welcome": {
+        "name": "Warm Welcome",
+        "points": 5,
+        "target_count": 1,
+        "reaction_channel": "_start-here"
+    },
+    "night_owl": {
+        "name": "Night Owl",
+        "points": 10,
+        "target_count": 1,
+        "time_start": 1, # 1 AM
+        "time_end": 5    # 5 AM
     }
 }
 
 # In-memory tracking for simplicity (note: this resets on restart)
-# In production, this should use a DB or Redis
 _quest_progress: Dict[str, Dict[str, int]] = {}
+# Track completed quests (reset on restart for now)
+_completed_quests: Dict[str, set] = {}
 
 async def handle_quests(event: dict):
     """
@@ -50,34 +122,86 @@ async def handle_quests(event: dict):
     if not user_id:
         return
 
-    # 1. Handle "Connector" Quest (Reactions)
+    # --- Reaction Events ---
     if event_type == "reaction_added":
+        # 1. Connector (Any reaction)
         await _update_progress(user_id, "connector")
 
-    # 2. Handle "Helper" Quest (Thread Replies)
-    if event_type == "message" and event.get("thread_ts") and event.get("thread_ts") != event.get("ts"):
-        # Ensure it's not a bot message
-        if not event.get("bot_id") and not event.get("subtype"):
+        reaction = event.get("reaction", "")
+        item = event.get("item", {})
+        channel = item.get("channel")
+
+        # 2. Melb Coffee
+        if reaction in QUESTS["melb_coffee"]["emojis"]:
+             await _update_progress(user_id, "melb_coffee")
+
+        # 3. Kangaroo Court
+        if reaction in QUESTS["kangaroo_court"]["emojis"]:
+             await _update_progress(user_id, "kangaroo_court")
+
+        # 4. Warm Welcome (React in #_start-here)
+        # Note: In real app, check if message author != user_id
+        start_here_id = get_channel_id("_start-here")
+        if start_here_id and channel == start_here_id:
+            await _update_progress(user_id, "warm_welcome")
+
+    # --- Message Events ---
+    if event_type == "message" and not event.get("bot_id") and not event.get("subtype"):
+        text = event.get("text", "")
+        channel = event.get("channel")
+        ts = event.get("ts")
+        is_thread = event.get("thread_ts") is not None
+
+        # 5. Helper (Thread replies)
+        if is_thread and event.get("thread_ts") != ts:
              await _update_progress(user_id, "helper")
 
-    # 3. Handle "First Contact" Quest (#_start-here post)
-    if event_type == "message" and not event.get("bot_id") and not event.get("subtype"):
-        # Ignore thread replies for this specific quest
-        if not event.get("thread_ts"):
-            await _check_start_here_quest(event)
+        # 6. First Contact (#_start-here post, no thread)
+        if not is_thread:
+             await _check_start_here_quest(event)
+
+        # 7. Pattern Match Quests (Paper Trail, Git Pusher, etc)
+        for q_id, q_data in QUESTS.items():
+            if "pattern" in q_data:
+                if re.search(q_data["pattern"], text, re.IGNORECASE):
+                    await _update_progress(user_id, q_id)
+
+        # 8. Channel Specific Quests (Show Off, Bug Basher)
+        for q_id, q_data in QUESTS.items():
+            if "channel_name" in q_data and q_id != "first_contact": # First contact handled separately
+                target_id = get_channel_id(q_data["channel_name"])
+                if target_id and channel == target_id:
+                    # For showcase/bugs, we assume any post counts
+                    if not is_thread: # usually top-level
+                        await _update_progress(user_id, q_id)
+
+        # 9. Night Owl
+        if QUESTS["night_owl"].get("time_start"):
+            try:
+                # Use float ts to get datetime
+                timestamp = float(ts)
+                # Convert to Melbourne time
+                from zoneinfo import ZoneInfo
+                dt = datetime.fromtimestamp(timestamp, tz=ZoneInfo("Australia/Melbourne"))
+                hour = dt.hour
+                if QUESTS["night_owl"]["time_start"] <= hour < QUESTS["night_owl"]["time_end"]:
+                    await _update_progress(user_id, "night_owl")
+            except Exception as e:
+                print(f"⚠️ Night Owl check failed: {e}")
 
 async def _update_progress(user_id: str, quest_id: str):
     """Update progress for a user on a specific quest."""
     if user_id not in _quest_progress:
         _quest_progress[user_id] = {}
+    if user_id not in _completed_quests:
+        _completed_quests[user_id] = set()
+
+    # If already completed this session, skip
+    if quest_id in _completed_quests[user_id]:
+        return
 
     current = _quest_progress[user_id].get(quest_id, 0)
     target = QUESTS[quest_id]["target_count"]
-
-    # If already completed, ignore (simple dedup)
-    # Ideally we'd check a persistent "completed_quests" store
-    if current >= target:
-        return
 
     current += 1
     _quest_progress[user_id][quest_id] = current
@@ -85,6 +209,7 @@ async def _update_progress(user_id: str, quest_id: str):
     print(f"📊 Quest Progress: {user_id} - {quest_id}: {current}/{target}")
 
     if current >= target:
+        _completed_quests[user_id].add(quest_id)
         await _complete_quest(user_id, quest_id)
 
 async def _check_start_here_quest(event: dict):
@@ -93,11 +218,10 @@ async def _check_start_here_quest(event: dict):
     user_id = event.get("user")
 
     # Resolve channel name
-    from .slack_client import get_channel_id
     target_channel_id = get_channel_id("_start-here")
 
-    # In tests, mock_get_channel returns "C12345".
-    # But if not mocked properly, it might be None or different.
+    # Fallback for testing/mocking if get_channel_id returns None but we want to simulate match
+    # (In real run, get_channel_id should work or return None)
 
     if channel_id != target_channel_id:
         return
@@ -110,15 +234,18 @@ async def _check_start_here_quest(event: dict):
         internal_api_key=settings.INTERNAL_API_KEY or settings.MLAI_API_KEY
     )
 
-    has_posted = await points_client.has_posted_in_channel(user_id, channel_id)
-    if has_posted:
-        return
+    try:
+        has_posted = await points_client.has_posted_in_channel(user_id, channel_id)
+        if has_posted:
+            return
 
-    # Record it
-    await points_client.record_channel_post(user_id, channel_id)
+        # Record it
+        await points_client.record_channel_post(user_id, channel_id)
 
-    # Complete the quest directly
-    await _complete_quest(user_id, "first_contact")
+        # Complete the quest directly
+        await _complete_quest(user_id, "first_contact")
+    except Exception as e:
+        print(f"❌ Failed First Contact check: {e}")
 
 
 async def _complete_quest(user_id: str, quest_id: str):
@@ -137,7 +264,6 @@ async def _complete_quest(user_id: str, quest_id: str):
     )
 
     try:
-        from .slack_client import get_bot_user_id
         bot_id = get_bot_user_id()
         if not bot_id:
             print("⚠️ Cannot award quest points: Bot ID not found")
