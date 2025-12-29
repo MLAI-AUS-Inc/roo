@@ -221,10 +221,10 @@ Keep the response concise but informative."""
         """Execute the content factory generation workflow."""
 
         
-        # Get a PointsClient for API calls
+        # Get a MLAIBackendClient for API calls
         settings = get_settings()
-        from .mlai_points.client import PointsClient
-        api_client = PointsClient(
+        from skills.mlai_points.client import MLAIBackendClient
+        api_client = MLAIBackendClient(
             base_url=settings.MLAI_BACKEND_URL,
             api_key=settings.MLAI_API_KEY,
             internal_api_key=settings.INTERNAL_API_KEY or settings.MLAI_API_KEY
@@ -450,7 +450,7 @@ Keep the response concise but informative."""
         import httpx
         
         # Get client from skill's implementation module
-        ClientClass = skill.get_client_class("PointsClient")
+        ClientClass = skill.get_client_class("MLAIBackendClient")
         
         if ClientClass is None:
             return "Sorry mate, the Points skill isn't properly configured. Missing implementation."
@@ -1098,8 +1098,8 @@ Keep the response concise but informative."""
         
         # Get API client for GitHub token operations
         settings = get_settings()
-        from .mlai_points.client import PointsClient
-        api_client = PointsClient(
+        from skills.mlai_points.client import MLAIBackendClient
+        api_client = MLAIBackendClient(
             base_url=settings.MLAI_BACKEND_URL,
             api_key=settings.MLAI_API_KEY,
             internal_api_key=settings.INTERNAL_API_KEY or settings.MLAI_API_KEY

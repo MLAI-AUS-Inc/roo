@@ -12,7 +12,7 @@ async def test_smart_award():
     mock_skill = MagicMock(spec=Skill)
     mock_skill.name = "mlai-points"
     
-    # Mock PointsClient
+    # Mock MLAIBackendClient
     mock_client = MagicMock()
     mock_client.get_rate_card = MagicMock(return_value=asyncio.Future())
     mock_client.get_rate_card.return_value.set_result([

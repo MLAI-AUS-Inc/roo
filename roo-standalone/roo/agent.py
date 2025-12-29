@@ -175,7 +175,7 @@ class RooAgent:
         if not skill:
             return None
             
-        ClientClass = skill.get_client_class("PointsClient")
+        ClientClass = skill.get_client_class("MLAIBackendClient")
         if not ClientClass:
             return None
             

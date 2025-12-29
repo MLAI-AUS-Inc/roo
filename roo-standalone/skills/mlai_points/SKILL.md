@@ -98,7 +98,7 @@ For admin-only actions (create, approve, award):
 - If 403 returned, respond with friendly denial
 
 ### Step 3: Execute via API
-Call the appropriate PointsClient method with extracted parameters.
+Call the appropriate MLAIBackendClient method with extracted parameters.
 - All API calls pass the requester's `slack_user_id` from the Slack event
 - Never trust user-provided identity in message text
 
