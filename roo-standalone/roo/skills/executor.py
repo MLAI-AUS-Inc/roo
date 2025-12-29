@@ -286,39 +286,29 @@ Keep the response concise but informative."""
         # 2. Check for Project Scanned status
 
         if not integration or not integration.get("project_scanned"):
-            # Only allow if user specifically requested a scan or we can infer it? 
-            # Ideally we redirect them to scan first.
+            # Automatically trigger scan via backend
+            if channel_id:
+                post_message(channel_id, "🔍 Let me scan your repository to understand the project structure...", thread_ts)
             
-            blocks = [
-                {
-                    "type": "section",
-                    "text": {
-                        "type": "mrkdwn",
-                        "text": f"I see you're connected, but I need to scan your repository (using backend auth) to understand the structure first."
-                    }
-                },
-                {
-                    "type": "actions",
-                    "elements": [
-                        {
-                            "type": "button",
-                            "text": {
-                                "type": "plain_text",
-                                "text": "Scan Repository",
-                                "emoji": True
-                            },
-                            "action_id": "scan_repo_trigger", 
-                            "value": "scan_repo", # We need a way to trigger this logic
-                            "style": "primary"
-                        }
-                    ]
-                }
-            ]
-            # Ideally we'd just automatically trigger the scan if we knew the repo name.
-            # But we might lack the repo name in the params here if they just said "generate article".
-            # For now, let's just ask them to run the scan command.
+            scan_result = await api_client.trigger_repo_scan(user_id)
             
-            return "Hold your horses! 🐎 I need to scan your repository first to understand your project structure.\n\nPlease run: `@Roo scan repo <owner>/<repo>`"
+            if scan_result.get("error"):
+                error_type = scan_result.get("error")
+                if error_type == "no_repository":
+                    return (
+                        "I see you've connected GitHub, but I don't know which repository to scan yet.\n\n"
+                        "Please let me know your repository (e.g., `owner/repo`) so I can analyze your project structure."
+                    )
+                else:
+                    return f"Had some trouble scanning your repository: {scan_result.get('message', 'Unknown error')}"
+            
+            # Scan succeeded - refresh integration status
+            integration = await api_client.get_integration(user_id)
+            if not integration or not integration.get("project_scanned"):
+                return "Scanning is taking a bit longer than expected. Please try again in a moment! 🦘"
+            
+            if channel_id:
+                post_message(channel_id, "✅ Repository scanned! Now I can help with your content.", thread_ts)
 
         # 3. Validation: Check parameters (Domain/Topic)
         domain = params.get("domain")
