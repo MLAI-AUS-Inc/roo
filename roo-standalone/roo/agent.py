@@ -11,6 +11,7 @@ from .config import get_settings
 from .llm import chat
 from .skills.loader import Skill, load_skills
 from .skills.executor import SkillExecutor
+from .slack_client import get_thread_messages
 
 
 class RooAgent:
@@ -65,6 +66,19 @@ class RooAgent:
         
         print(f"🔍 Processing: {clean_text[:100]}...")
         
+        # 0. Fetch Thread Context (if available)
+        thread_history = []
+        if channel_id and thread_ts:
+            try:
+                # Fetch last 10 messages for context
+                raw_history = get_thread_messages(channel=channel_id, thread_ts=thread_ts)
+                # Filter to recent ones and simple format
+                # We exclude the current message generally, but get_thread_messages returns all.
+                # Let's just pass the raw list to the executor/selector to handle filtering if needed.
+                thread_history = raw_history[-10:] if raw_history else []
+            except Exception as e:
+                print(f"⚠️ Failed to fetch thread history: {e}")
+
         # 1. Try Fast Path (Direct Command Execution)
         fast_result = await self._try_fast_path(clean_text, user_id, channel_id, thread_ts)
         if fast_result:
@@ -72,7 +86,7 @@ class RooAgent:
             return fast_result
         
         # 2. Select appropriate skill (LLM Routing)
-        skill = await self._select_skill(clean_text)
+        skill = await self._select_skill(clean_text, thread_history)
         
         if skill:
             print(f"🎯 Selected skill: {skill.name}")
@@ -82,6 +96,7 @@ class RooAgent:
                 user_id=user_id,
                 channel_id=channel_id,
                 thread_ts=thread_ts,
+                thread_history=thread_history,
                 **kwargs
             )
             return {
@@ -91,7 +106,7 @@ class RooAgent:
             }
         else:
             print("💬 No skill matched, generating general response")
-            response = await self._general_response(clean_text)
+            response = await self._general_response(clean_text, thread_history)
             return {
                 "message": response,
                 "skill_used": None,
@@ -258,7 +273,7 @@ class RooAgent:
         cleaned = ' '.join(cleaned.split())
         return cleaned.strip()
     
-    async def _select_skill(self, text: str) -> Optional[Skill]:
+    async def _select_skill(self, text: str, history: List[dict] = None) -> Optional[Skill]:
         """Use LLM to decide which skill to use."""
         if not self.skills:
             return None
@@ -276,12 +291,19 @@ class RooAgent:
             for s in self.skills
         )
         
-        prompt = f"""You are a skill router. Given the user's message, decide which skill to use.
+        # Format history for context
+        history_context = ""
+        if history:
+            history_str = "\n".join([f"{msg.get('user')}: {msg.get('text')}" for msg in history[:-1]]) # Skip last as it's the current request usually
+            history_context = f"Conversation History:\n{history_str}\n"
+
+        prompt = f"""You are a skill router. Given the user's message and conversation context, decide which skill to use.
 
 Available skills:
 {skill_descriptions}
 - none: Use this if no skill is appropriate (general conversation)
 
+{history_context}
 User message: "{text}"
 
 Respond with ONLY the skill name (e.g., "connect_users" or "none"):"""
@@ -307,8 +329,14 @@ Respond with ONLY the skill name (e.g., "connect_users" or "none"):"""
             print(f"❌ Skill selection failed: {e}")
             return None
     
-    async def _general_response(self, text: str) -> str:
+    async def _general_response(self, text: str, history: List[dict] = None) -> str:
         """Generate a general conversational response."""
+        # Format history
+        history_context = ""
+        if history:
+            history_str = "\n".join([f"{msg.get('user')}: {msg.get('text')}" for msg in history[:-1]])
+            history_context = f"\nRecent Context:\n{history_str}\n"
+
         skill_list = "\n".join(f"- {s.name}: {s.description}" for s in self.skills)
         prompt = f"""You are Roo, the friendly AI assistant for the MLAI community.
         
@@ -322,6 +350,8 @@ Your Capabilities / Skills:
 {skill_list}
 
 If the user asks "what can you do?" or "what are you?", summarize your role and list your skills in a friendly, conversational way. Don't just dump the raw list, explain it naturally.
+
+{history_context}
 Respond to the user's message in a helpful, conversational way."""
 
         try:

@@ -42,6 +42,7 @@ class SkillExecutor:
         user_id: str,
         channel_id: Optional[str] = None,
         thread_ts: Optional[str] = None,
+        thread_history: Optional[List[dict]] = None,
         **kwargs
     ) -> SkillResult:
         """
@@ -62,12 +63,12 @@ class SkillExecutor:
         
         try:
             # Extract parameters using LLM
-            params = await self._extract_parameters(skill, text)
+            params = await self._extract_parameters(skill, text, user_id, thread_history)
             print(f"   Extracted params: {params}")
             
             # Check for skill-specific implementation
             if skill.name == "content-factory":
-                result = await self._execute_content_factory(skill, text, params, user_id, channel_id, thread_ts)
+                result = await self._execute_content_factory(skill, text, params, user_id, channel_id, thread_ts, thread_history)
             elif skill.name == "connect-users":
                 result = await self._execute_connect_users(skill, text, params, user_id)
             elif skill.name == "mlai-points":
@@ -76,7 +77,7 @@ class SkillExecutor:
                 result = await self._execute_github_integration(skill, text, params, user_id, channel_id, thread_ts)
             else:
                 # Generic LLM-based execution
-                result = await self._execute_with_llm(skill, text, params, user_id)
+                result = await self._execute_with_llm(skill, text, params, user_id, thread_history)
             
             return SkillResult(
                 success=True,
@@ -95,17 +96,26 @@ class SkillExecutor:
                 error=str(e)
             )
     
-    async def _extract_parameters(self, skill: Skill, text: str) -> dict:
+    async def _extract_parameters(self, skill: Skill, text: str, user_id: str, history: Optional[List[dict]] = None) -> dict:
         """Extract parameters from user message based on skill definition."""
         # Parse parameter definitions from skill content
         param_section = self._find_section(skill.content, "Parameters")
         
         if not param_section:
             return {}
+            
+        # Format history context
+        history_context = ""
+        if history:
+            # Simple format: "User: msg"
+            context_lines = [f"{msg.get('user')}: {msg.get('text')}" for msg in history[:-1]]
+            history_context = "\nConversation Context (use this to fill missing parameters):\n" + "\n".join(context_lines)
         
         prompt = f"""Extract parameters from the user's message based on these definitions:
 
 {param_section}
+
+{history_context}
 
 User message: "{text}"
 
@@ -136,7 +146,8 @@ JSON:"""
         skill: Skill,
         text: str,
         params: dict,
-        user_id: str
+        user_id: str,
+        history: Optional[List[dict]] = None
     ) -> str:
         """Execute the skill using LLM to follow the skill's instructions."""
         
@@ -164,6 +175,9 @@ User's original request: "{text}"
 Extracted parameters: {params}
 Requesting user ID: {user_id}
 {context}
+
+Previous Conversation Context (if any):
+{history if history else 'None'}
 
 Follow the skill instructions to generate an appropriate response.
 Be helpful, friendly, and use casual Australian expressions occasionally.
@@ -201,7 +215,8 @@ Keep the response concise but informative."""
         params: dict,
         user_id: str,
         channel_id: Optional[str],
-        thread_ts: Optional[str]
+        thread_ts: Optional[str],
+        thread_history: Optional[List[dict]] = None
     ) -> str:
         """Execute the content factory generation workflow."""
         domain = params.get("domain")
@@ -328,11 +343,17 @@ Keep the response concise but informative."""
             )
             
             # Start generation
+            # Enhance context with thread history if available
+            full_context = text
+            if thread_history:
+                history_str = "\n".join([f"{msg.get('user')}: {msg.get('text')}" for msg in thread_history[:-1]])
+                full_context = f"Context from Thread:\n{history_str}\n\nCurrent Request: {text}"
+            
             job_id = await client.generate_article(
                 domain=domain,
                 topic=topic,
                 target_keyword=target_keyword,
-                context=text,
+                context=full_context,
                 slack_user_id=user_id
             )
             
@@ -1059,7 +1080,7 @@ Keep the response concise but informative."""
         
         else:
             # Fall back to LLM for unrecognized actions
-            return await self._execute_with_llm(skill, text, params, user_id)
+            return await self._execute_with_llm(skill, text, params, user_id, thread_history)
 
     async def _execute_github_integration(
         self,
