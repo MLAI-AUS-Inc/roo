@@ -24,14 +24,14 @@ QUESTS = {
         "name": "Connector",
         "description": "React to 5 messages",
         "target_count": 5,
-        "points": 5,
+        "points": 2,
         "event_type": "reaction_added"
     },
     "helper": {
         "name": "Helper",
         "description": "Reply to 3 threads",
         "target_count": 3,
-        "points": 5,
+        "points": 2,
         "event_type": "message"
     },
     "first_contact": {
@@ -45,37 +45,37 @@ QUESTS = {
     # New Quests
     "paper_trail": {
         "name": "Paper Trail",
-        "points": 5,
+        "points": 2,
         "target_count": 1,
         "pattern": r"arxiv\.org",
     },
     "git_pusher": {
         "name": "Git Pusher",
-        "points": 5,
+        "points": 2,
         "target_count": 1,
         "pattern": r"github\.com",
     },
     "model_citizen": {
         "name": "Model Citizen",
-        "points": 5,
+        "points": 2,
         "target_count": 1,
         "pattern": r"huggingface\.co",
     },
     "code_blooded": {
         "name": "Code Blooded",
-        "points": 2,
+        "points": 1,
         "target_count": 1,
         "pattern": r"```",
     },
     "show_off": {
         "name": "Show Off",
-        "points": 10,
+        "points": 4,
         "target_count": 1,
         "channel_name": "showcase"
     },
     "bug_basher": {
         "name": "Bug Basher",
-        "points": 10,
+        "points": 1,
         "target_count": 1,
         "channel_name": "bugs"
     },
@@ -93,13 +93,13 @@ QUESTS = {
     },
     "warm_welcome": {
         "name": "Warm Welcome",
-        "points": 5,
+        "points": 1,
         "target_count": 1,
         "reaction_channel": "_start-here"
     },
     "night_owl": {
         "name": "Night Owl",
-        "points": 10,
+        "points": 2,
         "target_count": 1,
         "time_start": 1, # 1 AM
         "time_end": 5    # 5 AM
