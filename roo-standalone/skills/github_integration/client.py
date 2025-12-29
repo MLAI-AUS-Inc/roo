@@ -16,7 +16,7 @@ class GitHubIntegrationClient:
     async def scan_repo(
         self,
         repo_name: str,
-        github_token: str,
+        slack_user_id: str,
         domain: str = None
     ) -> Dict[str, Any]:
         """
@@ -24,7 +24,7 @@ class GitHubIntegrationClient:
         
         Args:
             repo_name: "owner/repo"
-            github_token: The user's GitHub access token
+            slack_user_id: The Slack user ID (for backend token lookup)
             domain: Optional domain name
             
         Returns:
@@ -35,7 +35,7 @@ class GitHubIntegrationClient:
             
         payload = {
             "github_repo": repo_name,
-            "github_token": github_token,
+            "slack_user_id": slack_user_id,
             "scaffold": True  # Default to scaffolding/analyzing
         }
         

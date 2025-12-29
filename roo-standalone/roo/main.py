@@ -208,11 +208,71 @@ async def slack_commands(request: Request):
     text = form.get("text", "")
     user_id = form.get("user_id", "")
     
-    print(f"📨 Slash command: {command} from {user_id}")
+    print(f"📨 Slash command: {command} {text} from {user_id}")
+    
+    if command == "/roo" and "connect type" in text:  # Handle other connects?
+        pass
+
+    # Handle "connect github"
+    if "connect github" in text.lower():
+        settings = get_settings()
+        from .skills.mlai_points.client import PointsClient
+        
+        try:
+            client = PointsClient(
+                base_url=settings.MLAI_BACKEND_URL,
+                api_key=settings.MLAI_API_KEY
+            )
+            
+            # Get Auth URL
+            auth_response = await client.get_github_auth_url(user_id)
+            auth_url = auth_response.get("auth_url")
+            
+            if not auth_url:
+                return {
+                    "response_type": "ephemeral",
+                    "text": "Sorry mate, I couldn't get the authorization URL. Please try again later."
+                }
+                
+            return {
+                "response_type": "ephemeral",
+                "blocks": [
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": "Click the button below to connect your GitHub account to Roo."
+                        }
+                    },
+                    {
+                        "type": "actions",
+                        "elements": [
+                            {
+                                "type": "button",
+                                "text": {
+                                    "type": "plain_text",
+                                    "text": "Connect GitHub",
+                                    "emoji": True
+                                },
+                                "url": auth_url,
+                                "action_id": "connect_github_cmd",
+                                "style": "primary"
+                            }
+                        ]
+                    }
+                ]
+            }
+            
+        except Exception as e:
+            print(f"Failed to handle connect github command: {e}")
+            return {
+                "response_type": "ephemeral",
+                "text": "Sorry mate, ran into a snag getting the connection link."
+            }
     
     return {
         "response_type": "ephemeral",
-        "text": f"Command '{command}' received! (Not yet implemented)"
+        "text": f"Command '{command} {text}' received! (Not yet implemented)"
     }
 
 
@@ -239,123 +299,5 @@ async def api_mention(request: Request):
     )
     
     return result
-
-
-@app.get("/auth/github/login")
-async def github_login(state: str):
-    """
-    Redirect to GitHub OAuth login.
-    state: The slack_user_id to bind the token to.
-    """
-    settings = get_settings()
-    if not settings.GITHUB_CLIENT_ID:
-        raise HTTPException(status_code=500, detail="GitHub Client ID not configured")
-
-    scope = "repo user:email"
-    redirect_uri = f"{settings.SLACK_APP_URL}/auth/github/callback"
-    
-    # Construct GitHub OAuth URL
-    url = (
-        f"https://github.com/login/oauth/authorize"
-        f"?client_id={settings.GITHUB_CLIENT_ID}"
-        f"&scope={scope}"
-        f"&state={state}"
-        f"&redirect_uri={redirect_uri}"
-    )
-    
-    from fastapi.responses import RedirectResponse
-    return RedirectResponse(url)
-
-
-@app.get("/auth/github/callback")
-async def github_callback(code: str, state: str):
-    """
-    Handle GitHub OAuth callback.
-    Exchanges code for access token and saves it.
-    """
-    settings = get_settings()
-    if not settings.GITHUB_CLIENT_ID or not settings.GITHUB_CLIENT_SECRET:
-        raise HTTPException(status_code=500, detail="GitHub credentials not configured")
-        
-    # Exchange code for token
-    import httpx
-    async with httpx.AsyncClient() as client:
-        response = await client.post(
-            "https://github.com/login/oauth/access_token",
-            headers={"Accept": "application/json"},
-            data={
-                "client_id": settings.GITHUB_CLIENT_ID,
-                "client_secret": settings.GITHUB_CLIENT_SECRET,
-                "code": code,
-                "redirect_uri": f"{settings.SLACK_APP_URL}/auth/github/callback"
-            }
-        )
-        data = response.json()
-        
-    access_token = data.get("access_token")
-    if not access_token:
-        error = data.get("error_description") or "Unknown error"
-        return JSONResponse(status_code=400, content={"error": f"Failed to get token: {error}"})
-        
-    # Get user info for metadata (optional but good for logs)
-    user_name = "unknown"
-    async with httpx.AsyncClient() as client:
-        user_resp = await client.get(
-            "https://api.github.com/user",
-            headers={
-                "Authorization": f"token {access_token}",
-                "Accept": "application/json"
-            }
-        )
-        if user_resp.status_code == 200:
-            user_data = user_resp.json()
-            user_name = user_data.get("login", "unknown")
-
-    # Save via API
-    from skills.mlai_points.client import PointsClient
-    
-    # state param contains the slack_user_id
-    slack_user_id = state
-    
-    points_client = PointsClient(
-        base_url=settings.MLAI_BACKEND_URL,
-        api_key=settings.MLAI_API_KEY,
-        internal_api_key=settings.INTERNAL_API_KEY or settings.MLAI_API_KEY
-    )
-    
-    await points_client.save_github_token(
-        slack_user_id=slack_user_id,
-        token=access_token,
-        user_name=user_name,
-        scopes=["repo", "user:email"]
-    )
-    
-    # Notify user in Slack
-    from .slack_client import send_dm
-    send_dm(
-        slack_user_id,
-        f"🎉 success! I've connected to your GitHub account (`{user_name}`).\nYou can now ask me to scan your repos!"
-    )
-
-    # Check for pending intent
-    integration = await points_client.get_integration(slack_user_id)
-    pending_intent = integration.get("pending_intent") if integration else None
-    
-    if pending_intent:
-        import json
-        try:
-            intent = json.loads(pending_intent)
-            
-            # Clear it immediately
-            await points_client.clear_pending_intent(slack_user_id)
-            
-            # Resume asynchronously
-            import asyncio
-            asyncio.create_task(_resume_intent(slack_user_id, intent))
-            
-        except Exception as e:
-            print(f"Failed to resume intent: {e}")
-
-    return JSONResponse(content={"status": "success", "message": "GitHub connected! You can close this window."})
 
 
