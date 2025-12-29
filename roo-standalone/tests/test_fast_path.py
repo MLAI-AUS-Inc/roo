@@ -10,7 +10,7 @@ async def test_fast_path_balance():
     # Mock the skill selection to ensure we don't hit LLM if fast path matches
     agent._select_skill = MagicMock()
     
-    # Mock PointsClient
+    # Mock MLAIBackendClient
     mock_client = MagicMock()
     mock_client.get_balance = MagicMock(return_value=asyncio.Future())
     mock_client.get_balance.return_value.set_result({"balance": 100, "lifetime_earned": 200})

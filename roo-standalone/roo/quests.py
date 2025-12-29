@@ -14,7 +14,7 @@ except ImportError:
     from backports import zoneinfo
 
 from .config import get_settings
-from skills.mlai_points.client import PointsClient
+from skills.mlai_points.client import MLAIBackendClient
 from .slack_client import get_bot_user_id, post_message, get_channel_id
 
 # Configuration for quests
@@ -226,9 +226,9 @@ async def _check_start_here_quest(event: dict):
     if channel_id != target_channel_id:
         return
 
-    # Use PointsClient to check if they've posted before
+    # Use MLAIBackendClient to check if they've posted before
     settings = get_settings()
-    points_client = PointsClient(
+    points_client = MLAIBackendClient(
         base_url=settings.MLAI_BACKEND_URL,
         api_key=settings.MLAI_API_KEY,
         internal_api_key=settings.INTERNAL_API_KEY or settings.MLAI_API_KEY
@@ -257,7 +257,7 @@ async def _complete_quest(user_id: str, quest_id: str):
     print(f"🎉 Quest Complete: {user_id} completed {name}!")
 
     settings = get_settings()
-    points_client = PointsClient(
+    points_client = MLAIBackendClient(
         base_url=settings.MLAI_BACKEND_URL,
         api_key=settings.MLAI_API_KEY,
         internal_api_key=settings.INTERNAL_API_KEY or settings.MLAI_API_KEY

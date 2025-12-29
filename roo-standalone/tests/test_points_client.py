@@ -12,13 +12,13 @@ import httpx
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "skills" / "mlai_points"))
-from client import PointsClient
+from client import MLAIBackendClient
 
 
 @pytest.fixture
 def client():
-    """Create a PointsClient instance for testing."""
-    return PointsClient(
+    """Create a MLAIBackendClient instance for testing."""
+    return MLAIBackendClient(
         base_url="http://test-api.mlai.au", 
         api_key="test-key",
         internal_api_key="secure-key"

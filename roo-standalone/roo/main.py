@@ -216,10 +216,10 @@ async def slack_commands(request: Request):
     # Handle "connect github"
     if "connect github" in text.lower():
         settings = get_settings()
-        from .skills.mlai_points.client import PointsClient
+        from .skills.mlai_points.client import MLAIBackendClient
         
         try:
-            client = PointsClient(
+            client = MLAIBackendClient(
                 base_url=settings.MLAI_BACKEND_URL,
                 api_key=settings.MLAI_API_KEY
             )

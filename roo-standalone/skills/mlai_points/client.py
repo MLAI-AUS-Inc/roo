@@ -9,8 +9,8 @@ from typing import Optional, List, Dict, Any
 from datetime import date
 
 
-class PointsClient:
-    """Client for MLAI Points API."""
+class MLAIBackendClient:
+    """Client for MLAI Backend API (Auth, Points, Integrations)."""
     
     def __init__(self, base_url: str, api_key: Optional[str] = None, internal_api_key: Optional[str] = None):
         """
