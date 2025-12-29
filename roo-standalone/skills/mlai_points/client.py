@@ -704,6 +704,38 @@ class MLAIBackendClient:
             )
             response.raise_for_status()
 
+    async def trigger_repo_scan(self, slack_user_id: str) -> dict:
+        """
+        Trigger a repository scan for a user via the backend.
+        
+        The backend will:
+        1. Look up the user's connected GitHub repository
+        2. Call the content-factory to perform the scan
+        3. Update the integration status
+        
+        Returns:
+            Dict with scan status/result, or error info.
+        """
+        try:
+            clean_id = self._clean_slack_id(slack_user_id)
+            
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    f"{self.base_url}/api/v1/integrations/github/scan",
+                    json={"slack_user_id": clean_id},
+                    headers=self.admin_headers,
+                    timeout=60.0  # Scanning can take a while
+                )
+                if response.status_code == 404:
+                    return {"error": "no_integration", "message": "No GitHub integration found for this user."}
+                if response.status_code == 400:
+                    return {"error": "no_repository", "message": "No repository configured for this user."}
+                response.raise_for_status()
+                return response.json()
+        except Exception as e:
+            print(f"Failed to trigger repo scan: {e}")
+            return {"error": "scan_failed", "message": str(e)}
+
     # =========================================================================
     # Channel Activity Endpoints
     # =========================================================================
