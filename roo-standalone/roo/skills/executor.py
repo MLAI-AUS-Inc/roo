@@ -7,7 +7,7 @@ Follows Anthropic's Agent Skills pattern for execution.
 import re
 import asyncio
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Optional, List
 from difflib import SequenceMatcher
 
 from .loader import Skill
@@ -219,16 +219,7 @@ Keep the response concise but informative."""
         thread_history: Optional[List[dict]] = None
     ) -> str:
         """Execute the content factory generation workflow."""
-        domain = params.get("domain")
-        topic = params.get("topic")
-        target_keyword = params.get("target_keyword", "")
-        
-        if not domain or not topic:
-            missing = []
-            if not domain: missing.append("domain name (e.g., mlai.au)")
-            if not topic: missing.append("topic for the article")
-            
-            return f"I can help write that article! To get started, I just need to know the {' and '.join(missing)}."
+
         
         # Get a PointsClient for API calls
         settings = get_settings()
@@ -328,6 +319,18 @@ Keep the response concise but informative."""
             # For now, let's just ask them to run the scan command.
             
             return "Hold your horses! 🐎 I need to scan your repository first to understand your project structure.\n\nPlease run: `@Roo scan repo <owner>/<repo>`"
+
+        # 3. Validation: Check parameters (Domain/Topic)
+        domain = params.get("domain")
+        topic = params.get("topic")
+        target_keyword = params.get("target_keyword", "")
+        
+        if not domain or not topic:
+            missing = []
+            if not domain: missing.append("domain name (e.g., mlai.au)")
+            if not topic: missing.append("topic for the article")
+            
+            return f"I can help write that article! To get started, I just need to know the {' and '.join(missing)}."
 
         # Get client from skill's implementation module
         ClientClass = skill.get_client_class("ContentFactoryClient")
