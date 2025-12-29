@@ -224,12 +224,16 @@ Keep the response concise but informative."""
             internal_api_key=settings.INTERNAL_API_KEY or settings.MLAI_API_KEY
         )
         
-        # Check for GitHub Token (required for publishing updates)
-        github_token = await api_client.get_github_token(user_id)
+        # Check Status of GitHub Integration
+        integration = await api_client.get_integration(user_id)
         
-        if not github_token:
-             # Send Auth Button
-            auth_url = f"{settings.SLACK_APP_URL}/auth/github/login?state={user_id}"
+        if not integration:
+             # Get Auth URL from Backend
+            auth_response = await api_client.get_github_auth_url(user_id)
+            auth_url = auth_response.get("auth_url")
+            
+            if not auth_url:
+                return "Sorry mate, I couldn't get the authorization URL from the backend. Try again strictly?"
             
             blocks = [
                 {
@@ -274,7 +278,7 @@ Keep the response concise but informative."""
             return f"Please connect your GitHub account here: {auth_url}"
 
         # 2. Check for Project Scanned status
-        integration = await api_client.get_integration(user_id)
+
         if not integration or not integration.get("project_scanned"):
             # Only allow if user specifically requested a scan or we can infer it? 
             # Ideally we redirect them to scan first.
@@ -284,7 +288,7 @@ Keep the response concise but informative."""
                     "type": "section",
                     "text": {
                         "type": "mrkdwn",
-                        "text": f"I see you're connected, but I need to scan your repository **{github_token}** (placeholder - strictly we need repo name) to understand the structure first."
+                        "text": f"I see you're connected, but I need to scan your repository (using backend auth) to understand the structure first."
                     }
                 },
                 {
@@ -329,13 +333,13 @@ Keep the response concise but informative."""
                 topic=topic,
                 target_keyword=target_keyword,
                 context=text,
-                github_token=github_token
+                slack_user_id=user_id
             )
             
             # Launch background monitoring task
             if channel_id:
                 asyncio.create_task(
-                    self._monitor_generation(client, job_id, channel_id, thread_ts, github_token)
+                    self._monitor_generation(client, job_id, channel_id, thread_ts, user_id)
                 )
             
             return f"You beauty! I've started writing the article '{topic}' for {domain}. (Job ID: {job_id})\nI'll keep you posted on the progress right here! 🚀"
@@ -350,7 +354,7 @@ Keep the response concise but informative."""
         job_id: str,
         channel_id: str,
         thread_ts: Optional[str],
-        github_token: str
+        slack_user_id: str
     ):
         """Monitor job progress and post updates to Slack."""
         last_progress = -1
@@ -383,7 +387,7 @@ Keep the response concise but informative."""
             # Publish
             post_message(channel_id, "✨ Article generated! Publishing now...", thread_ts)
             
-            publish_result = await client.publish_article(job_id, github_token)
+            publish_result = await client.publish_article(job_id, slack_user_id)
             
             preview_url = publish_result.get("preview_url")
             pr_url = publish_result.get("pr_url")
@@ -1077,12 +1081,16 @@ Keep the response concise but informative."""
             internal_api_key=settings.INTERNAL_API_KEY or settings.MLAI_API_KEY
         )
         
-        # 1. Check for token
-        token = await api_client.get_github_token(user_id)
+        # 1. Check for valid integration (no token handling)
+        integration = await api_client.get_integration(user_id)
         
-        if not token:
+        if not integration:
             # Send Auth Button
-            auth_url = f"{settings.SLACK_APP_URL}/auth/github/login?state={user_id}"
+            auth_response = await api_client.get_github_auth_url(user_id)
+            auth_url = auth_response.get("auth_url")
+            
+            if not auth_url:
+                return "Sorry mate, I couldn't communicate with the backend to get the auth URL."
             
             blocks = [
                 {
@@ -1116,7 +1124,7 @@ Keep the response concise but informative."""
                 return "I've sent a button to connect your GitHub account. 🔌"
             return f"Please connect your GitHub account here: {auth_url}"
 
-        # 2. Token exists, assume action is scan_repo (main use case for now)
+        # 2. Assume action is scan_repo (main use case for now)
         repo_name = params.get("repo_name")
         domain = params.get("domain")
         
@@ -1134,7 +1142,7 @@ Keep the response concise but informative."""
         )
         
         try:
-            result = await client.scan_repo(repo_name, token, domain)
+            result = await client.scan_repo(repo_name, user_id, domain)
             
             job_id = result.get("job_id")
             

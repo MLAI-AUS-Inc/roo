@@ -40,7 +40,7 @@ class ContentFactoryClient:
         topic: str,
         target_keyword: str,
         context: Optional[str] = None,
-        github_token: Optional[str] = None
+        slack_user_id: Optional[str] = None
     ) -> str:
         """
         Direct Mode: Generates an article for a specific topic/keyword.
@@ -50,9 +50,10 @@ class ContentFactoryClient:
             topic: Specific topic title (e.g., "AI Hackathons")
             target_keyword: Main keyword to target (e.g., "hackathon melbourne")
             context: Optional conversation context/thread history
+            slack_user_id: Optional Slack user ID to associate with the job
             
         Returns:
-            job_id: The ID of the generation job
+            job_id: The generation job ID
         """
         payload = {
             "domain": domain,
@@ -61,8 +62,8 @@ class ContentFactoryClient:
         }
         if context:
             payload["context"] = context
-        if github_token:
-            payload["github_token"] = github_token
+        if slack_user_id:
+            payload["slack_user_id"] = slack_user_id
         
         async with httpx.AsyncClient() as client:
             response = await client.post(
@@ -188,7 +189,7 @@ class ContentFactoryClient:
         
         return await self.get_job_result(job_id)
     
-    async def publish_article(self, job_id: str, github_token: Optional[str] = None) -> dict:
+    async def publish_article(self, job_id: str, slack_user_id: Optional[str] = None) -> dict:
         """
         Publish a completed article via the publish endpoint.
         
@@ -196,18 +197,12 @@ class ContentFactoryClient:
             job_id: The job ID of the completed article
             
         Returns:
-            Dict with:
-                - preview_url: Cloudflare preview URL
-                - pr_url: GitHub Pull Request URL
-                - pr_number: PR number
-                - branch_name: Git branch name
-                - file_path: Path to file
-                - message: Status message
+            Dict with preview info
         """
         async with httpx.AsyncClient() as client:
             response = await client.post(
                 f"{self.base_url}/api/pipeline/publish/{job_id}",
-                json={"github_token": github_token} if github_token else {},
+                json={"slack_user_id": slack_user_id} if slack_user_id else {},
                 headers=self.headers,
                 timeout=60.0
             )

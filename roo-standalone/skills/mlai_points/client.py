@@ -626,56 +626,36 @@ class PointsClient:
     # Integration Endpoints (GitHub, Pending Intents)
     # =========================================================================
 
-    async def save_github_token(
-        self,
-        slack_user_id: str,
-        token: str,
-        user_name: Optional[str] = None,
-        scopes: Optional[List[str]] = None
-    ) -> dict:
-        """Save a GitHub access token for a user."""
-        payload = {
-            "slack_user_id": slack_user_id,
-            "github_access_token": token,
-        }
-        if user_name:
-            payload["github_user_name"] = user_name
-        if scopes:
-            payload["github_scopes"] = scopes
-
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{self.base_url}/api/v1/integrations/github/",
-                json=payload,
-                headers=self.admin_headers,
-                timeout=10.0
-            )
-            response.raise_for_status()
-            return response.json()
-
-    async def get_github_token(self, slack_user_id: str) -> Optional[str]:
-        """Get GitHub access token for a user."""
+    async def get_github_auth_url(self, slack_user_id: str) -> dict:
+        """
+        Get the GitHub OAuth URL for a user from the backend.
+        """
         try:
             async with httpx.AsyncClient() as client:
                 response = await client.get(
-                    f"{self.base_url}/api/v1/integrations/github/{slack_user_id}/",
-                    headers=self.admin_headers,
+                    f"{self.base_url}/api/v1/integrations/github/auth-url",
+                    params={"slack_user_id": slack_user_id},
+                    headers=self.headers, # Use standard headers, no admin key needed usually
                     timeout=10.0
                 )
-                if response.status_code == 404:
-                    return None
                 response.raise_for_status()
-                return response.json().get("github_access_token")
+                return response.json()
         except Exception as e:
-            print(f"Failed to get GitHub token: {e}")
-            return None
+            print(f"Failed to get GitHub auth URL: {e}")
+            return {"error": str(e)}
 
     async def get_integration(self, slack_user_id: str) -> Optional[dict]:
-        """Get full integration record for a user."""
+        """
+        Check if user has a valid GitHub integration.
+        Returns the integration dict if 200 OK, None if 404.
+        """
         try:
+            # Clean ID first to be safe
+            clean_id = self._clean_slack_id(slack_user_id)
+            
             async with httpx.AsyncClient() as client:
                 response = await client.get(
-                    f"{self.base_url}/api/v1/integrations/github/{slack_user_id}/",
+                    f"{self.base_url}/api/v1/integrations/github/{clean_id}/",
                     headers=self.admin_headers,
                     timeout=10.0
                 )
@@ -684,7 +664,7 @@ class PointsClient:
                 response.raise_for_status()
                 return response.json()
         except Exception as e:
-            print(f"Failed to get integration: {e}")
+            print(f"Failed to check integration status: {e}")
             return None
 
     async def save_pending_intent(self, slack_user_id: str, intent_data: str) -> None:
