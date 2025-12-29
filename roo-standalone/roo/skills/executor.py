@@ -285,22 +285,18 @@ Keep the response concise but informative."""
 
         # 2. Check for Project Scanned status
 
-        if not integration or not integration.get("project_scanned"):
-            # Automatically trigger scan via backend
+        # 2. Check for Project Scanned status
+        
+        # Scenario A: Repo Already Linked
+        if integration and integration.get("github_repo") and not integration.get("project_scanned"):
+            repo_name = integration.get("github_repo")
             if channel_id:
-                post_message(channel_id, "🔍 Let me scan your repository to understand the project structure...", thread_ts)
+                post_message(channel_id, f"🔍 I see you're connected to `{repo_name}`. Scanning it now...", thread_ts)
             
             scan_result = await api_client.trigger_repo_scan(user_id)
             
             if scan_result.get("error"):
-                error_type = scan_result.get("error")
-                if error_type == "no_repository":
-                    return (
-                        "I see you've connected GitHub, but I don't know which repository to scan yet.\n\n"
-                        "Please let me know your repository (e.g., `owner/repo`) so I can analyze your project structure."
-                    )
-                else:
-                    return f"Had some trouble scanning your repository: {scan_result.get('message', 'Unknown error')}"
+                 return f"Had some trouble scanning your repository: {scan_result.get('message', 'Unknown error')}"
             
             # Scan succeeded - refresh integration status
             integration = await api_client.get_integration(user_id)
@@ -309,6 +305,46 @@ Keep the response concise but informative."""
             
             if channel_id:
                 post_message(channel_id, "✅ Repository scanned! Now I can help with your content.", thread_ts)
+
+        # Scenario C: Token but No Repo (Shouldn't happen with new flow, but good fallback)
+        elif integration and not integration.get("github_repo"):
+             # Get Auth URL from Backend (reuse same flow to re-select repo)
+            auth_response = await api_client.get_github_auth_url(user_id)
+            auth_url = auth_response.get("auth_url")
+            
+            if not auth_url:
+                return "Sorry mate, I couldn't get the authorization URL. Try again?"
+            
+            blocks = [
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": "I see you're connected, but no repository is selected. Click below to choose one."
+                    }
+                },
+                {
+                    "type": "actions",
+                    "elements": [
+                        {
+                            "type": "button",
+                            "text": {
+                                "type": "plain_text",
+                                "text": "Re-connect & Select Repo",
+                                "emoji": True
+                            },
+                            "url": auth_url,
+                            "action_id": "connect_github",
+                            "style": "primary"
+                        }
+                    ]
+                }
+            ]
+            
+            if channel_id:
+                post_message(channel_id, "Please select a repository", thread_ts=thread_ts, blocks=blocks)
+                return "Please choose a repository to use with the Content Factory. 🔌"
+            return f"Please select a repository here: {auth_url}"
 
         # 3. Validation: Check parameters (Domain/Topic)
         domain = params.get("domain")
