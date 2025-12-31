@@ -285,29 +285,12 @@ Keep the response concise but informative."""
 
         # 2. Check for Project Scanned status
 
-        # 2. Check for Project Scanned status
+        # 2. Check for Project Scanned status & Pre-flight Status check
         
-        # Scenario A: Repo Already Linked
-        if integration and integration.get("github_repo") and not integration.get("project_scanned"):
-            repo_name = integration.get("github_repo")
-            if channel_id:
-                post_message(channel_id, f"🔍 I see you're connected to `{repo_name}`. Scanning it now...", thread_ts)
-            
-            scan_result = await api_client.trigger_repo_scan(user_id)
-            
-            if scan_result.get("error"):
-                 return f"Had some trouble scanning your repository: {scan_result.get('message', 'Unknown error')}"
-            
-            # Scan succeeded - refresh integration status
-            integration = await api_client.get_integration(user_id)
-            if not integration or not integration.get("project_scanned"):
-                return "Scanning is taking a bit longer than expected. Please try again in a moment! 🦘"
-            
-            if channel_id:
-                post_message(channel_id, "✅ Repository scanned! Now I can help with your content.", thread_ts)
-
-        # Scenario C: Token but No Repo (Shouldn't happen with new flow, but good fallback)
-        elif integration and not integration.get("github_repo"):
+        repo_name = integration.get("github_repo")
+        
+        # Scenario C: Token but No Repo
+        if not repo_name:
              # Get Auth URL from Backend (reuse same flow to re-select repo)
             auth_response = await api_client.get_github_auth_url(user_id)
             auth_url = auth_response.get("auth_url")
@@ -345,6 +328,50 @@ Keep the response concise but informative."""
                 post_message(channel_id, "Please select a repository", thread_ts=thread_ts, blocks=blocks)
                 return "Please choose a repository to use with the Content Factory. 🔌"
             return f"Please select a repository here: {auth_url}"
+
+        # Scenario A: Repo Linked - Check Status & Updates
+        needs_scan = False
+        scan_reason = ""
+        
+        if not integration.get("project_scanned"):
+            needs_scan = True
+            scan_reason = "Initial scan required"
+        elif integration.get("has_updates"):
+            needs_scan = True
+            scan_reason = "🔄 Updates detected in repository"
+            
+        # Compile Status Report
+        last_scanned = integration.get("last_scanned_at", "Never")
+        last_article = integration.get("last_article", {}).get("title", "None")
+        
+        if channel_id:
+            status_msg = (
+                f"👋 G'day! I see you're connected to `{repo_name}`.\n\n"
+                f"📊 **Status Report:**\n"
+                f"• Last scanned: {last_scanned}\n"
+                f"• Last article: {last_article}\n"
+            )
+            if needs_scan:
+                status_msg += f"\n{scan_reason}. Scanning updates now... 🕵️"
+            else:
+                status_msg += "• Repository: ✅ Up to date"
+            
+            post_message(channel_id, status_msg, thread_ts)
+
+        # Trigger Scan if needed
+        if needs_scan:
+            scan_result = await api_client.trigger_repo_scan(user_id)
+            
+            if scan_result.get("error"):
+                 return f"Had some trouble scanning your repository: {scan_result.get('message', 'Unknown error')}"
+            
+            # Scan succeeded - refresh integration status
+            integration = await api_client.get_integration(user_id)
+            if not integration or not integration.get("project_scanned"):
+                return "Scanning is taking a bit longer than expected. Please try again in a moment! 🦘"
+            
+            if channel_id:
+                post_message(channel_id, "✅ Repository analysis complete! Ready to write.", thread_ts)
 
         # 3. Validation: Check parameters (Domain/Topic)
         domain = params.get("domain")
