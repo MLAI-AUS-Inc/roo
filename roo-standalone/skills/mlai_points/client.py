@@ -726,6 +726,8 @@ class MLAIBackendClient:
                     headers=self.admin_headers,
                     timeout=60.0  # Scanning can take a while
                 )
+                if response.status_code == 202:
+                    return {"status": "accepted", "message": "Scan queued successfully."}
                 if response.status_code == 404:
                     return {"error": "no_integration", "message": "No GitHub integration found for this user."}
                 if response.status_code == 400:

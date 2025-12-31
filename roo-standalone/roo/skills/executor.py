@@ -417,10 +417,15 @@ Keep the response concise but informative."""
             if scan_result.get("error"):
                  return f"Had some trouble scanning your repository: {scan_result.get('message', 'Unknown error')}"
             
+            # Check for Async Acceptance
+            if scan_result.get("status") == "accepted":
+                return "updates are being processed in the background! 🏃\nI'll send you a DM when the scan is complete. Please ask me again then."
+
+            # Legacy Sync Behavior (if backend returns 200 immediately)
             # Scan succeeded - refresh integration status
             integration = await api_client.get_integration(user_id)
             if not integration or not integration.get("project_scanned"):
-                return "Scanning is taking a bit longer than expected. Please try again in a moment! 🦘"
+                return "Scanning is taking a bit longer than expected. Please wait for the notification! 🦘"
             
             if channel_id:
                 post_message(channel_id, "✅ Repository analysis complete! Ready to write.", thread_ts)
