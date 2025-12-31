@@ -1210,9 +1210,60 @@ Keep the response concise but informative."""
             internal_api_key=settings.INTERNAL_API_KEY or settings.MLAI_API_KEY
         )
         
-        # 1. Check for valid integration (no token handling)
+        # 1. Check for valid integration & handle errors
         integration = await api_client.get_integration(user_id)
         
+        # Check for Expired Token or Other Errors (Same as content-factory)
+        if integration and integration.get("error"):
+            auth_url = integration.get("auth_url")
+            error_msg = integration.get("error")
+            
+            if not auth_url:
+                auth_url_resp = await api_client.get_github_auth_url(user_id)
+                auth_url = auth_url_resp.get("auth_url")
+
+            blocks = [
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": f"⚠️ **Connection Issue**: {error_msg}\nI need you to re-connect your GitHub account to continue."
+                    }
+                },
+                {
+                    "type": "actions",
+                    "elements": [
+                        {
+                            "type": "button",
+                            "text": {
+                                "type": "plain_text",
+                                "text": "Re-connect GitHub",
+                                "emoji": True
+                            },
+                            "url": auth_url,
+                            "action_id": "connect_github",
+                            "style": "danger"
+                        },
+                        {
+                            "type": "button",
+                            "text": {
+                                "type": "plain_text",
+                                "text": "🚀 I've Connected - Resume",
+                                "emoji": True
+                            },
+                            "action_id": "resume_scan",
+                            "value": "resume_scan",
+                            "style": "primary"
+                        }
+                    ]
+                }
+            ]
+            
+            if channel_id:
+                post_message(channel_id, "Please re-connect GitHub", thread_ts=thread_ts, blocks=blocks)
+                return "Please re-connect your GitHub account using the button above. 🔌"
+            return f"GitHub connection issue ({error_msg}). Please re-connect here: {auth_url}"
+
         if not integration:
             # Send Auth Button
             auth_response = await api_client.get_github_auth_url(user_id)
@@ -1253,33 +1304,35 @@ Keep the response concise but informative."""
                 return "I've sent a button to connect your GitHub account. 🔌"
             return f"Please connect your GitHub account here: {auth_url}"
 
-        # 2. Assume action is scan_repo (main use case for now)
-        repo_name = params.get("repo_name")
-        domain = params.get("domain")
+        # 2. Determine Repo Name
+        # Prefer integration repo
+        repo_name = integration.get("github_repo")
         
         if not repo_name:
-            return "Which repository should I scan? (format: owner/repo)"
+             # Logic C: Connected but no repo selected
+             auth_response = await api_client.get_github_auth_url(user_id)
+             auth_url = auth_response.get("auth_url")
+             if channel_id:
+                 # Reuse connection block but maybe change text logic if we wanted, for now simplistic
+                 post_message(channel_id, f"You are connected but I don't see a repository linked. Please select one: {auth_url}", thread_ts=thread_ts)
+                 return "Please select a repository to scan."
+             return f"Please select a repository here: {auth_url}"
+
+        # 3. Trigger Scan via Backend
+        if channel_id:
+            scan_msg = f"🔍 Requesting scan for `{repo_name}`..."
+            post_message(channel_id, scan_msg, thread_ts=thread_ts)
             
-        # Get client
-        ClientClass = skill.get_client_class("GitHubIntegrationClient")
-        if not ClientClass:
-            return "Skill configuration error: Client not found."
-            
-        client = ClientClass(
-            content_factory_url=settings.CONTENT_FACTORY_URL,
-            api_key=settings.CONTENT_FACTORY_API_KEY
-        )
-        
         try:
-            result = await client.scan_repo(repo_name, user_id, domain)
+            # Trigger via Backend Client
+            scan_result = await api_client.trigger_repo_scan(user_id)
             
-            job_id = result.get("job_id")
+            if scan_result.get("error"):
+                 return f"❌ Scan failed: {scan_result.get('message')}"
             
-            # Mark project as scanned on success
-            await api_client.mark_project_scanned(user_id, True)
-            
-            return f"Started scanning **{repo_name}**! (Job ID: {job_id})\nI'll let you know when it's done."
+            # Backend might return status: 'started' or 'queued'
+            return f"✅ Scan started for `{repo_name}`! I'll let you know when the backend updates."
             
         except Exception as e:
-            print(f"GitHub Integration Error: {e}")
-            return f"Sorry mate, I had trouble connecting to your repository: {str(e)}"
+            print(f"GitHub Integration Scan Error: {e}")
+            return f"Sorry mate, I had trouble triggering the scan: {str(e)}"
