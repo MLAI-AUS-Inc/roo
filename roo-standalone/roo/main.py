@@ -301,3 +301,48 @@ async def api_mention(request: Request):
     return result
 
 
+@app.post("/slack/actions")
+async def slack_actions(request: Request):
+    """Handle interactive actions (e.g. button clicks)."""
+    form = await request.form()
+    payload_json = form.get("payload")
+    if not payload_json:
+        return JSONResponse(status_code=400, content={"error": "Missing payload"})
+        
+    try:
+        payload = json.loads(payload_json)
+    except json.JSONDecodeError:
+        return JSONResponse(status_code=400, content={"error": "Invalid JSON"})
+        
+    actions = payload.get("actions", [])
+    if not actions:
+        return JSONResponse(status_code=200, content={})
+        
+    action_id = actions[0].get("action_id")
+    user_id = payload.get("user", {}).get("id")
+    channel_id = payload.get("channel", {}).get("id")
+    # Interactive messages structure is slightly different for TS
+    message = payload.get("message", {})
+    thread_ts = message.get("thread_ts") or message.get("ts")
+    
+    print(f"🖱️ Action: {action_id} from {user_id}")
+    
+    if action_id == "resume_scan":
+        print(f"🔄 Resuming scan/writing for {user_id} via button click")
+        
+        # Acknowledge immediately (prevents timeout error on button)
+        # In background, trigger the scan command as if user typed "@Roo scan repo"
+        # This will trigger the backend scan and subsequent flow
+        import asyncio
+        agent = get_agent()
+        asyncio.create_task(agent.handle_mention(
+            text="scan repo",
+            user_id=user_id,
+            channel_id=channel_id,
+            thread_ts=thread_ts
+        ))
+        
+        # We could update the message here to say "Resuming...", but ack is sufficient for now.
+        return JSONResponse(status_code=200, content={})
+        
+    return JSONResponse(status_code=200, content={})

@@ -264,6 +264,17 @@ Keep the response concise but informative."""
                             "url": auth_url,
                             "action_id": "connect_github",
                             "style": "danger"
+                        },
+                        {
+                            "type": "button",
+                            "text": {
+                                "type": "plain_text",
+                                "text": "🚀 I've Connected - Resume",
+                                "emoji": True
+                            },
+                            "action_id": "resume_scan",
+                            "value": "resume_scan",
+                            "style": "primary"
                         }
                     ]
                 }
