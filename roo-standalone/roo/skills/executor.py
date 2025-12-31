@@ -233,6 +233,47 @@ Keep the response concise but informative."""
         # Check Status of GitHub Integration
         integration = await api_client.get_integration(user_id)
         
+        # Check for Expired Token or Other Errors
+        if integration and integration.get("error"):
+            auth_url = integration.get("auth_url")
+            error_msg = integration.get("error")
+            
+            if not auth_url:
+                # Fallback if auth_url missing in error response
+                auth_url_resp = await api_client.get_github_auth_url(user_id)
+                auth_url = auth_url_resp.get("auth_url")
+
+            blocks = [
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": f"⚠️ **Connection Issue**: {error_msg}\nI need you to re-connect your GitHub account to continue."
+                    }
+                },
+                {
+                    "type": "actions",
+                    "elements": [
+                        {
+                            "type": "button",
+                            "text": {
+                                "type": "plain_text",
+                                "text": "Re-connect GitHub",
+                                "emoji": True
+                            },
+                            "url": auth_url,
+                            "action_id": "connect_github",
+                            "style": "danger"
+                        }
+                    ]
+                }
+            ]
+            
+            if channel_id:
+                post_message(channel_id, "Please re-connect GitHub", thread_ts=thread_ts, blocks=blocks)
+                return "Please re-connect your GitHub account using the button above. 🔌"
+            return f"GitHub connection issue ({error_msg}). Please re-connect here: {auth_url}"
+
         if not integration:
              # Get Auth URL from Backend
             auth_response = await api_client.get_github_auth_url(user_id)
@@ -342,7 +383,7 @@ Keep the response concise but informative."""
             
         # Compile Status Report
         last_scanned = integration.get("last_scanned_at", "Never")
-        last_article = integration.get("last_article", {}).get("title", "None")
+        last_article = (integration.get("last_article") or {}).get("title", "None")
         
         if channel_id:
             status_msg = (
