@@ -8,8 +8,8 @@ trigger_keywords:
   - github integration
 requires_auth: true
 parameters:
-  - **repo_name**: The name of the repository to scan (e.g. owner/project).
-  - **domain**: The domain associated with the project (optional).
+  - repo_name: The name of the repository to scan (e.g. owner/project).
+  - domain: The domain associated with the project (optional).
 ---
 
 # GitHub Integration Skill
