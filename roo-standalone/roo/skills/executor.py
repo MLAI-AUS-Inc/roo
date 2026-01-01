@@ -519,7 +519,7 @@ Keep the response concise but informative."""
             # Publish
             post_message(channel_id, "✨ Article generated! Publishing now...", thread_ts)
             
-            publish_result = await client.publish_article(job_id)
+            publish_result = await client.publish_article(job_id, slack_user_id)
             
             preview_url = publish_result.get("preview_url")
             pr_url = publish_result.get("pr_url")
