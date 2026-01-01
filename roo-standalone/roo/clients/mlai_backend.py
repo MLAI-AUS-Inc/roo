@@ -422,14 +422,18 @@ class MLAIBackendClient:
             print(f"Failed to trigger repo scan: {e}")
             return {"error": "scan_failed", "message": str(e)}
 
-    async def publish_article(self, job_id: str) -> dict:
+    async def publish_article(self, job_id: str, slack_user_id: str) -> dict:
         """Request publication of a completed article."""
         if not self.base_url:
             raise ValueError("MLAI_BACKEND_URL not configured")
+        
+        # Ensure we have a clean ID
+        clean_id = self._clean_slack_id(slack_user_id)
             
         async with httpx.AsyncClient() as client:
             response = await client.post(
                 f"{self.base_url}/api/v1/content/publish/{job_id}",
+                json={"slack_user_id": clean_id},
                 headers=self.headers,
                 timeout=60.0
             )
