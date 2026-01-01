@@ -13,17 +13,39 @@ from ..config import get_settings
 class MLAIBackendClient:
     """Client for mlai-backend API."""
     
-    def __init__(self):
+    def __init__(self, base_url: Optional[str] = None, api_key: Optional[str] = None, internal_api_key: Optional[str] = None):
         settings = get_settings()
-        self.base_url = settings.MLAI_BACKEND_URL
-        self.api_key = settings.MLAI_API_KEY
-    
+        self.base_url = base_url or settings.MLAI_BACKEND_URL
+        self.api_key = api_key or settings.MLAI_API_KEY
+        self.internal_api_key = internal_api_key or settings.INTERNAL_API_KEY
+        self.base_url = self.base_url.rstrip('/') if self.base_url else ""
+        self._points_base = f"{self.base_url}/api/v1/points"
+        self._admin_cache: Dict[str, bool] = {}
+
+    def _clean_slack_id(self, user_id: str) -> str:
+        """Clean a Slack ID or mention string to extract the ID."""
+        if not user_id:
+            return user_id
+        # Handle <@U12345> format
+        if user_id.startswith("<@") and user_id.endswith(">"):
+            parts = user_id[2:-1].split("|")
+            return parts[0]
+        # Handle @U12345 format
+        if user_id.startswith("@"):
+            return user_id[1:]
+        return user_id
+
     @property
-    def headers(self) -> dict:
-        return {
-            "Authorization": f"Bearer {self.api_key}" if self.api_key else "",
-            "Content-Type": "application/json"
-        }
+    def admin_headers(self) -> dict:
+        """Headers for admin endpoints using internal secure key."""
+        headers = {"Content-Type": "application/json"}
+        # Prefer the internal key, but fall back to the standard API key so
+        # admin endpoints still authenticate when only one key is configured.
+        if hasattr(self, 'internal_api_key') and self.internal_api_key:
+             headers["X-API-Key"] = self.internal_api_key
+        elif self.api_key:
+            headers["X-API-Key"] = self.api_key
+        return headers
     
     async def save_article_generation(
         self,
@@ -216,16 +238,182 @@ class MLAIBackendClient:
             response.raise_for_status()
             return response.json()
 
-    async def publish_article(self, job_id: str) -> dict:
-        """Request publication of a completed article."""
-        if not self.base_url:
-            raise ValueError("MLAI_BACKEND_URL not configured")
-            
+    # =========================================================================
+    # Points / Member Endpoints (Merged from mlai_points/client.py)
+    # =========================================================================
+    
+    async def get_balance(self, slack_user_id: str) -> dict:
+        """Get points balance for a user."""
+        if not self.base_url: return {}
         async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{self.base_url}/api/v1/content/publish/{job_id}",
+            response = await client.get(
+                f"{self._points_base}/users/{slack_user_id}/balance/",
                 headers=self.headers,
-                timeout=60.0
+                timeout=10.0
             )
             response.raise_for_status()
             return response.json()
+    
+    async def get_history(self, slack_user_id: str, limit: int = 10) -> List[dict]:
+        """Get recent ledger entries for a user."""
+        if not self.base_url: return []
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"{self._points_base}/ledger/",
+                params={"slack_user_id": slack_user_id},
+                headers=self.headers,
+                timeout=10.0
+            )
+            response.raise_for_status()
+            return response.json()[:limit]
+    
+    async def list_tasks(self, status: Optional[str] = "open", portfolio: Optional[str] = None) -> List[dict]:
+        """List tasks, optionally filtered by status and portfolio."""
+        if not self.base_url: return []
+        params = {}
+        if status: params["status"] = status
+        if portfolio: params["portfolio"] = portfolio
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"{self._points_base}/tasks/",
+                params=params,
+                headers=self.headers,
+                timeout=10.0
+            )
+            response.raise_for_status()
+            return response.json()
+
+    async def claim_task(self, task_id: int, slack_user_id: str) -> dict:
+        """Claim a task for completion."""
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{self._points_base}/tasks/{task_id}/claim/",
+                json={"slack_user_id": self._clean_slack_id(slack_user_id)},
+                headers=self.headers,
+                timeout=10.0
+            )
+            response.raise_for_status()
+            return response.json()
+
+    async def submit_task(self, task_id: int, slack_user_id: str, submission_text: str, submission_url: Optional[str] = None) -> dict:
+        """Submit completed work for a task."""
+        payload = {
+            "slack_user_id": slack_user_id,
+            "submission_text": submission_text,
+        }
+        if submission_url: payload["submission_url"] = submission_url
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{self._points_base}/tasks/{task_id}/submit/",
+                json=payload,
+                headers=self.headers,
+                timeout=10.0
+            )
+            response.raise_for_status()
+            return response.json()
+
+    async def check_coworking(self, check_date: Optional[str] = None, days: int = 7) -> List[dict]:
+        """Check coworking availability."""
+        params = {"days": days}
+        if check_date: params["date"] = check_date
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"{self._points_base}/coworking/availability/",
+                params=params,
+                headers=self.headers,
+                timeout=10.0
+            )
+            response.raise_for_status()
+            return response.json()
+
+    async def book_coworking(self, slack_user_id: str, booking_date: str, slack_channel_id: Optional[str] = None) -> dict:
+        """Book a coworking day."""
+        try:
+            from datetime import datetime
+            current_time = datetime.now().isoformat()
+        except Exception:
+            current_time = ""
+        payload = {
+            "slack_user_id": slack_user_id,
+            "date": booking_date,
+            "current_time": current_time,
+        }
+        if slack_channel_id: payload["slack_channel_id"] = slack_channel_id
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{self._points_base}/coworking/book/",
+                json=payload,
+                headers=self.headers,
+                timeout=15.0
+            )
+            response.raise_for_status()
+            return response.json()
+    
+    async def get_github_auth_url(self, slack_user_id: str) -> dict:
+        """Get the GitHub OAuth URL for a user from the backend."""
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    f"{self.base_url}/api/v1/integrations/github/auth-url",
+                    params={"slack_user_id": slack_user_id},
+                    headers=self.headers,
+                    timeout=10.0
+                )
+                response.raise_for_status()
+                return response.json()
+        except Exception as e:
+            print(f"Failed to get GitHub auth URL: {e}")
+            return {"error": str(e)}
+
+    async def get_integration(self, slack_user_id: str) -> Optional[dict]:
+        """Check if user has a valid GitHub integration."""
+        try:
+            clean_id = self._clean_slack_id(slack_user_id)
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    f"{self.base_url}/api/v1/integrations/github/{clean_id}/",
+                    headers=self.headers,
+                    timeout=10.0
+                )
+                if response.status_code == 404:
+                    return None
+                response.raise_for_status()
+                return response.json()
+        except Exception as e:
+            print(f"Failed to check integration status: {e}")
+            return None
+
+    async def save_pending_intent(self, slack_user_id: str, intent_data: str) -> None:
+        """Save a pending intent to resume after auth."""
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{self.base_url}/api/v1/integrations/pending-intent/",
+                json={"slack_user_id": slack_user_id, "intent_data": intent_data},
+                headers=self.headers,
+                timeout=10.0
+            )
+            response.raise_for_status()
+
+    async def trigger_repo_scan(self, slack_user_id: str) -> dict:
+        """Trigger a repository scan for a user via the backend."""
+        try:
+            clean_id = self._clean_slack_id(slack_user_id)
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    f"{self.base_url}/api/v1/integrations/github/scan",
+                    json={"slack_user_id": clean_id},
+                    headers=self.headers,
+                    timeout=60.0
+                )
+                if response.status_code == 202:
+                    return {"status": "accepted", "message": "Scan queued successfully."}
+                if response.status_code == 404:
+                    return {"error": "no_integration", "message": "No GitHub integration found for this user."}
+                response.raise_for_status()
+                return response.json()
+        except Exception as e:
+            print(f"Failed to trigger repo scan: {e}")
+            return {"error": "scan_failed", "message": str(e)}
+
+    # Same for all other admin methods if needed, simpler to rely on basic points for now
+    # ...
