@@ -126,3 +126,106 @@ class MLAIBackendClient:
             )
             response.raise_for_status()
             return response.json()
+
+    async def trigger_article_generation(
+        self,
+        slack_user_id: str,
+        domain: str,
+        topic: str,
+        target_keyword: str,
+        context: Optional[str] = None
+    ) -> dict:
+        """
+        Trigger article generation via mlai-backend.
+        
+        Args:
+            slack_user_id: Slack ID of requesting user
+            domain: Target domain
+            topic: Article topic
+            target_keyword: Main keyword
+            context: Optional conversation context
+            
+        Returns:
+            Dict containing job_id and status
+        """
+        if not self.base_url:
+            raise ValueError("MLAI_BACKEND_URL not configured")
+            
+        payload = {
+            "slack_user_id": slack_user_id,
+            "domain": domain,
+            "topic": topic,
+            "target_keyword": target_keyword,
+            "context": context
+        }
+        
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{self.base_url}/api/v1/content/generate",
+                json=payload,
+                headers=self.headers,
+                timeout=30.0
+            )
+            response.raise_for_status()
+            return response.json()
+
+    async def discover_opportunities(
+        self,
+        domain: str,
+        competitors: list[str],
+        seed_keywords: Optional[list[str]] = None
+    ) -> list[dict]:
+        """
+        Discover content opportunities via mlai-backend.
+        """
+        if not self.base_url:
+            raise ValueError("MLAI_BACKEND_URL not configured")
+            
+        payload = {
+            "domain": domain,
+            "competitors": competitors,
+            "seed_keywords": seed_keywords
+        }
+        
+        async with httpx.AsyncClient() as client:
+            try:
+                response = await client.post(
+                    f"{self.base_url}/api/v1/content/discover",
+                    json=payload,
+                    headers=self.headers,
+                    timeout=60.0
+                )
+                response.raise_for_status()
+                data = response.json()
+                return data.get("opportunities", [])
+            except Exception as e:
+                print(f"Discovery failed: {e}")
+                raise
+
+    async def check_generation_status(self, job_id: str) -> dict:
+        """Check status of a generation job."""
+        if not self.base_url:
+            raise ValueError("MLAI_BACKEND_URL not configured")
+            
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"{self.base_url}/api/v1/content/jobs/{job_id}",
+                headers=self.headers,
+                timeout=10.0
+            )
+            response.raise_for_status()
+            return response.json()
+
+    async def publish_article(self, job_id: str) -> dict:
+        """Request publication of a completed article."""
+        if not self.base_url:
+            raise ValueError("MLAI_BACKEND_URL not configured")
+            
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{self.base_url}/api/v1/content/publish/{job_id}",
+                headers=self.headers,
+                timeout=60.0
+            )
+            response.raise_for_status()
+            return response.json()
