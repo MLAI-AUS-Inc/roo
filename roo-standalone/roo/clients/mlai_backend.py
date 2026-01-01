@@ -36,6 +36,13 @@ class MLAIBackendClient:
         return user_id
 
     @property
+    def headers(self) -> dict:
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["X-API-Key"] = self.api_key
+        return headers
+
+    @property
     def admin_headers(self) -> dict:
         """Headers for admin endpoints using internal secure key."""
         headers = {"Content-Type": "application/json"}
