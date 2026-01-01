@@ -442,49 +442,41 @@ Keep the response concise but informative."""
             
             return f"I can help write that article! To get started, I just need to know the {' and '.join(missing)}."
 
-        # Get client from skill's implementation module
-        ClientClass = skill.get_client_class("ContentFactoryClient")
-        
-        if ClientClass is None:
-            return "Sorry mate, the Content Factory skill isn't properly configured. Missing implementation."
-        
         try:
-            settings = get_settings()
-            client = ClientClass(
-                base_url=settings.CONTENT_FACTORY_URL,
-                api_key=settings.CONTENT_FACTORY_API_KEY
-            )
-            
-            # Start generation
+            # Start generation via MLAI Backend
             # Enhance context with thread history if available
             full_context = text
             if thread_history:
                 history_str = "\n".join([f"{msg.get('user')}: {msg.get('text')}" for msg in thread_history[:-1]])
                 full_context = f"Context from Thread:\n{history_str}\n\nCurrent Request: {text}"
             
-            job_id = await client.generate_article(
+            response = await api_client.trigger_article_generation(
+                slack_user_id=user_id,
                 domain=domain,
                 topic=topic,
                 target_keyword=target_keyword,
-                context=full_context,
-                slack_user_id=user_id
+                context=full_context
             )
             
+            job_id = response.get("job_id")
+            if not job_id:
+                return "Failed to start generation: No job ID returned from backend."
+
             # Launch background monitoring task
             if channel_id:
                 asyncio.create_task(
-                    self._monitor_generation(client, job_id, channel_id, thread_ts, user_id)
+                    self._monitor_generation(api_client, job_id, channel_id, thread_ts, user_id)
                 )
             
             return f"You beauty! I've started writing the article '{topic}' for {domain}. (Job ID: {job_id})\nI'll keep you posted on the progress right here! 🚀"
             
         except Exception as e:
-            print(f"Content Factory Error: {e}")
-            return f"Sorry mate, I had trouble connecting to the Content Factory: {str(e)}"
+            print(f"Content Generation Error: {e}")
+            return f"Sorry mate, I had trouble starting the article generation: {str(e)}"
 
     async def _monitor_generation(
         self,
-        client,
+        client,  # This is now MLAIBackendClient
         job_id: str,
         channel_id: str,
         thread_ts: Optional[str],
@@ -494,34 +486,40 @@ Keep the response concise but informative."""
         last_progress = -1
         last_step = ""
         
-        def on_progress(status):
-            nonlocal last_progress, last_step
-            progress = status.get("progress", 0)
-            step = status.get("current_step", "")
-            
-            # Only update on meaningful change (every 20% or step change)
-            should_update = (
-                progress >= last_progress + 20 or 
-                (step != last_step and step in ["researching", "writing", "optimizing", "publishing"])
-            )
-            
-            if should_update:
-                msg = f"📝 *Status Update*: {step.title()}... ({progress}%)"
-                try:
-                    post_message(channel_id, msg, thread_ts)
-                    last_progress = progress
-                    last_step = step
-                except Exception as e:
-                    print(f"Failed to post progress: {e}")
-
         try:
             # Poll until completion
-            result = await client.poll_and_wait(job_id, on_progress)
+            while True:
+                status_data = await client.check_generation_status(job_id)
+                state = status_data.get("status")
+                progress = status_data.get("progress", 0)
+                step = status_data.get("current_step", "unknown")
+                
+                # Update progress
+                should_update = (
+                    progress >= last_progress + 20 or 
+                    (step != last_step and step in ["researching", "writing", "optimizing", "publishing"])
+                )
+                
+                if should_update:
+                    msg = f"📝 *Status Update*: {step.title()}... ({progress}%)"
+                    try:
+                        post_message(channel_id, msg, thread_ts)
+                        last_progress = progress
+                        last_step = step
+                    except Exception as e:
+                        print(f"Failed to post progress: {e}")
+
+                if state == "completed":
+                    break
+                elif state == "failed":
+                    raise Exception(f"Job failed: {status_data.get('error', 'Unknown')}")
+                
+                await asyncio.sleep(5.0)
             
             # Publish
             post_message(channel_id, "✨ Article generated! Publishing now...", thread_ts)
             
-            publish_result = await client.publish_article(job_id, slack_user_id)
+            publish_result = await client.publish_article(job_id)
             
             preview_url = publish_result.get("preview_url")
             pr_url = publish_result.get("pr_url")
