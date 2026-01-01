@@ -223,7 +223,7 @@ Keep the response concise but informative."""
         
         # Get a MLAIBackendClient for API calls
         settings = get_settings()
-        from skills.mlai_points.client import MLAIBackendClient
+        from roo.clients.mlai_backend import MLAIBackendClient
         api_client = MLAIBackendClient(
             base_url=settings.MLAI_BACKEND_URL,
             api_key=settings.MLAI_API_KEY,
@@ -558,7 +558,9 @@ Keep the response concise but informative."""
         import httpx
         
         # Get client from skill's implementation module
-        ClientClass = skill.get_client_class("MLAIBackendClient")
+        # ClientClass = skill.get_client_class("MLAIBackendClient")
+        from roo.clients.mlai_backend import MLAIBackendClient
+        ClientClass = MLAIBackendClient
         
         if ClientClass is None:
             return "Sorry mate, the Points skill isn't properly configured. Missing implementation."
