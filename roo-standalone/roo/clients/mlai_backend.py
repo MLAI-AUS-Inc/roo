@@ -3,7 +3,7 @@ MLAI Backend Client
 
 HTTP client for communicating with the mlai-backend service.
 """
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 import httpx
 
