@@ -233,6 +233,66 @@ Keep the response concise but informative."""
         # Check Status of GitHub Integration
         integration = await api_client.get_integration(user_id)
         
+        # 1. New User Disclaimer & Education
+        # If user has no integration AND hasn't confirmed the disclaimer yet
+        if not integration and not params.get("confirmed"):
+            # Save pending intent so we don't lose the original params (domain/topic)
+            import json
+            intent_data = json.dumps({
+                "skill": "content-factory",
+                "params": params,
+                "text": text,
+                "channel": channel_id,
+                "ts": thread_ts
+            })
+            await api_client.save_pending_intent(user_id, intent_data)
+            
+            blocks = [
+                {
+                    "type": "header",
+                    "text": {
+                        "type": "plain_text",
+                        "text": "⚠️ Content Factory Requirements",
+                        "emoji": True
+                    }
+                },
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": (
+                            "Before we start, a quick heads-up! This skill works best with **Next.js & Tailwind CSS** projects "
+                            "and requires a connected **GitHub repository**.\n\n"
+                            "*How it works:*\n"
+                            "1. 🏗️ **Scans** your repo for blog structure (creates it if missing)\n"
+                            "2. 🧩 **Checks** for reusable components (Hero, CTAs) or creates them\n"
+                            "3. 🎨 **Creates** a design guide to match your site's style\n"
+                            "4. 🚀 **Publishes** a Pull Request for your review"
+                        )
+                    }
+                },
+                {
+                    "type": "actions",
+                    "elements": [
+                        {
+                            "type": "button",
+                            "text": {
+                                "type": "plain_text",
+                                "text": "I'm ready to proceed",
+                                "emoji": True
+                            },
+                            "action_id": "confirm_content_factory",
+                            "style": "primary"
+                        }
+                    ]
+                }
+            ]
+            
+            if channel_id:
+                post_message(channel_id, "Please review the requirements above.", thread_ts=thread_ts, blocks=blocks)
+                return "Please review the requirements above to get started! 👆"
+            return "Please confirm you have a Next.js/Tailwind project and are ready to connect GitHub."
+
         # Check for Expired Token or Other Errors
         if integration and integration.get("error"):
             auth_url = integration.get("auth_url")

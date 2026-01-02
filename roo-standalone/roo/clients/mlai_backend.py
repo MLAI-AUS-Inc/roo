@@ -440,5 +440,383 @@ class MLAIBackendClient:
             response.raise_for_status()
             return response.json()
 
-    # Same for all other admin methods if needed, simpler to rely on basic points for now
-    # ...
+    # =========================================================================
+    # Missing Admin / Points Methods
+    # =========================================================================
+
+    async def get_task(self, task_id: int) -> dict:
+        """Get a specific task by ID."""
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"{self._points_base}/tasks/{task_id}/",
+                headers=self.headers,
+                timeout=10.0
+            )
+            response.raise_for_status()
+            return response.json()
+
+    async def get_my_bookings(self, slack_user_id: str) -> List[dict]:
+        """Get user's coworking bookings."""
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"{self._points_base}/coworking/my-bookings/",
+                params={"slack_user_id": slack_user_id},
+                headers=self.headers,
+                timeout=10.0
+            )
+            response.raise_for_status()
+            return response.json()
+            
+    async def cancel_coworking(
+        self,
+        slack_user_id: str,
+        booking_id: Optional[str] = None,
+        booking_date: Optional[str] = None
+    ) -> dict:
+        """Cancel a coworking booking."""
+        payload = {"slack_user_id": slack_user_id}
+        if booking_id:
+            payload["booking_id"] = booking_id
+        elif booking_date:
+            payload["date"] = booking_date
+            
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{self._points_base}/coworking/cancel/",
+                json=payload,
+                headers=self.headers,
+                timeout=10.0
+            )
+            response.raise_for_status()
+            return response.json()
+
+    async def get_rate_card(self) -> List[dict]:
+        """Get the automated rate card for point awards."""
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    f"{self._points_base}/rate-card/",
+                    headers=self.headers,
+                    timeout=5.0
+                )
+                if response.status_code == 404:
+                    return []
+                response.raise_for_status()
+                return response.json()
+        except Exception as e:
+            print(f"❌ Failed to fetch rate card: {e}")
+            return []
+
+    async def is_admin(self, slack_user_id: str) -> bool:
+        """Check if a user is a Points Admin (with caching)."""
+        if slack_user_id in self._admin_cache:
+            return self._admin_cache[slack_user_id]
+        
+        try:
+            details = await self.get_admin_details(slack_user_id)
+            is_admin = details is not None
+            self._admin_cache[slack_user_id] = is_admin
+            return is_admin
+        except Exception:
+            return False
+
+    async def get_admin_details(self, slack_user_id: str) -> Optional[dict]:
+        """Get details for a Points Admin."""
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    f"{self._points_base}/admins/{slack_user_id}/",
+                    headers=self.headers,
+                    timeout=10.0
+                )
+                if response.status_code == 200:
+                    return response.json()
+                return None
+        except Exception as e:
+            print(f"Failed to fetch admin details: {e}")
+            return None
+
+    async def get_admin_allowance(self, slack_user_id: str) -> dict:
+        """Get the admin's weekly allowance status."""
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    f"{self._points_base}/admin/allowance/",
+                    params={"slack_id": slack_user_id},
+                    headers=self.admin_headers,
+                    timeout=10.0
+                )
+                if response.status_code == 404:
+                    return {'error': 'Not a points admin'}
+                response.raise_for_status()
+                return response.json()
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                return {'error': 'Not a points admin'}
+            raise
+        except Exception as e:
+            print(f"❌ Failed to fetch admin allowance: {e}")
+            return {'error': str(e)}
+
+    async def create_task(
+        self,
+        admin_slack_id: str,
+        title: str,
+        points: int,
+        description: str = "",
+        portfolio: str = "events",
+        due_date: Optional[str] = None,
+        assigned_to_user_id: Optional[str] = None,
+        slack_channel_id: Optional[str] = None,
+        slack_thread_ts: Optional[str] = None
+    ) -> dict:
+        """Create a new task (admin only)."""
+        payload = {
+            "title": title,
+            "points": points,
+            "description": description,
+            "portfolio": portfolio,
+            "created_by_user_id": admin_slack_id,
+            "status": "open",
+        }
+        if due_date:
+            payload["due_date"] = due_date
+        if assigned_to_user_id:
+            payload["assigned_to_user_id"] = self._clean_slack_id(assigned_to_user_id)
+            payload["status"] = "claimed"
+        if slack_channel_id:
+            payload["slack_channel_id"] = slack_channel_id
+        if slack_thread_ts:
+            payload["slack_thread_ts"] = slack_thread_ts
+            
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{self._points_base}/tasks/",
+                json=payload,
+                headers=self.admin_headers,
+                timeout=10.0
+            )
+            # Handle 403 gracefully
+            if response.status_code == 403:
+                return {"error": "forbidden", "message": response.json().get("error")}
+                
+            response.raise_for_status()
+            return response.json()
+
+    async def approve_task(
+        self,
+        task_id: int,
+        admin_slack_id: str,
+        submission_id: Optional[str] = None
+    ) -> dict:
+        """Approve a task submission (admin only)."""
+        payload = {"slack_user_id": admin_slack_id}
+        if submission_id:
+            payload["submission_id"] = submission_id
+            
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{self._points_base}/tasks/{task_id}/approve/",
+                json=payload,
+                headers=self.admin_headers,
+                timeout=15.0
+            )
+            response.raise_for_status()
+            return response.json()
+
+    async def reject_task(
+        self,
+        task_id: int,
+        admin_slack_id: str,
+        reason: str = "",
+        submission_id: Optional[str] = None
+    ) -> dict:
+        """Reject a task submission (admin only)."""
+        payload = {
+            "slack_user_id": admin_slack_id,
+            "reason": reason,
+        }
+        if submission_id:
+            payload["submission_id"] = submission_id
+            
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{self._points_base}/tasks/{task_id}/reject/",
+                json=payload,
+                headers=self.admin_headers,
+                timeout=10.0
+            )
+            response.raise_for_status()
+            return response.json()
+
+    async def award_task(self, task_id: int, admin_slack_id: str, target_slack_id: str) -> dict:
+        """Direct award a task (claim + approve) to a user (admin only)."""
+        payload = {
+            "created_by_user_id": admin_slack_id,
+            "assigned_to_user_id": self._clean_slack_id(target_slack_id),
+        }
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{self._points_base}/tasks/{task_id}/award/",
+                json=payload,
+                headers=self.admin_headers,
+                timeout=15.0
+            )
+            response.raise_for_status()
+            return response.json()
+
+    async def award_points(
+        self,
+        admin_slack_id: str,
+        target_slack_id: str,
+        points: int,
+        reason: str
+    ) -> dict:
+        """Manually award or deduct points (admin only)."""
+        # 1. Pre-flight Admin Check
+        is_admin = await self.is_admin(admin_slack_id)
+        if not is_admin:
+            raise PermissionError(f"User {admin_slack_id} is not a Points Admin.")
+
+        # 2. Pre-flight Self-Award Check
+        cleaned_target = self._clean_slack_id(target_slack_id)
+        if admin_slack_id == cleaned_target and points > 0:
+            raise ValueError("Nice try! You can't award points to yourself. 😉")
+
+        # 3. Pre-flight Negative Check
+        if points < 0:
+            raise ValueError("Point deductions are disabled. Only positive awards are allowed.")
+
+        # 4. Pre-flight Weekly Allowance Check
+        if points > 0:
+            allowance = await self.get_admin_allowance(admin_slack_id)
+            if 'error' in allowance:
+                raise PermissionError(allowance['error'])
+            remaining = allowance.get('remaining', 0)
+            if remaining <= 0:
+                raise ValueError(
+                    f"You've used your full weekly allowance ({allowance.get('allowance', 0)} pts). It resets on Monday."
+                )
+            if points > remaining:
+                raise ValueError(
+                    f"You only have {remaining} pts left this week. Try awarding {remaining} or less."
+                )
+
+        payload = {
+            "admin_slack_id": admin_slack_id,
+            "target_slack_id": cleaned_target,
+            "points": points,
+            "reason": reason,
+        }
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{self._points_base}/admin/award/",
+                json=payload,
+                headers=self.admin_headers,
+                timeout=15.0
+            )
+            response.raise_for_status()
+            return response.json()
+
+    async def list_rewards(self, slack_user_id: Optional[str] = None) -> List[dict]:
+        """List available rewards."""
+        params = {}
+        if slack_user_id: params["slack_user_id"] = slack_user_id
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"{self._points_base}/rewards/",
+                params=params,
+                headers=self.headers,
+                timeout=10.0
+            )
+            response.raise_for_status()
+            return response.json()
+    
+    async def request_reward(
+        self,
+        slack_user_id: str,
+        reward_code: str,
+        quantity: int = 1,
+        notes: Optional[str] = None,
+        slack_channel_id: Optional[str] = None,
+        slack_thread_ts: Optional[str] = None
+    ) -> dict:
+        """Request a reward redemption."""
+        payload = {
+            "slack_user_id": slack_user_id,
+            "reward_code": reward_code,
+            "quantity": quantity,
+        }
+        if notes: payload["notes"] = notes
+        if slack_channel_id: payload["slack_channel_id"] = slack_channel_id
+        if slack_thread_ts: payload["slack_thread_ts"] = slack_thread_ts
+            
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{self._points_base}/rewards/request/",
+                json=payload,
+                headers=self.headers,
+                timeout=10.0
+            )
+            response.raise_for_status()
+            return response.json()
+
+    async def approve_reward(self, admin_slack_id: str, redemption_id: str) -> dict:
+        """Approve a reward redemption request (admin only)."""
+        payload = {
+            "slack_user_id": admin_slack_id,
+            "redemption_id": redemption_id,
+        }
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{self._points_base}/rewards/approve/",
+                json=payload,
+                headers=self.admin_headers,
+                timeout=10.0
+            )
+            response.raise_for_status()
+            return response.json()
+
+    async def system_award_points(
+        self,
+        admin_slack_id: str,
+        target_slack_id: str,
+        points: int,
+        reason: str
+    ) -> dict:
+        """System award points (bypasses client-side admin checks)."""
+        payload = {
+            "admin_slack_id": admin_slack_id,
+            "target_slack_id": self._clean_slack_id(target_slack_id),
+            "points": points,
+            "reason": reason,
+        }
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{self._points_base}/admin/award/",
+                json=payload,
+                headers=self.admin_headers,
+                timeout=15.0
+            )
+            response.raise_for_status()
+            return response.json()
+
+    async def link_slack_user(self, slack_id: str, email: str) -> Optional[int]:
+        """Link a Slack ID to an existing user found by email."""
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    f"{self.base_url}/api/v1/users/link-slack/",
+                    json={"slack_id": slack_id, "email": email},
+                    headers=self.admin_headers,
+                    timeout=10.0
+                )
+                if response.status_code == 404:
+                    return None
+                response.raise_for_status()
+                return response.json().get("user_id")
+        except Exception as e:
+            print(f"Failed to link Slack user: {e}")
+            return None
+
+    # End of MLAIBackendClient
