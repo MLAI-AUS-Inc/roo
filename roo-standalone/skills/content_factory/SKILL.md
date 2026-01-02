@@ -20,6 +20,7 @@ This skill enables Claude to generate professional, SEO-optimized blog articles 
 - **topic**: The article topic or title (required) - e.g., "How to Find a Technical Co-Founder"
 - **target_keyword**: SEO target keyword (optional) - e.g., "find technical cofounder"
 - **competitors**: List of competitor domains for discovery mode (optional)
+- **confirmed**: Boolean flag indicating user has accepted the disclaimer (optional - internal use)
 
 ## Workflow
 

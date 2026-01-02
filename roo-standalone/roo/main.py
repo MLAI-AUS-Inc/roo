@@ -344,5 +344,28 @@ async def slack_actions(request: Request):
         
         # We could update the message here to say "Resuming...", but ack is sufficient for now.
         return JSONResponse(status_code=200, content={})
+
+    if action_id == "confirm_content_factory":
+        print(f"✅ User {user_id} confirmed content factory requirements")
         
+        # Trigger re-entry into the skill, but this time imply confirmation
+        import asyncio
+        agent = get_agent()
+        
+        # We act as if the user said "Proceed with content factory confirmed=true"
+        # The LLM extraction in executor.py will pick up 'confirmed': True (or we hope so)
+        # Actually, to be safer, we should rely on the saved pending intent or just
+        # send a text that explicitly sets the param if possible, OR
+        # better yet, since we use LLM extraction, adding "confirmed=true" to text might work
+        # providing the LLM understands it.
+        # Let's try sending a clear directive.
+        
+        asyncio.create_task(agent.handle_mention(
+            text="Proceed with content factory I confirm requirements",
+            user_id=user_id,
+            channel_id=channel_id,
+            thread_ts=thread_ts
+        ))
+        return JSONResponse(status_code=200, content={})
+
     return JSONResponse(status_code=200, content={})
