@@ -470,9 +470,12 @@ Keep the response concise but informative."""
             
             post_message(channel_id, status_msg, thread_ts)
 
-        # Trigger Scan if needed
         if needs_scan:
-            scan_result = await api_client.trigger_repo_scan(user_id)
+            scan_result = await api_client.trigger_repo_scan(
+                user_id, 
+                slack_channel_id=channel_id,
+                slack_thread_ts=thread_ts
+            )
             
             if scan_result.get("error"):
                  return f"Had some trouble scanning your repository: {scan_result.get('message', 'Unknown error')}"
