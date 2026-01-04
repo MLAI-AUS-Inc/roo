@@ -401,14 +401,20 @@ class MLAIBackendClient:
             )
             response.raise_for_status()
 
-    async def trigger_repo_scan(self, slack_user_id: str) -> dict:
+    async def trigger_repo_scan(self, slack_user_id: str, slack_channel_id: Optional[str] = None, slack_thread_ts: Optional[str] = None) -> dict:
         """Trigger a repository scan for a user via the backend."""
         try:
             clean_id = self._clean_slack_id(slack_user_id)
+            payload = {"slack_user_id": clean_id}
+            if slack_channel_id:
+                payload["slack_channel_id"] = slack_channel_id
+            if slack_thread_ts:
+                payload["slack_thread_ts"] = slack_thread_ts
+            
             async with httpx.AsyncClient() as client:
                 response = await client.post(
                     f"{self.base_url}/api/v1/integrations/github/scan",
-                    json={"slack_user_id": clean_id},
+                    json=payload,
                     headers=self.headers,
                     timeout=60.0
                 )
