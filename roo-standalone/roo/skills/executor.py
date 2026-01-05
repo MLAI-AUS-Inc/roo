@@ -219,7 +219,11 @@ Keep the response concise but informative."""
         thread_history: Optional[List[dict]] = None
     ) -> str:
         """Execute the content factory generation workflow."""
-
+        
+        # 0. Access Control (Private Beta)
+        ALLOWED_USER_ID = "U05QPB483K9"
+        if user_id != ALLOWED_USER_ID:
+            return "Sorry mate, this skill is currently in private beta. 🔒"
         
         # Get a MLAIBackendClient for API calls
         settings = get_settings()
