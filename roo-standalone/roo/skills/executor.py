@@ -465,8 +465,7 @@ Keep the response concise but informative."""
             # Double check that the org config actually exists (handle deleted config case)
             # This fixes the issue where user deletes Org entry but Integration remains
             org_config = await api_client.get_content_org_config(
-                domain=params.get("domain"),
-                github_repo=integration.get("github_repo")
+                slack_user_id=user_id
             )
             if not org_config:
                 needs_scan = True
