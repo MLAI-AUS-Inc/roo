@@ -198,21 +198,22 @@ class MLAIBackendClient:
             response.raise_for_status()
             return response.json()
 
-    async def get_content_org_config(self, domain: str, github_repo: str) -> Optional[dict]:
+    async def get_content_org_config(self, slack_user_id: str) -> Optional[dict]:
         """
-        Check if content factory org config exists for a domain.
+        Check if content factory org config exists for a user.
         
         Args:
-            domain: The domain to check (e.g., "mlai.au")
-            github_repo: The full repo name (e.g., "org/repo")
+            slack_user_id: The Slack ID of the user
             
         Returns:
             Config dict or None if not found
         """
         if not self.base_url:
             return None
-            
-        params = {"domain": domain, "github_repo": github_repo}
+        
+        # Clean ID here just in case caller didn't
+        clean_id = self._clean_slack_id(slack_user_id)
+        params = {"slack_user_id": clean_id}
         
         async with httpx.AsyncClient() as client:
             try:
