@@ -188,15 +188,40 @@ class MLAIBackendClient:
             "context": context
         }
         
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{self.base_url}/api/v1/content/generate",
-                json=payload,
-                headers=self.headers,
-                timeout=30.0
-            )
             response.raise_for_status()
             return response.json()
+
+    async def get_content_org_config(self, domain: str, github_repo: str) -> Optional[dict]:
+        """
+        Check if content factory org config exists for a domain.
+        
+        Args:
+            domain: The domain to check (e.g., "mlai.au")
+            github_repo: The full repo name (e.g., "org/repo")
+            
+        Returns:
+            Config dict or None if not found
+        """
+        if not self.base_url:
+            return None
+            
+        params = {"domain": domain, "github_repo": github_repo}
+        
+        async with httpx.AsyncClient() as client:
+            try:
+                response = await client.get(
+                    f"{self.base_url}/api/content-factory/org/config",
+                    params=params,
+                    headers=self.headers,
+                    timeout=5.0
+                )
+                if response.status_code == 404:
+                    return None
+                response.raise_for_status()
+                return response.json()
+            except Exception as e:
+                print(f"Failed to check org config: {e}")
+                return None
 
     async def discover_opportunities(
         self,
