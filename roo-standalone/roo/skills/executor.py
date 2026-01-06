@@ -497,12 +497,51 @@ Keep the response concise but informative."""
                 slack_thread_ts=thread_ts
             )
             
-            if scan_result.get("error"):
-                 return f"Had some trouble scanning your repository: {scan_result.get('message', 'Unknown error')}"
-            
-            # Check for Async Acceptance
             if scan_result.get("status") == "accepted":
                 return "updates are being processed in the background! 🏃\nI'll send you a DM when the scan is complete. Please ask me again then."
+                
+            # Handle sync failures or other errors
+            if scan_result.get("error"):
+                error_msg = scan_result.get("message", "Unknown error")
+                
+                # If error indicates auth failure or repo not found (404/403/401)
+                if any(code in str(error_msg) for code in ["404", "401", "403", "Not Found", "Bad credentials"]):
+                    # Fetch Auth URL to allow reconnect
+                    auth_response = await api_client.get_github_auth_url(user_id)
+                    auth_url = auth_response.get("auth_url")
+                    
+                    if auth_url:
+                        blocks = [
+                            {
+                                "type": "section",
+                                "text": {
+                                    "type": "mrkdwn",
+                                    "text": f"⚠️ **Connection Lost**: It looks like I can't access your repository anymore ({error_msg})."
+                                }
+                            },
+                            {
+                                "type": "actions",
+                                "elements": [
+                                    {
+                                        "type": "button",
+                                        "text": {
+                                            "type": "plain_text",
+                                            "text": "Re-connect GitHub App",
+                                            "emoji": True
+                                        },
+                                        "url": auth_url,
+                                        "action_id": "connect_github",
+                                        "style": "danger"
+                                    }
+                                ]
+                            }
+                        ]
+                        if channel_id:
+                            post_message(channel_id, "Please re-connect GitHub", thread_ts=thread_ts, blocks=blocks)
+                            return "Please re-connect your GitHub App using the button above. 🔌"
+                
+                return f"Had some trouble scanning your repository: {error_msg}"
+
 
             # Legacy Sync Behavior (if backend returns 200 immediately)
             # Scan succeeded - refresh integration status
