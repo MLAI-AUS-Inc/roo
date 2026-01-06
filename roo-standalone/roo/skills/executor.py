@@ -98,6 +98,8 @@ class SkillExecutor:
     
     async def _extract_parameters(self, skill: Skill, text: str, user_id: str, history: Optional[List[dict]] = None) -> dict:
         """Extract parameters from user message based on skill definition."""
+        from ..utils import get_current_date
+        
         # Parse parameter definitions from skill content
         param_section = self._find_section(skill.content, "Parameters")
         
@@ -111,9 +113,13 @@ class SkillExecutor:
             context_lines = [f"{msg.get('user')}: {msg.get('text')}" for msg in history[:-1]]
             history_context = "\nConversation Context (use this to fill missing parameters):\n" + "\n".join(context_lines)
         
+        current_date_str = get_current_date().isoformat()
+        
         prompt = f"""Extract parameters from the user's message based on these definitions:
 
 {param_section}
+
+Current Date: {current_date_str}
 
 {history_context}
 
