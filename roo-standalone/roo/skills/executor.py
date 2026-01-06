@@ -461,6 +461,16 @@ Keep the response concise but informative."""
         elif integration.get("has_updates"):
             needs_scan = True
             scan_reason = "🔄 Updates detected in repository"
+        elif params.get("domain"):
+            # Double check that the org config actually exists (handle deleted config case)
+            # This fixes the issue where user deletes Org entry but Integration remains
+            org_config = await api_client.get_content_org_config(
+                domain=params.get("domain"),
+                github_repo=integration.get("github_repo")
+            )
+            if not org_config:
+                needs_scan = True
+                scan_reason = "⚠️ Configuration missing (re-scan required)"
             
         # Compile Status Report
         last_scanned = integration.get("last_scanned_at", "Never")
