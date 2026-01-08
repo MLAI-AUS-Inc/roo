@@ -608,32 +608,48 @@ Keep the response concise but informative."""
         last_step = ""
         
         try:
+            consecutive_failures = 0
+
             # Poll until completion
             while True:
-                status_data = await client.check_generation_status(job_id)
-                state = status_data.get("status")
-                progress = status_data.get("progress", 0)
-                step = status_data.get("current_step", "unknown")
-                
-                # Update progress
-                should_update = (
-                    progress >= last_progress + 20 or 
-                    (step != last_step and step in ["researching", "writing", "optimizing", "publishing"])
-                )
-                
-                if should_update:
-                    msg = f"📝 *Status Update*: {step.title()}... ({progress}%)"
-                    try:
-                        post_message(channel_id, msg, thread_ts)
-                        last_progress = progress
-                        last_step = step
-                    except Exception as e:
-                        print(f"Failed to post progress: {e}")
+                try:
+                    status_data = await client.check_generation_status(job_id)
+                    consecutive_failures = 0 # Reset on success
+                    
+                    state = status_data.get("status")
+                    progress = status_data.get("progress", 0)
+                    step = status_data.get("current_step", "unknown")
+                    
+                    # Update progress
+                    should_update = (
+                        progress >= last_progress + 20 or 
+                        (step != last_step and step in ["researching", "writing", "optimizing", "publishing"])
+                    )
+                    
+                    if should_update:
+                        msg = f"📝 *Status Update*: {step.title()}... ({progress}%)"
+                        try:
+                            post_message(channel_id, msg, thread_ts)
+                            last_progress = progress
+                            last_step = step
+                        except Exception as e:
+                            print(f"Failed to post progress: {e}")
 
-                if state == "completed":
-                    break
-                elif state == "failed":
-                    raise Exception(f"Job failed: {status_data.get('error', 'Unknown')}")
+                    if state == "completed":
+                        break
+                    elif state == "failed":
+                        raise Exception(f"Job failed: {status_data.get('error', 'Unknown')}")
+                        
+                except Exception as loop_error:
+                    # If it's the "Job failed" exception raised above, re-raise it to exit
+                    if "Job failed" in str(loop_error):
+                        raise loop_error
+                        
+                    consecutive_failures += 1
+                    print(f"⚠️ Monitor polling failed ({consecutive_failures}/5): {loop_error}")
+                    
+                    if consecutive_failures >= 5:
+                        raise Exception(f"Lost connection to backend after 5 attempts. Last error: {loop_error}")
                 
                 await asyncio.sleep(5.0)
             
