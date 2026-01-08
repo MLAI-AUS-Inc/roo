@@ -390,15 +390,17 @@ Keep the response concise but informative."""
             ]
             
             # Save pending intent before asking for auth
-            import json
-            intent_data = json.dumps({
-                "skill": "content-factory",
-                "params": params,
-                "text": text,
-                "channel": channel_id,
-                "ts": thread_ts
-            })
-            await api_client.save_pending_intent(user_id, intent_data)
+            # Critically: Do NOT overwrite the intent if we are just confirming requirements (which has no domain/topic)
+            if not params.get("confirmed"):
+                import json
+                intent_data = json.dumps({
+                    "skill": "content-factory",
+                    "params": params,
+                    "text": text,
+                    "channel": channel_id,
+                    "ts": thread_ts
+                })
+                await api_client.save_pending_intent(user_id, intent_data)
             
             if channel_id:
                 post_message(channel_id, "Please connect GitHub", thread_ts=thread_ts, blocks=blocks)

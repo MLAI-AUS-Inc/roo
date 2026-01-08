@@ -361,7 +361,7 @@ async def slack_actions(request: Request):
         # Let's try sending a clear directive.
         
         asyncio.create_task(agent.handle_mention(
-            text="Proceed with content factory I confirm requirements",
+            text="Proceed with content factory. confirmed=True",
             user_id=user_id,
             channel_id=channel_id,
             thread_ts=thread_ts
