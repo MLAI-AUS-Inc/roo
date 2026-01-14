@@ -160,8 +160,8 @@ class MLAIBackendClient:
         self,
         slack_user_id: str,
         domain: str,
-        topic: str,
-        target_keyword: str,
+        topic: Optional[str] = None,
+        target_keyword: Optional[str] = None,
         context: Optional[str] = None
     ) -> dict:
         """
@@ -170,7 +170,7 @@ class MLAIBackendClient:
         Args:
             slack_user_id: Slack ID of requesting user
             domain: Target domain
-            topic: Article topic
+            topic: Article topic (Optional - if omitted, triggers auto-research)
             target_keyword: Main keyword
             context: Optional conversation context
             
@@ -183,10 +183,14 @@ class MLAIBackendClient:
         payload = {
             "slack_user_id": slack_user_id,
             "domain": domain,
-            "topic": topic,
-            "target_keyword": target_keyword,
             "context": context
         }
+        
+        # Only add topic/keyword if provided (omitting them triggers auto-research)
+        if topic:
+            payload["topic"] = topic
+        if target_keyword:
+            payload["target_keyword"] = target_keyword
         
         async with httpx.AsyncClient() as client:
             response = await client.post(

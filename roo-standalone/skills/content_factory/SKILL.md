@@ -17,7 +17,7 @@ This skill enables Claude to generate professional, SEO-optimized blog articles 
 ## Parameters
 
 - **domain**: The user's website domain (required) - e.g., "mlai.au"
-- **topic**: The article topic or title (required) - e.g., "How to Find a Technical Co-Founder"
+- **topic**: The article topic or title (optional) - e.g., "How to Find a Technical Co-Founder". If omitted, triggers "Auto Mode" (research & write).
 - **target_keyword**: SEO target keyword (optional) - e.g., "find technical cofounder"
 - **competitors**: List of competitor domains for discovery mode (optional)
 - **confirmed**: Boolean flag indicating user has accepted the disclaimer (optional - internal use)
@@ -27,18 +27,25 @@ This skill enables Claude to generate professional, SEO-optimized blog articles 
 ### Step 1: Extract Parameters
 Parse the user's request to identify:
 - Their domain (from context or ask if not provided)
-- The topic they want to write about
+- The topic they want to write about (optional)
 - Any specific keywords they mentioned
 
-If the user is vague (e.g., "write me some content"), ask clarifying questions:
-- "What's your website domain?"
-- "What topic would you like to cover?"
+If the user is vague (e.g., "write me some content" or "auto write"), assume they want **Auto Mode**.
+If the user provides a specific idea (e.g. "write about X"), extract it as **topic**.
 
 ### Step 2: Confirm Before Starting
 Before starting generation, confirm the details with the user:
+
+**If Topic Provided:**
 ```
 I'll generate an article for {domain} about "{topic}" targeting "{target_keyword}".
 Sound good? 👍
+```
+
+**If Auto Mode (No Topic):**
+```
+I'll research your competitors and automatically write the best article for {domain}.
+Ready to go? 🚀
 ```
 
 ### Step 3: Start Generation

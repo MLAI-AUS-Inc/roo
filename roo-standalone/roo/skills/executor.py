@@ -558,12 +558,8 @@ Keep the response concise but informative."""
         topic = params.get("topic")
         target_keyword = params.get("target_keyword", "")
         
-        if not domain or not topic:
-            missing = []
-            if not domain: missing.append("domain name (e.g., mlai.au)")
-            if not topic: missing.append("topic for the article")
-            
-            return f"I can help write that article! To get started, I just need to know the {' and '.join(missing)}."
+        if not domain:
+            return "I can help write that article! To get started, I just need to know the domain name (e.g., mlai.au)."
 
         try:
             # Start generation via MLAI Backend
@@ -573,6 +569,7 @@ Keep the response concise but informative."""
                 history_str = "\n".join([f"{msg.get('user')}: {msg.get('text')}" for msg in thread_history[:-1]])
                 full_context = f"Context from Thread:\n{history_str}\n\nCurrent Request: {text}"
             
+            # Note: topic can be None (triggers Auto-Write / Research Mode)
             response = await api_client.trigger_article_generation(
                 slack_user_id=user_id,
                 domain=domain,
@@ -591,7 +588,10 @@ Keep the response concise but informative."""
                     self._monitor_generation(api_client, job_id, channel_id, thread_ts, user_id)
                 )
             
-            return f"You beauty! I've started writing the article '{topic}' for {domain}. (Job ID: {job_id})\nI'll keep you posted on the progress right here! 🚀"
+            if topic:
+                return f"You beauty! I've started writing the article '{topic}' for {domain}. (Job ID: {job_id})\nI'll keep you posted on the progress right here! 🚀"
+            else:
+                return f"You beauty! I've started researching the best article for {domain}. (Job ID: {job_id})\nI'll keep you posted on the progress right here! 🕵️"
             
         except Exception as e:
             print(f"Content Generation Error: {e}")
