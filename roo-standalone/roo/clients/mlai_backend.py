@@ -438,11 +438,24 @@ class MLAIBackendClient:
             )
             response.raise_for_status()
 
-    async def trigger_repo_scan(self, slack_user_id: str, slack_channel_id: Optional[str] = None, slack_thread_ts: Optional[str] = None) -> dict:
-        """Trigger a repository scan for a user via the backend."""
+    async def trigger_repo_scan(
+        self,
+        slack_user_id: str,
+        slack_channel_id: Optional[str] = None,
+        slack_thread_ts: Optional[str] = None,
+        domain: Optional[str] = None
+    ) -> dict:
+        """
+        Trigger a repository scan for a user via the backend.
+
+        Including the domain ensures the Content Factory scan can scrape and
+        persist company context for auto-write mode.
+        """
         try:
             clean_id = self._clean_slack_id(slack_user_id)
             payload = {"slack_user_id": clean_id}
+            if domain:
+                payload["domain"] = domain
             if slack_channel_id:
                 payload["slack_channel_id"] = slack_channel_id
             if slack_thread_ts:
