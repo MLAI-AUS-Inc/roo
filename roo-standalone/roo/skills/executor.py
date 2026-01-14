@@ -239,6 +239,14 @@ Keep the response concise but informative."""
             api_key=settings.MLAI_API_KEY,
             internal_api_key=settings.INTERNAL_API_KEY or settings.MLAI_API_KEY
         )
+        domain = params.get("domain")
+        org_config_cached = None
+        if not domain:
+            org_config_cached = await api_client.get_content_org_config(
+                slack_user_id=user_id
+            )
+            if org_config_cached:
+                domain = org_config_cached.get("domain") or domain
         
         # Check Status of GitHub Integration
         integration = await api_client.get_integration(user_id)
@@ -463,12 +471,14 @@ Keep the response concise but informative."""
         elif integration.get("has_updates"):
             needs_scan = True
             scan_reason = "🔄 Updates detected in repository"
-        elif params.get("domain"):
+        elif domain:
             # Double check that the org config actually exists (handle deleted config case)
             # This fixes the issue where user deletes Org entry but Integration remains
-            org_config = await api_client.get_content_org_config(
-                slack_user_id=user_id
-            )
+            org_config = org_config_cached
+            if org_config is None:
+                org_config = await api_client.get_content_org_config(
+                    slack_user_id=user_id
+                )
             if not org_config:
                 needs_scan = True
                 scan_reason = "⚠️ Configuration missing (re-scan required)"
@@ -495,7 +505,8 @@ Keep the response concise but informative."""
             scan_result = await api_client.trigger_repo_scan(
                 user_id, 
                 slack_channel_id=channel_id,
-                slack_thread_ts=thread_ts
+                slack_thread_ts=thread_ts,
+                domain=domain
             )
             
             if scan_result.get("status") == "accepted":
@@ -554,7 +565,6 @@ Keep the response concise but informative."""
                 post_message(channel_id, "✅ Repository analysis complete! Ready to write.", thread_ts)
 
         # 3. Validation: Check parameters (Domain/Topic)
-        domain = params.get("domain")
         topic = params.get("topic")
         target_keyword = params.get("target_keyword", "")
         

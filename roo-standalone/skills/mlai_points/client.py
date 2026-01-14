@@ -704,7 +704,7 @@ class MLAIBackendClient:
             )
             response.raise_for_status()
 
-    async def trigger_repo_scan(self, slack_user_id: str) -> dict:
+    async def trigger_repo_scan(self, slack_user_id: str, domain: Optional[str] = None) -> dict:
         """
         Trigger a repository scan for a user via the backend.
         
@@ -712,17 +712,23 @@ class MLAIBackendClient:
         1. Look up the user's connected GitHub repository
         2. Call the content-factory to perform the scan
         3. Update the integration status
+
+        Including the domain ensures the Content Factory scan can scrape and
+        persist company context for auto-write mode.
         
         Returns:
             Dict with scan status/result, or error info.
         """
         try:
             clean_id = self._clean_slack_id(slack_user_id)
+            payload = {"slack_user_id": clean_id}
+            if domain:
+                payload["domain"] = domain
             
             async with httpx.AsyncClient() as client:
                 response = await client.post(
                     f"{self.base_url}/api/v1/integrations/github/scan",
-                    json={"slack_user_id": clean_id},
+                    json=payload,
                     headers=self.admin_headers,
                     timeout=60.0  # Scanning can take a while
                 )
