@@ -603,6 +603,70 @@ async def slack_actions(request: Request):
                 "text": f"❌ Error confirming topic: {e}"
             })
 
+    # Handler for confirm_topic_btn (sent by mlai-backend)
+    # Value format: "confirm_topic:{job_id}"
+    if action_id == "confirm_topic_btn":
+        value = actions[0].get("value", "")
+        if not value or not value.startswith("confirm_topic:"):
+            return JSONResponse(status_code=400, content={"error": "Invalid value format"})
+
+        job_id = value.replace("confirm_topic:", "")
+        print(f"✅ User {user_id} confirmed topic for job {job_id} (via mlai-backend button)")
+
+        from .clients.mlai_backend import MLAIBackendClient
+        settings = get_settings()
+        client = MLAIBackendClient(
+            base_url=settings.MLAI_BACKEND_URL,
+            api_key=settings.MLAI_API_KEY
+        )
+
+        try:
+            await client.confirm_article_topic(
+                job_id=job_id,
+                slack_user_id=user_id
+            )
+
+            return JSONResponse(status_code=200, content={
+                "response_type": "ephemeral",
+                "replace_original": "true",
+                "text": "✅ Topic confirmed! Generating article now...",
+                "blocks": [
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": "✅ Topic confirmed! Generating article now..."
+                        }
+                    }
+                ]
+            })
+        except Exception as e:
+            print(f"❌ Failed to confirm topic: {e}")
+            import traceback
+            traceback.print_exc()
+            return JSONResponse(status_code=200, content={
+                "response_type": "ephemeral",
+                "text": f"❌ Error confirming topic: {e}"
+            })
+
+    # Handler for cancel_topic_btn (sent by mlai-backend)
+    if action_id == "cancel_topic_btn":
+        print(f"❌ User {user_id} cancelled topic selection")
+        return JSONResponse(status_code=200, content={
+            "response_type": "ephemeral",
+            "replace_original": "true",
+            "text": "❌ Article generation cancelled.",
+            "blocks": [
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": "❌ Article generation cancelled."
+                    }
+                }
+            ]
+        })
+
     if action_id == "content_factory_select_alt":
         # Handle dropdown selection
         # For now, we just acknowledge it and let the user click "Write This Article"

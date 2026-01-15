@@ -206,36 +206,36 @@ class MLAIBackendClient:
         self,
         job_id: str,
         slack_user_id: str,
-        domain: str,
-        confirmed_keyword: str,
+        domain: Optional[str] = None,
+        confirmed_keyword: Optional[str] = None,
         custom_title: Optional[str] = None
     ) -> dict:
         """
         Confirm topic selection for article generation.
-        
+
         Args:
             job_id: The ID of the research job
             slack_user_id: The Slack user confirming the topic
-            domain: The target domain
-            confirmed_keyword: The selected/confirmed keyword
+            domain: The target domain (optional - backend gets from job if not provided)
+            confirmed_keyword: The selected/confirmed keyword (optional - backend gets from job if not provided)
             custom_title: Optional custom title override
-            
+
         Returns:
             Response from backend
         """
         if not self.base_url:
             raise ValueError("MLAI_BACKEND_URL not configured")
-            
-        # Updated payload format per user requirements
+
+        # Build payload - only include fields that are provided
         payload = {
-            "keyword": confirmed_keyword,
             "action": "write",
-            # We still include these for context/tracking if the backend accepts extra fields,
-            # but 'keyword' and 'action' are the critical ones requested.
             "slack_user_id": self._clean_slack_id(slack_user_id),
-            "domain": domain
         }
-        
+
+        if confirmed_keyword:
+            payload["keyword"] = confirmed_keyword
+        if domain:
+            payload["domain"] = domain
         if custom_title:
             payload["custom_title"] = custom_title
             
