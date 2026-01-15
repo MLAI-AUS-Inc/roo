@@ -202,6 +202,50 @@ class MLAIBackendClient:
             response.raise_for_status()
             return response.json()
 
+    async def confirm_article_topic(
+        self,
+        job_id: str,
+        slack_user_id: str,
+        domain: str,
+        confirmed_keyword: str,
+        custom_title: Optional[str] = None
+    ) -> dict:
+        """
+        Confirm topic selection for article generation.
+        
+        Args:
+            job_id: The ID of the research job
+            slack_user_id: The Slack user confirming the topic
+            domain: The target domain
+            confirmed_keyword: The selected/confirmed keyword
+            custom_title: Optional custom title override
+            
+        Returns:
+            Response from backend
+        """
+        if not self.base_url:
+            raise ValueError("MLAI_BACKEND_URL not configured")
+            
+        payload = {
+            "job_id": job_id,
+            "domain": domain,
+            "slack_user_id": self._clean_slack_id(slack_user_id),
+            "confirmed_keyword": confirmed_keyword
+        }
+        
+        if custom_title:
+            payload["custom_title"] = custom_title
+            
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{self.base_url}/api/v1/content/confirm",
+                json=payload,
+                headers=self.headers,
+                timeout=30.0
+            )
+            response.raise_for_status()
+            return response.json()
+
     async def get_content_org_config(self, slack_user_id: str) -> Optional[dict]:
         """
         Check if content factory org config exists for a user.
