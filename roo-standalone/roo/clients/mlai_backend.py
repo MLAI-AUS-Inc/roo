@@ -208,7 +208,8 @@ class MLAIBackendClient:
         slack_user_id: str,
         domain: Optional[str] = None,
         confirmed_keyword: Optional[str] = None,
-        custom_title: Optional[str] = None
+        custom_title: Optional[str] = None,
+        option_index: int = 0
     ) -> dict:
         """
         Confirm topic selection for article generation.
@@ -219,6 +220,7 @@ class MLAIBackendClient:
             domain: The target domain (optional - backend gets from job if not provided)
             confirmed_keyword: The selected/confirmed keyword (optional - backend gets from job if not provided)
             custom_title: Optional custom title override
+            option_index: The index of the selected option (default 0)
 
         Returns:
             Response from backend
@@ -230,6 +232,7 @@ class MLAIBackendClient:
         payload = {
             "action": "write",
             "slack_user_id": self._clean_slack_id(slack_user_id),
+            "option_index": option_index
         }
 
         if confirmed_keyword:

@@ -604,14 +604,26 @@ async def slack_actions(request: Request):
             })
 
     # Handler for confirm_topic_btn (sent by mlai-backend)
-    # Value format: "confirm_topic:{job_id}"
-    if action_id == "confirm_topic_btn":
+    # Value format: "confirm_topic:{job_id}:{index}"
+    if action_id.startswith("confirm_topic_btn"):
         value = actions[0].get("value", "")
         if not value or not value.startswith("confirm_topic:"):
             return JSONResponse(status_code=400, content={"error": "Invalid value format"})
 
-        job_id = value.replace("confirm_topic:", "")
-        print(f"✅ User {user_id} confirmed topic for job {job_id} (via mlai-backend button)")
+        parts = value.split(":")
+        # Expected: confirm_topic, job_id, [index]
+        if len(parts) < 2:
+            return JSONResponse(status_code=400, content={"error": "Invalid value format"})
+            
+        job_id = parts[1]
+        
+        # Handle optional index (default to 0 if not present)
+        try:
+            option_index = int(parts[2]) if len(parts) > 2 else 0
+        except ValueError:
+            option_index = 0
+            
+        print(f"✅ User {user_id} confirmed topic for job {job_id}, option {option_index} (via mlai-backend button)")
 
         from .clients.mlai_backend import MLAIBackendClient
         settings = get_settings()
@@ -623,7 +635,8 @@ async def slack_actions(request: Request):
         try:
             await client.confirm_article_topic(
                 job_id=job_id,
-                slack_user_id=user_id
+                slack_user_id=user_id,
+                option_index=option_index
             )
 
             return JSONResponse(status_code=200, content={
