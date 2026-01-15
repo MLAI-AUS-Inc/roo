@@ -226,11 +226,14 @@ class MLAIBackendClient:
         if not self.base_url:
             raise ValueError("MLAI_BACKEND_URL not configured")
             
+        # Updated payload format per user requirements
         payload = {
-            "job_id": job_id,
-            "domain": domain,
+            "keyword": confirmed_keyword,
+            "action": "write",
+            # We still include these for context/tracking if the backend accepts extra fields,
+            # but 'keyword' and 'action' are the critical ones requested.
             "slack_user_id": self._clean_slack_id(slack_user_id),
-            "confirmed_keyword": confirmed_keyword
+            "domain": domain
         }
         
         if custom_title:
@@ -238,7 +241,7 @@ class MLAIBackendClient:
             
         async with httpx.AsyncClient() as client:
             response = await client.post(
-                f"{self.base_url}/api/v1/content/confirm",
+                f"{self.base_url}/api/v1/content/jobs/{job_id}/confirm",
                 json=payload,
                 headers=self.headers,
                 timeout=30.0
