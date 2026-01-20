@@ -15,6 +15,19 @@ uvicorn roo.main:app --reload
 docker-compose up -d
 ```
 
+## Testing
+
+```bash
+# Unit tests
+cd roo-standalone
+pytest -q
+```
+
+```bash
+# E2E test suite (from repo root)
+bash e2e_test_suite.sh
+```
+
 ## Project Structure
 
 ```
