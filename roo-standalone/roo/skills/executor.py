@@ -164,12 +164,17 @@ JSON:"""
 
         system_prompt = skill.content
 
-        user_prompt = f"""Here is the original text to rewrite. Extract the key points and message, then COMPLETELY rewrite it from scratch using the MLAI tone of voice described in your instructions. Do not lightly edit or rephrase. Write it fresh as if you were the MLAI writer producing this content for the first time.
+        user_prompt = f"""Here is the original text to rewrite. Follow these steps:
 
-HARD RULES (violating these is a failure):
-- NEVER use the em dash character (\u2014) or en dash (\u2013). Use a comma, period, or hyphen instead.
-- NEVER use any emoji characters.
-- NEVER use corporate filler language.
+1. First, identify the key points and core message in the original text.
+2. Then COMPLETELY rewrite it from scratch using the MLAI tone of voice described in your instructions. Do not lightly edit or rephrase. Write it fresh as if you were the MLAI writer producing this content for the first time.
+3. Before returning your result, review it against these HARD RULES and fix any violations:
+   - ZERO em dash characters (\u2014) or en dash characters (\u2013). Use a comma, period, or hyphen instead.
+   - ZERO emoji characters of any kind.
+   - ZERO corporate filler language.
+   - Short paragraphs, punchy lines, high specificity.
+
+Return ONLY the final rewritten text. No preamble, no explanation.
 
 Original text:
 {raw_text}"""
@@ -179,13 +184,7 @@ Original text:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            max_tokens=8192,
-            extra_body={
-                "thinking": {
-                    "type": "enabled",
-                    "budget_tokens": 4096
-                }
-            }
+            max_tokens=8192
         )
 
         return response.content
