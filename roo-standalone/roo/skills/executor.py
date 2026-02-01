@@ -166,13 +166,27 @@ JSON:"""
 
         user_prompt = f"""Here is the original text to rewrite. Extract the key points and message, then COMPLETELY rewrite it from scratch using the MLAI tone of voice described in your instructions. Do not lightly edit or rephrase. Write it fresh as if you were the MLAI writer producing this content for the first time.
 
+HARD RULES (violating these is a failure):
+- NEVER use the em dash character (\u2014) or en dash (\u2013). Use a comma, period, or hyphen instead.
+- NEVER use any emoji characters.
+- NEVER use corporate filler language.
+
 Original text:
 {raw_text}"""
 
-        response = await chat([
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt}
-        ])
+        response = await chat(
+            [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            max_tokens=8192,
+            extra_body={
+                "thinking": {
+                    "type": "enabled",
+                    "budget_tokens": 4096
+                }
+            }
+        )
 
         return response.content
 
