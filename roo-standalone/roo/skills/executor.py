@@ -11,7 +11,7 @@ from typing import Any, Optional, List
 from difflib import SequenceMatcher
 
 from .loader import Skill
-from ..llm import chat, embed
+from ..llm import chat, embed, get_llm_client
 from ..slack_client import post_message
 from ..config import get_settings
 
@@ -179,12 +179,16 @@ Return ONLY the final rewritten text. No preamble, no explanation.
 Original text:
 {raw_text}"""
 
-        response = await chat(
+        # Use GPT-5.2 with thinking mode for higher quality tone rewrites
+        openai_client = get_llm_client("openai")
+        response = await openai_client.chat(
             [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            max_tokens=8192
+            model="gpt-5.2",
+            max_tokens=8192,
+            reasoning_effort="high"
         )
 
         return response.content

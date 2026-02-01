@@ -52,13 +52,15 @@ class OpenAIClient(BaseLLMClient):
     async def chat(self, messages: List[Dict[str, str]], **kwargs) -> LLMResponse:
         """Send chat completion request."""
         create_kwargs = {
-            "model": self.model,
+            "model": kwargs.get("model", self.model),
             "messages": messages,
             "temperature": kwargs.get("temperature", 0.7),
             "max_tokens": kwargs.get("max_tokens", 2048),
         }
         if "extra_body" in kwargs:
             create_kwargs["extra_body"] = kwargs["extra_body"]
+        if "reasoning_effort" in kwargs:
+            create_kwargs["reasoning_effort"] = kwargs["reasoning_effort"]
 
         response = await self.client.chat.completions.create(**create_kwargs)
         
