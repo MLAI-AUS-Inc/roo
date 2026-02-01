@@ -75,6 +75,8 @@ class SkillExecutor:
                 result = await self._execute_mlai_points(skill, text, params, user_id, channel_id, thread_ts)
             elif skill.name == "github-integration":
                 result = await self._execute_github_integration(skill, text, params, user_id, channel_id, thread_ts)
+            elif skill.name == "tone-of-voice":
+                result = await self._execute_tone_of_voice(skill, text, params, user_id)
             else:
                 # Generic LLM-based execution
                 result = await self._execute_with_llm(skill, text, params, user_id, thread_history)
@@ -147,6 +149,33 @@ JSON:"""
         except json.JSONDecodeError:
             return {}
     
+    async def _execute_tone_of_voice(
+        self,
+        skill: Skill,
+        text: str,
+        params: dict,
+        user_id: str
+    ) -> str:
+        """Execute the tone-of-voice skill with a dedicated prompt structure."""
+
+        # Extract the user's original text to rewrite
+        # Strip common prefixes so the LLM gets just the raw content
+        raw_text = params.get("text", text)
+
+        system_prompt = skill.content
+
+        user_prompt = f"""Here is the original text to rewrite. Extract the key points and message, then COMPLETELY rewrite it from scratch using the MLAI tone of voice described in your instructions. Do not lightly edit or rephrase. Write it fresh as if you were the MLAI writer producing this content for the first time.
+
+Original text:
+{raw_text}"""
+
+        response = await chat([
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ])
+
+        return response.content
+
     async def _execute_with_llm(
         self,
         skill: Skill,
