@@ -51,11 +51,14 @@ class OpenAIClient(BaseLLMClient):
     
     async def chat(self, messages: List[Dict[str, str]], **kwargs) -> LLMResponse:
         """Send chat completion request."""
+        model = kwargs.get("model", self.model)
+        # Newer OpenAI models (gpt-5+, o-series) require max_completion_tokens
+        max_tokens_key = "max_completion_tokens" if model.startswith(("gpt-5", "o1", "o3")) else "max_tokens"
         create_kwargs = {
-            "model": kwargs.get("model", self.model),
+            "model": model,
             "messages": messages,
             "temperature": kwargs.get("temperature", 0.7),
-            "max_tokens": kwargs.get("max_tokens", 2048),
+            max_tokens_key: kwargs.get("max_tokens", 2048),
         }
         if "extra_body" in kwargs:
             create_kwargs["extra_body"] = kwargs["extra_body"]
