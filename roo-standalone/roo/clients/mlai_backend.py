@@ -322,13 +322,45 @@ class MLAIBackendClient:
         """Check status of a generation job."""
         if not self.base_url:
             raise ValueError("MLAI_BACKEND_URL not configured")
-            
+
         async with httpx.AsyncClient() as client:
             response = await client.get(
                 f"{self.base_url}/api/v1/content/jobs/{job_id}",
                 headers=self.headers,
                 timeout=10.0
             )
+            response.raise_for_status()
+            return response.json()
+
+    async def cancel_job(self, job_id: str, slack_user_id: str) -> dict:
+        """
+        Cancel a content generation job.
+
+        Args:
+            job_id: The job ID to cancel
+            slack_user_id: The Slack user requesting cancellation
+
+        Returns:
+            Response from backend
+        """
+        if not self.base_url:
+            raise ValueError("MLAI_BACKEND_URL not configured")
+
+        payload = {
+            "action": "cancel",
+            "slack_user_id": self._clean_slack_id(slack_user_id)
+        }
+
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{self.base_url}/api/v1/content/jobs/{job_id}/cancel",
+                json=payload,
+                headers=self.headers,
+                timeout=10.0
+            )
+            # Don't raise on 404 - job may already be cancelled or completed
+            if response.status_code == 404:
+                return {"status": "not_found", "message": "Job not found or already completed"}
             response.raise_for_status()
             return response.json()
 

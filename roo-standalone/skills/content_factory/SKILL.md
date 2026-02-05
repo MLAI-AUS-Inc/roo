@@ -1,18 +1,39 @@
 ---
 name: content-factory
 description: Generate SEO-optimized blog articles using the Content Factory pipeline
+trigger_keywords:
+  - write article
+  - content factory
+  - auto write
+  - write content
+  - generate article
+  - blog post
 ---
 
 # Content Factory Skill
 
-This skill enables Claude to generate professional, SEO-optimized blog articles for any domain using the Content Factory API.
+This skill enables Roo to manage the content generation workflow in Slack, acting as the liaison between users and the Content Factory pipeline.
 
-## Capabilities
+## Role: Content Factory Liaison
 
-- Generate articles with specified topics and target keywords
-- Monitor generation progress in real-time
-- Publish completed articles with preview and PR links
-- Discover content opportunities by analyzing competitors
+You are an agent responsible for managing the content generation workflow in Slack.
+
+### Trigger
+You receive a `topic_confirmation_request` event from the backend containing:
+- Selected keyword/topic
+- Reasoning/metrics (volume, difficulty, tier)
+- Potential alternatives
+
+### Responsibilities
+1. **Present Options**: Format the research results into a clear, interactive Slack message using Block Kit.
+2. **Explain Reasoning**: Briefly summarize why the main topic was chosen (e.g., "High opportunity score of 85.2 with low competition").
+3. **Handle Confirmation**:
+   - If user clicks "Approve": Trigger the article generation for the selected topic.
+   - If user clicks "Pick Alternative": Present a menu or simple way to select one of the `top_alternatives`.
+   - If user clicks "Cancel": Abort the job.
+
+### Tone
+Professional, concise, and helpful. Focus on the SEO metrics to justify the recommendation.
 
 ## Parameters
 
@@ -53,7 +74,14 @@ Use the `generate_article` function from `client.py` to start the job.
 
 The function returns a `job_id` which is used to track progress.
 
-### Step 4: Monitor Progress
+### Step 4: Topic Confirmation (Auto Mode)
+When research is complete, the backend sends a `topic_confirmation_request` callback.
+Roo displays an interactive card with:
+- Recommended topic with SEO metrics
+- Alternative topics in a dropdown
+- Approve/Cancel buttons
+
+### Step 5: Monitor Progress
 Poll the job status and update the user with progress milestones:
 - 🔍 **Researching** (0-20%) - Analyzing competitors and gathering data
 - 📋 **Strategizing** (20-40%) - Creating content brief and outline
@@ -63,7 +91,7 @@ Poll the job status and update the user with progress milestones:
 
 Only send updates when progress changes significantly (every 20% or major step change).
 
-### Step 5: Report Success
+### Step 6: Report Success
 When complete, provide the user with:
 - 👀 **Preview URL** - Cloudflare preview link
 - 💻 **PR URL** - GitHub Pull Request for review
@@ -71,12 +99,11 @@ When complete, provide the user with:
 
 Example success message:
 ```
-🎉 Article Published!
+✅ Article Published!
 
-👀 Preview: https://preview.mlai.au/articles/how-to-find-a-cofounder
-💻 Pull Request: https://github.com/mlai-au/mlai.au/pull/42
-
-Review the content and merge the PR when you're ready!
+Topic: ai startup accelerator
+URL: https://mlai.au/articles/ai-startup-accelerator
+PR: https://github.com/drsamdonegan/mlai-au/pull/205
 ```
 
 ## Response Style
@@ -96,6 +123,6 @@ If generation fails:
 
 Example:
 ```
-Sorry mate, ran into a snag with that article generation. 
+Sorry mate, ran into a snag with that article generation.
 The AI writer seems to be having a moment. Mind trying again in a few? 🤔
 ```

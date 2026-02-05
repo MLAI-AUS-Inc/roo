@@ -301,42 +301,62 @@ async def api_mention(request: Request):
     return result
 
 
+def _format_tier_display(tier: str) -> str:
+    """Format tier string for display with emoji."""
+    tier_lower = tier.lower().replace("_", " ")
+    if "blue" in tier_lower or "tier_1" in tier_lower or "tier 1" in tier_lower:
+        return "🔵 Blue Ocean"
+    elif "green" in tier_lower or "tier_2" in tier_lower or "tier 2" in tier_lower:
+        return "🟢 Green"
+    elif "yellow" in tier_lower or "tier_3" in tier_lower or "tier 3" in tier_lower:
+        return "🟡 Yellow"
+    elif "red" in tier_lower or "tier_4" in tier_lower or "tier 4" in tier_lower:
+        return "🔴 Red"
+    return tier.replace("_", " ").title()
+
+
 @app.post("/api/callbacks/content-factory")
 async def content_factory_callback(request: Request):
     """
     Handle callbacks from mlai-backend Content Factory.
-    
+
     Supports:
-    - topic_selection: When a topic is proposed for user confirmation
+    - topic_confirmation_request: When research is complete and topic needs confirmation
+    - topic_selection: Legacy format - When a topic is proposed for user confirmation
     - article_complete: When an article has been generated
     """
     try:
         payload = await request.json()
-        event_type = payload.get("event_type")
+        event_type = payload.get("type") or payload.get("event_type")
         slack_user_id = payload.get("slack_user_id")
-        
+
         print(f"🏭 Content Factory event: {event_type} for {slack_user_id}")
-        
-        if event_type == "topic_selection":
-            # Extract data
-            selection = payload.get("selection", {})
-            keyword = selection.get("selected_keyword")
-            reason = selection.get("selection_reason")
-            volume = selection.get("volume")
-            difficulty = selection.get("difficulty")
-            tier = selection.get("tier", "").replace("_", " ").title()
-            score = selection.get("opportunity_index")
-            alternatives = selection.get("top_alternatives", [])
+
+        # Handle new topic_confirmation_request format
+        if event_type == "topic_confirmation_request":
             job_id = payload.get("job_id")
             domain = payload.get("domain")
-            
-            # Format Block Kit message
+            data = payload.get("data", {})
+
+            keyword = data.get("selected_keyword")
+            reason = data.get("selection_reason", "")
+            metrics = data.get("metrics", {})
+            volume = metrics.get("volume", 0)
+            difficulty = metrics.get("difficulty", 0)
+            tier = metrics.get("tier", "")
+            score = metrics.get("score", 0)
+            alternatives = data.get("alternatives", [])
+
+            # Format tier for display
+            tier_display = _format_tier_display(tier)
+
+            # Build Block Kit message matching the specification
             blocks = [
                 {
                     "type": "header",
                     "text": {
                         "type": "plain_text",
-                        "text": "📊 Article Topic Selected",
+                        "text": "📊 Content Research Complete",
                         "emoji": True
                     }
                 },
@@ -344,54 +364,83 @@ async def content_factory_callback(request: Request):
                     "type": "section",
                     "text": {
                         "type": "mrkdwn",
-                        "text": f"I've researched content opportunities for *{domain}* and found great topics. Choose one to write:"
+                        "text": f"*Recommended Topic:* `{keyword}`\n\nI found this topic has high potential for *{domain}*."
                     }
+                },
+                {
+                    "type": "section",
+                    "fields": [
+                        {
+                            "type": "mrkdwn",
+                            "text": f"*Volume:*\n{volume:,}/mo"
+                        },
+                        {
+                            "type": "mrkdwn",
+                            "text": f"*Difficulty:*\n{difficulty}/100"
+                        },
+                        {
+                            "type": "mrkdwn",
+                            "text": f"*Tier:*\n{tier_display}"
+                        },
+                        {
+                            "type": "mrkdwn",
+                            "text": f"*Opportunity Score:*\n{score}"
+                        }
+                    ]
                 }
             ]
 
-            # Combine recommended and alternatives into a single numbered list
-            all_topics = [keyword] + alternatives
-            # Limit to 4 topics total to fit buttons in one row (with cancel) if needed, 
-            # though Slack allows 5 elements.
-            all_topics = all_topics[:4] 
+            # Add alternatives section if present
+            if alternatives:
+                alt_text = "*Alternatives:*\n" + "\n".join(f"• {alt}" for alt in alternatives)
+                blocks.append({
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": alt_text
+                    }
+                })
 
-            # Build the text section
-            # 1. Recommended
-            topic_text = f"*1. {keyword}*\n📈 Volume: {volume}/mo • 🎯 Difficulty: {difficulty}/100 • Score: {score}\n_Recommended due to high opportunity score._"
-            
-            # Add alternatives text
-            for i, alt in enumerate(all_topics[1:], start=2):
-                topic_text += f"\n\n*{i}. {alt}*"
-            
-            blocks.append({
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": topic_text
-                }
-            })
-
-            # Prepare Action Buttons
-            actions = []
-            for i, topic in enumerate(all_topics):
-                # Button text: "Op 1: topic..."
-                # Truncate topic if too long
-                display_topic = topic[:20] + "..." if len(topic) > 20 else topic
-                btn_text = f"Op {i+1}: {display_topic}"
-                
-                actions.append({
+            # Build action elements
+            action_elements = [
+                {
                     "type": "button",
                     "text": {
                         "type": "plain_text",
-                        "text": btn_text,
+                        "text": "✅ Write This Article",
                         "emoji": True
                     },
-                    "value": f"confirm_topic:{job_id}:{i}",
-                    "action_id": "confirm_topic_btn"  # Use common handler
+                    "style": "primary",
+                    "value": f"confirm:{keyword}:{job_id}",
+                    "action_id": "confirm_topic"
+                }
+            ]
+
+            # Add static_select dropdown for alternatives if present
+            if alternatives:
+                alt_options = [
+                    {
+                        "text": {
+                            "type": "plain_text",
+                            "text": alt[:75]  # Slack limit for option text
+                        },
+                        "value": f"confirm:{alt}:{job_id}"
+                    }
+                    for alt in alternatives[:10]  # Limit to 10 options
+                ]
+                action_elements.append({
+                    "type": "static_select",
+                    "placeholder": {
+                        "type": "plain_text",
+                        "text": "Pick Alternative",
+                        "emoji": True
+                    },
+                    "options": alt_options,
+                    "action_id": "select_alternative"
                 })
 
-            # Add Cancel button
-            actions.append({
+            # Add cancel button
+            action_elements.append({
                 "type": "button",
                 "text": {
                     "type": "plain_text",
@@ -399,62 +448,205 @@ async def content_factory_callback(request: Request):
                     "emoji": True
                 },
                 "style": "danger",
-                "value": "cancel",
-                "action_id": "cancel_topic_btn"  # Use common handler
+                "value": f"cancel:{job_id}",
+                "action_id": "cancel_topic"
             })
-            
+
             blocks.append({
                 "type": "actions",
-                "elements": actions
+                "block_id": "topic_confirmation_actions",
+                "elements": action_elements
             })
-            
+
             # Send DM
             dm_channel = from_slack_client_open_dm(slack_user_id)
             if dm_channel:
                 post_message(
                     channel=dm_channel,
-                    text=f"Topic selected: {keyword}",  # Fallback text
+                    text=f"Content research complete. Recommended topic: {keyword}",
                     blocks=blocks
                 )
             return {"status": "ok"}
-            
-        elif event_type == "article_complete":
-            article_url = payload.get("article_url")
-            pr_url = payload.get("pr_url")
+
+        # Handle legacy topic_selection format for backwards compatibility
+        elif event_type == "topic_selection":
+            selection = payload.get("selection", {})
+            keyword = selection.get("selected_keyword")
+            reason = selection.get("selection_reason")
+            volume = selection.get("volume")
+            difficulty = selection.get("difficulty")
+            tier = selection.get("tier", "")
+            score = selection.get("opportunity_index")
+            alternatives = selection.get("top_alternatives", [])
+            job_id = payload.get("job_id")
             domain = payload.get("domain")
-            
+
+            tier_display = _format_tier_display(tier)
+
+            # Use the new Block Kit format for legacy events too
             blocks = [
                 {
-                    "type": "section",
+                    "type": "header",
                     "text": {
-                        "type": "mrkdwn",
-                        "text": f"🎉 *Article Published for {domain}*!"
+                        "type": "plain_text",
+                        "text": "📊 Content Research Complete",
+                        "emoji": True
                     }
                 },
                 {
                     "type": "section",
                     "text": {
                         "type": "mrkdwn",
-                        "text": f"Your article is ready and a pull request has been created.\n\n🔗 *< {article_url} | View Live Article >*\n🔨 *< {pr_url} | View Pull Request >*"
+                        "text": f"*Recommended Topic:* `{keyword}`\n\nI found this topic has high potential for *{domain}*."
                     }
+                },
+                {
+                    "type": "section",
+                    "fields": [
+                        {
+                            "type": "mrkdwn",
+                            "text": f"*Volume:*\n{volume:,}/mo" if volume else "*Volume:*\n--"
+                        },
+                        {
+                            "type": "mrkdwn",
+                            "text": f"*Difficulty:*\n{difficulty}/100" if difficulty else "*Difficulty:*\n--"
+                        },
+                        {
+                            "type": "mrkdwn",
+                            "text": f"*Tier:*\n{tier_display}"
+                        },
+                        {
+                            "type": "mrkdwn",
+                            "text": f"*Opportunity Score:*\n{score}" if score else "*Opportunity Score:*\n--"
+                        }
+                    ]
                 }
             ]
-            
+
+            if alternatives:
+                alt_text = "*Alternatives:*\n" + "\n".join(f"• {alt}" for alt in alternatives)
+                blocks.append({
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": alt_text
+                    }
+                })
+
+            action_elements = [
+                {
+                    "type": "button",
+                    "text": {
+                        "type": "plain_text",
+                        "text": "✅ Write This Article",
+                        "emoji": True
+                    },
+                    "style": "primary",
+                    "value": f"confirm:{keyword}:{job_id}",
+                    "action_id": "confirm_topic"
+                }
+            ]
+
+            if alternatives:
+                alt_options = [
+                    {
+                        "text": {
+                            "type": "plain_text",
+                            "text": alt[:75]
+                        },
+                        "value": f"confirm:{alt}:{job_id}"
+                    }
+                    for alt in alternatives[:10]
+                ]
+                action_elements.append({
+                    "type": "static_select",
+                    "placeholder": {
+                        "type": "plain_text",
+                        "text": "Pick Alternative",
+                        "emoji": True
+                    },
+                    "options": alt_options,
+                    "action_id": "select_alternative"
+                })
+
+            action_elements.append({
+                "type": "button",
+                "text": {
+                    "type": "plain_text",
+                    "text": "❌ Cancel",
+                    "emoji": True
+                },
+                "style": "danger",
+                "value": f"cancel:{job_id}",
+                "action_id": "cancel_topic"
+            })
+
+            blocks.append({
+                "type": "actions",
+                "block_id": "topic_confirmation_actions",
+                "elements": action_elements
+            })
+
             dm_channel = from_slack_client_open_dm(slack_user_id)
             if dm_channel:
                 post_message(
                     channel=dm_channel,
-                    text=f"Article complete: {article_url}",
+                    text=f"Topic selected: {keyword}",
                     blocks=blocks
                 )
             return {"status": "ok"}
-            
+
+        elif event_type == "article_complete":
+            article_url = payload.get("article_url")
+            pr_url = payload.get("pr_url")
+            domain = payload.get("domain")
+            topic = payload.get("topic", "")
+
+            blocks = [
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": "**✅ Article Published!**"
+                    }
+                },
+                {
+                    "type": "section",
+                    "fields": [
+                        {
+                            "type": "mrkdwn",
+                            "text": f"*Topic:*\n{topic}" if topic else f"*Domain:*\n{domain}"
+                        },
+                        {
+                            "type": "mrkdwn",
+                            "text": f"*URL:*\n<{article_url}|View Article>"
+                        }
+                    ]
+                },
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": f"*PR:* <{pr_url}|View Pull Request>"
+                    }
+                }
+            ]
+
+            dm_channel = from_slack_client_open_dm(slack_user_id)
+            if dm_channel:
+                post_message(
+                    channel=dm_channel,
+                    text=f"Article published: {article_url}",
+                    blocks=blocks
+                )
+            return {"status": "ok"}
+
     except Exception as e:
         print(f"❌ Error handling content factory callback: {e}")
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
-    
+
     return {"status": "ignored"}
 
 
@@ -530,7 +722,151 @@ async def slack_actions(request: Request):
         ))
         return JSONResponse(status_code=200, content={})
 
-    # Handler for confirm_topic_btn (sent by mlai-backend)
+    # Handler for confirm_topic (new format)
+    # Value format: "confirm:{keyword}:{job_id}"
+    if action_id == "confirm_topic":
+        value = actions[0].get("value", "")
+        if not value or not value.startswith("confirm:"):
+            return JSONResponse(status_code=400, content={"error": "Invalid value format"})
+
+        parts = value.split(":", 2)  # Split into max 3 parts
+        if len(parts) < 3:
+            return JSONResponse(status_code=400, content={"error": "Invalid value format"})
+
+        keyword = parts[1]
+        job_id = parts[2]
+
+        print(f"✅ User {user_id} confirmed topic '{keyword}' for job {job_id}")
+
+        from .clients.mlai_backend import MLAIBackendClient
+        settings = get_settings()
+        client = MLAIBackendClient(
+            base_url=settings.MLAI_BACKEND_URL,
+            api_key=settings.MLAI_API_KEY
+        )
+
+        try:
+            await client.confirm_article_topic(
+                job_id=job_id,
+                slack_user_id=user_id,
+                confirmed_keyword=keyword
+            )
+
+            return JSONResponse(status_code=200, content={
+                "response_type": "ephemeral",
+                "replace_original": True,
+                "text": f"⏳ Queued generation for `{keyword}`...",
+                "blocks": [
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": f"⏳ Queued generation for `{keyword}`..."
+                        }
+                    }
+                ]
+            })
+        except Exception as e:
+            print(f"❌ Failed to confirm topic: {e}")
+            import traceback
+            traceback.print_exc()
+            return JSONResponse(status_code=200, content={
+                "response_type": "ephemeral",
+                "text": f"❌ Error confirming topic: {e}"
+            })
+
+    # Handler for select_alternative (dropdown selection)
+    # Value format: "confirm:{keyword}:{job_id}"
+    if action_id == "select_alternative":
+        selected_option = actions[0].get("selected_option", {})
+        value = selected_option.get("value", "")
+        if not value or not value.startswith("confirm:"):
+            return JSONResponse(status_code=400, content={"error": "Invalid value format"})
+
+        parts = value.split(":", 2)
+        if len(parts) < 3:
+            return JSONResponse(status_code=400, content={"error": "Invalid value format"})
+
+        keyword = parts[1]
+        job_id = parts[2]
+
+        print(f"✅ User {user_id} selected alternative topic '{keyword}' for job {job_id}")
+
+        from .clients.mlai_backend import MLAIBackendClient
+        settings = get_settings()
+        client = MLAIBackendClient(
+            base_url=settings.MLAI_BACKEND_URL,
+            api_key=settings.MLAI_API_KEY
+        )
+
+        try:
+            await client.confirm_article_topic(
+                job_id=job_id,
+                slack_user_id=user_id,
+                confirmed_keyword=keyword
+            )
+
+            return JSONResponse(status_code=200, content={
+                "response_type": "ephemeral",
+                "replace_original": True,
+                "text": f"⏳ Queued generation for `{keyword}`...",
+                "blocks": [
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": f"⏳ Queued generation for `{keyword}`..."
+                        }
+                    }
+                ]
+            })
+        except Exception as e:
+            print(f"❌ Failed to confirm alternative topic: {e}")
+            import traceback
+            traceback.print_exc()
+            return JSONResponse(status_code=200, content={
+                "response_type": "ephemeral",
+                "text": f"❌ Error confirming topic: {e}"
+            })
+
+    # Handler for cancel_topic (new format)
+    # Value format: "cancel:{job_id}"
+    if action_id == "cancel_topic":
+        value = actions[0].get("value", "")
+        job_id = value.split(":", 1)[1] if ":" in value else None
+
+        print(f"❌ User {user_id} cancelled topic selection for job {job_id}")
+
+        # Optionally notify backend to clean up the job
+        if job_id:
+            try:
+                from .clients.mlai_backend import MLAIBackendClient
+                settings = get_settings()
+                client = MLAIBackendClient(
+                    base_url=settings.MLAI_BACKEND_URL,
+                    api_key=settings.MLAI_API_KEY
+                )
+                await client.cancel_job(job_id, user_id)
+            except Exception as e:
+                print(f"⚠️ Failed to notify backend of cancellation: {e}")
+
+        return JSONResponse(status_code=200, content={
+            "response_type": "ephemeral",
+            "replace_original": True,
+            "text": "❌ Job cancelled.",
+            "blocks": [
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": "❌ Job cancelled."
+                    }
+                }
+            ]
+        })
+
+    # Legacy handlers for backwards compatibility
+    # Handler for confirm_topic_btn (legacy format)
     # Value format: "confirm_topic:{job_id}:{index}"
     if action_id.startswith("confirm_topic_btn"):
         value = actions[0].get("value", "")
@@ -538,19 +874,17 @@ async def slack_actions(request: Request):
             return JSONResponse(status_code=400, content={"error": "Invalid value format"})
 
         parts = value.split(":")
-        # Expected: confirm_topic, job_id, [index]
         if len(parts) < 2:
             return JSONResponse(status_code=400, content={"error": "Invalid value format"})
-            
+
         job_id = parts[1]
-        
-        # Handle optional index (default to 0 if not present)
+
         try:
             option_index = int(parts[2]) if len(parts) > 2 else 0
         except ValueError:
             option_index = 0
-            
-        print(f"✅ User {user_id} confirmed topic for job {job_id}, option {option_index}")
+
+        print(f"✅ User {user_id} confirmed topic for job {job_id}, option {option_index} (legacy)")
 
         from .clients.mlai_backend import MLAIBackendClient
         settings = get_settings()
@@ -569,13 +903,13 @@ async def slack_actions(request: Request):
             return JSONResponse(status_code=200, content={
                 "response_type": "ephemeral",
                 "replace_original": True,
-                "text": "✅ Topic confirmed! Generating article now...",
+                "text": "⏳ Queued generation...",
                 "blocks": [
                     {
                         "type": "section",
                         "text": {
                             "type": "mrkdwn",
-                            "text": "✅ Topic confirmed! Generating article now..."
+                            "text": "⏳ Queued generation..."
                         }
                     }
                 ]
@@ -589,19 +923,19 @@ async def slack_actions(request: Request):
                 "text": f"❌ Error confirming topic: {e}"
             })
 
-    # Handler for cancel_topic_btn
+    # Handler for cancel_topic_btn (legacy)
     if action_id == "cancel_topic_btn":
-        print(f"❌ User {user_id} cancelled topic selection")
+        print(f"❌ User {user_id} cancelled topic selection (legacy)")
         return JSONResponse(status_code=200, content={
             "response_type": "ephemeral",
             "replace_original": True,
-            "text": "❌ Article generation cancelled.",
+            "text": "❌ Job cancelled.",
             "blocks": [
                 {
                     "type": "section",
                     "text": {
                         "type": "mrkdwn",
-                        "text": "❌ Article generation cancelled."
+                        "text": "❌ Job cancelled."
                     }
                 }
             ]
