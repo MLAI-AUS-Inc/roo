@@ -9,6 +9,7 @@ import asyncio
 from dataclasses import dataclass
 from typing import Any, Optional, List
 from difflib import SequenceMatcher
+import httpx
 
 from .loader import Skill
 from ..llm import chat, embed, get_llm_client
@@ -294,8 +295,8 @@ Keep the response concise but informative."""
             if org_config_cached:
                 domain = org_config_cached.get("domain") or domain
         
-        # Check Status of GitHub Integration
-        integration = await api_client.get_integration(user_id)
+        # Check Status of GitHub Integration (pass domain for domain-specific checks)
+        integration = await api_client.get_integration(user_id, domain=domain)
         
         # 1. New User Disclaimer & Education
         # If user has no integration AND hasn't confirmed the disclaimer yet
@@ -461,12 +462,52 @@ Keep the response concise but informative."""
                 return "I've sent a button to connect your GitHub account. 🔌"
             return f"Please connect your GitHub account here: {auth_url}"
 
-        # 2. Check for Project Scanned status
-
         # 2. Check for Project Scanned status & Pre-flight Status check
-        
-        repo_name = integration.get("github_repo")
-        
+
+        # Check domain-specific GitHub connection when domain is known
+        if domain and integration.get("domain_connected") is False:
+            # GitHub is NOT connected for this specific domain
+            oauth_url = integration.get("oauth_url")
+            domain_name = integration.get("domain", domain)
+            if oauth_url:
+                blocks = [
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": f"⚠️ GitHub isn't connected for *{domain_name}* yet.\nClick below to connect your GitHub repo for this domain."
+                        }
+                    },
+                    {
+                        "type": "actions",
+                        "elements": [
+                            {
+                                "type": "button",
+                                "text": {
+                                    "type": "plain_text",
+                                    "text": "Connect GitHub for " + domain_name,
+                                    "emoji": True
+                                },
+                                "url": oauth_url,
+                                "action_id": "connect_github",
+                                "style": "primary"
+                            }
+                        ]
+                    }
+                ]
+                if channel_id:
+                    post_message(channel_id, f"GitHub not connected for {domain_name}", thread_ts=thread_ts, blocks=blocks)
+                    return f"GitHub isn't connected for {domain_name} yet. Click the button above to connect! 🔌"
+                return f"GitHub isn't connected for {domain_name}. Connect here: {oauth_url}"
+            else:
+                return f"GitHub isn't connected for {domain_name}. Please connect your GitHub account."
+
+        # Use domain-specific repo if available, otherwise fall back to default
+        if domain and integration.get("domain_connected"):
+            repo_name = integration.get("domain_github_repo") or integration.get("github_repo")
+        else:
+            repo_name = integration.get("github_repo")
+
         # Scenario C: Token but No Repo
         if not repo_name:
              # Get Auth URL from Backend (reuse same flow to re-select repo)
@@ -534,8 +575,12 @@ Keep the response concise but informative."""
         last_article = (integration.get("last_article") or {}).get("title", "None")
         
         if channel_id:
+            if domain and integration.get("domain_connected"):
+                connected_msg = f"👋 G'day! Connected to `{repo_name}` for *{domain}*.\n\n"
+            else:
+                connected_msg = f"👋 G'day! I see you're connected to `{repo_name}`.\n\n"
             status_msg = (
-                f"👋 G'day! I see you're connected to `{repo_name}`.\n\n"
+                connected_msg +
                 f"📊 **Status Report:**\n"
                 f"• Last scanned: {last_scanned}\n"
                 f"• Last article: {last_article}\n"
@@ -561,7 +606,42 @@ Keep the response concise but informative."""
             # Handle sync failures or other errors
             if scan_result.get("error"):
                 error_msg = scan_result.get("message", "Unknown error")
-                
+
+                # If backend says GitHub isn't connected for this domain
+                if scan_result.get("needs_github_auth"):
+                    oauth_url = scan_result.get("oauth_url")
+                    domain_name = scan_result.get("domain", domain)
+                    if oauth_url:
+                        blocks = [
+                            {
+                                "type": "section",
+                                "text": {
+                                    "type": "mrkdwn",
+                                    "text": f"⚠️ GitHub isn't connected for *{domain_name}*.\nClick below to connect your GitHub repo for this domain."
+                                }
+                            },
+                            {
+                                "type": "actions",
+                                "elements": [
+                                    {
+                                        "type": "button",
+                                        "text": {
+                                            "type": "plain_text",
+                                            "text": "Connect GitHub for " + (domain_name or "this domain"),
+                                            "emoji": True
+                                        },
+                                        "url": oauth_url,
+                                        "action_id": "connect_github",
+                                        "style": "primary"
+                                    }
+                                ]
+                            }
+                        ]
+                        if channel_id:
+                            post_message(channel_id, f"GitHub not connected for {domain_name}", thread_ts=thread_ts, blocks=blocks)
+                            return f"GitHub isn't connected for {domain_name}. Click the button above to connect, then try again! 🔌"
+                    return f"GitHub isn't connected for {domain_name}. Please connect your GitHub account and try again."
+
                 # If error indicates auth failure or repo not found (404/403/401)
                 if any(code in str(error_msg) for code in ["404", "401", "403", "Not Found", "Bad credentials"]):
                     # Fetch Auth URL to allow reconnect
@@ -603,7 +683,7 @@ Keep the response concise but informative."""
 
             # Legacy Sync Behavior (if backend returns 200 immediately)
             # Scan succeeded - refresh integration status
-            integration = await api_client.get_integration(user_id)
+            integration = await api_client.get_integration(user_id, domain=domain)
             if not integration or not integration.get("project_scanned"):
                 return "Scanning is taking a bit longer than expected. Please wait for the notification! 🦘"
             
@@ -649,6 +729,52 @@ Keep the response concise but informative."""
             else:
                 return f"You beauty! I've started researching the best article for {domain}. (Job ID: {job_id})\nI'll keep you posted on the progress right here! 🕵️"
             
+        except httpx.HTTPStatusError as e:
+            print(f"Content Generation HTTP Error: {e}")
+            if e.response.status_code == 400:
+                try:
+                    error_data = e.response.json()
+                except Exception:
+                    error_data = {}
+                # Structured error: GitHub not connected for this domain
+                if error_data.get("needs_github_auth"):
+                    oauth_url = error_data.get("oauth_url")
+                    domain_name = error_data.get("domain", domain)
+                    if oauth_url and channel_id:
+                        blocks = [
+                            {
+                                "type": "section",
+                                "text": {
+                                    "type": "mrkdwn",
+                                    "text": f"⚠️ GitHub isn't connected for *{domain_name}*.\nClick below to connect your GitHub repo for this domain, then try again."
+                                }
+                            },
+                            {
+                                "type": "actions",
+                                "elements": [
+                                    {
+                                        "type": "button",
+                                        "text": {
+                                            "type": "plain_text",
+                                            "text": "Connect GitHub for " + (domain_name or "this domain"),
+                                            "emoji": True
+                                        },
+                                        "url": oauth_url,
+                                        "action_id": "connect_github",
+                                        "style": "primary"
+                                    }
+                                ]
+                            }
+                        ]
+                        post_message(channel_id, f"GitHub not connected for {domain_name}", thread_ts=thread_ts, blocks=blocks)
+                        return f"GitHub isn't connected for {domain_name}. Click the button above to connect, then try again! 🔌"
+                    elif oauth_url:
+                        return f"GitHub isn't connected for {domain_name}. Connect here: {oauth_url}"
+                    return f"GitHub isn't connected for {domain_name}. Please connect your GitHub account."
+                # Other 400 errors - show the error message
+                error_msg = error_data.get("error", str(e))
+                return f"Sorry mate, I had trouble starting the article generation: {error_msg}"
+            return f"Sorry mate, I had trouble starting the article generation: {str(e)}"
         except Exception as e:
             print(f"Content Generation Error: {e}")
             return f"Sorry mate, I had trouble starting the article generation: {str(e)}"

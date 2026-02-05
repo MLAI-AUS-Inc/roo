@@ -491,14 +491,25 @@ class MLAIBackendClient:
             print(f"Failed to get GitHub auth URL: {e}")
             return {"error": str(e)}
 
-    async def get_integration(self, slack_user_id: str) -> Optional[dict]:
-        """Check if user has a valid GitHub integration."""
+    async def get_integration(self, slack_user_id: str, domain: Optional[str] = None) -> Optional[dict]:
+        """Check if user has a valid GitHub integration.
+
+        Args:
+            slack_user_id: Slack user ID
+            domain: Optional domain to check domain-specific GitHub connection.
+                    When provided, response includes domain_connected, domain_github_repo,
+                    needs_github_auth, and oauth_url fields.
+        """
         try:
             clean_id = self._clean_slack_id(slack_user_id)
+            params = {}
+            if domain:
+                params["domain"] = domain
             async with httpx.AsyncClient() as client:
                 response = await client.get(
                     f"{self.base_url}/api/v1/integrations/github/{clean_id}/",
                     headers=self.headers,
+                    params=params,
                     timeout=10.0
                 )
                 if response.status_code == 404:
@@ -554,6 +565,20 @@ class MLAIBackendClient:
                     return {"status": "accepted", "message": "Scan queued successfully."}
                 if response.status_code == 404:
                     return {"error": "no_integration", "message": "No GitHub integration found for this user."}
+                if response.status_code == 400:
+                    try:
+                        error_data = response.json()
+                    except Exception:
+                        error_data = {"error": response.text}
+                    if error_data.get("needs_github_auth"):
+                        return {
+                            "error": "needs_github_auth",
+                            "needs_github_auth": True,
+                            "oauth_url": error_data.get("oauth_url"),
+                            "domain": error_data.get("domain"),
+                            "message": error_data.get("error", "GitHub not connected for this domain")
+                        }
+                    return {"error": "bad_request", "message": error_data.get("error", "Bad request")}
                 response.raise_for_status()
                 return response.json()
         except Exception as e:
