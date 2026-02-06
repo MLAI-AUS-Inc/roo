@@ -641,6 +641,306 @@ async def content_factory_callback(request: Request):
                 )
             return {"status": "ok"}
 
+        elif event_type == "scan_complete":
+            job_id = payload.get("job_id")
+            domain = payload.get("domain")
+            channel_id = payload.get("channel_id")  # Thread context from backend
+            thread_ts = payload.get("thread_ts")    # Thread context from backend
+            components_generated = payload.get("components_generated", False)
+            components_count = payload.get("components_count", 0)
+            component_names = payload.get("component_names", [])
+
+            print(f"📦 Scan complete for {domain}: {components_count} components")
+
+            # Build message blocks
+            if components_generated and components_count > 0:
+                # Success case with components
+                component_list = "\n".join(f"• `{name}`" for name in component_names[:10])
+                if len(component_names) > 10:
+                    component_list += f"\n• _...and {len(component_names) - 10} more_"
+
+                blocks = [
+                    {
+                        "type": "header",
+                        "text": {
+                            "type": "plain_text",
+                            "text": "🎉 Repository Scan Complete",
+                            "emoji": True
+                        }
+                    },
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": f"Found *{components_count} components* in your repository for *{domain}*"
+                        }
+                    },
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": f"*Components:*\n{component_list}"
+                        }
+                    },
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": "Would you like me to create the articles directory structure?"
+                        }
+                    },
+                    {
+                        "type": "actions",
+                        "block_id": "scaffold_actions",
+                        "elements": [
+                            {
+                                "type": "button",
+                                "text": {
+                                    "type": "plain_text",
+                                    "text": "📁 Create Articles Directory",
+                                    "emoji": True
+                                },
+                                "style": "primary",
+                                "value": json.dumps({
+                                    "domain": domain,
+                                    "slack_user_id": slack_user_id,
+                                    "channel_id": channel_id,
+                                    "thread_ts": thread_ts
+                                }),
+                                "action_id": "scaffold_confirm"
+                            },
+                            {
+                                "type": "button",
+                                "text": {
+                                    "type": "plain_text",
+                                    "text": "Skip for now",
+                                    "emoji": True
+                                },
+                                "value": json.dumps({"domain": domain}),
+                                "action_id": "scaffold_skip"
+                            }
+                        ]
+                    }
+                ]
+            else:
+                # No components case
+                blocks = [
+                    {
+                        "type": "header",
+                        "text": {
+                            "type": "plain_text",
+                            "text": "✅ Repository Scan Complete",
+                            "emoji": True
+                        }
+                    },
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": f"Scan complete for *{domain}*. No new components were detected."
+                        }
+                    }
+                ]
+
+            # Post in thread if context available, otherwise DM
+            if channel_id and thread_ts:
+                try:
+                    post_message(
+                        channel=channel_id,
+                        text=f"Scan complete for {domain}",
+                        thread_ts=thread_ts,
+                        blocks=blocks
+                    )
+                    print(f"✅ Posted scan results to thread {thread_ts}")
+                except Exception as e:
+                    print(f"⚠️ Failed to post in thread, falling back to DM: {e}")
+                    dm_channel = from_slack_client_open_dm(slack_user_id)
+                    if dm_channel:
+                        post_message(
+                            channel=dm_channel,
+                            text=f"Scan complete for {domain}",
+                            blocks=blocks
+                        )
+            else:
+                # Fallback to DM
+                print(f"⚠️ No thread context, sending DM to {slack_user_id}")
+                dm_channel = from_slack_client_open_dm(slack_user_id)
+                if dm_channel:
+                    post_message(
+                        channel=dm_channel,
+                        text=f"Scan complete for {domain}",
+                        blocks=blocks
+                    )
+
+            return {"status": "ok"}
+
+        elif event_type == "scaffold_complete":
+            job_id = payload.get("job_id")
+            domain = payload.get("domain")
+            channel_id = payload.get("channel_id")
+            thread_ts = payload.get("thread_ts")
+            pr_url = payload.get("pr_url")
+            files_created = payload.get("files_created", 0)
+            pillar_count = payload.get("pillar_count", 0)
+            component_count = payload.get("component_count", 0)
+            already_exists = payload.get("already_exists", False)
+
+            print(f"📁 Scaffold complete for {domain}: PR={pr_url}")
+
+            # Build message blocks
+            if already_exists:
+                blocks = [
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": "ℹ️ Articles directory already exists - no changes needed."
+                        }
+                    }
+                ]
+            elif pr_url:
+                blocks = [
+                    {
+                        "type": "header",
+                        "text": {
+                            "type": "plain_text",
+                            "text": "✅ Articles Directory Created",
+                            "emoji": True
+                        }
+                    },
+                    {
+                        "type": "section",
+                        "fields": [
+                            {
+                                "type": "mrkdwn",
+                                "text": f"*Domain:*\n{domain}"
+                            },
+                            {
+                                "type": "mrkdwn",
+                                "text": f"*Files Created:*\n{files_created}"
+                            },
+                            {
+                                "type": "mrkdwn",
+                                "text": f"*Pillars:*\n{pillar_count}"
+                            },
+                            {
+                                "type": "mrkdwn",
+                                "text": f"*Components:*\n{component_count}"
+                            }
+                        ]
+                    },
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": f"*Pull Request:* <{pr_url}|View on GitHub>\n\nMerge this PR to enable article generation for your site."
+                        }
+                    }
+                ]
+            else:
+                blocks = [
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": f"📁 Articles directory scaffolded for *{domain}*, but the PR could not be created. Check your repo for a `feature/articles-scaffolding` branch."
+                        }
+                    }
+                ]
+
+            # Post in thread if context available, otherwise DM
+            if channel_id and thread_ts:
+                try:
+                    post_message(
+                        channel=channel_id,
+                        text=f"Scaffold complete for {domain}",
+                        thread_ts=thread_ts,
+                        blocks=blocks
+                    )
+                    print(f"✅ Posted scaffold results to thread {thread_ts}")
+                except Exception as e:
+                    print(f"⚠️ Failed to post in thread, falling back to DM: {e}")
+                    dm_channel = from_slack_client_open_dm(slack_user_id)
+                    if dm_channel:
+                        post_message(
+                            channel=dm_channel,
+                            text=f"Scaffold complete for {domain}",
+                            blocks=blocks
+                        )
+            else:
+                # Fallback to DM
+                print(f"⚠️ No thread context, sending DM to {slack_user_id}")
+                dm_channel = from_slack_client_open_dm(slack_user_id)
+                if dm_channel:
+                    post_message(
+                        channel=dm_channel,
+                        text=f"Scaffold complete for {domain}",
+                        blocks=blocks
+                    )
+
+            return {"status": "ok"}
+
+        elif event_type == "generation_failed":
+            job_id = payload.get("job_id")
+            domain = payload.get("domain")
+            channel_id = payload.get("channel_id")
+            thread_ts = payload.get("thread_ts")
+            error_message = payload.get("error_message") or payload.get("error", "Unknown error")
+            error_code = payload.get("error_code")
+            stage = payload.get("stage", "generation")  # scan, scaffold, generation
+
+            print(f"❌ Generation failed for {domain} at {stage}: {error_message} (code: {error_code})")
+
+            # Provide specific error messages based on error_code
+            if error_code == "INVALID_CREDENTIALS":
+                user_message = "❌ I need fresh GitHub access. Please reconnect your GitHub account and try again."
+            elif error_code == "MISSING_CONFIG":
+                user_message = "❌ I don't have scan data for this site. Let me run a scan first."
+            else:
+                user_message = f"❌ Something went wrong setting up the articles directory: {error_message}\n\nLet me know if you'd like to try again."
+
+            blocks = [
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": user_message
+                    }
+                }
+            ]
+
+            # Post in thread if context available, otherwise DM
+            if channel_id and thread_ts:
+                try:
+                    post_message(
+                        channel=channel_id,
+                        text=f"Error during {stage}",
+                        thread_ts=thread_ts,
+                        blocks=blocks
+                    )
+                    print(f"✅ Posted error to thread {thread_ts}")
+                except Exception as e:
+                    print(f"⚠️ Failed to post in thread, falling back to DM: {e}")
+                    dm_channel = from_slack_client_open_dm(slack_user_id)
+                    if dm_channel:
+                        post_message(
+                            channel=dm_channel,
+                            text=f"Error during {stage}",
+                            blocks=blocks
+                        )
+            else:
+                # Fallback to DM
+                print(f"⚠️ No thread context, sending DM to {slack_user_id}")
+                dm_channel = from_slack_client_open_dm(slack_user_id)
+                if dm_channel:
+                    post_message(
+                        channel=dm_channel,
+                        text=f"Error during {stage}",
+                        blocks=blocks
+                    )
+
+            return {"status": "ok"}
+
     except Exception as e:
         print(f"❌ Error handling content factory callback: {e}")
         import traceback
@@ -864,6 +1164,180 @@ async def slack_actions(request: Request):
                 }
             ]
         })
+
+    # Handler for scaffold_confirm
+    # Value format: JSON string with domain, slack_user_id, channel_id, thread_ts
+    if action_id == "scaffold_confirm":
+        value = actions[0].get("value", "")
+        try:
+            value_data = json.loads(value)
+        except json.JSONDecodeError:
+            return JSONResponse(status_code=400, content={"error": "Invalid JSON value format"})
+
+        domain = value_data.get("domain")
+        original_user_id = value_data.get("slack_user_id")
+        value_channel_id = value_data.get("channel_id")
+        value_thread_ts = value_data.get("thread_ts")
+
+        # Get message context for button removal
+        msg_channel = payload.get("channel", {}).get("id")
+        msg_ts = payload.get("message", {}).get("ts")
+        msg_thread_ts = payload.get("message", {}).get("thread_ts") or msg_ts
+
+        # Security check: only the original user can confirm
+        if user_id != original_user_id:
+            return JSONResponse(status_code=200, content={
+                "response_type": "ephemeral",
+                "text": "⚠️ Only the user who initiated the scan can confirm this action."
+            })
+
+        print(f"📁 User {user_id} confirmed scaffold for {domain}")
+
+        # Use value's thread context if available, fallback to message context
+        reply_channel = value_channel_id or msg_channel
+        reply_thread_ts = value_thread_ts or msg_thread_ts
+
+        # 1. Post immediate in-thread reply
+        try:
+            post_message(
+                channel=reply_channel,
+                thread_ts=reply_thread_ts,
+                text=f"📁 Creating articles directory for *{domain}*..."
+            )
+        except Exception as e:
+            print(f"⚠️ Failed to post in-thread message: {e}")
+
+        # 2. Call mlai-backend scaffold API
+        from .clients.mlai_backend import MLAIBackendClient
+        settings = get_settings()
+        backend_client = MLAIBackendClient(
+            base_url=settings.MLAI_BACKEND_URL,
+            api_key=settings.MLAI_API_KEY
+        )
+
+        try:
+            result = await backend_client.scaffold_articles(
+                domain=domain,
+                slack_user_id=user_id,
+                slack_channel_id=reply_channel,
+                slack_thread_ts=reply_thread_ts
+            )
+
+            status_code = result.get("status_code")
+            data = result.get("data", {})
+
+            # Handle different response codes
+            if status_code == 200:
+                # Already scaffolded
+                pr_url = data.get("pr_url", "")
+                pr_text = f" PR: {pr_url}" if pr_url else ""
+                post_message(
+                    channel=reply_channel,
+                    thread_ts=reply_thread_ts,
+                    text=f"📁 Articles directory already exists for *{domain}*.{pr_text}"
+                )
+            elif status_code == 400:
+                # Error - check for needs_github_auth
+                error = data.get("error", "Unknown error")
+                if data.get("needs_github_auth"):
+                    oauth_url = data.get("oauth_url", "")
+                    post_message(
+                        channel=reply_channel,
+                        thread_ts=reply_thread_ts,
+                        text=f"❌ GitHub authentication required for *{domain}*.\n\nPlease reconnect: {oauth_url}"
+                    )
+                else:
+                    post_message(
+                        channel=reply_channel,
+                        thread_ts=reply_thread_ts,
+                        text=f"❌ Could not start scaffolding: {error}"
+                    )
+            elif status_code == 202:
+                # Scaffold initiated - mlai-backend will send completion message
+                print(f"✅ Scaffold initiated for {domain}, waiting for completion callback")
+            else:
+                # Unexpected status code
+                post_message(
+                    channel=reply_channel,
+                    thread_ts=reply_thread_ts,
+                    text=f"❌ Unexpected response from backend (status {status_code})"
+                )
+
+        except Exception as e:
+            print(f"❌ Failed to trigger scaffold: {e}")
+            import traceback
+            traceback.print_exc()
+            post_message(
+                channel=reply_channel,
+                thread_ts=reply_thread_ts,
+                text=f"❌ Error creating articles directory: {e}"
+            )
+
+        # 3. Remove buttons from original message
+        try:
+            from .slack_client import get_slack_client
+            slack_client = get_slack_client()
+            original_blocks = payload.get("message", {}).get("blocks", [])
+            # Keep all blocks except the actions block
+            updated_blocks = [block for block in original_blocks if block.get("type") != "actions"]
+
+            slack_client.chat_update(
+                channel=msg_channel,
+                ts=msg_ts,
+                text=payload.get("message", {}).get("text", ""),
+                blocks=updated_blocks
+            )
+        except Exception as e:
+            print(f"⚠️ Failed to remove buttons: {e}")
+
+        return JSONResponse(status_code=200, content={})
+
+    # Handler for scaffold_skip
+    # Value format: JSON string with domain
+    if action_id == "scaffold_skip":
+        value = actions[0].get("value", "")
+        try:
+            value_data = json.loads(value)
+        except json.JSONDecodeError:
+            return JSONResponse(status_code=400, content={"error": "Invalid JSON value format"})
+
+        domain = value_data.get("domain", "your site")
+
+        # Get message context
+        msg_channel = payload.get("channel", {}).get("id")
+        msg_ts = payload.get("message", {}).get("ts")
+        msg_thread_ts = payload.get("message", {}).get("thread_ts") or msg_ts
+
+        print(f"⏭️ User {user_id} skipped scaffold for {domain}")
+
+        # Post skip message in thread
+        try:
+            post_message(
+                channel=msg_channel,
+                thread_ts=msg_thread_ts,
+                text=f"No worries! You can create the articles directory later with:\n  `@Roo create articles directory for {domain}`"
+            )
+        except Exception as e:
+            print(f"⚠️ Failed to post skip message: {e}")
+
+        # Remove buttons from original message
+        try:
+            from .slack_client import get_slack_client
+            slack_client = get_slack_client()
+            original_blocks = payload.get("message", {}).get("blocks", [])
+            # Keep all blocks except the actions block
+            updated_blocks = [block for block in original_blocks if block.get("type") != "actions"]
+
+            slack_client.chat_update(
+                channel=msg_channel,
+                ts=msg_ts,
+                text=payload.get("message", {}).get("text", ""),
+                blocks=updated_blocks
+            )
+        except Exception as e:
+            print(f"⚠️ Failed to remove buttons: {e}")
+
+        return JSONResponse(status_code=200, content={})
 
     # Legacy handlers for backwards compatibility
     # Handler for confirm_topic_btn (legacy format)
