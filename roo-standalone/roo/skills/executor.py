@@ -601,7 +601,7 @@ Keep the response concise but informative."""
             )
             
             if scan_result.get("status") == "accepted":
-                return "updates are being processed in the background! 🏃\nI'll send you a DM when the scan is complete. Please ask me again then."
+                return "updates are being processed in the background! 🏃\nI'll reply here when the scan is complete."
                 
             # Handle sync failures or other errors
             if scan_result.get("error"):

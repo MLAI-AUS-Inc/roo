@@ -585,6 +585,48 @@ class MLAIBackendClient:
             print(f"Failed to trigger repo scan: {e}")
             return {"error": "scan_failed", "message": str(e)}
 
+    async def scaffold_articles(
+        self,
+        domain: str,
+        slack_user_id: str,
+        slack_channel_id: str,
+        slack_thread_ts: str
+    ) -> dict:
+        """
+        Trigger articles directory scaffolding for a domain.
+
+        Args:
+            domain: The domain to scaffold articles for
+            slack_user_id: The Slack user requesting the scaffold
+            slack_channel_id: The Slack channel for thread replies
+            slack_thread_ts: The Slack thread timestamp for replies
+
+        Returns:
+            Response dict with status_code and data
+        """
+        if not self.base_url:
+            raise ValueError("MLAI_BACKEND_URL not configured")
+
+        clean_id = self._clean_slack_id(slack_user_id)
+        payload = {
+            "domain": domain,
+            "slack_user_id": clean_id,
+            "slack_channel_id": slack_channel_id,
+            "slack_thread_ts": slack_thread_ts
+        }
+
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{self.base_url}/api/v1/integrations/github/scaffold",
+                json=payload,
+                headers=self.headers,
+                timeout=60.0
+            )
+            return {
+                "status_code": response.status_code,
+                "data": response.json() if response.status_code < 500 else {}
+            }
+
     async def publish_article(self, job_id: str, slack_user_id: str) -> dict:
         """Request publication of a completed article."""
         if not self.base_url:
