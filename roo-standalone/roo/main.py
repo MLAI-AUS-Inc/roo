@@ -885,17 +885,26 @@ async def content_factory_callback(request: Request):
             domain = payload.get("domain")
             channel_id = payload.get("channel_id")
             thread_ts = payload.get("thread_ts")
-            error_message = payload.get("error_message", "Unknown error")
+            error_message = payload.get("error_message") or payload.get("error", "Unknown error")
+            error_code = payload.get("error_code")
             stage = payload.get("stage", "generation")  # scan, scaffold, generation
 
-            print(f"❌ Generation failed for {domain} at {stage}: {error_message}")
+            print(f"❌ Generation failed for {domain} at {stage}: {error_message} (code: {error_code})")
+
+            # Provide specific error messages based on error_code
+            if error_code == "INVALID_CREDENTIALS":
+                user_message = "❌ I need fresh GitHub access. Please reconnect your GitHub account and try again."
+            elif error_code == "MISSING_CONFIG":
+                user_message = "❌ I don't have scan data for this site. Let me run a scan first."
+            else:
+                user_message = f"❌ Something went wrong setting up the articles directory: {error_message}\n\nLet me know if you'd like to try again."
 
             blocks = [
                 {
                     "type": "section",
                     "text": {
                         "type": "mrkdwn",
-                        "text": f"❌ *Error during {stage}*\n\n{error_message}"
+                        "text": user_message
                     }
                 }
             ]
