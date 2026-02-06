@@ -784,6 +784,8 @@ async def content_factory_callback(request: Request):
             pillar_count = payload.get("pillar_count", 0)
             component_count = payload.get("component_count", 0)
             already_exists = payload.get("already_exists", False)
+            preview_url = payload.get("preview_url")
+            build_verified = payload.get("build_verified", False)
 
             print(f"📁 Scaffold complete for {domain}: PR={pr_url}")
 
@@ -799,6 +801,17 @@ async def content_factory_callback(request: Request):
                     }
                 ]
             elif pr_url:
+                # Build additional info
+                build_status_text = "✅ Build passed" if build_verified else "⏳ Build pending"
+                preview_section = []
+                if preview_url:
+                    preview_section = [{
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": f"🔗 *Preview:* <{preview_url}|View Live Preview>"
+                        }
+                    }]
                 blocks = [
                     {
                         "type": "header",
@@ -833,7 +846,15 @@ async def content_factory_callback(request: Request):
                         "type": "section",
                         "text": {
                             "type": "mrkdwn",
-                            "text": f"*Pull Request:* <{pr_url}|View on GitHub>\n\nMerge this PR to enable article generation for your site."
+                            "text": f"*Pull Request:* <{pr_url}|View on GitHub>\n*Build:* {build_status_text}"
+                        }
+                    },
+                    *preview_section,
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": "Merge this PR to enable article generation for your site."
                         }
                     }
                 ]
