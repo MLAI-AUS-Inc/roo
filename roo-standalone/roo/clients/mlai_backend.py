@@ -162,36 +162,44 @@ class MLAIBackendClient:
         domain: str,
         topic: Optional[str] = None,
         target_keyword: Optional[str] = None,
-        context: Optional[str] = None
+        context: Optional[str] = None,
+        slack_channel_id: Optional[str] = None,
+        slack_thread_ts: Optional[str] = None
     ) -> dict:
         """
         Trigger article generation via mlai-backend.
-        
+
         Args:
             slack_user_id: Slack ID of requesting user
             domain: Target domain
             topic: Article topic (Optional - if omitted, triggers auto-research)
             target_keyword: Main keyword
             context: Optional conversation context
-            
+            slack_channel_id: Slack channel for in-thread replies
+            slack_thread_ts: Slack thread timestamp for in-thread replies
+
         Returns:
             Dict containing job_id and status
         """
         if not self.base_url:
             raise ValueError("MLAI_BACKEND_URL not configured")
-            
+
         payload = {
             "slack_user_id": slack_user_id,
             "domain": domain,
             "context": context
         }
-        
+
         # Only add topic/keyword if provided (omitting them triggers auto-research)
         if topic:
             payload["topic"] = topic
         if target_keyword:
             payload["target_keyword"] = target_keyword
-        
+        if slack_channel_id:
+            payload["slack_channel_id"] = slack_channel_id
+        if slack_thread_ts:
+            payload["slack_thread_ts"] = slack_thread_ts
+
         async with httpx.AsyncClient() as client:
             response = await client.post(
                 f"{self.base_url}/api/v1/content/generate",
