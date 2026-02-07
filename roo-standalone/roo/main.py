@@ -649,79 +649,134 @@ async def content_factory_callback(request: Request):
             components_generated = payload.get("components_generated", False)
             components_count = payload.get("components_count", 0)
             component_names = payload.get("component_names", [])
+            pr_url = payload.get("pr_url")
+            preview_url = payload.get("preview_url")
 
-            print(f"📦 Scan complete for {domain}: {components_count} components")
+            print(f"📦 Scan complete for {domain}: {components_count} components, pr={pr_url}")
 
             # Build message blocks
             if components_generated and components_count > 0:
-                # Success case with components
                 component_list = "\n".join(f"• `{name}`" for name in component_names[:10])
                 if len(component_names) > 10:
                     component_list += f"\n• _...and {len(component_names) - 10} more_"
 
-                blocks = [
-                    {
-                        "type": "header",
-                        "text": {
-                            "type": "plain_text",
-                            "text": "🎉 Repository Scan Complete",
-                            "emoji": True
-                        }
-                    },
-                    {
-                        "type": "section",
-                        "text": {
-                            "type": "mrkdwn",
-                            "text": f"Found *{components_count} components* in your repository for *{domain}*"
-                        }
-                    },
-                    {
-                        "type": "section",
-                        "text": {
-                            "type": "mrkdwn",
-                            "text": f"*Components:*\n{component_list}"
-                        }
-                    },
-                    {
-                        "type": "section",
-                        "text": {
-                            "type": "mrkdwn",
-                            "text": "Would you like me to create the articles directory structure?"
-                        }
-                    },
-                    {
-                        "type": "actions",
-                        "block_id": "scaffold_actions",
-                        "elements": [
-                            {
-                                "type": "button",
-                                "text": {
-                                    "type": "plain_text",
-                                    "text": "📁 Create Articles Directory",
-                                    "emoji": True
-                                },
-                                "style": "primary",
-                                "value": json.dumps({
-                                    "domain": domain,
-                                    "slack_user_id": slack_user_id,
-                                    "channel_id": channel_id,
-                                    "thread_ts": thread_ts
-                                }),
-                                "action_id": "scaffold_confirm"
-                            },
-                            {
-                                "type": "button",
-                                "text": {
-                                    "type": "plain_text",
-                                    "text": "Skip for now",
-                                    "emoji": True
-                                },
-                                "value": json.dumps({"domain": domain}),
-                                "action_id": "scaffold_skip"
+                if pr_url:
+                    # PR available - show review link directly
+                    link_sections = [
+                        {
+                            "type": "section",
+                            "text": {
+                                "type": "mrkdwn",
+                                "text": f"*Pull Request:* <{pr_url}|Review and publish these changes>"
                             }
-                        ]
-                    }
-                ]
+                        }
+                    ]
+                    if preview_url:
+                        link_sections.append({
+                            "type": "section",
+                            "text": {
+                                "type": "mrkdwn",
+                                "text": f"🔗 *Preview:* <{preview_url}|View Live Preview>"
+                            }
+                        })
+
+                    blocks = [
+                        {
+                            "type": "header",
+                            "text": {
+                                "type": "plain_text",
+                                "text": "🎉 Articles Directory Ready",
+                                "emoji": True
+                            }
+                        },
+                        {
+                            "type": "section",
+                            "text": {
+                                "type": "mrkdwn",
+                                "text": f"I've added an articles directory and *{components_count} components* for creating articles on *{domain}*."
+                            }
+                        },
+                        {
+                            "type": "section",
+                            "text": {
+                                "type": "mrkdwn",
+                                "text": f"*Components:*\n{component_list}"
+                            }
+                        },
+                        *link_sections,
+                        {
+                            "type": "section",
+                            "text": {
+                                "type": "mrkdwn",
+                                "text": "Merge this PR to enable article generation for your site. Once merged, say `@Roo write me an article about [topic]` to get started."
+                            }
+                        }
+                    ]
+                else:
+                    # No PR yet - show scaffold buttons
+                    blocks = [
+                        {
+                            "type": "header",
+                            "text": {
+                                "type": "plain_text",
+                                "text": "🎉 Repository Scan Complete",
+                                "emoji": True
+                            }
+                        },
+                        {
+                            "type": "section",
+                            "text": {
+                                "type": "mrkdwn",
+                                "text": f"Found *{components_count} components* in your repository for *{domain}*"
+                            }
+                        },
+                        {
+                            "type": "section",
+                            "text": {
+                                "type": "mrkdwn",
+                                "text": f"*Components:*\n{component_list}"
+                            }
+                        },
+                        {
+                            "type": "section",
+                            "text": {
+                                "type": "mrkdwn",
+                                "text": "Would you like me to create the articles directory structure?"
+                            }
+                        },
+                        {
+                            "type": "actions",
+                            "block_id": "scaffold_actions",
+                            "elements": [
+                                {
+                                    "type": "button",
+                                    "text": {
+                                        "type": "plain_text",
+                                        "text": "📁 Create Articles Directory",
+                                        "emoji": True
+                                    },
+                                    "style": "primary",
+                                    "value": json.dumps({
+                                        "domain": domain,
+                                        "slack_user_id": slack_user_id,
+                                        "channel_id": channel_id,
+                                        "thread_ts": thread_ts
+                                    }),
+                                    "action_id": "scaffold_confirm"
+                                },
+                                {
+                                    "type": "button",
+                                    "text": {
+                                        "type": "plain_text",
+                                        "text": "Skip for now",
+                                        "emoji": True
+                                    },
+                                    "value": json.dumps({"domain": domain}),
+                                    "action_id": "scaffold_skip"
+                                }
+                            ]
+                        }
+                    ]
             else:
                 # No components case
                 blocks = [
@@ -801,60 +856,27 @@ async def content_factory_callback(request: Request):
                     }
                 ]
             elif pr_url:
-                # Build additional info
-                build_status_text = "✅ Build passed" if build_verified else "⏳ Build pending"
-                preview_section = []
+                # Build detail lines
+                details = f"• {files_created} files created ({component_count} components, {pillar_count} pillars)"
+                details += f"\n• PR: <{pr_url}|View pull request>"
+
                 if preview_url:
-                    preview_section = [{
-                        "type": "section",
-                        "text": {
-                            "type": "mrkdwn",
-                            "text": f"🔗 *Preview:* <{preview_url}|View Live Preview>"
-                        }
-                    }]
+                    preview_label = "View live preview"
+                    if "stackblitz.com" in preview_url:
+                        preview_label += " (may take a moment to load)"
+                    details += f"\n• Preview: <{preview_url}|{preview_label}> :eyes:"
+
+                    if build_verified:
+                        details += "\n• Build: Passed :white_check_mark:"
+                    else:
+                        details += "\n• Build: Not verified"
+
                 blocks = [
                     {
-                        "type": "header",
-                        "text": {
-                            "type": "plain_text",
-                            "text": "✅ Articles Directory Created",
-                            "emoji": True
-                        }
-                    },
-                    {
-                        "type": "section",
-                        "fields": [
-                            {
-                                "type": "mrkdwn",
-                                "text": f"*Domain:*\n{domain}"
-                            },
-                            {
-                                "type": "mrkdwn",
-                                "text": f"*Files Created:*\n{files_created}"
-                            },
-                            {
-                                "type": "mrkdwn",
-                                "text": f"*Pillars:*\n{pillar_count}"
-                            },
-                            {
-                                "type": "mrkdwn",
-                                "text": f"*Components:*\n{component_count}"
-                            }
-                        ]
-                    },
-                    {
                         "type": "section",
                         "text": {
                             "type": "mrkdwn",
-                            "text": f"*Pull Request:* <{pr_url}|View on GitHub>\n*Build:* {build_status_text}"
-                        }
-                    },
-                    *preview_section,
-                    {
-                        "type": "section",
-                        "text": {
-                            "type": "mrkdwn",
-                            "text": "Merge this PR to enable article generation for your site."
+                            "text": f"✅ Articles scaffold complete for *{domain}*\n\n{details}"
                         }
                     }
                 ]
