@@ -16,6 +16,10 @@ from .config import get_settings, Settings
 from .agent import RooAgent, get_agent
 from .slack_client import post_message
 
+# Pending intents for auto-continue after prerequisite steps complete.
+# Key: "{slack_user_id}:{domain}" → {"action": "write", "topic": "...", "channel_id": "...", "thread_ts": "..."}
+_pending_intents: dict = {}
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -758,6 +762,51 @@ async def content_factory_callback(request: Request):
                         blocks=blocks
                     )
 
+            # Auto-continue: check for pending intent after scan completes
+            intent_key = f"{slack_user_id}:{domain}"
+            pending = _pending_intents.get(intent_key)
+            if pending:
+                pending_action = pending.get("action")
+                intent_channel = pending.get("channel_id") or channel_id
+                intent_thread = pending.get("thread_ts") or thread_ts
+
+                if pending_action in ("scaffold", "write"):
+                    # Auto-trigger scaffold (keep intent for write auto-continue)
+                    print(f"🔄 Auto-continuing: triggering scaffold for {domain} (pending intent: {pending_action})")
+                    if pending_action == "scaffold":
+                        _pending_intents.pop(intent_key, None)
+
+                    from .clients.mlai_backend import MLAIBackendClient
+                    settings = get_settings()
+                    backend_client = MLAIBackendClient(
+                        base_url=settings.MLAI_BACKEND_URL,
+                        api_key=settings.MLAI_API_KEY
+                    )
+                    try:
+                        result = await backend_client.scaffold_articles(
+                            domain=domain,
+                            slack_user_id=slack_user_id,
+                            slack_channel_id=intent_channel or "",
+                            slack_thread_ts=intent_thread or ""
+                        )
+                        status_code = result.get("status_code")
+                        if status_code == 202:
+                            if intent_channel:
+                                post_message(
+                                    channel=intent_channel,
+                                    thread_ts=intent_thread,
+                                    text=f"📁 Scan complete! Now creating articles directory for *{domain}*..."
+                                )
+                        elif status_code == 200:
+                            if intent_channel:
+                                post_message(
+                                    channel=intent_channel,
+                                    thread_ts=intent_thread,
+                                    text=f"📁 Articles directory already exists for *{domain}*."
+                                )
+                    except Exception as e:
+                        print(f"❌ Auto-scaffold failed: {e}")
+
             return {"status": "ok"}
 
         elif event_type == "scaffold_complete":
@@ -854,7 +903,7 @@ async def content_factory_callback(request: Request):
                                     "emoji": True
                                 },
                                 "value": json.dumps({"domain": domain}),
-                                "action_id": "write_skip"
+                                "action_id": "write_article_skip"
                             }
                         ]
                     }
@@ -899,6 +948,49 @@ async def content_factory_callback(request: Request):
                         text=f"Scaffold complete for {domain}",
                         blocks=blocks
                     )
+
+            # Auto-continue: check for pending write intent after scaffold completes
+            intent_key = f"{slack_user_id}:{domain}"
+            pending = _pending_intents.pop(intent_key, None)
+            if pending and pending.get("action") == "write":
+                intent_channel = pending.get("channel_id") or channel_id
+                intent_thread = pending.get("thread_ts") or thread_ts
+                topic = pending.get("topic")
+
+                print(f"🔄 Auto-continuing: triggering article generation for {domain} (topic: {topic})")
+
+                if intent_channel:
+                    topic_note = f" about *{topic}*" if topic else ""
+                    post_message(
+                        channel=intent_channel,
+                        thread_ts=intent_thread,
+                        text=f"✅ Articles directory is ready! Now writing your article{topic_note}..."
+                    )
+
+                from .clients.mlai_backend import MLAIBackendClient
+                settings = get_settings()
+                backend_client = MLAIBackendClient(
+                    base_url=settings.MLAI_BACKEND_URL,
+                    api_key=settings.MLAI_API_KEY
+                )
+                try:
+                    await backend_client.trigger_article_generation(
+                        slack_user_id=slack_user_id,
+                        domain=domain,
+                        topic=topic,
+                        target_keyword=pending.get("target_keyword"),
+                        slack_channel_id=intent_channel,
+                        slack_thread_ts=intent_thread
+                    )
+                    print(f"✅ Auto-generation triggered for {domain}")
+                except Exception as e:
+                    print(f"❌ Auto-generation failed: {e}")
+                    if intent_channel:
+                        post_message(
+                            channel=intent_channel,
+                            thread_ts=intent_thread,
+                            text=f"❌ Error starting article generation: {e}"
+                        )
 
             return {"status": "ok"}
 
@@ -1204,7 +1296,6 @@ async def slack_actions(request: Request):
         # Get message context for button removal
         msg_channel = payload.get("channel", {}).get("id")
         msg_ts = payload.get("message", {}).get("ts")
-        msg_thread_ts = payload.get("message", {}).get("thread_ts") or msg_ts
 
         # Security check: only the original user can confirm
         if user_id != original_user_id:
@@ -1217,17 +1308,26 @@ async def slack_actions(request: Request):
 
         # Use value's thread context if available, fallback to message context
         reply_channel = value_channel_id or msg_channel
-        reply_thread_ts = value_thread_ts or msg_thread_ts
+        reply_thread_ts = value_thread_ts or payload.get("message", {}).get("thread_ts") or msg_ts
 
-        # 1. Post immediate in-thread reply
+        # 1. Remove buttons and show status via context block
         try:
-            post_message(
-                channel=reply_channel,
-                thread_ts=reply_thread_ts,
-                text=f"📁 Creating articles directory for *{domain}*..."
+            from .slack_client import get_slack_client
+            slack_client = get_slack_client()
+            original_blocks = payload.get("message", {}).get("blocks", [])
+            updated_blocks = [b for b in original_blocks if b.get("type") != "actions"]
+            updated_blocks.append({
+                "type": "context",
+                "elements": [{"type": "mrkdwn", "text": "✅ Creating articles directory..."}]
+            })
+            slack_client.chat_update(
+                channel=msg_channel,
+                ts=msg_ts,
+                text=payload.get("message", {}).get("text", ""),
+                blocks=updated_blocks
             )
         except Exception as e:
-            print(f"⚠️ Failed to post in-thread message: {e}")
+            print(f"⚠️ Failed to update message: {e}")
 
         # 2. Call mlai-backend scaffold API
         from .clients.mlai_backend import MLAIBackendClient
@@ -1248,7 +1348,6 @@ async def slack_actions(request: Request):
             status_code = result.get("status_code")
             data = result.get("data", {})
 
-            # Handle different response codes
             if status_code == 200:
                 # Already scaffolded
                 pr_url = data.get("pr_url", "")
@@ -1259,7 +1358,6 @@ async def slack_actions(request: Request):
                     text=f"📁 Articles directory already exists for *{domain}*.{pr_text}"
                 )
             elif status_code == 400:
-                # Error - check for needs_github_auth
                 error = data.get("error", "Unknown error")
                 if data.get("needs_github_auth"):
                     oauth_url = data.get("oauth_url", "")
@@ -1274,11 +1372,16 @@ async def slack_actions(request: Request):
                         thread_ts=reply_thread_ts,
                         text=f"❌ Could not start scaffolding: {error}"
                     )
+            elif status_code == 404:
+                post_message(
+                    channel=reply_channel,
+                    thread_ts=reply_thread_ts,
+                    text=f"❌ No configuration found for *{domain}*."
+                )
             elif status_code == 202:
-                # Scaffold initiated - mlai-backend will send completion message
-                print(f"✅ Scaffold initiated for {domain}, waiting for completion callback")
+                # Scaffold initiated - backend sends Slack updates directly
+                print(f"✅ Scaffold initiated for {domain}")
             else:
-                # Unexpected status code
                 post_message(
                     channel=reply_channel,
                     thread_ts=reply_thread_ts,
@@ -1295,23 +1398,6 @@ async def slack_actions(request: Request):
                 text=f"❌ Error creating articles directory: {e}"
             )
 
-        # 3. Remove buttons from original message
-        try:
-            from .slack_client import get_slack_client
-            slack_client = get_slack_client()
-            original_blocks = payload.get("message", {}).get("blocks", [])
-            # Keep all blocks except the actions block
-            updated_blocks = [block for block in original_blocks if block.get("type") != "actions"]
-
-            slack_client.chat_update(
-                channel=msg_channel,
-                ts=msg_ts,
-                text=payload.get("message", {}).get("text", ""),
-                blocks=updated_blocks
-            )
-        except Exception as e:
-            print(f"⚠️ Failed to remove buttons: {e}")
-
         return JSONResponse(status_code=200, content={})
 
     # Handler for scaffold_skip
@@ -1325,31 +1411,21 @@ async def slack_actions(request: Request):
 
         domain = value_data.get("domain", "your site")
 
-        # Get message context
         msg_channel = payload.get("channel", {}).get("id")
         msg_ts = payload.get("message", {}).get("ts")
-        msg_thread_ts = payload.get("message", {}).get("thread_ts") or msg_ts
 
         print(f"⏭️ User {user_id} skipped scaffold for {domain}")
 
-        # Post skip message in thread
-        try:
-            post_message(
-                channel=msg_channel,
-                thread_ts=msg_thread_ts,
-                text=f"No worries! You can create the articles directory later with:\n  `@Roo create articles directory for {domain}`"
-            )
-        except Exception as e:
-            print(f"⚠️ Failed to post skip message: {e}")
-
-        # Remove buttons from original message
+        # Replace buttons with context block
         try:
             from .slack_client import get_slack_client
             slack_client = get_slack_client()
             original_blocks = payload.get("message", {}).get("blocks", [])
-            # Keep all blocks except the actions block
-            updated_blocks = [block for block in original_blocks if block.get("type") != "actions"]
-
+            updated_blocks = [b for b in original_blocks if b.get("type") != "actions"]
+            updated_blocks.append({
+                "type": "context",
+                "elements": [{"type": "mrkdwn", "text": f"Skipped. You can scaffold later with `@Roo scaffold {domain}`"}]
+            })
             slack_client.chat_update(
                 channel=msg_channel,
                 ts=msg_ts,
@@ -1357,7 +1433,7 @@ async def slack_actions(request: Request):
                 blocks=updated_blocks
             )
         except Exception as e:
-            print(f"⚠️ Failed to remove buttons: {e}")
+            print(f"⚠️ Failed to update message: {e}")
 
         return JSONResponse(status_code=200, content={})
 
@@ -1377,7 +1453,6 @@ async def slack_actions(request: Request):
 
         msg_channel = payload.get("channel", {}).get("id")
         msg_ts = payload.get("message", {}).get("ts")
-        msg_thread_ts = payload.get("message", {}).get("thread_ts") or msg_ts
 
         if user_id != original_user_id:
             return JSONResponse(status_code=200, content={
@@ -1388,19 +1463,28 @@ async def slack_actions(request: Request):
         print(f"✍️ User {user_id} requested first article for {domain}")
 
         reply_channel = value_channel_id or msg_channel
-        reply_thread_ts = value_thread_ts or msg_thread_ts
+        reply_thread_ts = value_thread_ts or payload.get("message", {}).get("thread_ts") or msg_ts
 
-        # Post immediate in-thread reply
+        # 1. Remove buttons and show status via context block
         try:
-            post_message(
-                channel=reply_channel,
-                thread_ts=reply_thread_ts,
-                text=f"✍️ Starting article generation for *{domain}*... I'll research a topic and get back to you."
+            from .slack_client import get_slack_client
+            slack_client = get_slack_client()
+            original_blocks = payload.get("message", {}).get("blocks", [])
+            updated_blocks = [b for b in original_blocks if b.get("type") != "actions"]
+            updated_blocks.append({
+                "type": "context",
+                "elements": [{"type": "mrkdwn", "text": "✅ Starting article generation..."}]
+            })
+            slack_client.chat_update(
+                channel=msg_channel,
+                ts=msg_ts,
+                text=payload.get("message", {}).get("text", ""),
+                blocks=updated_blocks
             )
         except Exception as e:
-            print(f"⚠️ Failed to post in-thread message: {e}")
+            print(f"⚠️ Failed to update message: {e}")
 
-        # Trigger article generation (no topic = auto-research)
+        # 2. Trigger article generation (no topic = auto-research)
         from .clients.mlai_backend import MLAIBackendClient
         settings = get_settings()
         backend_client = MLAIBackendClient(
@@ -1411,7 +1495,9 @@ async def slack_actions(request: Request):
         try:
             result = await backend_client.trigger_article_generation(
                 slack_user_id=user_id,
-                domain=domain
+                domain=domain,
+                slack_channel_id=reply_channel,
+                slack_thread_ts=reply_thread_ts
             )
             print(f"✅ Article generation triggered for {domain}: {result}")
         except Exception as e:
@@ -1424,27 +1510,11 @@ async def slack_actions(request: Request):
                 text=f"❌ Error starting article generation: {e}"
             )
 
-        # Remove buttons from original message
-        try:
-            from .slack_client import get_slack_client
-            slack_client = get_slack_client()
-            original_blocks = payload.get("message", {}).get("blocks", [])
-            updated_blocks = [block for block in original_blocks if block.get("type") != "actions"]
-
-            slack_client.chat_update(
-                channel=msg_channel,
-                ts=msg_ts,
-                text=payload.get("message", {}).get("text", ""),
-                blocks=updated_blocks
-            )
-        except Exception as e:
-            print(f"⚠️ Failed to remove buttons: {e}")
-
         return JSONResponse(status_code=200, content={})
 
-    # Handler for write_skip
+    # Handler for write_article_skip
     # Value format: JSON string with domain
-    if action_id == "write_skip":
+    if action_id in ("write_article_skip", "write_skip"):
         value = actions[0].get("value", "")
         try:
             value_data = json.loads(value)
@@ -1455,26 +1525,19 @@ async def slack_actions(request: Request):
 
         msg_channel = payload.get("channel", {}).get("id")
         msg_ts = payload.get("message", {}).get("ts")
-        msg_thread_ts = payload.get("message", {}).get("thread_ts") or msg_ts
 
         print(f"⏭️ User {user_id} skipped first article for {domain}")
 
-        try:
-            post_message(
-                channel=msg_channel,
-                thread_ts=msg_thread_ts,
-                text=f"No worries! When you're ready, just say:\n  `@Roo write me an article about [topic]`"
-            )
-        except Exception as e:
-            print(f"⚠️ Failed to post skip message: {e}")
-
-        # Remove buttons from original message
+        # Replace buttons with context block
         try:
             from .slack_client import get_slack_client
             slack_client = get_slack_client()
             original_blocks = payload.get("message", {}).get("blocks", [])
-            updated_blocks = [block for block in original_blocks if block.get("type") != "actions"]
-
+            updated_blocks = [b for b in original_blocks if b.get("type") != "actions"]
+            updated_blocks.append({
+                "type": "context",
+                "elements": [{"type": "mrkdwn", "text": "Skipped. Say `@Roo write me an article about [topic]` anytime."}]
+            })
             slack_client.chat_update(
                 channel=msg_channel,
                 ts=msg_ts,
@@ -1482,13 +1545,250 @@ async def slack_actions(request: Request):
                 blocks=updated_blocks
             )
         except Exception as e:
-            print(f"⚠️ Failed to remove buttons: {e}")
+            print(f"⚠️ Failed to update message: {e}")
 
         return JSONResponse(status_code=200, content={})
 
-    # Legacy handlers for backwards compatibility
-    # Handler for confirm_topic_btn (legacy format)
-    # Value format: "confirm_topic:{job_id}:{index}"
+    # Handler for prerequisite_scan
+    # User clicked "Scan Codebase" from a prerequisite message
+    if action_id == "prerequisite_scan":
+        value = actions[0].get("value", "")
+        try:
+            value_data = json.loads(value)
+        except json.JSONDecodeError:
+            return JSONResponse(status_code=400, content={"error": "Invalid JSON value format"})
+
+        domain = value_data.get("domain")
+        original_user_id = value_data.get("slack_user_id")
+        value_channel_id = value_data.get("channel_id")
+        value_thread_ts = value_data.get("thread_ts")
+        original_intent = value_data.get("original_intent", {})
+
+        msg_channel = payload.get("channel", {}).get("id")
+        msg_ts = payload.get("message", {}).get("ts")
+
+        print(f"🔍 User {user_id} triggered prerequisite scan for {domain}")
+
+        reply_channel = value_channel_id or msg_channel
+        reply_thread_ts = value_thread_ts or payload.get("message", {}).get("thread_ts") or msg_ts
+
+        # Store pending intent for auto-continue after scan completes
+        if original_intent:
+            intent_key = f"{user_id}:{domain}"
+            _pending_intents[intent_key] = {
+                **original_intent,
+                "channel_id": reply_channel,
+                "thread_ts": reply_thread_ts
+            }
+            print(f"   📌 Stored pending intent: {original_intent.get('action')} for {intent_key}")
+
+        # Remove buttons and show status
+        try:
+            from .slack_client import get_slack_client
+            slack_client = get_slack_client()
+            original_blocks = payload.get("message", {}).get("blocks", [])
+            updated_blocks = [b for b in original_blocks if b.get("type") != "actions"]
+            updated_blocks.append({
+                "type": "context",
+                "elements": [{"type": "mrkdwn", "text": "✅ Scanning codebase..."}]
+            })
+            slack_client.chat_update(
+                channel=msg_channel,
+                ts=msg_ts,
+                text=payload.get("message", {}).get("text", ""),
+                blocks=updated_blocks
+            )
+        except Exception as e:
+            print(f"⚠️ Failed to update message: {e}")
+
+        # Trigger scan via backend
+        from .clients.mlai_backend import MLAIBackendClient
+        settings = get_settings()
+        backend_client = MLAIBackendClient(
+            base_url=settings.MLAI_BACKEND_URL,
+            api_key=settings.MLAI_API_KEY
+        )
+
+        try:
+            result = await backend_client.trigger_repo_scan(
+                slack_user_id=user_id,
+                slack_channel_id=reply_channel,
+                slack_thread_ts=reply_thread_ts,
+                domain=domain
+            )
+            if result.get("error"):
+                error_msg = result.get("message", "Unknown error")
+                post_message(
+                    channel=reply_channel,
+                    thread_ts=reply_thread_ts,
+                    text=f"❌ Scan failed: {error_msg}"
+                )
+            else:
+                print(f"✅ Scan triggered for {domain}")
+        except Exception as e:
+            print(f"❌ Failed to trigger scan: {e}")
+            post_message(
+                channel=reply_channel,
+                thread_ts=reply_thread_ts,
+                text=f"❌ Error starting scan: {e}"
+            )
+
+        return JSONResponse(status_code=200, content={})
+
+    # Handler for prerequisite_scaffold
+    # User clicked "Set Up Articles Directory" from a prerequisite message
+    if action_id == "prerequisite_scaffold":
+        value = actions[0].get("value", "")
+        try:
+            value_data = json.loads(value)
+        except json.JSONDecodeError:
+            return JSONResponse(status_code=400, content={"error": "Invalid JSON value format"})
+
+        domain = value_data.get("domain")
+        original_user_id = value_data.get("slack_user_id")
+        value_channel_id = value_data.get("channel_id")
+        value_thread_ts = value_data.get("thread_ts")
+        original_intent = value_data.get("original_intent", {})
+
+        msg_channel = payload.get("channel", {}).get("id")
+        msg_ts = payload.get("message", {}).get("ts")
+
+        print(f"📁 User {user_id} triggered prerequisite scaffold for {domain}")
+
+        reply_channel = value_channel_id or msg_channel
+        reply_thread_ts = value_thread_ts or payload.get("message", {}).get("thread_ts") or msg_ts
+
+        # Store pending intent for auto-continue after scaffold completes
+        if original_intent:
+            intent_key = f"{user_id}:{domain}"
+            _pending_intents[intent_key] = {
+                **original_intent,
+                "channel_id": reply_channel,
+                "thread_ts": reply_thread_ts
+            }
+            print(f"   📌 Stored pending intent: {original_intent.get('action')} for {intent_key}")
+
+        # Remove buttons and show status
+        try:
+            from .slack_client import get_slack_client
+            slack_client = get_slack_client()
+            original_blocks = payload.get("message", {}).get("blocks", [])
+            updated_blocks = [b for b in original_blocks if b.get("type") != "actions"]
+            updated_blocks.append({
+                "type": "context",
+                "elements": [{"type": "mrkdwn", "text": "✅ Creating articles directory..."}]
+            })
+            slack_client.chat_update(
+                channel=msg_channel,
+                ts=msg_ts,
+                text=payload.get("message", {}).get("text", ""),
+                blocks=updated_blocks
+            )
+        except Exception as e:
+            print(f"⚠️ Failed to update message: {e}")
+
+        # Trigger scaffold via backend
+        from .clients.mlai_backend import MLAIBackendClient
+        settings = get_settings()
+        backend_client = MLAIBackendClient(
+            base_url=settings.MLAI_BACKEND_URL,
+            api_key=settings.MLAI_API_KEY
+        )
+
+        try:
+            result = await backend_client.scaffold_articles(
+                domain=domain,
+                slack_user_id=user_id,
+                slack_channel_id=reply_channel,
+                slack_thread_ts=reply_thread_ts
+            )
+
+            status_code = result.get("status_code")
+            data = result.get("data", {})
+
+            if status_code == 200:
+                pr_url = data.get("pr_url", "")
+                pr_text = f" PR: {pr_url}" if pr_url else ""
+                post_message(
+                    channel=reply_channel,
+                    thread_ts=reply_thread_ts,
+                    text=f"📁 Articles directory already exists for *{domain}*.{pr_text}"
+                )
+            elif status_code == 400:
+                error = data.get("error", "Unknown error")
+                if data.get("needs_github_auth"):
+                    oauth_url = data.get("oauth_url", "")
+                    post_message(
+                        channel=reply_channel,
+                        thread_ts=reply_thread_ts,
+                        text=f"❌ GitHub authentication required for *{domain}*.\n\nPlease reconnect: {oauth_url}"
+                    )
+                else:
+                    post_message(
+                        channel=reply_channel,
+                        thread_ts=reply_thread_ts,
+                        text=f"❌ Scaffolding failed: {error}"
+                    )
+            elif status_code == 202:
+                print(f"✅ Scaffold initiated for {domain}")
+            else:
+                post_message(
+                    channel=reply_channel,
+                    thread_ts=reply_thread_ts,
+                    text=f"❌ Unexpected response (status {status_code})"
+                )
+
+        except Exception as e:
+            print(f"❌ Failed to trigger scaffold: {e}")
+            post_message(
+                channel=reply_channel,
+                thread_ts=reply_thread_ts,
+                text=f"❌ Error creating articles directory: {e}"
+            )
+
+        return JSONResponse(status_code=200, content={})
+
+    # Handler for prerequisite_cancel
+    if action_id == "prerequisite_cancel":
+        value = actions[0].get("value", "")
+        try:
+            value_data = json.loads(value)
+        except json.JSONDecodeError:
+            value_data = {}
+
+        domain = value_data.get("domain", "")
+        msg_channel = payload.get("channel", {}).get("id")
+        msg_ts = payload.get("message", {}).get("ts")
+
+        print(f"⏭️ User {user_id} cancelled prerequisite for {domain}")
+
+        # Clear any pending intent
+        intent_key = f"{user_id}:{domain}"
+        _pending_intents.pop(intent_key, None)
+
+        # Replace buttons with context block
+        try:
+            from .slack_client import get_slack_client
+            slack_client = get_slack_client()
+            original_blocks = payload.get("message", {}).get("blocks", [])
+            updated_blocks = [b for b in original_blocks if b.get("type") != "actions"]
+            updated_blocks.append({
+                "type": "context",
+                "elements": [{"type": "mrkdwn", "text": "Cancelled."}]
+            })
+            slack_client.chat_update(
+                channel=msg_channel,
+                ts=msg_ts,
+                text=payload.get("message", {}).get("text", ""),
+                blocks=updated_blocks
+            )
+        except Exception as e:
+            print(f"⚠️ Failed to update message: {e}")
+
+        return JSONResponse(status_code=200, content={})
+
+    # Handler for confirm_topic_btn_* (backend sends these during topic selection)
+    # Value format: "confirm_topic:{job_id}:{option_index}"
     if action_id.startswith("confirm_topic_btn"):
         value = actions[0].get("value", "")
         if not value or not value.startswith("confirm_topic:"):
@@ -1505,8 +1805,31 @@ async def slack_actions(request: Request):
         except ValueError:
             option_index = 0
 
-        print(f"✅ User {user_id} confirmed topic for job {job_id}, option {option_index} (legacy)")
+        print(f"✅ User {user_id} confirmed topic for job {job_id}, option {option_index}")
 
+        msg_channel = payload.get("channel", {}).get("id")
+        msg_ts = payload.get("message", {}).get("ts")
+
+        # Remove buttons and show status via context block
+        try:
+            from .slack_client import get_slack_client
+            slack_client = get_slack_client()
+            original_blocks = payload.get("message", {}).get("blocks", [])
+            updated_blocks = [b for b in original_blocks if b.get("type") != "actions"]
+            updated_blocks.append({
+                "type": "context",
+                "elements": [{"type": "mrkdwn", "text": "✅ Generating article..."}]
+            })
+            slack_client.chat_update(
+                channel=msg_channel,
+                ts=msg_ts,
+                text=payload.get("message", {}).get("text", ""),
+                blocks=updated_blocks
+            )
+        except Exception as e:
+            print(f"⚠️ Failed to update message: {e}")
+
+        # Call confirm endpoint
         from .clients.mlai_backend import MLAIBackendClient
         settings = get_settings()
         client = MLAIBackendClient(
@@ -1520,47 +1843,49 @@ async def slack_actions(request: Request):
                 slack_user_id=user_id,
                 option_index=option_index
             )
-
-            return JSONResponse(status_code=200, content={
-                "response_type": "ephemeral",
-                "replace_original": True,
-                "text": "⏳ Queued generation...",
-                "blocks": [
-                    {
-                        "type": "section",
-                        "text": {
-                            "type": "mrkdwn",
-                            "text": "⏳ Queued generation..."
-                        }
-                    }
-                ]
-            })
+            print(f"✅ Topic confirmed for job {job_id}")
         except Exception as e:
             print(f"❌ Failed to confirm topic: {e}")
             import traceback
             traceback.print_exc()
-            return JSONResponse(status_code=200, content={
-                "response_type": "ephemeral",
-                "text": f"❌ Error confirming topic: {e}"
-            })
+            reply_channel = msg_channel
+            reply_thread_ts = payload.get("message", {}).get("thread_ts") or msg_ts
+            if reply_channel:
+                post_message(
+                    channel=reply_channel,
+                    thread_ts=reply_thread_ts,
+                    text=f"❌ Error confirming topic: {e}"
+                )
 
-    # Handler for cancel_topic_btn (legacy)
+        return JSONResponse(status_code=200, content={})
+
+    # Handler for cancel_topic_btn
     if action_id == "cancel_topic_btn":
-        print(f"❌ User {user_id} cancelled topic selection (legacy)")
-        return JSONResponse(status_code=200, content={
-            "response_type": "ephemeral",
-            "replace_original": True,
-            "text": "❌ Job cancelled.",
-            "blocks": [
-                {
-                    "type": "section",
-                    "text": {
-                        "type": "mrkdwn",
-                        "text": "❌ Job cancelled."
-                    }
-                }
-            ]
-        })
+        print(f"❌ User {user_id} cancelled topic selection")
+
+        msg_channel = payload.get("channel", {}).get("id")
+        msg_ts = payload.get("message", {}).get("ts")
+
+        # Remove buttons and show cancelled status
+        try:
+            from .slack_client import get_slack_client
+            slack_client = get_slack_client()
+            original_blocks = payload.get("message", {}).get("blocks", [])
+            updated_blocks = [b for b in original_blocks if b.get("type") != "actions"]
+            updated_blocks.append({
+                "type": "context",
+                "elements": [{"type": "mrkdwn", "text": "❌ Cancelled."}]
+            })
+            slack_client.chat_update(
+                channel=msg_channel,
+                ts=msg_ts,
+                text=payload.get("message", {}).get("text", ""),
+                blocks=updated_blocks
+            )
+        except Exception as e:
+            print(f"⚠️ Failed to update message: {e}")
+
+        return JSONResponse(status_code=200, content={})
 
 
 

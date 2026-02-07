@@ -4,6 +4,7 @@ Skill Executor
 Executes skill actions based on the skill definition.
 Follows Anthropic's Agent Skills pattern for execution.
 """
+import json
 import re
 import asyncio
 from dataclasses import dataclass
@@ -540,6 +541,46 @@ Keep the response concise but informative."""
             if not domain:
                 return "I need a domain to scaffold the articles directory. Try: `@Roo scaffold articles for <domain>`"
 
+            # Check scan prerequisite
+            if domain_info and not domain_info.get("scanned"):
+                blocks = [
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": f"I need to scan your codebase first before I can do that for *{domain}*.\n\nThis will analyse your repo's design system, generate matching article components, and create content pillars."
+                        }
+                    },
+                    {
+                        "type": "actions",
+                        "block_id": "prerequisite_actions",
+                        "elements": [
+                            {
+                                "type": "button",
+                                "text": {"type": "plain_text", "text": "Scan Codebase", "emoji": True},
+                                "style": "primary",
+                                "value": json.dumps({
+                                    "domain": domain,
+                                    "slack_user_id": user_id,
+                                    "channel_id": channel_id,
+                                    "thread_ts": thread_ts,
+                                    "original_intent": {"action": "scaffold"}
+                                }),
+                                "action_id": "prerequisite_scan"
+                            },
+                            {
+                                "type": "button",
+                                "text": {"type": "plain_text", "text": "Cancel", "emoji": True},
+                                "value": json.dumps({"domain": domain}),
+                                "action_id": "prerequisite_cancel"
+                            }
+                        ]
+                    }
+                ]
+                if channel_id:
+                    post_message(channel_id, f"Scan required for {domain}", thread_ts=thread_ts, blocks=blocks)
+                return "I need to scan your codebase first before I can scaffold the articles directory."
+
             if channel_id:
                 post_message(
                     channel_id,
@@ -564,11 +605,52 @@ Keep the response concise but informative."""
                     return f"📁 Articles directory already exists for *{domain}*.{pr_text}"
                 elif status_code == 202:
                     return "Scaffolding is underway! I'll reply here when it's done. 🏗️"
+                elif status_code == 412:
+                    missing_step = data.get("missing_step", "scan")
+                    blocks = [
+                        {
+                            "type": "section",
+                            "text": {
+                                "type": "mrkdwn",
+                                "text": f"I need to scan your codebase first before I can do that for *{domain}*.\n\nThis will analyse your repo's design system, generate matching article components, and create content pillars."
+                            }
+                        },
+                        {
+                            "type": "actions",
+                            "block_id": "prerequisite_actions",
+                            "elements": [
+                                {
+                                    "type": "button",
+                                    "text": {"type": "plain_text", "text": "Scan Codebase", "emoji": True},
+                                    "style": "primary",
+                                    "value": json.dumps({
+                                        "domain": domain,
+                                        "slack_user_id": user_id,
+                                        "channel_id": channel_id,
+                                        "thread_ts": thread_ts,
+                                        "original_intent": {"action": "scaffold"}
+                                    }),
+                                    "action_id": "prerequisite_scan"
+                                },
+                                {
+                                    "type": "button",
+                                    "text": {"type": "plain_text", "text": "Cancel", "emoji": True},
+                                    "value": json.dumps({"domain": domain}),
+                                    "action_id": "prerequisite_cancel"
+                                }
+                            ]
+                        }
+                    ]
+                    if channel_id:
+                        post_message(channel_id, f"Scan required for {domain}", thread_ts=thread_ts, blocks=blocks)
+                    return "I need to scan your codebase first."
                 elif status_code == 400:
                     if data.get("needs_github_auth"):
                         oauth_url = data.get("oauth_url", "")
                         return f"❌ GitHub authentication required for *{domain}*.\n\nPlease reconnect: {oauth_url}"
                     return f"❌ Could not start scaffolding: {data.get('error', 'Unknown error')}"
+                elif status_code == 404:
+                    return f"❌ No configuration found for *{domain}*."
                 else:
                     return f"❌ Unexpected response from backend (status {status_code})"
             except Exception as e:
@@ -727,9 +809,55 @@ Keep the response concise but informative."""
         # 3. Validation: Check parameters (Domain/Topic)
         topic = params.get("topic")
         target_keyword = params.get("target_keyword", "")
-        
+
         if not domain:
             return "I can help write that article! To get started, I just need to know the domain name (e.g., mlai.au)."
+
+        # Check scaffold prerequisite before article generation
+        if domain_info and not domain_info.get("articles_scaffolded"):
+            original_intent = {"action": "write"}
+            if topic:
+                original_intent["topic"] = topic
+            if target_keyword:
+                original_intent["target_keyword"] = target_keyword
+
+            blocks = [
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": f"I need to set up your articles directory before I can write articles for *{domain}*.\n\nThis will create a PR with all the reusable components and a demo article so you can see how everything looks."
+                    }
+                },
+                {
+                    "type": "actions",
+                    "block_id": "prerequisite_actions",
+                    "elements": [
+                        {
+                            "type": "button",
+                            "text": {"type": "plain_text", "text": "Set Up Articles Directory", "emoji": True},
+                            "style": "primary",
+                            "value": json.dumps({
+                                "domain": domain,
+                                "slack_user_id": user_id,
+                                "channel_id": channel_id,
+                                "thread_ts": thread_ts,
+                                "original_intent": original_intent
+                            }),
+                            "action_id": "prerequisite_scaffold"
+                        },
+                        {
+                            "type": "button",
+                            "text": {"type": "plain_text", "text": "Cancel", "emoji": True},
+                            "value": json.dumps({"domain": domain}),
+                            "action_id": "prerequisite_cancel"
+                        }
+                    ]
+                }
+            ]
+            if channel_id:
+                post_message(channel_id, f"Articles directory needed for {domain}", thread_ts=thread_ts, blocks=blocks)
+            return "I need to set up your articles directory before I can write articles."
 
         try:
             # Start generation via MLAI Backend
@@ -745,7 +873,9 @@ Keep the response concise but informative."""
                 domain=domain,
                 topic=topic,
                 target_keyword=target_keyword,
-                context=full_context
+                context=full_context,
+                slack_channel_id=channel_id,
+                slack_thread_ts=thread_ts
             )
             
             job_id = response.get("job_id")
@@ -765,6 +895,96 @@ Keep the response concise but informative."""
             
         except httpx.HTTPStatusError as e:
             print(f"Content Generation HTTP Error: {e}")
+            if e.response.status_code == 412:
+                try:
+                    error_data = e.response.json()
+                except Exception:
+                    error_data = {}
+                missing_step = error_data.get("missing_step", "")
+                if missing_step == "scan":
+                    original_intent = {"action": "write"}
+                    if topic:
+                        original_intent["topic"] = topic
+                    blocks = [
+                        {
+                            "type": "section",
+                            "text": {
+                                "type": "mrkdwn",
+                                "text": f"I need to scan your codebase first before I can do that for *{domain}*.\n\nThis will analyse your repo's design system, generate matching article components, and create content pillars."
+                            }
+                        },
+                        {
+                            "type": "actions",
+                            "block_id": "prerequisite_actions",
+                            "elements": [
+                                {
+                                    "type": "button",
+                                    "text": {"type": "plain_text", "text": "Scan Codebase", "emoji": True},
+                                    "style": "primary",
+                                    "value": json.dumps({
+                                        "domain": domain,
+                                        "slack_user_id": user_id,
+                                        "channel_id": channel_id,
+                                        "thread_ts": thread_ts,
+                                        "original_intent": original_intent
+                                    }),
+                                    "action_id": "prerequisite_scan"
+                                },
+                                {
+                                    "type": "button",
+                                    "text": {"type": "plain_text", "text": "Cancel", "emoji": True},
+                                    "value": json.dumps({"domain": domain}),
+                                    "action_id": "prerequisite_cancel"
+                                }
+                            ]
+                        }
+                    ]
+                    if channel_id:
+                        post_message(channel_id, f"Scan required for {domain}", thread_ts=thread_ts, blocks=blocks)
+                    return "I need to scan your codebase first."
+                elif missing_step == "scaffold":
+                    original_intent = {"action": "write"}
+                    if topic:
+                        original_intent["topic"] = topic
+                    blocks = [
+                        {
+                            "type": "section",
+                            "text": {
+                                "type": "mrkdwn",
+                                "text": f"I need to set up your articles directory before I can write articles for *{domain}*.\n\nThis will create a PR with all the reusable components and a demo article so you can see how everything looks."
+                            }
+                        },
+                        {
+                            "type": "actions",
+                            "block_id": "prerequisite_actions",
+                            "elements": [
+                                {
+                                    "type": "button",
+                                    "text": {"type": "plain_text", "text": "Set Up Articles Directory", "emoji": True},
+                                    "style": "primary",
+                                    "value": json.dumps({
+                                        "domain": domain,
+                                        "slack_user_id": user_id,
+                                        "channel_id": channel_id,
+                                        "thread_ts": thread_ts,
+                                        "original_intent": original_intent
+                                    }),
+                                    "action_id": "prerequisite_scaffold"
+                                },
+                                {
+                                    "type": "button",
+                                    "text": {"type": "plain_text", "text": "Cancel", "emoji": True},
+                                    "value": json.dumps({"domain": domain}),
+                                    "action_id": "prerequisite_cancel"
+                                }
+                            ]
+                        }
+                    ]
+                    if channel_id:
+                        post_message(channel_id, f"Scaffold required for {domain}", thread_ts=thread_ts, blocks=blocks)
+                    return "I need to set up your articles directory first."
+                else:
+                    return f"A prerequisite step is missing: {error_data.get('error', 'Unknown')}. Please try again."
             if e.response.status_code == 400:
                 try:
                     error_data = e.response.json()
