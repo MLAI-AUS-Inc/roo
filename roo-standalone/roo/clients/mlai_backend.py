@@ -483,13 +483,16 @@ class MLAIBackendClient:
             response.raise_for_status()
             return response.json()
     
-    async def get_github_auth_url(self, slack_user_id: str) -> dict:
+    async def get_github_auth_url(self, slack_user_id: str, domain: Optional[str] = None) -> dict:
         """Get the GitHub OAuth URL for a user from the backend."""
         try:
+            params = {"slack_user_id": slack_user_id}
+            if domain:
+                params["domain"] = domain
             async with httpx.AsyncClient() as client:
                 response = await client.get(
                     f"{self.base_url}/api/v1/integrations/github/auth-url",
-                    params={"slack_user_id": slack_user_id},
+                    params=params,
                     headers=self.headers,
                     timeout=10.0
                 )
