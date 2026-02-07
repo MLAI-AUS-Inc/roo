@@ -358,7 +358,7 @@ Keep the response concise but informative."""
             
             if not auth_url:
                 # Fallback if auth_url missing in error response
-                auth_url_resp = await api_client.get_github_auth_url(user_id)
+                auth_url_resp = await api_client.get_github_auth_url(user_id, domain=domain)
                 auth_url = auth_url_resp.get("auth_url")
 
             blocks = [
@@ -405,7 +405,7 @@ Keep the response concise but informative."""
 
         if not integration:
              # Get Auth URL from Backend
-            auth_response = await api_client.get_github_auth_url(user_id)
+            auth_response = await api_client.get_github_auth_url(user_id, domain=domain)
             auth_url = auth_response.get("auth_url")
             
             if not auth_url:
@@ -495,7 +495,7 @@ Keep the response concise but informative."""
 
         # No repo at all — prompt to connect
         if not repo_name:
-            auth_response = await api_client.get_github_auth_url(user_id)
+            auth_response = await api_client.get_github_auth_url(user_id, domain=domain)
             auth_url = auth_response.get("auth_url")
 
             if not auth_url:
@@ -758,7 +758,7 @@ Keep the response concise but informative."""
                 # If error indicates auth failure or repo not found (404/403/401)
                 if any(code in str(error_msg) for code in ["404", "401", "403", "Not Found", "Bad credentials"]):
                     # Fetch Auth URL to allow reconnect
-                    auth_response = await api_client.get_github_auth_url(user_id)
+                    auth_response = await api_client.get_github_auth_url(user_id, domain=domain)
                     auth_url = auth_response.get("auth_url")
                     
                     if auth_url:
