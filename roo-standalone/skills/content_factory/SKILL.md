@@ -8,6 +8,17 @@ trigger_keywords:
   - write content
   - generate article
   - blog post
+  - scaffold
+  - create articles
+  - articles directory
+  - articles page
+  - set up articles
+  - set up blog
+  - create blog page
+  - add blog
+  - scan codebase
+  - scan my codebase
+  - connect to
 ---
 
 # Content Factory Skill
@@ -37,6 +48,7 @@ Professional, concise, and helpful. Focus on the SEO metrics to justify the reco
 
 ## Parameters
 
+- **action**: The user's intent (optional) - one of "scan", "scaffold", or "write". Use "scan" for requests about scanning/analysing/connecting a repo. Use "scaffold" for requests about creating an articles directory, articles page, blog page, or setting up the blog structure. Use "write" for requests about writing or generating articles/blog posts. If unclear, omit.
 - **domain**: The user's website domain (required) - e.g., "mlai.au"
 - **topic**: The article topic or title (optional) - e.g., "How to Find a Technical Co-Founder". If omitted, triggers "Auto Mode" (research & write).
 - **target_keyword**: SEO target keyword (optional) - e.g., "find technical cofounder"
