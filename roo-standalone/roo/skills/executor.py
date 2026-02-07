@@ -140,7 +140,6 @@ JSON:"""
         ])
         
         # Parse JSON from response
-        import json
         try:
             # Clean up response - extract JSON if wrapped in markdown
             content = response.content.strip()
@@ -297,7 +296,6 @@ Keep the response concise but informative."""
         # If user has no integration AND hasn't confirmed the disclaimer yet
         if not integration and not params.get("confirmed"):
             # Save pending intent so we don't lose the original params (domain/topic)
-            import json
             intent_data = json.dumps({
                 "skill": "content-factory",
                 "params": params,
@@ -442,7 +440,6 @@ Keep the response concise but informative."""
             # Save pending intent before asking for auth
             # Critically: Do NOT overwrite the intent if we are just confirming requirements (which has no domain/topic)
             if not params.get("confirmed"):
-                import json
                 intent_data = json.dumps({
                     "skill": "content-factory",
                     "params": params,
