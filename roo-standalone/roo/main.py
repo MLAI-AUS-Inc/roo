@@ -644,155 +644,86 @@ async def content_factory_callback(request: Request):
         elif event_type == "scan_complete":
             job_id = payload.get("job_id")
             domain = payload.get("domain")
-            channel_id = payload.get("channel_id")  # Thread context from backend
-            thread_ts = payload.get("thread_ts")    # Thread context from backend
-            components_generated = payload.get("components_generated", False)
+            channel_id = payload.get("channel_id")
+            thread_ts = payload.get("thread_ts")
             components_count = payload.get("components_count", 0)
             component_names = payload.get("component_names", [])
-            pr_url = payload.get("pr_url")
-            preview_url = payload.get("preview_url")
+            pillar_count = payload.get("pillar_count")
+            pillar_names = payload.get("pillar_names")
 
-            print(f"📦 Scan complete for {domain}: {components_count} components, pr={pr_url}")
+            print(f"📦 Scan complete for {domain}: {components_count} components, {pillar_count} pillars")
 
-            # Build message blocks
-            if components_generated and components_count > 0:
-                component_list = "\n".join(f"• `{name}`" for name in component_names[:10])
-                if len(component_names) > 10:
-                    component_list += f"\n• _...and {len(component_names) - 10} more_"
+            if components_count > 0:
+                # Build component summary: "ArticleHeroHeader, ArticleCard, ArticleFAQ, +27 more"
+                shown_names = component_names[:3]
+                component_summary = ", ".join(shown_names)
+                remaining = components_count - len(shown_names)
+                if remaining > 0:
+                    component_summary += f", +{remaining} more"
 
-                if pr_url:
-                    # PR available - show review link directly
-                    link_sections = [
-                        {
-                            "type": "section",
-                            "text": {
-                                "type": "mrkdwn",
-                                "text": f"*Pull Request:* <{pr_url}|Review and publish these changes>"
-                            }
-                        }
-                    ]
-                    if preview_url:
-                        link_sections.append({
-                            "type": "section",
-                            "text": {
-                                "type": "mrkdwn",
-                                "text": f"🔗 *Preview:* <{preview_url}|View Live Preview>"
-                            }
-                        })
+                summary = f"I've analysed your codebase and generated:\n• *{components_count} article components* ({component_summary})"
 
-                    blocks = [
-                        {
-                            "type": "header",
-                            "text": {
-                                "type": "plain_text",
-                                "text": "🎉 Articles Directory Ready",
-                                "emoji": True
-                            }
-                        },
-                        {
-                            "type": "section",
-                            "text": {
-                                "type": "mrkdwn",
-                                "text": f"I've added an articles directory and *{components_count} components* for creating articles on *{domain}*."
-                            }
-                        },
-                        {
-                            "type": "section",
-                            "text": {
-                                "type": "mrkdwn",
-                                "text": f"*Components:*\n{component_list}"
-                            }
-                        },
-                        *link_sections,
-                        {
-                            "type": "section",
-                            "text": {
-                                "type": "mrkdwn",
-                                "text": "Merge this PR to enable article generation for your site. Once merged, say `@Roo write me an article about [topic]` to get started."
-                            }
-                        }
-                    ]
-                else:
-                    # No PR yet - show scaffold buttons
-                    blocks = [
-                        {
-                            "type": "header",
-                            "text": {
-                                "type": "plain_text",
-                                "text": "🎉 Repository Scan Complete",
-                                "emoji": True
-                            }
-                        },
-                        {
-                            "type": "section",
-                            "text": {
-                                "type": "mrkdwn",
-                                "text": f"Found *{components_count} components* in your repository for *{domain}*"
-                            }
-                        },
-                        {
-                            "type": "section",
-                            "text": {
-                                "type": "mrkdwn",
-                                "text": f"*Components:*\n{component_list}"
-                            }
-                        },
-                        {
-                            "type": "section",
-                            "text": {
-                                "type": "mrkdwn",
-                                "text": "Would you like me to create the articles directory structure?"
-                            }
-                        },
-                        {
-                            "type": "actions",
-                            "block_id": "scaffold_actions",
-                            "elements": [
-                                {
-                                    "type": "button",
-                                    "text": {
-                                        "type": "plain_text",
-                                        "text": "📁 Create Articles Directory",
-                                        "emoji": True
-                                    },
-                                    "style": "primary",
-                                    "value": json.dumps({
-                                        "domain": domain,
-                                        "slack_user_id": slack_user_id,
-                                        "channel_id": channel_id,
-                                        "thread_ts": thread_ts
-                                    }),
-                                    "action_id": "scaffold_confirm"
-                                },
-                                {
-                                    "type": "button",
-                                    "text": {
-                                        "type": "plain_text",
-                                        "text": "Skip for now",
-                                        "emoji": True
-                                    },
-                                    "value": json.dumps({"domain": domain}),
-                                    "action_id": "scaffold_skip"
-                                }
-                            ]
-                        }
-                    ]
-            else:
-                # No components case
+                if pillar_count and pillar_names:
+                    pillar_list = ", ".join(pillar_names)
+                    summary += f"\n• *{pillar_count} content pillars:* {pillar_list}"
+                elif pillar_count:
+                    summary += f"\n• *{pillar_count} content pillars*"
+
                 blocks = [
                     {
-                        "type": "header",
+                        "type": "section",
                         "text": {
-                            "type": "plain_text",
-                            "text": "✅ Repository Scan Complete",
-                            "emoji": True
+                            "type": "mrkdwn",
+                            "text": f"✅ *Scan complete for {domain}*\n\n{summary}"
                         }
                     },
                     {
                         "type": "section",
                         "text": {
                             "type": "mrkdwn",
-                            "text": f"Scan complete for *{domain}*. No new components were detected."
+                            "text": "Ready to create your articles directory? This will open a PR with:\n- An articles listing page\n- All {0} reusable components\n- A demo article showcasing how they look".format(components_count)
+                        }
+                    },
+                    {
+                        "type": "actions",
+                        "block_id": "scaffold_actions",
+                        "elements": [
+                            {
+                                "type": "button",
+                                "text": {
+                                    "type": "plain_text",
+                                    "text": "Create Articles Directory",
+                                    "emoji": True
+                                },
+                                "style": "primary",
+                                "value": json.dumps({
+                                    "domain": domain,
+                                    "slack_user_id": slack_user_id,
+                                    "channel_id": channel_id,
+                                    "thread_ts": thread_ts
+                                }),
+                                "action_id": "scaffold_confirm"
+                            },
+                            {
+                                "type": "button",
+                                "text": {
+                                    "type": "plain_text",
+                                    "text": "Not Now",
+                                    "emoji": True
+                                },
+                                "value": json.dumps({"domain": domain}),
+                                "action_id": "scaffold_skip"
+                            }
+                        ]
+                    }
+                ]
+            else:
+                blocks = [
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": f"✅ *Scan complete for {domain}*\n\nNo new components were detected."
                         }
                     }
                 ]
@@ -844,7 +775,6 @@ async def content_factory_callback(request: Request):
 
             print(f"📁 Scaffold complete for {domain}: PR={pr_url}")
 
-            # Build message blocks
             if already_exists:
                 blocks = [
                     {
@@ -856,8 +786,7 @@ async def content_factory_callback(request: Request):
                     }
                 ]
             elif pr_url:
-                # Build detail lines
-                details = f"• {files_created} files created ({component_count} components, {pillar_count} pillars)"
+                details = f"• {files_created} files created ({component_count} components, {pillar_count} content pillars)"
                 details += f"\n• PR: <{pr_url}|View pull request>"
 
                 if preview_url:
@@ -871,13 +800,63 @@ async def content_factory_callback(request: Request):
                     else:
                         details += "\n• Build: Not verified"
 
+                extra_sections = []
+                if preview_url:
+                    extra_sections.append({
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": "Check out the demo article in the preview to see how your components look!\n_Note: Preview may take a moment to load._"
+                        }
+                    })
+
                 blocks = [
                     {
                         "type": "section",
                         "text": {
                             "type": "mrkdwn",
-                            "text": f"✅ Articles scaffold complete for *{domain}*\n\n{details}"
+                            "text": f"✅ *Articles directory created for {domain}*\n\n{details}"
                         }
+                    },
+                    *extra_sections,
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": "Ready to write your first article?"
+                        }
+                    },
+                    {
+                        "type": "actions",
+                        "block_id": "write_article_actions",
+                        "elements": [
+                            {
+                                "type": "button",
+                                "text": {
+                                    "type": "plain_text",
+                                    "text": "Write First Article",
+                                    "emoji": True
+                                },
+                                "style": "primary",
+                                "value": json.dumps({
+                                    "domain": domain,
+                                    "slack_user_id": slack_user_id,
+                                    "channel_id": channel_id,
+                                    "thread_ts": thread_ts
+                                }),
+                                "action_id": "write_first_article"
+                            },
+                            {
+                                "type": "button",
+                                "text": {
+                                    "type": "plain_text",
+                                    "text": "Not Now",
+                                    "emoji": True
+                                },
+                                "value": json.dumps({"domain": domain}),
+                                "action_id": "write_skip"
+                            }
+                        ]
                     }
                 ]
             else:
@@ -1369,6 +1348,131 @@ async def slack_actions(request: Request):
             slack_client = get_slack_client()
             original_blocks = payload.get("message", {}).get("blocks", [])
             # Keep all blocks except the actions block
+            updated_blocks = [block for block in original_blocks if block.get("type") != "actions"]
+
+            slack_client.chat_update(
+                channel=msg_channel,
+                ts=msg_ts,
+                text=payload.get("message", {}).get("text", ""),
+                blocks=updated_blocks
+            )
+        except Exception as e:
+            print(f"⚠️ Failed to remove buttons: {e}")
+
+        return JSONResponse(status_code=200, content={})
+
+    # Handler for write_first_article
+    # Value format: JSON string with domain, slack_user_id, channel_id, thread_ts
+    if action_id == "write_first_article":
+        value = actions[0].get("value", "")
+        try:
+            value_data = json.loads(value)
+        except json.JSONDecodeError:
+            return JSONResponse(status_code=400, content={"error": "Invalid JSON value format"})
+
+        domain = value_data.get("domain")
+        original_user_id = value_data.get("slack_user_id")
+        value_channel_id = value_data.get("channel_id")
+        value_thread_ts = value_data.get("thread_ts")
+
+        msg_channel = payload.get("channel", {}).get("id")
+        msg_ts = payload.get("message", {}).get("ts")
+        msg_thread_ts = payload.get("message", {}).get("thread_ts") or msg_ts
+
+        if user_id != original_user_id:
+            return JSONResponse(status_code=200, content={
+                "response_type": "ephemeral",
+                "text": "⚠️ Only the user who initiated the scan can confirm this action."
+            })
+
+        print(f"✍️ User {user_id} requested first article for {domain}")
+
+        reply_channel = value_channel_id or msg_channel
+        reply_thread_ts = value_thread_ts or msg_thread_ts
+
+        # Post immediate in-thread reply
+        try:
+            post_message(
+                channel=reply_channel,
+                thread_ts=reply_thread_ts,
+                text=f"✍️ Starting article generation for *{domain}*... I'll research a topic and get back to you."
+            )
+        except Exception as e:
+            print(f"⚠️ Failed to post in-thread message: {e}")
+
+        # Trigger article generation (no topic = auto-research)
+        from .clients.mlai_backend import MLAIBackendClient
+        settings = get_settings()
+        backend_client = MLAIBackendClient(
+            base_url=settings.MLAI_BACKEND_URL,
+            api_key=settings.MLAI_API_KEY
+        )
+
+        try:
+            result = await backend_client.trigger_article_generation(
+                slack_user_id=user_id,
+                domain=domain
+            )
+            print(f"✅ Article generation triggered for {domain}: {result}")
+        except Exception as e:
+            print(f"❌ Failed to trigger article generation: {e}")
+            import traceback
+            traceback.print_exc()
+            post_message(
+                channel=reply_channel,
+                thread_ts=reply_thread_ts,
+                text=f"❌ Error starting article generation: {e}"
+            )
+
+        # Remove buttons from original message
+        try:
+            from .slack_client import get_slack_client
+            slack_client = get_slack_client()
+            original_blocks = payload.get("message", {}).get("blocks", [])
+            updated_blocks = [block for block in original_blocks if block.get("type") != "actions"]
+
+            slack_client.chat_update(
+                channel=msg_channel,
+                ts=msg_ts,
+                text=payload.get("message", {}).get("text", ""),
+                blocks=updated_blocks
+            )
+        except Exception as e:
+            print(f"⚠️ Failed to remove buttons: {e}")
+
+        return JSONResponse(status_code=200, content={})
+
+    # Handler for write_skip
+    # Value format: JSON string with domain
+    if action_id == "write_skip":
+        value = actions[0].get("value", "")
+        try:
+            value_data = json.loads(value)
+        except json.JSONDecodeError:
+            return JSONResponse(status_code=400, content={"error": "Invalid JSON value format"})
+
+        domain = value_data.get("domain", "your site")
+
+        msg_channel = payload.get("channel", {}).get("id")
+        msg_ts = payload.get("message", {}).get("ts")
+        msg_thread_ts = payload.get("message", {}).get("thread_ts") or msg_ts
+
+        print(f"⏭️ User {user_id} skipped first article for {domain}")
+
+        try:
+            post_message(
+                channel=msg_channel,
+                thread_ts=msg_thread_ts,
+                text=f"No worries! When you're ready, just say:\n  `@Roo write me an article about [topic]`"
+            )
+        except Exception as e:
+            print(f"⚠️ Failed to post skip message: {e}")
+
+        # Remove buttons from original message
+        try:
+            from .slack_client import get_slack_client
+            slack_client = get_slack_client()
+            original_blocks = payload.get("message", {}).get("blocks", [])
             updated_blocks = [block for block in original_blocks if block.get("type") != "actions"]
 
             slack_client.chat_update(
