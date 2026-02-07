@@ -288,15 +288,9 @@ Keep the response concise but informative."""
         )
         domain = params.get("domain")
         org_config_cached = None
-        if not domain:
-            org_config_cached = await api_client.get_content_org_config(
-                slack_user_id=user_id
-            )
-            if org_config_cached:
-                domain = org_config_cached.get("domain") or domain
-        
-        # Check Status of GitHub Integration (pass domain for domain-specific checks)
-        integration = await api_client.get_integration(user_id, domain=domain)
+
+        # Check Status of GitHub Integration
+        integration = await api_client.get_integration(user_id)
         
         # 1. New User Disclaimer & Education
         # If user has no integration AND hasn't confirmed the disclaimer yet
@@ -462,61 +456,53 @@ Keep the response concise but informative."""
                 return "I've sent a button to connect your GitHub account. 🔌"
             return f"Please connect your GitHub account here: {auth_url}"
 
-        # 2. Check for Project Scanned status & Pre-flight Status check
+        # 2. Resolve domain from connected_domains
+        connected_domains = integration.get("connected_domains", [])
 
-        # Check domain-specific GitHub connection when domain is known
-        if domain and integration.get("domain_connected") is False:
-            # GitHub is NOT connected for this specific domain
-            oauth_url = integration.get("oauth_url")
-            domain_name = integration.get("domain", domain)
-            if oauth_url:
-                blocks = [
-                    {
-                        "type": "section",
-                        "text": {
-                            "type": "mrkdwn",
-                            "text": f"⚠️ GitHub isn't connected for *{domain_name}* yet.\nClick below to connect your GitHub repo for this domain."
-                        }
-                    },
-                    {
-                        "type": "actions",
-                        "elements": [
-                            {
-                                "type": "button",
-                                "text": {
-                                    "type": "plain_text",
-                                    "text": "Connect GitHub for " + domain_name,
-                                    "emoji": True
-                                },
-                                "url": oauth_url,
-                                "action_id": "connect_github",
-                                "style": "primary"
-                            }
-                        ]
-                    }
-                ]
-                if channel_id:
-                    post_message(channel_id, f"GitHub not connected for {domain_name}", thread_ts=thread_ts, blocks=blocks)
-                    return f"GitHub isn't connected for {domain_name} yet. Click the button above to connect! 🔌"
-                return f"GitHub isn't connected for {domain_name}. Connect here: {oauth_url}"
+        if not domain:
+            if len(connected_domains) == 0:
+                # No domains connected — fall back to org config lookup
+                org_config_cached = await api_client.get_content_org_config(
+                    slack_user_id=user_id
+                )
+                if org_config_cached:
+                    domain = org_config_cached.get("domain")
+            elif len(connected_domains) == 1:
+                # Single domain — use it automatically
+                domain = connected_domains[0].get("domain")
             else:
-                return f"GitHub isn't connected for {domain_name}. Please connect your GitHub account."
+                # Multiple domains — ask user to choose
+                domain_list = "\n".join(
+                    f"  • `{d['domain']}` → `{d.get('github_repo', 'unknown')}`"
+                    for d in connected_domains
+                )
+                msg = f"You have multiple connected codebases. Which one should I work with?\n\n{domain_list}\n\nTry: `@Roo scan <domain>` or `@Roo write an article for <domain>`"
+                if channel_id:
+                    post_message(channel_id, msg, thread_ts)
+                return msg
 
-        # Use domain-specific repo if available, otherwise fall back to default
-        if domain and integration.get("domain_connected"):
-            repo_name = integration.get("domain_github_repo") or integration.get("github_repo")
-        else:
+        # Look up repo from connected_domains
+        repo_name = None
+        domain_info = None
+        if domain and connected_domains:
+            domain_info = next(
+                (d for d in connected_domains if d.get("domain") == domain), None
+            )
+            if domain_info:
+                repo_name = domain_info.get("github_repo")
+
+        # Fallback to top-level github_repo if domain not in connected_domains
+        if not repo_name:
             repo_name = integration.get("github_repo")
 
-        # Scenario C: Token but No Repo
+        # No repo at all — prompt to connect
         if not repo_name:
-             # Get Auth URL from Backend (reuse same flow to re-select repo)
             auth_response = await api_client.get_github_auth_url(user_id)
             auth_url = auth_response.get("auth_url")
-            
+
             if not auth_url:
                 return "Sorry mate, I couldn't get the authorization URL. Try again?"
-            
+
             blocks = [
                 {
                     "type": "section",
@@ -542,40 +528,76 @@ Keep the response concise but informative."""
                     ]
                 }
             ]
-            
+
             if channel_id:
                 post_message(channel_id, "Please select a repository", thread_ts=thread_ts, blocks=blocks)
                 return "Please choose a repository to use with the Content Factory. 🔌"
             return f"Please select a repository here: {auth_url}"
 
-        # Scenario A: Repo Linked - Check Status & Updates
+        # 3. Handle explicit scaffold action
+        action = params.get("action")
+        if action == "scaffold":
+            if not domain:
+                return "I need a domain to scaffold the articles directory. Try: `@Roo scaffold articles for <domain>`"
+
+            if channel_id:
+                post_message(
+                    channel_id,
+                    f"📁 Creating articles directory for *{domain}*...",
+                    thread_ts
+                )
+
+            try:
+                result = await api_client.scaffold_articles(
+                    domain=domain,
+                    slack_user_id=user_id,
+                    slack_channel_id=channel_id or "",
+                    slack_thread_ts=thread_ts or ""
+                )
+
+                status_code = result.get("status_code")
+                data = result.get("data", {})
+
+                if status_code == 200:
+                    pr_url = data.get("pr_url", "")
+                    pr_text = f" <{pr_url}|View PR>" if pr_url else ""
+                    return f"📁 Articles directory already exists for *{domain}*.{pr_text}"
+                elif status_code == 202:
+                    return "Scaffolding is underway! I'll reply here when it's done. 🏗️"
+                elif status_code == 400:
+                    if data.get("needs_github_auth"):
+                        oauth_url = data.get("oauth_url", "")
+                        return f"❌ GitHub authentication required for *{domain}*.\n\nPlease reconnect: {oauth_url}"
+                    return f"❌ Could not start scaffolding: {data.get('error', 'Unknown error')}"
+                else:
+                    return f"❌ Unexpected response from backend (status {status_code})"
+            except Exception as e:
+                print(f"❌ Failed to trigger scaffold: {e}")
+                return f"❌ Error creating articles directory: {e}"
+
+        # 4. Check scan status
         needs_scan = False
         scan_reason = ""
-        
-        if not integration.get("project_scanned"):
+
+        if domain_info:
+            # Use domain-specific scan status
+            if not domain_info.get("scanned"):
+                needs_scan = True
+                scan_reason = "Initial scan required"
+        elif not integration.get("project_scanned"):
             needs_scan = True
             scan_reason = "Initial scan required"
-        elif integration.get("has_updates"):
+
+        if integration.get("has_updates"):
             needs_scan = True
             scan_reason = "🔄 Updates detected in repository"
-        elif domain:
-            # Double check that the org config actually exists (handle deleted config case)
-            # This fixes the issue where user deletes Org entry but Integration remains
-            org_config = org_config_cached
-            if org_config is None:
-                org_config = await api_client.get_content_org_config(
-                    slack_user_id=user_id
-                )
-            if not org_config:
-                needs_scan = True
-                scan_reason = "⚠️ Configuration missing (re-scan required)"
             
         # Compile Status Report
         last_scanned = integration.get("last_scanned_at", "Never")
         last_article = (integration.get("last_article") or {}).get("title", "None")
-        
+
         if channel_id:
-            if domain and integration.get("domain_connected"):
+            if domain:
                 connected_msg = f"👋 G'day! Connected to `{repo_name}` for *{domain}*.\n\n"
             else:
                 connected_msg = f"👋 G'day! I see you're connected to `{repo_name}`.\n\n"
@@ -589,7 +611,7 @@ Keep the response concise but informative."""
                 status_msg += f"\n{scan_reason}. Scanning updates now... 🕵️"
             else:
                 status_msg += "• Repository: ✅ Up to date"
-            
+
             post_message(channel_id, status_msg, thread_ts)
 
         if needs_scan:
@@ -606,6 +628,18 @@ Keep the response concise but informative."""
             # Handle sync failures or other errors
             if scan_result.get("error"):
                 error_msg = scan_result.get("message", "Unknown error")
+
+                # Multiple domains — backend needs user to choose
+                if scan_result.get("error") == "multiple_domains":
+                    available = scan_result.get("available_domains", [])
+                    domain_list = "\n".join(
+                        f"  • `{d['domain']}` → `{d.get('github_repo', 'unknown')}`"
+                        for d in available
+                    )
+                    msg = f"{error_msg}\n\n{domain_list}\n\nTry: `@Roo scan <domain>`"
+                    if channel_id:
+                        post_message(channel_id, msg, thread_ts)
+                    return msg
 
                 # If backend says GitHub isn't connected for this domain
                 if scan_result.get("needs_github_auth"):

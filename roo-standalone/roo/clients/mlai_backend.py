@@ -570,6 +570,13 @@ class MLAIBackendClient:
                         error_data = response.json()
                     except Exception:
                         error_data = {"error": response.text}
+                    if error_data.get("available_domains"):
+                        return {
+                            "error": "multiple_domains",
+                            "available_domains": error_data["available_domains"],
+                            "message": error_data.get("error", "Multiple domains available"),
+                            "hint": error_data.get("hint", "")
+                        }
                     if error_data.get("needs_github_auth"):
                         return {
                             "error": "needs_github_auth",
