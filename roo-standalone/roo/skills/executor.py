@@ -1896,13 +1896,19 @@ Keep the response concise but informative."""
              return f"Please select a repository here: {auth_url}"
 
         # 3. Trigger Scan via Backend
+        domain = params.get("domain")
         if channel_id:
             scan_msg = f"🔍 Requesting scan for `{repo_name}`..."
             post_message(channel_id, scan_msg, thread_ts=thread_ts)
-            
+
         try:
             # Trigger via Backend Client
-            scan_result = await api_client.trigger_repo_scan(user_id)
+            scan_result = await api_client.trigger_repo_scan(
+                user_id,
+                slack_channel_id=channel_id,
+                slack_thread_ts=thread_ts,
+                domain=domain
+            )
             
             if scan_result.get("error"):
                  return f"❌ Scan failed: {scan_result.get('message')}"
