@@ -332,8 +332,14 @@ Original text:
         guess_patterns = ["i think it", "my diagnosis is", "my guess is", "is it ",
                           "could it be", "i reckon it", "the diagnosis is",
                           "i believe it", "it must be", "it's got to be",
-                          "lock in", "lock it in", "final answer"]
+                          "does she have", "does he have", "do they have",
+                          "she has", "he has", "they have", "it could be",
+                          "maybe it's", "i'd say", "i'd guess",
+                          "has she got", "has he got", "have they got"]
+        # Patterns that are ONLY for confirmation, not new guesses
+        confirm_only_patterns = ["lock in", "lock it in", "final answer"]
         is_guess = any(p in text_lower for p in guess_patterns)
+        is_lock_in = any(p in text_lower for p in confirm_only_patterns)
 
         # Confirmation patterns for locking in a pending guess
         confirm_patterns = ["yes", "yeah", "yep", "yup", "lock in", "lock it in",
@@ -371,6 +377,44 @@ Original text:
             # remind them (but also let the LLM respond to their question)
             # Clear the pending guess so it doesn't block future interactions
             client.clear_pending_guess(user_id)
+
+        # --- "Lock it in" with no pending guess: search thread history ---
+        if is_lock_in and not is_guess and not pending_guess and current_case and not current_case.get("solved"):
+            if client.is_user_locked_out(user_id, today):
+                return (
+                    f"<@{user_id}> Sorry mate, you've already used your guess for today's case. "
+                    "Come back tomorrow for a new one!"
+                )
+            # Try to find their most recent guess-like message in thread history
+            extracted_guess = None
+            if thread_history:
+                for msg in reversed(thread_history) if isinstance(thread_history, list) else []:
+                    msg_user = msg.get("user", "")
+                    msg_text = msg.get("text", "").lower()
+                    if msg_user == user_id and msg_text != text_lower:
+                        # Check if this earlier message had a guess in it
+                        for p in guess_patterns:
+                            if p in msg_text:
+                                idx = msg_text.index(p) + len(p)
+                                candidate = msg.get("text", "")[idx:].strip().rstrip("?.!")
+                                if candidate:
+                                    extracted_guess = candidate
+                                    break
+                        if extracted_guess:
+                            break
+
+            if extracted_guess:
+                # Lock it in immediately
+                result = client.check_guess(user_id, extracted_guess, today)
+                return await self._handle_guess_result(
+                    result, user_id, skill, text, client, today,
+                    thread_history, channel_id, extracted_guess
+                )
+            else:
+                return (
+                    f"<@{user_id}> I'm not sure what diagnosis you want to lock in. "
+                    f"Please tell me your guess first, e.g. \"I think it's pneumonia\""
+                )
 
         # --- New guess attempt ---
         if is_guess and current_case and not current_case.get("solved"):
