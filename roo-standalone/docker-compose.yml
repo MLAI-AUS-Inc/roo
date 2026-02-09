@@ -9,9 +9,9 @@ services:
     volumes:
       - ./skills:/app/skills:ro
       - roo-data:/app/data
-
-volumes:
-  roo-data:
     dns:
       - 8.8.8.8
       - 8.8.4.4
+
+volumes:
+  roo-data:
