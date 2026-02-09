@@ -15,7 +15,10 @@ from difflib import SequenceMatcher
 SKILL_DIR = Path(__file__).parent
 CASES_FILE = SKILL_DIR / "cases.yaml"
 EVENT_INFO_FILE = SKILL_DIR / "event_info.yaml"
-GAME_STATE_FILE = SKILL_DIR / "game_state.json"
+
+# Game state goes in /app/data (writable volume) in production, falls back to skill dir for local dev
+DATA_DIR = Path("/app/data") if Path("/app/data").exists() else SKILL_DIR
+GAME_STATE_FILE = DATA_DIR / "medhack_game_state.json"
 
 # Points awarded for a correct diagnosis
 DIAGNOSIS_WIN_POINTS = 12
