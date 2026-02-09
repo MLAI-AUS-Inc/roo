@@ -204,6 +204,63 @@ Original text:
 
         return response.content
 
+    async def _ensure_user_exists(self, user_id: str) -> None:
+        """
+        Ensure a user exists in the mlai-backend database.
+        Uses the /api/v1/users/slack-user/ endpoint which handles both
+        new user creation and returning existing users.
+
+        This prevents errors when new users interact with backend-dependent features.
+        """
+        from ..clients.mlai_backend import MLAIBackendClient
+        from ..slack_client import get_user_info
+
+        try:
+            backend = MLAIBackendClient()
+
+            # Get Slack user profile
+            slack_info = get_user_info(user_id)
+
+            # Email is required by the backend
+            email = slack_info.get("email")
+            if not email:
+                # If no email in Slack profile, generate a fallback
+                email = f"{user_id}@slack.generated"
+                print(f"⚠️ No email found for {user_id}, using generated: {email}")
+
+            # Parse first_name and last_name from real_name
+            real_name = slack_info.get("real_name", "")
+            name_parts = real_name.split(" ", 1) if real_name else []
+            first_name = name_parts[0] if len(name_parts) > 0 else ""
+            last_name = name_parts[1] if len(name_parts) > 1 else ""
+
+            # Get avatar URL (192x192 size is good for profiles)
+            # Note: Slack user info structure varies, handle both formats
+            avatar_url = slack_info.get("image_192")  # Direct from our get_user_info
+
+            # Register/fetch user using the new endpoint
+            # This endpoint returns existing users or creates new ones
+            result = await backend.ensure_slack_user_registered(
+                slack_id=user_id,
+                email=email,
+                first_name=first_name,
+                last_name=last_name,
+                avatar_url=avatar_url
+            )
+
+            if result.get("created"):
+                print(f"✅ Created new user: {email} (Slack ID: {user_id})")
+            else:
+                if result.get("linked"):
+                    print(f"✅ Linked Slack ID {user_id} to existing user: {email}")
+                # Silently pass for existing users (no need to log on every message)
+
+        except Exception as e:
+            # Don't fail the request if user registration fails
+            # The MedHack client will handle missing users gracefully with local fallback
+            print(f"⚠️ Failed to register user {user_id}: {e}")
+            print(f"   MedHack will continue with local JSON fallback")
+
     async def _execute_medhack(
         self,
         skill: Skill,
@@ -227,6 +284,9 @@ Original text:
                     f"The MedHack skill is only available in {channels_list}. "
                     f"Head over there to ask about the event or play Guess the Diagnosis!"
                 )
+
+        # Ensure user exists in backend (auto-create if needed)
+        await self._ensure_user_exists(user_id)
 
         # Load the MedHackClient from the skill module
         ClientClass = skill.get_client_class("MedHackClient")

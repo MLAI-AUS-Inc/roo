@@ -138,10 +138,10 @@ class MLAIBackendClient:
         name: str,
         email: Optional[str] = None
     ) -> dict:
-        """Create a new user in mlai-backend."""
+        """Create a new user in mlai-backend (legacy endpoint)."""
         if not self.base_url:
             return {}
-        
+
         async with httpx.AsyncClient() as client:
             response = await client.post(
                 f"{self.base_url}/api/roo/users/",
@@ -150,6 +150,61 @@ class MLAIBackendClient:
                     "name": name,
                     "email": email
                 },
+                headers=self.headers,
+                timeout=10.0
+            )
+            response.raise_for_status()
+            return response.json()
+
+    async def ensure_slack_user_registered(
+        self,
+        slack_id: str,
+        email: str,
+        first_name: Optional[str] = None,
+        last_name: Optional[str] = None,
+        avatar_url: Optional[str] = None
+    ) -> dict:
+        """
+        Ensure a Slack user is registered in mlai-backend.
+        This is the recommended endpoint for user registration.
+
+        Uses the /api/v1/users/slack-user/ endpoint which:
+        - Creates new user if slack_id doesn't exist
+        - Returns existing user if already registered
+        - Links slack_id to existing email if found
+
+        Args:
+            slack_id: Slack user ID (e.g., "U05QPB483K9")
+            email: User's email address (required)
+            first_name: User's first name (optional)
+            last_name: User's last name (optional)
+            avatar_url: URL to user's Slack avatar (optional)
+
+        Returns:
+            Dict with keys: user_id, email, slack_id, created (bool)
+
+        Raises:
+            httpx.HTTPError: If API request fails
+        """
+        if not self.base_url:
+            return {}
+
+        payload = {
+            "slack_id": slack_id,
+            "email": email,
+        }
+
+        if first_name:
+            payload["first_name"] = first_name
+        if last_name:
+            payload["last_name"] = last_name
+        if avatar_url:
+            payload["avatar_url"] = avatar_url
+
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{self.base_url}/api/v1/users/slack-user/",
+                json=payload,
                 headers=self.headers,
                 timeout=10.0
             )
