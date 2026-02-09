@@ -93,7 +93,24 @@ async def _medhack_daily_case_loop():
                             f"_You have 3 guesses. First correct answer wins 12 MLAI points "
                             f"+ DM Dr Sam for a free ticket code to MedHack: Frontiers!_"
                         )
-                    post_message(channel=channel_id, text=message)
+
+                    # Build blocks with optional image
+                    image_url = new_case.get("image_url", "")
+                    if image_url:
+                        blocks = [
+                            {
+                                "type": "image",
+                                "image_url": image_url,
+                                "alt_text": f"Guess the Diagnosis - {new_case.get('title', 'Daily Case')}",
+                            },
+                            {
+                                "type": "section",
+                                "text": {"type": "mrkdwn", "text": message},
+                            },
+                        ]
+                        post_message(channel=channel_id, text=message, blocks=blocks)
+                    else:
+                        post_message(channel=channel_id, text=message)
                     print(f"Posted new MedHack case #{new_case['id']} for {today}")
                 else:
                     print("⚠️ No available MedHack cases to post")

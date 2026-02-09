@@ -271,4 +271,6 @@ class MedHackClient:
             result["title"] = new_case["title"]
         if new_case.get("ed_first_look"):
             result["ed_first_look"] = new_case["ed_first_look"]
+        if new_case.get("image_url"):
+            result["image_url"] = new_case["image_url"]
         return result
