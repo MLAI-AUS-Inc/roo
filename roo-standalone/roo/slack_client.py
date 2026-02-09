@@ -131,28 +131,30 @@ def get_thread_messages(channel: str, thread_ts: str) -> list[dict]:
 def get_user_info(user_id: str) -> Dict[str, Any]:
     """
     Get user information from Slack.
-    
+
     Results are cached to avoid repeated API calls.
     """
     client = get_slack_client()
-    
+
     try:
         response = client.users_info(user=user_id)
-        
+
         if response.get("ok"):
             user = response["user"]
             profile = user.get("profile", {})
-            
+
             return {
                 "id": user_id,
                 "name": user.get("name", ""),
                 "real_name": user.get("real_name", profile.get("real_name", "")),
                 "display_name": profile.get("display_name", ""),
                 "email": profile.get("email", ""),
+                "image_192": profile.get("image_192", ""),  # 192x192 avatar
+                "image_512": profile.get("image_512", ""),  # 512x512 avatar
             }
-        
+
         return {"id": user_id, "name": "Unknown"}
-        
+
     except Exception as e:
         print(f"❌ User lookup error for {user_id}: {e}")
         return {"id": user_id, "name": "Unknown"}
