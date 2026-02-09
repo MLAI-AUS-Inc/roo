@@ -363,7 +363,10 @@ Original text:
             message = (
                 f"{header}\n\n"
                 f"{complaint}\n\n"
-                f"Ask me questions about this patient to work towards the diagnosis. "
+                f"Tag *@Roo* to interact — I'm your gateway to the patient. "
+                f"Ask me anything you'd ask them and I'll relay their answer. "
+                f"You can also request examinations and investigations, but be specific — "
+                f"the hospital has limited resources and inappropriate or costly tests may be denied.\n\n"
                 f"When you're ready, tell me your diagnosis!\n\n"
                 f"_You have 3 guesses. First correct answer wins 12 MLAI points "
                 f"+ DM Dr Sam for a free ticket code to MedHack: Frontiers!_"
