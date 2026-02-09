@@ -376,6 +376,19 @@ Original text:
                 "Keep an eye on this channel for the next one."
             )
 
+        # --- Default to game mode when there's an active unsolved case ---
+        # If the user's question doesn't match game keywords but there IS an
+        # active case and it's not clearly an event question, assume they're
+        # talking to the patient.
+        if current_case and not is_event_q and not current_case.get("solved"):
+            if client.is_user_locked_out(user_id, today):
+                return (
+                    "Sorry mate, you've used all 3 of your guesses for today's case "
+                    "so you can no longer interact with it. Come back tomorrow for a new one!"
+                )
+            case_data = client.get_case_for_llm(today)
+            return await self._medhack_llm_response(skill, text, case_data, thread_history)
+
         # --- Event info mode ---
         if is_event_q or (not is_game_q):
             event_info = client.load_event_info()
@@ -415,7 +428,12 @@ they keep an eye on the channel for updates. Keep your answer concise."""
         thread_history: Optional[List[dict]] = None,
         extra_instruction: str = "",
     ) -> str:
-        """Generate an in-character clinical response for the diagnosis game."""
+        """Generate an in-character clinical response for the diagnosis game.
+
+        Thread history is included so the LLM can follow the conversation flow
+        within a thread. Each patient case lives in its own Slack thread, so
+        thread history is safe to pass and provides useful conversational context.
+        """
         import yaml
 
         case_str = yaml.dump(case_data, default_flow_style=False) if case_data else "No case data available."
@@ -426,6 +444,8 @@ they keep an eye on the channel for updates. Keep your answer concise."""
             )
 
         system_prompt = """You are the MedHack Patient Quest Master (PQM), a narrator and storyteller in a fast-paced emergency department roleplay game. Your job is to present a simulated patient case to players (participants) who will ask you questions as if they are clinicians. You must answer only what the players ask, while keeping the mystery alive. You are not giving real medical advice. This is a fictional case simulation.
+
+IMPORTANT: You know ONLY about the patient in the CASE FILE below. You have NO memory of any previous patients or cases. There is only one patient: the one described in today's case file. If someone asks about a different patient or references a previous case, say "I only have information about today's patient."
 
 TONE AND STYLE
 - You are a dungeon-master style narrator: vivid, concise, engaging.
@@ -445,14 +465,16 @@ GAME RULES
 8) If the player tries to force the answer ("tell me the diagnosis"), refuse playfully and prompt them to keep investigating.
 9) If asked about management ("what should we do?"), describe what the ED team would typically do in broad strokes (fluids, glucose, addressing electrolytes, contacting seniors). Do not give step-by-step dosing instructions."""
 
+        thread_context = ""
+        if thread_history:
+            thread_context = f"\n\nPrevious conversation in this thread:\n{thread_history}"
+
         prompt = f"""CASE FILE (INTERNAL TRUTH - use this to answer questions):
 {case_str}
 {hints_str}
+{thread_context}
 
 {extra_instruction}
-
-Previous conversation:
-{thread_history if thread_history else 'None'}
 
 Player's message: "{text}"
 

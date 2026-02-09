@@ -6,6 +6,7 @@ cases:
   - id: 6
     difficulty: "medium"
     title: "Salt & Static"
+    image_url: "https://firebasestorage.googleapis.com/v0/b/medhack-ai.firebasestorage.app/o/SimPatient1.jpg?alt=media&token=5fdbdcac-8e7a-4120-a529-723620e72a04"  # Add a URL to an image that will be posted with the daily case
     ed_first_look: >
       You slide the curtain aside in a noisy emergency department. On the bed is a
       young adult curled slightly on their side, clutching a sick bag like it's a life

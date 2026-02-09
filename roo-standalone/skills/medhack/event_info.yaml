@@ -272,7 +272,8 @@ workshops:
   - name: "Workshop 3 (Pitching)"
     day: "Day 2"
     time: "10:30 AM"
-  note: "Strongly recommended, especially if you're new or you want your pitch/demo to land well."
+
+workshops_note: "Strongly recommended, especially if you're new or you want your pitch/demo to land well."
 
 # ---------------------
 # FOOD & DRINKS
@@ -376,10 +377,11 @@ what_to_bring:
   - "Anything you need for your build/demo"
   - "Ticket confirmation and ID"
   - "A power board (smart move for team tables)"
-  dress_code: "Comfortable casual clothing. You'll be sitting, building, and moving between mentor chats."
-  pre_install: "Have your usual dev setup ready (Python, notebooks, Git, etc.). You'll get track-specific guidance at the event."
-  hardware_allowed: true
-  hardware_note: "Yes, as long as it's safe, portable, and you can manage it at a hackathon table."
+
+dress_code: "Comfortable casual clothing. You'll be sitting, building, and moving between mentor chats."
+pre_install: "Have your usual dev setup ready (Python, notebooks, Git, etc.). You'll get track-specific guidance at the event."
+hardware_allowed: true
+hardware_note: "Yes, as long as it's safe, portable, and you can manage it at a hackathon table."
 
 # ---------------------
 # ACCESSIBILITY & SAFETY
