@@ -1042,4 +1042,149 @@ class MLAIBackendClient:
             print(f"Failed to link Slack user: {e}")
             return None
 
+    # --- MedHack Game State ---
+
+    async def medhack_get_current_case(self) -> Optional[dict]:
+        """Get the currently active MedHack case."""
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    f"{self.base_url}/api/v1/medhack/cases/current/",
+                    headers=self.headers,
+                    timeout=10.0
+                )
+                if response.status_code == 404:
+                    return None
+                response.raise_for_status()
+                return response.json()
+        except Exception as e:
+            print(f"⚠️ MedHack get current case error: {e}")
+            return None
+
+    async def medhack_start_case(self, case_id: int, admin_slack_id: str) -> Optional[dict]:
+        """Start a new MedHack case (admin only). Closes any active case."""
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    f"{self.base_url}/api/v1/medhack/cases/start/",
+                    json={"case_id": case_id, "admin_slack_id": admin_slack_id},
+                    headers=self.admin_headers,
+                    timeout=10.0
+                )
+                response.raise_for_status()
+                return response.json()
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 403:
+                print(f"⚠️ MedHack start case: not authorized")
+                return None
+            raise
+        except Exception as e:
+            print(f"⚠️ MedHack start case error: {e}")
+            return None
+
+    async def medhack_get_user_status(self, slack_user_id: str) -> Optional[dict]:
+        """Get a user's status for the active MedHack case."""
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    f"{self.base_url}/api/v1/medhack/cases/active/user/{slack_user_id}/",
+                    headers=self.headers,
+                    timeout=10.0
+                )
+                if response.status_code == 404:
+                    return None
+                response.raise_for_status()
+                return response.json()
+        except Exception as e:
+            print(f"⚠️ MedHack get user status error: {e}")
+            return None
+
+    async def medhack_set_pending_guess(self, case_id: int, slack_user_id: str, guess: str) -> Optional[dict]:
+        """Store a pending guess awaiting user confirmation."""
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    f"{self.base_url}/api/v1/medhack/guesses/pending/",
+                    json={"case_id": case_id, "slack_user_id": slack_user_id, "guess": guess},
+                    headers=self.headers,
+                    timeout=10.0
+                )
+                response.raise_for_status()
+                return response.json()
+        except Exception as e:
+            print(f"⚠️ MedHack set pending guess error: {e}")
+            return None
+
+    async def medhack_clear_pending_guess(self, case_id: int, slack_user_id: str) -> bool:
+        """Clear a user's pending guess."""
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.request(
+                    "DELETE",
+                    f"{self.base_url}/api/v1/medhack/guesses/pending/",
+                    json={"case_id": case_id, "slack_user_id": slack_user_id},
+                    headers=self.headers,
+                    timeout=10.0
+                )
+                return response.status_code == 204
+        except Exception as e:
+            print(f"⚠️ MedHack clear pending guess error: {e}")
+            return False
+
+    async def medhack_submit_guess(
+        self, case_id: int, slack_user_id: str, guess: str, correct: bool
+    ) -> Optional[dict]:
+        """Submit a confirmed guess."""
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    f"{self.base_url}/api/v1/medhack/guesses/submit/",
+                    json={
+                        "case_id": case_id,
+                        "slack_user_id": slack_user_id,
+                        "guess": guess,
+                        "correct": correct,
+                    },
+                    headers=self.headers,
+                    timeout=10.0
+                )
+                response.raise_for_status()
+                return response.json()
+        except Exception as e:
+            print(f"⚠️ MedHack submit guess error: {e}")
+            return None
+
+    async def medhack_record_winner(
+        self, case_id: int, slack_user_id: str, is_first_solver: bool
+    ) -> Optional[dict]:
+        """Record a winner for a MedHack case."""
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    f"{self.base_url}/api/v1/medhack/cases/{case_id}/winners/",
+                    json={"slack_user_id": slack_user_id, "is_first_solver": is_first_solver},
+                    headers=self.headers,
+                    timeout=10.0
+                )
+                response.raise_for_status()
+                return response.json()
+        except Exception as e:
+            print(f"⚠️ MedHack record winner error: {e}")
+            return None
+
+    async def medhack_get_case_history(self) -> list:
+        """Get history of all played MedHack cases."""
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    f"{self.base_url}/api/v1/medhack/cases/history/",
+                    headers=self.headers,
+                    timeout=10.0
+                )
+                response.raise_for_status()
+                return response.json().get("cases", [])
+        except Exception as e:
+            print(f"⚠️ MedHack get case history error: {e}")
+            return []
+
     # End of MLAIBackendClient

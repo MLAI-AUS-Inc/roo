@@ -297,3 +297,43 @@ class MedHackClient:
         if new_case.get("image_url"):
             result["image_url"] = new_case["image_url"]
         return result
+
+    def start_specific_case(self, case_id: int, today: date) -> Optional[dict]:
+        """Start a specific case by its ID (for admin manual advancement).
+
+        Returns the case presentation data, or None if case_id not found.
+        """
+        cases = self._load_cases()
+        new_case = next((c for c in cases if c["id"] == case_id), None)
+        if new_case is None:
+            return None
+
+        state = self._load_state()
+        state["current_case_id"] = new_case["id"]
+        state["posted_date"] = today.isoformat()
+        state["winners"] = []
+        state["solved"] = False
+        state["hint_level"] = 0
+        state["guess_counts"] = {}
+        state["pending_guesses"] = {}
+        state.setdefault("played_case_ids", [])
+        if new_case["id"] not in state["played_case_ids"]:
+            state["played_case_ids"].append(new_case["id"])
+        self._save_state(state)
+
+        result = {
+            "id": new_case["id"],
+            "difficulty": new_case.get("difficulty", "medium"),
+            "presenting_complaint": new_case["presenting_complaint"],
+        }
+        if new_case.get("title"):
+            result["title"] = new_case["title"]
+        if new_case.get("ed_first_look"):
+            result["ed_first_look"] = new_case["ed_first_look"]
+        if new_case.get("image_url"):
+            result["image_url"] = new_case["image_url"]
+        return result
+
+    def get_all_case_ids(self) -> List[int]:
+        """Return all available case IDs from cases.yaml."""
+        return [c["id"] for c in self._load_cases()]

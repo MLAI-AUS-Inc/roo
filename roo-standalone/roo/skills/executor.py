@@ -237,6 +237,86 @@ Original text:
         today = get_current_date()
         text_lower = text.lower()
 
+        # --- Admin: manual case start ---
+        MEDHACK_ADMIN_ID = "U05QPB483K9"
+        import re
+        admin_patterns = [
+            r"(?:give me|start|begin|launch|lets begin|let's begin)\s+patient\s+(\d+)",
+            r"(?:next patient|next case)",
+        ]
+        admin_match = None
+        requested_case_id = None
+        for pattern in admin_patterns:
+            m = re.search(pattern, text_lower)
+            if m:
+                admin_match = m
+                if m.groups():
+                    requested_case_id = int(m.group(1))
+                break
+
+        if admin_match:
+            if user_id != MEDHACK_ADMIN_ID:
+                return f"<@{user_id}> Sorry, only admins can start new cases."
+
+            from ..slack_client import post_message
+
+            if requested_case_id is not None:
+                new_case = client.start_specific_case(requested_case_id, today)
+                if not new_case:
+                    available = client.get_all_case_ids()
+                    return f"Case #{requested_case_id} not found. Available case IDs: {available}"
+            else:
+                # "next patient" — pick the next unplayed case
+                new_case = client.start_new_case(today)
+                if not new_case:
+                    return "All cases have been played! No new cases available."
+
+            # Format and post as new top-level message
+            title = new_case.get("title", "Daily Case")
+            difficulty = new_case.get("difficulty", "medium").upper()
+            header = f"*GUESS THE DIAGNOSIS* - Daily Challenge [{difficulty}] - _{title}_"
+            complaint = (new_case.get("ed_first_look") or new_case["presenting_complaint"]).strip()
+            triage = new_case["presenting_complaint"].strip()
+
+            if new_case.get("ed_first_look"):
+                message = (
+                    f"{header}\n\n"
+                    f"{complaint}\n\n"
+                    f"*Triage note:* {triage}\n\n"
+                    f"Tag *@Roo* to interact — I'm your gateway to the patient. "
+                    f"Ask me anything you'd ask them and I'll relay their answer. "
+                    f"You can also request examinations and investigations, but be specific — "
+                    f"the hospital has limited resources and inappropriate or costly tests may be denied.\n\n"
+                    f"When you're ready, tell me your diagnosis!\n\n"
+                    f"_You get *one guess* — make it count! First correct answer wins 12 MLAI points "
+                    f"+ DM Dr Sam for a free ticket code to MedHack: Frontiers!_"
+                )
+            else:
+                message = (
+                    f"{header}\n\n"
+                    f"{complaint}\n\n"
+                    f"Tag *@Roo* to interact — I'm your gateway to the patient. "
+                    f"Ask me anything you'd ask them and I'll relay their answer. "
+                    f"You can also request examinations and investigations, but be specific — "
+                    f"the hospital has limited resources and inappropriate or costly tests may be denied.\n\n"
+                    f"When you're ready, tell me your diagnosis!\n\n"
+                    f"_You get *one guess* — make it count! First correct answer wins 12 MLAI points "
+                    f"+ DM Dr Sam for a free ticket code to MedHack: Frontiers!_"
+                )
+
+            # Post as new top-level message (not in thread)
+            image_url = new_case.get("image_url", "")
+            if image_url and channel_id:
+                blocks = [
+                    {"type": "image", "image_url": image_url, "alt_text": f"Guess the Diagnosis - {title}"},
+                    {"type": "section", "text": {"type": "mrkdwn", "text": message}},
+                ]
+                post_message(channel=channel_id, text=message, blocks=blocks)
+            elif channel_id:
+                post_message(channel=channel_id, text=message)
+
+            return f"Patient #{new_case['id']} ({title}) is now live!"
+
         # --- Determine mode: event info vs diagnosis game ---
         event_keywords = ["when", "where", "ticket", "register", "schedule", "speaker",
                           "venue", "price", "event", "medhack", "frontiers", "sign up"]
