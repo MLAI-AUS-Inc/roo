@@ -3,7 +3,7 @@
 # Add more cases as needed. Roo will cycle through them one per day.
 
 cases:
-  - id: 6
+  - id: 1
     difficulty: "medium"
     title: "Salt & Static"
     image_url: "https://firebasestorage.googleapis.com/v0/b/medhack-ai.firebasestorage.app/o/SimPatient1.jpg?alt=media&token=5fdbdcac-8e7a-4120-a529-723620e72a04"  # Add a URL to an image that will be posted with the daily case
@@ -132,3 +132,549 @@ cases:
       - "Consider what electrolyte pattern you'd see with mineralocorticoid deficiency..."
       - "The combination of hypotension, hyponatraemia, hyperkalaemia, and hypoglycaemia is a classic pattern. What endocrine axis controls all of these?"
       - "Have you asked the patient about their medications or any chronic conditions? They might be holding something back."
+
+  - id: 2
+    difficulty: "hard"
+    title: "The Violet Trial"
+    image_url: "https://firebasestorage.googleapis.com/v0/b/medhack-ai.firebasestorage.app/o/SimPatient2.jpg?alt=media&token=019ea109-9730-44c3-8594-50a2095d2ea6"  # Add image URL if available
+    ed_first_look: >
+      It's after midnight, and the ED has that fluorescent, half-dream feeling. You find
+      your patient pacing beside the bed, one hand pressed to their abdomen like they're
+      holding themselves together. They're dressed like they came straight from an office:
+      tailored blazer, lipstick still perfect, hair pinned with ruthless intent. The only
+      thing that looks out of place is how wide their eyes are, like they're trying not to
+      panic in public. When they notice you, they stop pacing and force a crisp, professional
+      smile that cracks at the edges. "I'm sorry," they say, voice controlled but thin.
+      "I know it's busy. I just… I can't get on top of this pain. It's like my insides are
+      being wrung out." They inhale slowly, as if they're negotiating with their own nervous
+      system. "I can answer questions. I'm good at questions."
+    presenting_complaint: >
+      31F, severe abdo pain 18 hours, nausea, constipation, feels wired, tingling hands.
+      Similar episodes in past with negative scans. Vitals: BP 162/96, HR 118, RR 20,
+      SpO2 98% RA, T 36.8°C. Pain 9/10. Appears distressed, pacing. Abdomen soft.
+      IV access, analgesia requested.
+    patient:
+      name: "Leila Farouk"
+      age: 31
+      gender: "Female"
+      vibe: >
+        Intense, articulate, fast-talking when anxious. Uses precise language and tries
+        to stay "high functioning," even while suffering.
+      historian_quality: >
+        Good historian. Gives timelines well. Misses the "why" unless guided to triggers.
+      motivation: >
+        Terrified of being dismissed again. Overcompensates by sounding calm and competent.
+        If the clinician is kind, she becomes more vulnerable and admits how lonely and
+        scary these episodes feel.
+    history:
+      presenting_history: >
+        Severe diffuse abdominal pain (deep, cramping, constant with waves) for 18 hours,
+        9/10 severity. Nausea with minimal vomiting (mostly retching). Constipation (no
+        bowel motion for 2 days). Feels "wired," restless, anxious, trouble sleeping.
+        Tingling in hands and feet, intermittent burning pains down thighs. Mild headache.
+        Palpitations.
+      past_medical_history:
+        - "Multiple prior ED presentations for 'unexplained abdominal pain' - all investigations negative, labelled as 'functional,' 'IBS,' or 'stress'"
+      medications:
+        - "Hormonal contraception (recently changed)"
+        - "Recently treated for 'possible UTI' with antibiotics 4 days ago"
+      family_history: >
+        Family history of "mysterious abdominal attacks" (if asked specifically). A relative
+        who got very sick after "a medication during surgery."
+      social_history: "Works in professional office setting. High stress. Non-smoker."
+      history_disclosure_rules: >
+        Patient will NOT say "porphyria" - she does not know the diagnosis. She only
+        provides symptom details. Will reveal medication history if asked about new
+        medications. Will mention poor intake and stress if asked about diet/triggers.
+        Will describe dark urine if asked about urine colour. Will reveal family history
+        only if specifically asked about family illness patterns.
+    symptoms:
+      main:
+        - "Severe diffuse abdominal pain (deep, cramping, constant with waves), 18 hours, 9/10"
+        - "Nausea, minimal vomiting (mostly retching)"
+        - "Constipation (no bowel motion 2 days)"
+        - "Feels 'wired,' restless, anxious, trouble sleeping"
+        - "Tingling in hands and feet, intermittent burning pains down thighs"
+        - "Mild headache"
+        - "Palpitations"
+      associated_if_asked:
+        - "No fever, no infectious contacts"
+        - "No dysuria now, but treated for 'possible UTI' 4 days ago"
+        - "Poor intake for several days (stress + 'forgot to eat')"
+        - "Dark urine noticed tonight, 'like cola,' more obvious after sitting in the toilet bowl"
+        - "Sensitivity to bright lights and noise (more irritable than truly photophobic)"
+        - "Period recently, hormonal contraception recently changed"
+      red_flag_negatives:
+        - "No chest pain, no shortness of breath"
+        - "No blood in stool, no black stool"
+        - "No localized right lower quadrant pain pattern"
+        - "No alcohol binge, no recreational drugs"
+        - "No known pregnancy (pregnancy test negative)"
+    vitals:
+      heart_rate: 118
+      blood_pressure: "162/96"
+      respiratory_rate: 20
+      temperature: 36.8
+      spo2: "98% on room air"
+    examination:
+      general: "Alert, distressed, restless. Speaks rapidly but coherent."
+      cardiovascular: "Tachycardia and hypertension out of proportion to exam findings."
+      respiratory: "Clear chest."
+      abdominal: "Soft, not peritonitic, mild diffuse tenderness, no guarding, no rebound, bowel sounds reduced."
+      neurological: >
+        Normal power on formal testing early, but reports subjective weakness and "rubbery
+        legs." Mild distal paresthesias. Reflexes can be slightly reduced.
+      psych: "Anxious, irritable, not psychotic."
+      skin: "No rash. No track marks."
+    investigations:
+      ecg: "Sinus tachycardia ~115 bpm, otherwise normal."
+      urinalysis: "Dark urine appearance. Dip shows no blood, no nitrites, no leukocytes, mild ketones."
+      bloods:
+        sodium: "118 mmol/L (low)"
+        potassium: "3.6 mmol/L (normal)"
+        chloride: "86 mmol/L (low)"
+        bicarbonate: "21 mmol/L (mildly low-normal)"
+        urea: "4.2 mmol/L (normal)"
+        creatinine: "72 µmol/L (normal)"
+        glucose_lab: "5.1 mmol/L (normal)"
+        wcc: "8.9 x10⁹/L (normal)"
+        haemoglobin: "136 g/L (normal)"
+        platelets: "Normal"
+        crp: "6 mg/L (low)"
+        ast: "68 U/L (elevated)"
+        alt: "74 U/L (elevated)"
+        bilirubin: "Normal"
+        lipase: "Normal"
+        tsh: "Normal"
+      hyponatremia_workup_if_ordered:
+        serum_osmolality: "Low"
+        urine_osmolality: "Inappropriately high"
+        urine_sodium: "Elevated"
+        note: "Pattern consistent with SIADH physiology, which can happen in porphyria attacks."
+      imaging_if_ordered:
+        ct_abdomen_pelvis: "No acute surgical pathology. No appendicitis. No obstruction. No pancreatitis."
+        pelvic_ultrasound: "No torsion, no acute ovarian pathology."
+      pregnancy_test: "Urine β-hCG: Negative."
+      confirmatory_test_if_ordered:
+        urine_porphobilinogen: "Markedly elevated"
+        urine_ala: "Elevated"
+        note: "Only reveal if specifically ordered or if player asks for porphyrin screen/urine porphobilinogen test."
+    diagnosis: "Acute Intermittent Porphyria"
+    acceptable_answers:
+      - "acute intermittent porphyria"
+      - "aip"
+      - "porphyria"
+      - "acute porphyria"
+      - "intermittent porphyria"
+      - "hepatic porphyria"
+    hints:
+      - "Have you asked about recent medications, fasting, or hormonal changes? Something might have triggered this episode."
+      - "The dark urine is a key clue. Combined with the neuropathic symptoms and profound hyponatremia, what metabolic disorder causes this constellation?"
+      - "Consider ordering a urine porphobilinogen test. The combination of autonomic symptoms (tachycardia, hypertension), neuropathy, abdominal pain, and SIADH points to a specific rare diagnosis."
+
+  - id: 3
+    difficulty: "hard"
+    title: "Keto Cut Catastrophe"
+    image_url: "https://firebasestorage.googleapis.com/v0/b/medhack-ai.firebasestorage.app/o/SimPatient3.jpg?alt=media&token=609fdb92-2a2d-4953-bdd1-327b6c061c2a"  # Add image URL if available
+    ed_first_look: >
+      The cubicle curtain is half-drawn, like someone gave up on privacy halfway through a
+      sprint. Inside, a man in gym shorts and a crumpled hoodie sits bolt upright on the bed,
+      elbows braced on his knees, breathing like he's trying to blow out a candle that won't
+      go out. Each breath is deep and deliberate, almost theatrical, but his eyes are scared.
+      Not panic-scared. Cornered-scared. A stale-sweet smell hangs in the air, like fruit
+      left too long on a kitchen bench. He looks up at you, trying to play it cool. He fails.
+      "Doc," he says between breaths, "I think I've got… food poisoning or something. Or I'm
+      dying. Either way, can we speed-run this?" From the side, the tiny nurse puppy in purple
+      scrubs peers up at you, wide-eyed, hands on the rail like she's anchoring herself to
+      the moment.
+    presenting_complaint: >
+      35M, vomiting + abdo pain 24h, can't catch breath, feels anxious. Poor intake.
+      Vitals: BP 104/62, HR 132, RR 30 deep, SpO2 99% RA, T 37.4°C. BGL 7.8 mmol/L.
+      Pain 7/10 epigastric. Appears dehydrated. IV access, VBG, ketones, ECG, labs, fluids.
+    patient:
+      name: "Jordan 'Jordo' Price"
+      age: 35
+      gender: "Male"
+      vibe: >
+        Fast-talking, jokey, uses gym/tech slang, tries to control the room with humor.
+        When he's scared, he gets defensive and vague.
+      historian_quality: >
+        Poor-to-medium. He underreports medical history, frames things as "not important,"
+        and answers the question he wishes you asked. Jokes and avoids admitting diabetes
+        and medications unless asked directly and kindly.
+      motivation: >
+        Embarrassed about diabetes and medication. Worried you'll tell him to stop keto or
+        "judge his lifestyle." Initially says he's "basically healthy."
+    history:
+      presenting_history: >
+        Vomiting for 24 hours (frequent, unable to keep water down). Epigastric/upper
+        abdominal pain (burning + crampy). Profound weakness, dizziness. Shortness of
+        breath that feels like "air hunger" (deep fast breathing). Nausea, dry mouth,
+        intense thirst. "Anxiety" sensation (really physiologic distress).
+      past_medical_history:
+        - "Type 2 diabetes (will say 'not really... just borderline' unless asked specifically about meds/tablets for sugar)"
+      medications:
+        - "SGLT2 inhibitor - empagliflozin or dapagliflozin (will say 'a little tablet for sugar... starts with E... GP said it helps kidneys and weight' if asked about diabetes meds)"
+        - "Continued taking it through vomiting because 'routine'"
+      family_history: "Non-contributory"
+      social_history: "Gym enthusiast, tech worker. Recently doing strict keto cut with intermittent fasting."
+      history_disclosure_rules: >
+        If asked "are you diabetic?" he says "Not really... just borderline" unless asked
+        specifically about meds, scripts, or "any tablets for sugar/weight." Initially
+        says "no regular meds" or "just vitamins." Only reveals SGLT2 inhibitor if asked
+        specifically about diabetes medications or tablets. Will mention keto/fasting if
+        asked about diet. Will mention GI bug contact if asked about sick contacts.
+    symptoms:
+      main:
+        - "Vomiting for 24 hours (frequent, unable to keep water down)"
+        - "Epigastric/upper abdominal pain (burning + crampy)"
+        - "Profound weakness, dizziness"
+        - "Shortness of breath - air hunger with deep fast breathing"
+        - "Nausea, dry mouth, intense thirst"
+        - "Restless, anxious feeling (physiologic distress)"
+      associated_if_asked:
+        - "No real fever (felt 'clammy')"
+        - "Reduced urine output"
+        - "Headache, lightheadedness"
+        - "Muscle cramps"
+        - "Recent strict keto + intermittent fasting"
+        - "A 'stomach bug' contact (partner had GI symptoms)"
+        - "Recent weight-loss push, dehydration"
+      red_flag_negatives:
+        - "No chest pain, no wheeze, no productive cough"
+        - "No blood in vomit, no black stools"
+        - "No heavy alcohol binge"
+        - "No toxic ingestion admitted"
+    vitals:
+      heart_rate: 132
+      blood_pressure: "104/62"
+      respiratory_rate: 30
+      temperature: 37.4
+      spo2: "99% on room air"
+      bgl: "7.8 mmol/L"
+    examination:
+      general: "Unwell, sweaty, restless but oriented."
+      respiratory: "Tachypneic with deep, sighing breaths (Kussmaul-like). Lungs clear."
+      breath_odor: "Sweet/acetone-like."
+      cardiovascular: "Tachycardic, peripheral perfusion a bit poor, mild postural symptoms."
+      abdominal: "Mild epigastric tenderness, soft, no guarding, no rebound."
+      neurological: "No focal deficits. Tremulous, fatigued."
+      hydration: "Dry mucous membranes, poor skin turgor."
+    investigations:
+      ecg: "Sinus tachycardia ~130 bpm, no ischemic changes."
+      fingerstick_glucose: "7.8 mmol/L (not very high)"
+      urinalysis: "Glucose positive, ketones 3+, concentrated urine."
+      vbg: "pH 7.12, HCO3 9 mmol/L, pCO2 low (respiratory compensation)"
+      bloods:
+        anion_gap: "26 (high)"
+        beta_hydroxybutyrate: "6.4 mmol/L (high)"
+        lactate: "1.6 mmol/L (not driving the acidosis)"
+        sodium: "132 mmol/L"
+        potassium: "5.6 mmol/L (elevated)"
+        chloride: "95 mmol/L"
+        urea: "12.4 mmol/L"
+        creatinine: "156 µmol/L (AKI from dehydration)"
+        glucose_lab: "7.8 mmol/L"
+        wcc: "15.2 x10⁹/L (stress response)"
+        crp: "12 mg/L (mild)"
+        lipase: "Normal"
+        ast: "Mildly elevated (dehydration/stress)"
+        alt: "Mildly elevated (dehydration/stress)"
+      imaging_if_ordered:
+        cxr: "Clear"
+      troponin_if_ordered: "Negative"
+      medication_clue_if_asked_properly:
+        note: >
+          Only if asked about meds in a structured way: "A little tablet for sugar... starts
+          with E... my GP said it helps protect kidneys and helps weight." (SGLT2 inhibitor).
+          He has kept taking it through the vomiting because "routine."
+    diagnosis: "Euglycemic Diabetic Ketoacidosis"
+    acceptable_answers:
+      - "euglycemic dka"
+      - "euglycemic diabetic ketoacidosis"
+      - "euglycaemic dka"
+      - "euglycaemic diabetic ketoacidosis"
+      - "dka from sglt2 inhibitor"
+      - "sglt2 inhibitor dka"
+      - "dka with normal glucose"
+      - "dka"
+      - "diabetic ketoacidosis"
+    hints:
+      - "The breathing pattern and sweet smell are important clues. Have you checked a VBG/ABG and calculated the anion gap?"
+      - "The glucose is only mildly elevated, but there's severe acidosis with high ketones. What recent medication class can cause DKA even when glucose isn't very high?"
+      - "Ask specifically about diabetes medications - especially newer classes that affect kidney glucose handling. The combination of keto diet, fasting, gastroenteritis, and continuing his 'E' tablet is the perfect storm."
+
+  - id: 4
+    difficulty: "hard"
+    title: "Blue at the Mouth"
+    image_url: ""  # Add image URL if available
+    ed_first_look: >
+      The curtain slides back and the cubicle light hits like a stage spotlight. A young man
+      sits upright, elbows locked on the mattress, breathing fast like he's trying to outrun
+      something invisible. He keeps touching his lips, as if checking they're still there.
+      They are. They are also noticeably... blue. Not "cold winter morning" blue. Not "bad
+      lighting" blue. A real slate tint around the mouth and nail beds that makes your brain
+      do that little alarm-bell ping. A monitor chirps steadily. Someone has already put oxygen
+      on him, but it's not changing the colour in his face. From near the foot of the bed, the
+      tiny nurse puppy in purple scrubs grips the rail with both hands and looks up at you with
+      a worried expression, eyes big as coins. The patient forces a laugh that lands badly.
+      "Okay, so... I'm not trying to be dramatic," he says, voice slightly breathy. "But I think
+      I'm turning into a Smurf."
+    presenting_complaint: >
+      29M, sudden SOB + dizziness + headache x 2 hours. Lips blue. No chest pain.
+      Vitals: BP 138/84, HR 124, RR 28, SpO2 85% RA → 86-88% on high-flow O2, T 36.9°C.
+      No wheeze, lungs clear. Cyanosis noted. ECG, CXR, VBG/ABG, labs. Consider tox/metHb.
+    patient:
+      name: "Marco 'Maz' Bianchi"
+      age: 29
+      gender: "Male"
+      vibe: >
+        Social, cheeky, fast-talking. Bartender/club promoter energy. Uses humor to deflect.
+        When he feels judged, becomes evasive and "forgets details."
+      historian_quality: >
+        Bad-to-medium. Answers around sensitive topics. Requires clean, specific questions.
+        Minimizes exposures and deflects with jokes.
+      motivation: >
+        Scared of being seen as reckless. Keeps joking to protect himself. If the clinician
+        is calm and nonjudgmental, he becomes honest. If pressed hard, he shuts down.
+    history:
+      presenting_history: >
+        Sudden shortness of breath (feels "air hunger") for 2 hours. Lightheadedness,
+        near-fainting when standing. Headache (tight, pressure-like). Nausea. "Chest feels
+        weird" (not pain, more like discomfort/anxiety). Tingling in fingers, mild tremor.
+        Noticed lips "look blue" in bathroom mirror.
+      past_medical_history:
+        - "Very mild childhood asthma (says 'doesn't count' - hasn't used inhaler in years) - RED HERRING"
+        - "Anxiety disorder (takes sertraline occasionally) - RED HERRING"
+        - "Previous episode of presyncope 6 months ago (worked up, found nothing) - RED HERRING"
+      medications:
+        - "Sertraline 50mg (takes inconsistently for anxiety) - RED HERRING"
+        - "Over-the-counter benzocaine throat spray (used repeatedly tonight for sore throat)"
+      family_history: "Father has 'heart problems' (unspecified, patient vague) - RED HERRING"
+      social_history: "Bartender/club promoter. Works late nights. Social drinker. Non-smoker but club environment exposure."
+      history_disclosure_rules: >
+        Patient initially denies recreational drug use. Mentions throat spray only if asked
+        about OTC medications or what he took for sore throat. Will admit to "poppers" (alkyl
+        nitrites) only if asked calmly and specifically about inhaled substances or party drugs,
+        using nonjudgmental language. If asked aggressively, becomes defensive and evasive.
+        Minimizes both exposures as "harmless."
+    symptoms:
+      main:
+        - "Sudden shortness of breath (air hunger) x 2 hours"
+        - "Lightheadedness, near-fainting when standing"
+        - "Headache (tight, pressure-like)"
+        - "Nausea"
+        - "Chest discomfort (not pain, more anxiety-like)"
+        - "Tingling in fingers, mild tremor"
+        - "Noticed lips look blue in mirror"
+      associated_if_asked:
+        - "Sore throat for 2-3 days (kept working through it)"
+        - "Used numbing throat spray 'a bunch' tonight"
+        - "Club environment exposure (smoke/vape), but no wheeze"
+        - "Used 'something at a party' earlier (avoids naming it initially)"
+        - "No fever, no productive cough"
+        - "Felt palpitations earlier (RED HERRING - anxiety vs tachycardia)"
+        - "Skipped lunch and dinner (busy shift) - RED HERRING"
+      red_flag_negatives:
+        - "No crushing chest pain"
+        - "No unilateral leg swelling"
+        - "No pleuritic chest pain"
+        - "No wheeze (or very mild childhood asthma that 'doesn't count')"
+        - "No seizure, no focal weakness"
+        - "No known cardiac history"
+    vitals:
+      heart_rate: 124
+      blood_pressure: "138/84"
+      respiratory_rate: 28
+      temperature: 36.9
+      spo2: "85% RA → 86-88% on high-flow O2 (does not correct)"
+    examination:
+      general: "Anxious, restless, speaking in full sentences but breathy."
+      colour: "Central cyanosis (blue lips) + nail bed duskiness despite oxygen."
+      respiratory: "Tachypnea; lungs clear; no wheeze; no crackles; no increased work of breathing beyond fast rate."
+      cardiovascular: "Tachycardic; good volume; no murmurs; warm peripheries."
+      neurological: "Alert, oriented; mild tremor; no focal deficits."
+      skin: "No rash."
+      blood_appearance_if_asked: "Blood drawn looks darker, brownish 'chocolate' color rather than bright red - KEY CLUE"
+    investigations:
+      spo2_pattern: "85% RA → 86-88% on high-flow oxygen (doesn't correct fully) - KEY FINDING"
+      ecg: "Sinus tachycardia ~120 bpm. No ischemic changes."
+      cxr: "Clear lungs, no consolidation, no edema."
+      peak_flow_if_ordered: "Normal range for patient (does not support asthma attack)."
+      bloods:
+        wcc: "9.8 x10⁹/L (normal)"
+        haemoglobin: "145 g/L (normal)"
+        platelets: "Normal"
+        sodium: "139 mmol/L"
+        potassium: "4.1 mmol/L"
+        creatinine: "78 µmol/L"
+        crp: "4 mg/L (low)"
+        troponin_if_ordered: "Negative"
+        d_dimer_if_ordered: "Normal (to avoid PE rabbit hole)"
+      abg_on_high_flow_o2:
+        ph: "7.44"
+        pco2: "33 mmHg"
+        hco3: "22 mmol/L"
+        pao2: "260 mmHg (very high) - KEY FINDING: saturation gap"
+        note: "PaO2 is high, yet pulse ox remains low - this is the saturation gap that suggests methemoglobinemia"
+      confirmatory_test_if_ordered:
+        co_oximetry: "Methemoglobin 28% (elevated - diagnostic)"
+        note: "Only reveal if specifically ordered or if players ask about co-oximetry/methemoglobin level"
+      exposure_details_if_asked_calmly:
+        note: >
+          If asked "what exactly did you take or inhale tonight?" in a calm, nonjudgmental way,
+          he admits: "Okay... I did poppers once. Like, a small hit. And the throat spray...
+          I used it heaps. My throat was killing me."
+    diagnosis: "Methemoglobinemia"
+    acceptable_answers:
+      - "methemoglobinemia"
+      - "methaemoglobinemia"
+      - "meth"
+      - "methemoglobin"
+      - "methemoglobinemia from benzocaine"
+      - "methemoglobinemia from nitrites"
+      - "methemoglobinemia from poppers"
+      - "acquired methemoglobinemia"
+      - "toxic methemoglobinemia"
+    hints:
+      - "Notice anything unusual about how the oxygen saturation isn't improving despite high-flow oxygen? What would you see on an ABG compared to the pulse oximeter?"
+      - "The saturation gap is the key - high PaO2 on blood gas but persistently low SpO2 on pulse ox. What condition causes this mismatch? Have you asked about the blood appearance or ordered co-oximetry?"
+      - "Think about oxidizing exposures. Have you asked specifically about throat sprays, topical anesthetics, or inhaled substances? The combination of benzocaine spray + nitrites (poppers) is the perfect storm for this diagnosis."
+
+  - id: 5
+    difficulty: "medium"
+    title: "The Hot Shower Ritual"
+    image_url: ""  # Add image URL if available
+    ed_first_look: >
+      The cubicle smells faintly of disinfectant and something sharp and sour, like old citrus.
+      Your patient is half-sitting, half-folded over a kidney dish, eyes squeezed shut in pure
+      annoyance at their own body. Their hoodie is on, but the hood is down and their hair is
+      damp at the edges like they've been sweating or splashing water on their face. Every few
+      minutes, their stomach clenches and they gag without much coming up, like their body is
+      trying to eject a ghost. At the bedside rail, the tiny nurse puppy in purple scrubs peeks
+      up, paws resting on the railing, expression pinched with concern. She glances between you
+      and the patient like she's silently begging you to fix it quickly. The patient cracks one
+      eye open at you and manages, through grit teeth: "Hi. So. I'm not dying, right? Because
+      this is... embarrassingly dramatic."
+    presenting_complaint: >
+      24M, recurrent severe nausea/vomiting + epigastric pain since this morning. Similar episodes
+      in past. Vitals: BP 118/74, HR 112, RR 18, SpO2 99% RA, T 36.7°C. Dry mucous membranes,
+      retching, abdomen soft. BGL 5.4 mmol/L. IV access, antiemetic, fluids, labs, urine.
+    patient:
+      name: "Kai Rutherford"
+      age: 24
+      gender: "Male"
+      vibe: >
+        Quick, sarcastic, tries to act "fine," hates feeling out of control. Uses humor as armor.
+      historian_quality: >
+        Medium. Can tell a timeline, but omits the most important habit unless asked in a
+        nonjudgmental way. If he feels judged, he shuts down.
+      motivation: >
+        Embarrassed. Worried someone will call him an addict. Also scared this means something
+        "serious" like cancer. Wants reassurance but also wants control and an exit plan.
+    history:
+      presenting_history: >
+        Sudden nausea and repeated vomiting since early morning (10-15 episodes). Epigastric
+        pain (dull, crampy, worsens with retching). Unable to keep down food or water. Dizziness
+        when standing. Feels chilled and sweaty in waves.
+      past_medical_history:
+        - "Lactose intolerance (self-diagnosed, avoids dairy) - RED HERRING"
+        - "IBS diagnosed 2 years ago - RED HERRING"
+        - "Anxiety disorder (not currently treated) - RED HERRING"
+        - "Multiple similar ED/urgent care visits over past year (4 times, labelled as 'gastroenteritis' or 'viral illness')"
+      medications:
+        - "None regular (occasionally takes over-the-counter antacids) - RED HERRING"
+      family_history: "Mother has Crohn's disease - RED HERRING"
+      social_history: >
+        Works in tech/gaming industry. High stress job. Lives with partner. Social drinker
+        (denies heavy alcohol use). Daily cannabis use (vaped/edibles most nights, heavier
+        on weekends) - only reveals if asked specifically and nonjudgmentally.
+      history_disclosure_rules: >
+        Patient will NOT volunteer cannabis use unless asked directly and nonjudgmentally about
+        "cannabis, vaping, edibles, or recreational substances." Initially insists it's "food
+        poisoning." Will reveal hot shower relief only if asked "what makes it better?" or
+        "have you found anything that helps?" Will mention recurrent episodes only if asked
+        about previous similar symptoms. Embarrassed and defensive if feels judged.
+    symptoms:
+      main:
+        - "Sudden nausea and repeated vomiting since early morning (10-15 episodes)"
+        - "Epigastric pain (dull, crampy, worsens with retching)"
+        - "Unable to keep down food or water"
+        - "Dizziness when standing"
+        - "Feels chilled and sweaty in waves"
+      associated_if_asked:
+        - "No fever"
+        - "No persistent diarrhea (or mild loose stool once)"
+        - "Thirst, dry mouth"
+        - "Anxiety and irritability from vomiting"
+        - "Similar episodes in the past (increasing over the last year)"
+        - "Ate leftover pizza last night (blames food poisoning) - RED HERRING"
+        - "Stressful work week - RED HERRING"
+        - "Skipped breakfast and had extra coffee this morning - RED HERRING"
+      clue_symptoms_if_asked_specifically:
+        - "Hot showers provide temporary relief ('It's the only thing that settles it') - KEY CLUE"
+        - "Symptoms often start in the morning - KEY CLUE"
+        - "Symptoms tend to come in cycles every few months - KEY CLUE"
+        - "Heavier cannabis use this past week due to stress - only reveals if asked about cannabis"
+      red_flag_negatives:
+        - "No blood in vomit"
+        - "No black stools"
+        - "No focal right lower quadrant pain"
+        - "No chest pain, no shortness of breath"
+        - "No urinary symptoms"
+        - "No recent travel or sick contacts"
+    vitals:
+      heart_rate: 112
+      blood_pressure: "118/74"
+      respiratory_rate: 18
+      temperature: 36.7
+      spo2: "99% on room air"
+      bgl: "5.4 mmol/L"
+    examination:
+      general: "Uncomfortable, restless, retching. Looks dehydrated."
+      vitals_pattern: "Mild tachycardia, otherwise stable."
+      heent: "Dry mucous membranes."
+      abdominal: "Soft, mild epigastric tenderness, no guarding, no rebound, normal bowel sounds."
+      skin: "Slightly clammy. No rash."
+      neurological: "Alert, oriented, no focal deficits."
+      hydration: "Reduced skin turgor, lightheaded with standing."
+    investigations:
+      fingerstick_glucose: "5.4 mmol/L"
+      urinalysis: "Ketones 2+, specific gravity high (concentrated), no nitrites/leukocytes/blood."
+      bloods:
+        sodium: "136 mmol/L"
+        potassium: "3.2 mmol/L (low)"
+        chloride: "95 mmol/L (low-ish)"
+        bicarbonate: "30 mmol/L (metabolic alkalosis pattern from vomiting)"
+        urea: "8.8 mmol/L (mildly elevated)"
+        creatinine: "118 µmol/L (mild pre-renal dehydration)"
+        glucose_lab: "5.2 mmol/L"
+        wcc: "13.4 x10⁹/L (stress leukocytosis)"
+        crp: "5 mg/L (low)"
+        lfts: "Normal"
+        lipase: "Normal"
+      ecg_if_ordered: "Sinus tachycardia ~110 bpm, otherwise normal."
+      imaging_if_ordered:
+        abdominal_ultrasound: "No gallstones, no biliary dilation, no acute findings."
+        ct_abdomen_pelvis: "No acute pathology (if players really push for CT)."
+      substance_history_if_asked_nonjudgmentally:
+        cannabis_use: >
+          If asked "Do you use cannabis, vaping, edibles, or anything recreational?" he
+          hesitates, then admits daily use: "Most nights. It helps me sleep. I didn't think
+          it counted."
+        relief_method: >
+          If asked "Does anything relieve it?" or "What makes it better?" he says: "Hot showers.
+          Like... ridiculously hot. It's the only thing that works."
+    diagnosis: "Cannabinoid Hyperemesis Syndrome"
+    acceptable_answers:
+      - "cannabinoid hyperemesis syndrome"
+      - "chs"
+      - "cannabis hyperemesis"
+      - "cannabis hyperemesis syndrome"
+      - "cannabinoid hyperemesis"
+      - "marijuana hyperemesis"
+      - "marijuana hyperemesis syndrome"
+    hints:
+      - "This patient has had multiple similar episodes. Have you asked about the pattern of recurrence and what makes the symptoms better or worse?"
+      - "The normal lipase and imaging rule out many common causes. The key is in the social history - have you asked specifically about cannabis or other recreational substance use? What about unusual symptom relief methods?"
+      - "The classic triad is cyclic vomiting, chronic cannabis use, and compulsive hot bathing/showering for relief. All three pieces need to come together from careful, nonjudgmental history taking."
