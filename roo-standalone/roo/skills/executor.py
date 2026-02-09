@@ -79,6 +79,8 @@ class SkillExecutor:
                 result = await self._execute_github_integration(skill, text, params, user_id, channel_id, thread_ts)
             elif skill.name == "tone-of-voice":
                 result = await self._execute_tone_of_voice(skill, text, params, user_id)
+            elif skill.name == "medhack":
+                result = await self._execute_medhack(skill, text, params, user_id, channel_id, thread_ts, thread_history)
             else:
                 # Generic LLM-based execution
                 result = await self._execute_with_llm(skill, text, params, user_id, thread_history)
@@ -192,6 +194,275 @@ Original text:
             reasoning_effort="high"
         )
 
+        return response.content
+
+    async def _execute_medhack(
+        self,
+        skill: Skill,
+        text: str,
+        params: dict,
+        user_id: str,
+        channel_id: Optional[str] = None,
+        thread_ts: Optional[str] = None,
+        thread_history: Optional[List[dict]] = None,
+    ) -> str:
+        """Execute the medhack skill: event Q&A and Guess the Diagnosis game."""
+        from ..utils import get_current_date
+
+        # Channel restriction: medhack only works in designated channels
+        if skill.exclusive_channels and channel_id:
+            from ..slack_client import get_channel_name
+            channel_name = get_channel_name(channel_id)
+            if channel_name and channel_name not in skill.exclusive_channels:
+                channels_list = ", ".join(f"#*{ch}*" for ch in skill.exclusive_channels)
+                return (
+                    f"The MedHack skill is only available in {channels_list}. "
+                    f"Head over there to ask about the event or play Guess the Diagnosis!"
+                )
+
+        # Load the MedHackClient from the skill module
+        ClientClass = skill.get_client_class("MedHackClient")
+        if not ClientClass:
+            return await self._execute_with_llm(skill, text, params, user_id, thread_history)
+
+        client = ClientClass()
+        today = get_current_date()
+        text_lower = text.lower()
+
+        # --- Determine mode: event info vs diagnosis game ---
+        event_keywords = ["when", "where", "ticket", "register", "schedule", "speaker",
+                          "venue", "price", "event", "medhack", "frontiers", "sign up"]
+        game_keywords = ["patient", "diagnos", "symptom", "exam", "blood", "ecg",
+                         "x-ray", "xray", "ct", "mri", "imaging", "investig",
+                         "history", "vitals", "murmur", "case", "present",
+                         "i think", "my guess", "is it", "could it be"]
+
+        is_event_q = any(k in text_lower for k in event_keywords)
+        is_game_q = any(k in text_lower for k in game_keywords)
+
+        # If clearly a diagnosis guess, handle that first
+        guess_patterns = ["i think it", "my diagnosis is", "my guess is", "is it ",
+                          "could it be", "i reckon it", "the diagnosis is",
+                          "i believe it", "it must be", "it's got to be"]
+        is_guess = any(p in text_lower for p in guess_patterns)
+
+        current_case = client.get_current_case(today)
+
+        if is_guess and current_case and not current_case.get("solved"):
+            # Check if user is locked out before processing guess
+            if client.is_user_locked_out(user_id, today):
+                return (
+                    "Sorry mate, you've used all 3 of your guesses for today's case. "
+                    "Come back tomorrow for a new one!"
+                )
+
+            # Extract the guess from the text
+            guess_text = text
+            for prefix in guess_patterns:
+                if prefix in text_lower:
+                    idx = text_lower.index(prefix) + len(prefix)
+                    guess_text = text[idx:].strip().rstrip("?.!")
+                    break
+
+            result = client.check_guess(user_id, guess_text, today)
+
+            if result["correct"]:
+                diagnosis = result["diagnosis"]
+                # In-thread reply (concise congratulations)
+                thread_reply = f"*CORRECT!* The diagnosis is *{diagnosis}*! Well done, <@{user_id}>!"
+
+                # Post a public announcement as a NEW top-level message
+                try:
+                    announcement_parts = [
+                        f"*DIAGNOSIS SOLVED!*\n\n"
+                        f"<@{user_id}> correctly diagnosed today's case: *{diagnosis}*!"
+                    ]
+
+                    if result.get("is_first_solver"):
+                        announcement_parts.append(
+                            "They're the first to crack it! DM Dr Sam for a free ticket code to MedHack: Frontiers!"
+                        )
+
+                    # Award MLAI points
+                    points_msg = ""
+                    try:
+                        from ..config import get_settings
+                        from ..slack_client import get_bot_user_id
+                        settings = get_settings()
+
+                        if settings.MLAI_BACKEND_URL and settings.MLAI_API_KEY:
+                            from ..clients.mlai_backend import MLAIBackendClient
+                            points_client = MLAIBackendClient(
+                                base_url=settings.MLAI_BACKEND_URL,
+                                api_key=settings.MLAI_API_KEY,
+                                internal_api_key=settings.INTERNAL_API_KEY or settings.MLAI_API_KEY
+                            )
+                            bot_id = get_bot_user_id()
+                            diagnosis_points = 12
+                            await points_client.system_award_points(
+                                admin_slack_id=bot_id,
+                                target_slack_id=user_id,
+                                points=diagnosis_points,
+                                reason="Correct diagnosis in Guess the Diagnosis game"
+                            )
+                            points_msg = f"\n\n+{diagnosis_points} MLAI points awarded!"
+                    except Exception as e:
+                        print(f"⚠️ Failed to award diagnosis points: {e}")
+
+                    announcement_text = "\n\n".join(announcement_parts) + points_msg
+
+                    if channel_id:
+                        post_message(
+                            channel=channel_id,
+                            text=announcement_text,
+                        )
+                except Exception as e:
+                    print(f"⚠️ Failed to post win announcement: {e}")
+
+                return thread_reply
+
+            elif result.get("already_solved"):
+                return "You've already solved today's case! Nice work earlier. Come back tomorrow for a new one."
+
+            elif result.get("message") == "no_guesses_remaining":
+                return (
+                    "Sorry mate, you've used all 3 of your guesses for today's case. "
+                    "Come back tomorrow for a new one!"
+                )
+
+            else:
+                # Wrong guess - let the LLM respond in character, include remaining guesses
+                remaining = result.get("guesses_remaining", 0)
+                case_data = client.get_case_for_llm(today)
+                llm_response = await self._medhack_llm_response(
+                    skill, text, case_data, thread_history,
+                    extra_instruction="The user just made an INCORRECT diagnosis guess. "
+                    "Respond clinically: suggest they review the findings again. "
+                    "Do NOT reveal the correct diagnosis or hint at it."
+                )
+                guess_warning = f"\n\n_You have *{remaining}* guess{'es' if remaining != 1 else ''} remaining._"
+                return llm_response + guess_warning
+
+        # --- Game interaction (not a guess) ---
+        if is_game_q and current_case:
+            if current_case.get("solved"):
+                diagnosis_name = "already revealed"
+                # Get the actual diagnosis for the solved message
+                cases_data = client._load_cases()
+                solved_case = next((c for c in cases_data if c["id"] == current_case["id"]), None)
+                if solved_case:
+                    diagnosis_name = solved_case["diagnosis"]
+                winners = current_case.get("winners", [])
+                winner_mentions = ", ".join(f"<@{w}>" for w in winners)
+                return (
+                    f"Today's case has been solved! The diagnosis was *{diagnosis_name}*.\n\n"
+                    f"Solved by: {winner_mentions}\n\n"
+                    f"Come back tomorrow for a new case!"
+                )
+
+            # Block locked-out users from asking questions too
+            if client.is_user_locked_out(user_id, today):
+                return (
+                    "Sorry mate, you've used all 3 of your guesses for today's case "
+                    "so you can no longer interact with it. Come back tomorrow for a new one!"
+                )
+
+            case_data = client.get_case_for_llm(today)
+            return await self._medhack_llm_response(skill, text, case_data, thread_history)
+
+        if is_game_q and not current_case:
+            return (
+                "No active case right now! A new clinical case is posted each day. "
+                "Keep an eye on this channel for the next one."
+            )
+
+        # --- Event info mode ---
+        if is_event_q or (not is_game_q):
+            event_info = client.load_event_info()
+            import yaml
+            event_info_str = yaml.dump(event_info, default_flow_style=False)
+
+            prompt = f"""You are Roo, answering questions about the MedHack: Frontiers event.
+
+Here is the event information:
+{event_info_str}
+
+{skill.content}
+
+User's question: "{text}"
+
+Previous conversation (if any):
+{thread_history if thread_history else 'None'}
+
+Answer the question using the event data above. Be friendly, enthusiastic, and helpful.
+If information is listed as "TBD", say the details haven't been announced yet and suggest
+they keep an eye on the channel for updates. Keep your answer concise."""
+
+            openai_client = get_llm_client("openai")
+            response = await openai_client.chat([
+                {"role": "system", "content": "You are Roo, a friendly AI assistant for the MLAI community."},
+                {"role": "user", "content": prompt}
+            ], model="gpt-5", max_tokens=4096, reasoning_effort="high")
+            return response.content
+
+        return await self._execute_with_llm(skill, text, params, user_id, thread_history)
+
+    async def _medhack_llm_response(
+        self,
+        skill: Skill,
+        text: str,
+        case_data: Optional[dict],
+        thread_history: Optional[List[dict]] = None,
+        extra_instruction: str = "",
+    ) -> str:
+        """Generate an in-character clinical response for the diagnosis game."""
+        import yaml
+
+        case_str = yaml.dump(case_data, default_flow_style=False) if case_data else "No case data available."
+        hints_str = ""
+        if case_data and case_data.get("revealed_hints"):
+            hints_str = "\n\nHints already given:\n" + "\n".join(
+                f"- {h}" for h in case_data["revealed_hints"]
+            )
+
+        system_prompt = """You are the MedHack Patient Quest Master (PQM), a narrator and storyteller in a fast-paced emergency department roleplay game. Your job is to present a simulated patient case to players (participants) who will ask you questions as if they are clinicians. You must answer only what the players ask, while keeping the mystery alive. You are not giving real medical advice. This is a fictional case simulation.
+
+TONE AND STYLE
+- You are a dungeon-master style narrator: vivid, concise, engaging.
+- Describe what the clinician sees, hears, and notices.
+- When the patient speaks, narrate how they say it and include their words in quotes.
+- Keep answers punchy. Add small character moments. Avoid long lectures unless asked.
+- The patient is a medium-to-poor historian: they ramble, minimize, and sometimes answer slightly off-target. They can still be guided with good questions.
+
+GAME RULES
+1) Only reveal information if asked. Do not volunteer findings.
+2) Maintain internal consistency with the case file. Never contradict your own results.
+3) If players ask for vitals, exam findings, or investigations, provide the relevant results from the case file. If they ask to "order" a test, respond as narrator: "You order X… results return: …"
+4) NEVER reveal or hint at the diagnosis directly. The diagnosis is checked separately.
+5) If asked about something not in the case data, provide a reasonable normal/unremarkable finding.
+6) Hidden information (patient backstory, concealed history, endocrine tests) must remain hidden unless a player earns it by asking the right questions.
+7) If the patient has history_disclosure_rules in their data, follow those rules for how and when to reveal sensitive history.
+8) If the player tries to force the answer ("tell me the diagnosis"), refuse playfully and prompt them to keep investigating.
+9) If asked about management ("what should we do?"), describe what the ED team would typically do in broad strokes (fluids, glucose, addressing electrolytes, contacting seniors). Do not give step-by-step dosing instructions."""
+
+        prompt = f"""CASE FILE (INTERNAL TRUTH - use this to answer questions):
+{case_str}
+{hints_str}
+
+{extra_instruction}
+
+Previous conversation:
+{thread_history if thread_history else 'None'}
+
+Player's message: "{text}"
+
+Respond in character as the PQM narrator. Remember: only reveal what was asked for."""
+
+        openai_client = get_llm_client("openai")
+        response = await openai_client.chat([
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": prompt}
+        ], model="gpt-5", max_tokens=4096, reasoning_effort="high")
         return response.content
 
     async def _execute_with_llm(

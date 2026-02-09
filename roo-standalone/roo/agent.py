@@ -86,7 +86,7 @@ class RooAgent:
             return fast_result
         
         # 2. Select appropriate skill (LLM Routing)
-        skill = await self._select_skill(clean_text, thread_history)
+        skill = await self._select_skill(clean_text, thread_history, channel_id)
         
         if skill:
             print(f"🎯 Selected skill: {skill.name}")
@@ -273,24 +273,40 @@ class RooAgent:
         cleaned = ' '.join(cleaned.split())
         return cleaned.strip()
     
-    async def _select_skill(self, text: str, history: List[dict] = None) -> Optional[Skill]:
+    async def _select_skill(self, text: str, history: List[dict] = None, channel_id: Optional[str] = None) -> Optional[Skill]:
         """Use LLM to decide which skill to use."""
         if not self.skills:
             return None
-        
+
         # First check trigger keywords for quick matching
         text_lower = text.lower()
         for skill in self.skills:
             for keyword in skill.trigger_keywords:
                 if keyword.lower() in text_lower:
                     return skill
-        
+
+        # Resolve channel name for priority matching
+        channel_priority_hint = ""
+        if channel_id:
+            from .slack_client import get_channel_name
+            channel_name = get_channel_name(channel_id)
+            if channel_name:
+                for skill in self.skills:
+                    if channel_name in skill.priority_channels:
+                        channel_priority_hint = (
+                            f"\nIMPORTANT: The user is in #{channel_name}. "
+                            f"Strongly prefer the '{skill.name}' skill unless "
+                            f"the request is clearly about a different skill "
+                            f"(e.g. checking points balance, writing content).\n"
+                        )
+                        break
+
         # Fall back to LLM classification
         skill_descriptions = "\n".join(
-            f"- {s.name}: {s.description}" 
+            f"- {s.name}: {s.description}"
             for s in self.skills
         )
-        
+
         # Format history for context
         history_context = ""
         if history:
@@ -302,7 +318,7 @@ class RooAgent:
 Available skills:
 {skill_descriptions}
 - none: Use this if no skill is appropriate (general conversation)
-
+{channel_priority_hint}
 {history_context}
 User message: "{text}"
 
@@ -313,18 +329,18 @@ Respond with ONLY the skill name (e.g., "connect_users" or "none"):"""
                 {"role": "system", "content": "You are a skill router. Respond with only the skill name."},
                 {"role": "user", "content": prompt}
             ])
-            
+
             skill_name = response.content.strip().lower()
             # Normalize: both underscores and hyphens should match
             skill_name_normalized = skill_name.replace("_", "-")
-            
+
             for skill in self.skills:
                 skill_normalized = skill.name.lower().replace("_", "-")
                 if skill_normalized == skill_name_normalized:
                     return skill
-            
+
             return None
-            
+
         except Exception as e:
             print(f"❌ Skill selection failed: {e}")
             return None

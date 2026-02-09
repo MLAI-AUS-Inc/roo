@@ -1,0 +1,496 @@
+# MedHack: Frontiers - Complete Event Information
+# Roo uses this data to answer event questions in Slack.
+
+event_name: "MedHack: Frontiers"
+tagline: "Where healthcare meets AI"
+
+description: >
+  A healthcare AI hackathon where clinicians, engineers, designers, and students
+  build real prototypes over an intense weekend. The best Big Tract teams then pitch
+  live at Pitch Night. The purpose is to bring healthcare and AI communities together
+  to solve meaningful healthcare challenges and showcase emerging talent.
+
+hosted_by:
+  - name: "MYMI"
+    description: "Monash Young Medtech Innovators - a student-led organisation affiliated with Monash University focused on medtech innovation."
+  - name: "MLAI"
+    description: "A not-for-profit community that teaches and supports people building with AI, from students to seasoned engineers."
+  - name: "ASME"
+    description: "A not-for-profit for clinicians interested in entrepreneurship and innovation."
+
+# ---------------------
+# KEY DATES
+# ---------------------
+key_dates:
+  team_formation_night:
+    date: "2026-02-15"
+    day: "Sunday"
+    time: "5:00 PM - 8:00 PM"
+    label: "Team Formation Night"
+  hackathon_day_1:
+    date: "2026-02-21"
+    day: "Saturday"
+    time: "10:30 AM - 8:45 PM"
+    label: "Hackathon Day 1"
+    mandatory: true
+  hackathon_day_2:
+    date: "2026-02-22"
+    day: "Sunday"
+    time: "8:30 AM - 5:30 PM"
+    label: "Hackathon Day 2 (Optional)"
+    mandatory: false
+  pitch_night:
+    date: "2026-03-04"
+    day: "Wednesday"
+    time: "5:30 PM - 9:30 PM"
+    label: "Pitch Night"
+
+# ---------------------
+# VENUES
+# ---------------------
+venues:
+  team_formation:
+    name: "Stone & Chalk"
+    address: "121 King St, Melbourne VIC 3000"
+    city: "Melbourne CBD"
+  hackathon:
+    name: "Woodside Building for Technology and Design (Building 94)"
+    address: "20 Exhibition Walk, Clayton VIC 3168"
+    campus: "Monash University, Clayton Campus"
+    wheelchair_accessible: true
+    accessibility_notes: "Wheelchair accessible with plenty of routes between the building and the bus loop/car park."
+    public_transport: "Many bus routes arriving at the Monash Bus Loop."
+    parking: "Free after 4 PM on weekdays and on weekends in most parking zones."
+    map_note: "For the latest venue map and parking advice, email hi@mlai.au or info@mymi.org.au."
+  pitch_night:
+    name: "Monash College City Campus"
+    address: "Level 5/750 Collins St, Docklands VIC 3008"
+
+# ---------------------
+# DETAILED SCHEDULES
+# ---------------------
+schedule:
+  team_formation_night:
+    date: "Sunday 15 Feb 2026"
+    venue: "Stone & Chalk, 121 King St, Melbourne CBD"
+    items:
+      - time: "5:00 PM"
+        title: "Team Formation / Ice Breakers / Social Activity"
+      - time: "8:00 PM"
+        title: "Wrap up"
+
+  hackathon_day_1:
+    date: "Saturday 21 Feb 2026"
+    venue: "Monash Clayton, Woodside Building (Building 94)"
+    items:
+      - time: "10:30 AM"
+        title: "Event start / Student sign-ins"
+      - time: "~11:00 AM"
+        title: "Welcome / Introductions"
+      - time: "11:30 AM"
+        title: "Sponsor speeches"
+      - time: "12:30 PM"
+        title: "Brainstorming + optional social activity + hacking"
+      - time: "1:30 PM"
+        title: "Lunch / refreshments"
+      - time: "2:30 PM"
+        title: "Mentors & co-designers available / hacking"
+      - time: "3:00 PM"
+        title: "Workshop 1 (Technical)"
+      - time: "4:00 PM"
+        title: "Mentors & co-designers available"
+      - time: "5:45 PM"
+        title: "Workshop 2 (Technical)"
+      - time: "6:45 PM"
+        title: "Dinner / refreshments"
+      - time: "7:45 PM"
+        title: "Mentors & co-designers available / hacking"
+      - time: "8:45 PM"
+        title: "Day 1 wraps up"
+
+  hackathon_day_2:
+    date: "Sunday 22 Feb 2026"
+    venue: "Monash Clayton, Woodside Building (Building 94)"
+    optional: true
+    items:
+      - time: "8:30 AM"
+        title: "Breakfast"
+      - time: "9:00 AM"
+        title: "Morning briefing / hacking"
+      - time: "9:30 AM"
+        title: "Mentors & co-designers available"
+      - time: "10:30 AM"
+        title: "Workshop 3 (Pitching)"
+      - time: "11:15 AM"
+        title: "Mentors & co-designers available"
+      - time: "12:15 PM"
+        title: "Lunch / refreshments"
+      - time: "1:30 PM"
+        title: "Optional social activity / hacking"
+      - time: "2:30 PM"
+        title: "Mentors & co-designers available"
+      - time: "5:30 PM"
+        title: "Day 2 wraps up"
+
+  pitch_night:
+    date: "Wednesday 4 Mar 2026"
+    venue: "Monash College City Campus, Level 5/750 Collins St, Docklands"
+    items:
+      - time: "5:30 PM"
+        title: "Networking"
+      - time: "6:00 PM"
+        title: "Acknowledgment of Country & intro"
+      - time: "6:05 PM"
+        title: "Opening remarks"
+      - time: "6:10 PM"
+        title: "Sponsor introductions"
+      - time: "6:20 PM"
+        title: "Overview + judges intro"
+      - time: "6:30 PM"
+        title: "Pitches (x4)"
+      - time: "7:10 PM"
+        title: "Break"
+      - time: "7:30 PM"
+        title: "Pitches (x4)"
+      - time: "8:10 PM"
+        title: "Judges deliberate / startup programs"
+      - time: "8:30 PM"
+        title: "Winners announced"
+      - time: "8:40 PM"
+        title: "Networking & after drinks"
+
+# ---------------------
+# TICKETS
+# ---------------------
+tickets:
+  hackathon:
+    description: "MedHack: Frontiers Hackathon ticket (covers Day 1 and Day 2)"
+    note: "Buy via the official event listings shared by MLAI/MYMI (mlai.au and mymi.org.au)."
+    limited: true
+  team_formation:
+    description: "Team Formation Night ticket (separate from hackathon ticket)"
+    note: "Team Formation Night has its own ticket."
+  pitch_night:
+    early_bird:
+      price: "A$14.90"
+    standard:
+      price: "A$25.00"
+    note: "Ticket availability depends on what's still on sale. Finalists attend Pitch Night for free."
+  general_notes:
+    - "All tickets are limited by design and often sell out."
+    - "Every participant / team member needs their own ticket."
+    - "Ticket transfers are handled through the ticketing platform. Email hi@mlai.au or info@mymi.org.au for help."
+    - "Refunds follow the ticketing platform's policy. Email hi@mlai.au or info@mymi.org.au if stuck."
+    - "If you bought a Pitch Night ticket but you're also a finalist, email hi@mlai.au with your ticket receipt and team details."
+
+# ---------------------
+# TRACKS / CHALLENGES
+# ---------------------
+tracks:
+  small_tract:
+    name: "Small Tract (Coding)"
+    description: >
+      A guided coding challenge where you'll be walked through creating an AI bot
+      from scratch. Your bot will learn to identify when simulated patients are in
+      trouble and alert medical staff. Perfect for people who want a structured,
+      hands-on build experience.
+    data_used: "Simulated patient vitals data"
+    scoring: "Points-based. The team with the highest points at the end wins."
+    one_liner: "Guided AI build + simulated vitals + points"
+  big_tract:
+    name: "Big Tract (Pitching)"
+    description: >
+      An open-ended challenge where you interview mentors, choose your OWN medical
+      problem to solve, build a solution, and pitch it to judges. This track is about
+      problem discovery, clinical insight, solution design, and presenting your work
+      convincingly.
+    data_used: "Real, de-identified Electronic Medical Record (EMR) data, plus your own research"
+    scoring: "Teams submit a short video pitch. Judges select finalists who pitch live at Pitch Night."
+    one_liner: "Choose your problem + build a solution + pitch to judges"
+    examples_of_solutions: "AI copilots, workflow tools, diagnostic support concepts, patient-first platforms, and other practical prototypes grounded in healthcare needs."
+
+track_choice_advice: >
+  Choose Small Tract (Coding) if you want a guided, structured build experience
+  and you're newer to AI. Choose Big Tract (Pitching) if you want to find your own
+  medical problem, interview mentors, build a solution, and pitch it to judges.
+  You can choose during team formation or at the start of the hackathon once you've
+  met your team. Mixed-skill teams are strongly encouraged.
+
+# ---------------------
+# TEAMS
+# ---------------------
+teams:
+  min_size: 2
+  max_size: 6
+  recommended_size: "5 to 6"
+  solo_welcome: true
+  solo_advice: "Team Formation Night is perfect for meeting teammates, and you can also form/join a team on Day 1."
+  pre_form_allowed: true
+  clinician_required: false
+  clinician_note: "Not required, but clinician input is a huge advantage, especially for Big Tract (Pitching) projects."
+  remote_participation: >
+    The event isn't run as an online hackathon, but remote contribution can work if
+    at least one teammate attends in person to register the team and everyone has tickets.
+
+# ---------------------
+# WHO SHOULD ATTEND
+# ---------------------
+audience:
+  summary: "AI developers, data scientists, university students, and healthcare professionals (doctors, nurses, researchers, ward clerks, administrators)."
+  no_ai_experience_needed: true
+  no_healthcare_experience_needed: true
+  good_for_beginners: true
+  clinician_value: "Clinical context, workflows, and problem framing are often the difference between a cool demo and a real solution."
+  designer_value: "Pitch clarity, user journeys, and workflow design are critical, especially in the Big Tract (Pitching)."
+  students_welcome: true
+
+# ---------------------
+# CHECK-IN & REGISTRATION
+# ---------------------
+check_in:
+  day_1_time: "From 10:30 AM"
+  what_to_bring: "Your ticket confirmation and a form of ID."
+  day_1_mandatory: true
+  day_1_note: "Day 1 is required for registration and orientation. Plan to attend Day 1."
+  running_late: "Let your team know and email hi@mlai.au if you think you'll miss sign-in."
+
+# ---------------------
+# MENTORS & WORKSHOPS
+# ---------------------
+mentors:
+  available: true
+  help_with: "Brainstorming, solution design, AI/healthcare process insight, coding support (especially for Small Tract teams), and pitch preparation."
+  availability: "Multiple mentor blocks each day. The first afternoon (Day 1) is especially valuable for getting your project on rails."
+
+workshops:
+  - name: "Workshop 1 (Technical)"
+    day: "Day 1"
+    time: "3:00 PM"
+  - name: "Workshop 2 (Technical)"
+    day: "Day 1"
+    time: "5:45 PM"
+  - name: "Workshop 3 (Pitching)"
+    day: "Day 2"
+    time: "10:30 AM"
+  note: "Strongly recommended, especially if you're new or you want your pitch/demo to land well."
+
+# ---------------------
+# FOOD & DRINKS
+# ---------------------
+food:
+  provided: true
+  day_1: "Lunch/refreshments and dinner/refreshments"
+  day_2: "Breakfast and lunch/refreshments"
+  pitch_night: "Food and drinks included, plus an after-networking vibe."
+
+# ---------------------
+# DATA, PRIVACY & COMPLIANCE
+# ---------------------
+data_and_privacy:
+  safe_to_use: true
+  small_tract_data: "Simulated patient vitals data"
+  big_tract_data: "Real, de-identified Electronic Medical Record (EMR) data"
+  identifiable_patient_data: false
+  responsible_use: "Treat all datasets as sensitive, keep them within the event rules, and build responsibly."
+
+# ---------------------
+# INTELLECTUAL PROPERTY
+# ---------------------
+intellectual_property:
+  team_owns_work: true
+  can_continue_after_event: true
+  can_publish_publicly: true
+  dataset_note: "If your project uses provided datasets, follow any dataset handling rules given during the event."
+
+# ---------------------
+# SCORING, JUDGING & WINNERS
+# ---------------------
+judging:
+  small_tract:
+    method: "Points-based. Build a vitals-monitoring AI bot and earn points based on performance against challenge criteria and test cases."
+    winner: "Team with the highest points wins."
+  big_tract:
+    method: "Submit a short video pitch. Judges select finalists. Finalists pitch live at Pitch Night."
+    finalist_pathway: "Video pitch submission → judged finalists → live pitch on Mar 4."
+    num_pitching_teams: 8
+    pitch_format: "Two blocks of four pitches."
+    scoring_rubric:
+      total_points: 50
+      categories:
+        - name: "Innovation"
+          max_score: 5
+          description: "Does the solution provide a new or significantly improved approach to what's currently available?"
+        - name: "Usefulness"
+          max_score: 10
+          description: "Does it truly address the needs of the user? Does it solve a large problem?"
+        - name: "Viability"
+          max_score: 10
+          description: "Is it scalable, cost-effective, and easy to adopt?"
+        - name: "Technical"
+          max_score: 10
+          description: "Is what the team built technically complex? Is their future vision technically feasible?"
+        - name: "Business"
+          max_score: 10
+          description: "Does it have the potential to be implemented and possibly funded?"
+        - name: "Sustainability"
+          max_score: 5
+          description: "Will it minimise long-term environmental impact and stand the test of time?"
+      note: "Usefulness, Viability, Technical, and Business are weighted higher (10 points each) than Innovation and Sustainability (5 points each). Focus on solving real problems with feasible, well-built solutions."
+  judges_span: "Healthcare, tech, and venture."
+
+# ---------------------
+# PRIZES
+# ---------------------
+prizes:
+  available: true
+  cash_pool: "Around A$2,500"
+  announced_at: "Pitch Night"
+  both_tracks_have_winners: true
+  details_note: "Prize allocation details can be confirmed by emailing hi@mlai.au or info@mymi.org.au."
+
+# ---------------------
+# PITCH NIGHT (ATTENDEE INFO)
+# ---------------------
+pitch_night_info:
+  who_should_attend: "Hackathon participants, supporters, people scouting talent, and anyone curious about healthcare innovation."
+  what_to_expect: "Live pitches from finalists, demos of real prototypes, judges Q&A, winners announced, then networking."
+  suitable_for_non_participants: true
+  food_and_drinks: true
+
+# ---------------------
+# EVENT NATURE
+# ---------------------
+event_nature:
+  is_coding: true
+  is_pitching: true
+  description: "Both. Small Tract (Coding) is a guided AI build with points. Big Tract (Pitching) is problem discovery + solution design + demo + pitching (including a video pitch and potentially a live pitch)."
+  founder_energy: "It's a hackathon with strong 'founder energy': teams prototype fast, work with mentors, and Big Tract finalists pitch to judges/investors at Pitch Night."
+
+# ---------------------
+# WHAT TO BRING & PREPARATION
+# ---------------------
+what_to_bring:
+  - "Laptop"
+  - "Charger and any adapters"
+  - "Water bottle"
+  - "Anything you need for your build/demo"
+  - "Ticket confirmation and ID"
+  - "A power board (smart move for team tables)"
+  dress_code: "Comfortable casual clothing. You'll be sitting, building, and moving between mentor chats."
+  pre_install: "Have your usual dev setup ready (Python, notebooks, Git, etc.). You'll get track-specific guidance at the event."
+  hardware_allowed: true
+  hardware_note: "Yes, as long as it's safe, portable, and you can manage it at a hackathon table."
+
+# ---------------------
+# ACCESSIBILITY & SAFETY
+# ---------------------
+accessibility:
+  venue_accessible: true
+  public_transport: "Buses run to the Monash Bus Loop."
+  parking: "Free after 4 PM weekdays and on weekends in most zones."
+  code_of_conduct: true
+  code_of_conduct_note: "Professional behaviour is expected to keep the event respectful and inclusive."
+  safety: "The event complies with health and safety regulations for in-person events."
+
+# ---------------------
+# CONTACT & SUPPORT
+# ---------------------
+contact:
+  general: "hi@mlai.au"
+  mymi: "info@mymi.org.au"
+  special_requests: "Email hi@mlai.au or info@mymi.org.au with details (dietary, accessibility, team issues)."
+  partnerships_and_sponsorship: "Email info@mymi.org.au"
+
+# ---------------------
+# SOCIAL / WEBSITES
+# ---------------------
+social:
+  mlai_website: "mlai.au"
+  mymi_website: "mymi.org.au"
+
+# ---------------------
+# FAQ
+# ---------------------
+faq:
+  - question: "What is MedHack: Frontiers?"
+    answer: "A healthcare AI hackathon where clinicians, engineers, designers, and students build real prototypes over an intense weekend, then the best Big Tract teams pitch live at Pitch Night."
+  - question: "What's the purpose of the event?"
+    answer: "To bring healthcare and AI communities together to solve meaningful healthcare challenges and showcase emerging talent."
+  - question: "What do participants actually do?"
+    answer: "Form teams, pick a track (Small Tract for coding or Big Tract for pitching), use the provided datasets, build a working demo/prototype, and present outcomes (points-based for Small Tract, pitch-based for Big Tract)."
+  - question: "Do I need AI experience?"
+    answer: "No. The Small Tract (Coding) is designed for first-timers and guides you through building an AI bot from scratch. Workshops + mentors support you throughout."
+  - question: "Do I need healthcare experience?"
+    answer: "No. Clinicians and healthcare mentors will be around, and mixed teams are encouraged."
+  - question: "I'm a clinician. Will I be useful even if I don't code?"
+    answer: "Absolutely. Clinical context, workflows, and problem framing are often the difference between a cool demo and a real solution."
+  - question: "I'm a designer / product person. Is there a role for me?"
+    answer: "Yes. Pitch clarity, user journeys, and workflow design are critical, especially in the Big Tract (Pitching)."
+  - question: "Can I come solo?"
+    answer: "Yes. Team Formation Night is perfect for meeting teammates, and you can also form/join a team on Day 1."
+  - question: "Can my team include beginners and experts together?"
+    answer: "Yes, mixed-skill teams are strongly encouraged."
+  - question: "Can our team work remotely?"
+    answer: "The event isn't run as an online hackathon, but remote contribution can work if at least one teammate attends in person to register the team and everyone has tickets."
+  - question: "Is Day 2 optional?"
+    answer: "Yes, but it's a big advantage if you want extra support, time, and feedback."
+  - question: "Do I need to attend workshops?"
+    answer: "Strongly recommended, especially if you're new or you want your pitch/demo to land well."
+  - question: "Is there parking available?"
+    answer: "Free after 4 PM on weekdays and on weekends in most zones at Monash Clayton."
+  - question: "What should I bring?"
+    answer: "Laptop, charger, any adapters, a water bottle, anything you need for your build/demo, plus your ticket confirmation and ID. A power board is also a smart move."
+  - question: "What should I wear?"
+    answer: "Comfortable casual clothing. You'll be sitting, building, and moving between mentor chats."
+  - question: "Will food be provided?"
+    answer: "Yes. Meals and refreshments are provided during the hackathon days, and food and drinks are included at Pitch Night."
+  - question: "Who owns what we build?"
+    answer: "Teams retain ownership of what they create and can keep working on projects after the event."
+  - question: "Can we publish our project publicly?"
+    answer: "Yes, and many teams do. If your project uses provided datasets, follow any dataset handling rules given during the event."
+  - question: "Will we ever see identifiable patient data?"
+    answer: "No. Datasets are de-identified or synthetic, and the event follows strict privacy and ethical guidelines."
+  - question: "How are winners selected in the Small Tract (Coding)?"
+    answer: "Points-based. Build a vitals-monitoring AI bot and earn points based on how well your system performs against the challenge criteria and test cases."
+  - question: "How are winners selected in the Big Tract (Pitching)?"
+    answer: "Submit a short video pitch, judges select finalists, and finalists pitch live at Pitch Night where final winners are chosen. Pitches are scored out of 50 across six categories: Innovation (/5), Usefulness (/10), Viability (/10), Technical (/10), Business (/10), and Sustainability (/5)."
+  - question: "What do judges look for?"
+    answer: "Usefulness (does it solve a real problem?), Viability (is it scalable and cost-effective?), Technical complexity and feasibility, Business potential (can it be implemented and funded?), Innovation, and Sustainability. Usefulness, Viability, Technical, and Business are weighted highest at 10 points each."
+  - question: "How are pitches scored?"
+    answer: "Pitches are scored out of 50 total points across six categories: Innovation (/5), Usefulness (/10), Viability (/10), Technical (/10), Business (/10), and Sustainability (/5). The heavier-weighted categories (Usefulness, Viability, Technical, Business) reward teams that solve real problems with feasible, well-built solutions."
+  - question: "Are there prizes?"
+    answer: "Yes. Winning teams receive prizes, including a cash prize pool around A$2,500. Winners are announced on Pitch Night."
+  - question: "Can I get a refund?"
+    answer: "Refunds follow the ticketing platform's policy. If you're stuck, email hi@mlai.au or info@mymi.org.au."
+  - question: "Can I transfer my ticket to someone else?"
+    answer: "Ticket changes are usually handled through the ticketing platform. Email hi@mlai.au or info@mymi.org.au with your order details."
+  - question: "Is the hackathon venue accessible?"
+    answer: "Yes, wheelchair accessible with good routes between the building and transport/parking areas."
+  - question: "Is there a code of conduct?"
+    answer: "Yes. Professional behaviour is expected to keep the event respectful and inclusive."
+  - question: "I have a question. Who do I contact?"
+    answer: "Email hi@mlai.au (general support) or info@mymi.org.au."
+  - question: "I'm interested in partnerships or sponsorship. Who do I contact?"
+    answer: "Email info@mymi.org.au (or ask the organisers and they'll route you)."
+  - question: "Is this a startup event?"
+    answer: "It's a hackathon with strong 'founder energy': teams prototype fast, work with mentors, and Big Tract finalists pitch to judges/investors at Pitch Night."
+  - question: "How do I get tickets?"
+    answer: "Buy via the official event listings shared by MLAI/MYMI (mlai.au and mymi.org.au are the official sites). Team Formation Night, Hackathon, and Pitch Night each have separate tickets."
+  - question: "How much are Pitch Night tickets?"
+    answer: "Early Bird is A$14.90 and Standard is A$25.00 (availability depends on what's still on sale)."
+  - question: "Do finalists need to buy a Pitch Night ticket?"
+    answer: "No. Finalists attend Pitch Night for free."
+  - question: "Do all team members need tickets?"
+    answer: "Yes. Every participant should have their own ticket."
+  - question: "Do I need to install anything beforehand?"
+    answer: "Have your usual dev setup ready (Python, notebooks, Git, etc.). You'll get track-specific guidance at the event."
+  - question: "Can I bring hardware?"
+    answer: "Yes, as long as it's safe, portable, and you can manage it at a hackathon table."
+  - question: "Is Pitch Night suitable if I didn't participate in the hackathon?"
+    answer: "Yes, it's designed as a public showcase."
+  - question: "I bought a Pitch Night ticket but I'm also a finalist. What should I do?"
+    answer: "Email hi@mlai.au with your ticket receipt and team details so the organisers can sort you out."
+  - question: "I'm running late on Day 1. What do I do?"
+    answer: "Let your team know and email hi@mlai.au if you think you'll miss sign-in."
+  - question: "I have a special request (dietary, accessibility, team issue). Who do I email?"
+    answer: "Email hi@mlai.au or info@mymi.org.au with details."

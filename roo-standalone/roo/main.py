@@ -21,6 +21,101 @@ from .slack_client import post_message
 _pending_intents: dict = {}
 
 
+async def _medhack_daily_case_loop():
+    """Background task that posts a new diagnosis case each day."""
+    import asyncio
+    from .slack_client import get_channel_id, post_message
+    from .utils import get_current_date
+
+    # Wait a bit for the app to fully start
+    await asyncio.sleep(10)
+
+    while True:
+        try:
+            today = get_current_date()
+            # Try medhack-testing first (for dev), then medhack-frontiers (for prod)
+            channel_id = get_channel_id("medhack-testing") or get_channel_id("medhack-frontiers")
+            if not channel_id:
+                print("⚠️ MedHack: neither #medhack-testing nor #medhack-frontiers channel found, skipping daily case")
+                await asyncio.sleep(3600)  # Retry in an hour
+                continue
+
+            # Load the medhack client
+            from pathlib import Path
+            import sys
+            settings = get_settings()
+            skills_dir = Path(settings.SKILLS_DIR) / "medhack"
+            client_path = skills_dir / "client.py"
+
+            if not client_path.exists():
+                print("⚠️ MedHack client.py not found, skipping daily case")
+                await asyncio.sleep(3600)
+                continue
+
+            # Import the client
+            import importlib.util
+            spec = importlib.util.spec_from_file_location("medhack_daily_client", client_path)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            client = mod.MedHackClient()
+
+            # Check if there's already a case for today
+            current = client.get_current_case(today)
+            if current is None:
+                # Start a new case
+                new_case = client.start_new_case(today)
+                if new_case:
+                    difficulty = new_case.get("difficulty", "medium").upper()
+                    title = new_case.get("title", "")
+                    title_str = f' - _{title}_' if title else ""
+                    header = f"*GUESS THE DIAGNOSIS* - Daily Challenge [{difficulty}]{title_str}"
+
+                    # New-style cases have an ed_first_look narrative + triage note
+                    if new_case.get("ed_first_look"):
+                        scene = new_case["ed_first_look"].strip()
+                        triage = new_case["presenting_complaint"].strip()
+                        message = (
+                            f"{header}\n\n"
+                            f"{scene}\n\n"
+                            f"*Triage note:* {triage}\n\n"
+                            f"Ask me questions about this patient to work towards the diagnosis. "
+                            f"When you're ready, tell me your diagnosis!\n\n"
+                            f"_You have 3 guesses. First correct answer wins 12 MLAI points "
+                            f"+ DM Dr Sam for a free ticket code to MedHack: Frontiers!_"
+                        )
+                    else:
+                        complaint = new_case["presenting_complaint"].strip()
+                        message = (
+                            f"{header}\n\n"
+                            f"{complaint}\n\n"
+                            f"Ask me questions about this patient to work towards the diagnosis. "
+                            f"When you're ready, tell me your diagnosis!\n\n"
+                            f"_You have 3 guesses. First correct answer wins 12 MLAI points "
+                            f"+ DM Dr Sam for a free ticket code to MedHack: Frontiers!_"
+                        )
+                    post_message(channel=channel_id, text=message)
+                    print(f"Posted new MedHack case #{new_case['id']} for {today}")
+                else:
+                    print("⚠️ No available MedHack cases to post")
+
+        except Exception as e:
+            print(f"❌ MedHack daily case error: {e}")
+            import traceback
+            traceback.print_exc()
+
+        # Sleep until tomorrow (calculate seconds until next 10 AM AEST)
+        from datetime import datetime, timedelta
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo(get_settings().TIMEZONE)
+        now = datetime.now(tz)
+        next_post = now.replace(hour=10, minute=0, second=0, microsecond=0)
+        if now >= next_post:
+            next_post += timedelta(days=1)
+        sleep_seconds = (next_post - now).total_seconds()
+        print(f"MedHack: Next case in {sleep_seconds/3600:.1f} hours")
+        await asyncio.sleep(sleep_seconds)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan handler for startup/shutdown."""
@@ -28,13 +123,20 @@ async def lifespan(app: FastAPI):
     print(f"🦘 Roo Standalone starting...")
     print(f"   LLM Provider: {settings.default_llm_provider}")
     print(f"   Skills Dir: {settings.SKILLS_DIR}")
-    
+
     # Initialize agent on startup
     agent = get_agent()
     print(f"   Loaded {len(agent.skills)} skills")
-    
+
+    # Start MedHack daily case scheduler
+    import asyncio
+    medhack_task = asyncio.create_task(_medhack_daily_case_loop())
+    print("   Started MedHack daily case scheduler")
+
     yield
-    
+
+    # Cancel the background task on shutdown
+    medhack_task.cancel()
     print("🦘 Roo Standalone shutting down...")
 
 

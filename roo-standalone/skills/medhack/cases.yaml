@@ -1,0 +1,133 @@
+# MedHack: Guess the Diagnosis - Clinical Cases
+# Each case represents a patient scenario for the daily game.
+# Add more cases as needed. Roo will cycle through them one per day.
+
+cases:
+  - id: 6
+    difficulty: "medium"
+    title: "Salt & Static"
+    ed_first_look: >
+      You slide the curtain aside in a noisy emergency department. On the bed is a
+      young adult curled slightly on their side, clutching a sick bag like it's a life
+      raft. Their skin has a warm, bronzed tone that looks almost too even, like a
+      filter, and their lips are dry. They try to smile as you approach, but the smile
+      wobbles. A nurse murmurs, "They're a bit soft. We've got fluids running." They
+      look up at you with tired, glassy eyes and manage: "Hi… sorry, I'm not being
+      dramatic. I just feel… unplugged."
+    presenting_complaint: >
+      27F, 2 days N/V + abdo cramps, dizzy on standing, "can't keep anything down."
+      Very weak. Vitals: BP 84/48, HR 128, RR 22, SpO2 99% RA, T 37.2°C, BGL 3.2
+      mmol/L. Category 2. IV fluids started. ECG ordered.
+    patient:
+      name: "Sasha 'Sash' Nguyen"
+      age: 27
+      gender: "Female"
+      vibe: >
+        Quick-witted, self-deprecating, tries to make jokes to cope. Speaks in short
+        bursts when nauseated. When anxious, they ramble and lose the thread.
+      historian_quality: >
+        Medium-to-poor. They answer what they think you mean, not what you asked.
+        They minimize important history unless asked directly ("I didn't think it mattered").
+      motivation: >
+        Embarrassed about the diagnosis, worried you'll judge them for "not handling
+        it better." If asked kindly, they open up. If asked aggressively, they shut
+        down or get sarcastic.
+    history:
+      presenting_history: >
+        Nausea and vomiting for 48 hours (vomiting 6-10 times/day, can't keep fluids
+        down). Diffuse abdominal cramping (non-localised, comes in waves). Profound
+        fatigue and "heavy limbs." Dizziness, near-syncope when standing. Mild dull
+        headache. Muscle weakness, shaky feeling. Reduced urine output.
+      past_medical_history:
+        - "Primary adrenal insufficiency (Addison's disease) - diagnosed approximately 1 year ago"
+      medications:
+        - "Hydrocortisone (missed doses recently due to hectic schedule and vomiting)"
+        - "Fludrocortisone (missed doses recently)"
+      family_history: "Non-contributory"
+      social_history: "Works in hospitality. Lives alone. Non-smoker."
+      history_disclosure_rules: >
+        The patient does NOT volunteer their Addison's diagnosis or missed medications
+        unless asked specifically. If asked "any chronic conditions?" they first say
+        "just… nothing serious" unless prompted gently. If asked "have you missed any
+        meds?" they admit they've missed "a few doses" and then the full context comes
+        out. If asked about steroid tablets, daily meds, or endocrine history, they
+        reveal the Addison's and missed doses.
+    symptoms:
+      main:
+        - "Nausea and vomiting for 48 hours (6-10 times/day, can't keep fluids down)"
+        - "Diffuse abdominal cramping (non-localised, comes in waves)"
+        - "Profound fatigue and 'heavy limbs'"
+        - "Dizziness, near-syncope when standing"
+        - "Mild dull headache"
+        - "Muscle weakness, shaky feeling"
+        - "Reduced urine output"
+      associated_if_asked:
+        - "Salt cravings ('I could eat a bowl of soy sauce')"
+        - "Unintentional weight loss over the last few months"
+        - "Darkening of skin, especially palms/knuckles and inside mouth (they think it's 'just tanning')"
+        - "Occasional diarrhoea early on day 1 (not constant)"
+        - "No chest pain, no focal neuro deficits, no rash"
+        - "No significant fever (maybe felt 'hot and cold')"
+      red_flag_negatives:
+        - "No blood in vomit or stool"
+        - "No severe focal abdominal guarding or rebound"
+        - "No pregnancy risk (urine pregnancy test negative)"
+    vitals:
+      heart_rate: 128
+      blood_pressure: "84/48"
+      respiratory_rate: 22
+      temperature: 37.2
+      spo2: "99% on room air"
+      bgl: "3.2 mmol/L"
+    examination:
+      general: "Ill-looking, dehydrated, tired; responds appropriately but slow."
+      skin: >
+        Noticeable hyperpigmentation (palmar creases, knuckles), subtle mucosal
+        pigmentation; small vitiligo patch on forearm.
+      mouth: "Dry mucous membranes."
+      cardiovascular: "Tachycardic, thready pulses, capillary refill mildly delayed."
+      respiratory: "Clear chest, no wheeze, no crackles."
+      abdominal: "Soft, mildly tender diffusely, no peritonism."
+      neurological: "Alert, oriented, no focal deficits, generalized weakness."
+      postural_vitals: "Marked drop in BP on standing with lightheadedness."
+    investigations:
+      ecg: "Sinus tachycardia ~125 bpm, mild peaked T waves (consistent with hyperkalaemia), no ST elevation."
+      fingerstick_glucose: "3.2 mmol/L (low)"
+      bloods:
+        sodium: "122 mmol/L (low)"
+        potassium: "6.1 mmol/L (high)"
+        chloride: "92 mmol/L (low)"
+        bicarbonate: "18 mmol/L (low)"
+        urea: "10.2 mmol/L (high-ish)"
+        creatinine: "132 µmol/L (AKI/dehydration range)"
+        glucose_lab: "3.1 mmol/L"
+        lactate: "2.4 mmol/L (mildly elevated)"
+        wcc: "12.1 x10⁹/L (mild stress leukocytosis)"
+        haemoglobin: "152 g/L (hemoconcentration)"
+        eosinophils: "0.8 x10⁹/L (mildly high)"
+        crp: "18 mg/L (mild)"
+      vbg: "pH 7.31, HCO3 18 (mild metabolic acidosis)"
+      urinalysis: "Concentrated, ketones trace, no nitrites/leukocytes, no blood."
+      pregnancy_test: "Urine β-hCG: Negative."
+      endocrine_if_ordered:
+        random_cortisol: "60 nmol/L (inappropriately low for severe illness)"
+        acth: "Very high (supports primary adrenal insufficiency)"
+        note: "Only reveal these results if the team specifically orders cortisol or ACTH levels."
+      imaging_if_ordered:
+        abdominal_ultrasound: >
+          No gallstones, no biliary dilation, no free fluid, appendix not visualised,
+          no obvious pathology.
+    diagnosis: "Adrenal Crisis"
+    acceptable_answers:
+      - "adrenal crisis"
+      - "addisonian crisis"
+      - "adrenal crisis due to addison's"
+      - "addison's crisis"
+      - "acute adrenal insufficiency"
+      - "adrenal insufficiency crisis"
+      - "addison's disease crisis"
+      - "acute adrenal crisis"
+    hints:
+      - "Consider what electrolyte pattern you'd see with mineralocorticoid deficiency..."
+      - "The combination of hypotension, hyponatraemia, hyperkalaemia, and hypoglycaemia is a classic pattern. What endocrine axis controls all of these?"
+      - "Have you asked the patient about their medications or any chronic conditions? They might be holding something back."
