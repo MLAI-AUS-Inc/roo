@@ -31,7 +31,9 @@ class Skill:
     trigger_keywords: List[str] = field(default_factory=list)
     requires_auth: bool = False
     parameters: List[dict] = field(default_factory=list)
-    
+    priority_channels: List[str] = field(default_factory=list)
+    exclusive_channels: List[str] = field(default_factory=list)
+
     # Loaded implementation module (if any)
     _module: Optional[Any] = field(default=None, repr=False)
     
@@ -139,9 +141,11 @@ def load_skill_from_directory(skill_dir: Path) -> Optional[Skill]:
         path=skill_dir,
         trigger_keywords=post.metadata.get("trigger_keywords", []),
         requires_auth=post.metadata.get("requires_auth", False),
-        parameters=parameters
+        parameters=parameters,
+        priority_channels=post.metadata.get("priority_channels", []),
+        exclusive_channels=post.metadata.get("exclusive_channels", []),
     )
-    
+
     # Load implementation module if present
     client_file = skill_dir / "client.py"
     if client_file.exists():
@@ -175,7 +179,9 @@ def load_skill_file(file_path: Path) -> Optional[Skill]:
         path=file_path.parent,
         trigger_keywords=post.metadata.get("trigger_keywords", []),
         requires_auth=post.metadata.get("requires_auth", False),
-        parameters=parameters
+        parameters=parameters,
+        priority_channels=post.metadata.get("priority_channels", []),
+        exclusive_channels=post.metadata.get("exclusive_channels", []),
     )
 
 

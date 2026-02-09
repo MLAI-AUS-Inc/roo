@@ -191,6 +191,22 @@ def send_dm(user_id: str, text: str, **kwargs) -> Optional[Dict[str, Any]]:
     return None
 
 
+@lru_cache(maxsize=100)
+def get_channel_name(channel_id: str) -> Optional[str]:
+    """Get channel name by ID using conversations.info."""
+    client = get_slack_client()
+
+    try:
+        response = client.conversations_info(channel=channel_id)
+        if response.get("ok"):
+            name = response["channel"].get("name")
+            return name
+        return None
+    except Exception as e:
+        print(f"❌ Channel info lookup error for {channel_id}: {e}")
+        return None
+
+
 @lru_cache(maxsize=10)
 def get_channel_id(channel_name: str) -> Optional[str]:
     """Get channel ID by name."""
