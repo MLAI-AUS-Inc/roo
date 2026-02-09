@@ -231,7 +231,7 @@ class MedHackClient:
                 status = await backend.medhack_get_user_status(user_id)
                 if status is not None:
                     return status.get("locked_out", False)
-                return False
+                # Backend returned None (e.g. 404) — fall through to local
             except Exception as e:
                 print(f"⚠️ Backend is_user_locked_out failed: {e}")
 
@@ -270,7 +270,7 @@ class MedHackClient:
                 status = await backend.medhack_get_user_status(user_id)
                 if status is not None:
                     return status.get("pending_guess")
-                return None
+                # Backend returned None (e.g. 404) — fall through to local
             except Exception as e:
                 print(f"⚠️ Backend get_pending_guess failed: {e}")
 
