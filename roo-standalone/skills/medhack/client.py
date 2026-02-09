@@ -24,7 +24,7 @@ GAME_STATE_FILE = DATA_DIR / "medhack_game_state.json"
 DIAGNOSIS_WIN_POINTS = 12
 
 # Maximum guesses per user per case
-MAX_GUESSES_PER_USER = 3
+MAX_GUESSES_PER_USER = 1
 
 
 class MedHackClient:
@@ -53,6 +53,7 @@ class MedHackClient:
             "hint_level": 0,
             "played_case_ids": [],
             "guess_counts": {},
+            "pending_guesses": {},
         }
 
     def _save_state(self, state: dict) -> None:
@@ -127,6 +128,27 @@ class MedHackClient:
     def is_user_locked_out(self, user_id: str, today: date) -> bool:
         """Check if a user has exhausted all guesses for today's case."""
         return self.get_user_guesses_remaining(user_id, today) <= 0
+
+    def set_pending_guess(self, user_id: str, guess: str) -> None:
+        """Store a pending guess that needs user confirmation before locking in."""
+        state = self._load_state()
+        pending = state.get("pending_guesses", {})
+        pending[user_id] = guess
+        state["pending_guesses"] = pending
+        self._save_state(state)
+
+    def get_pending_guess(self, user_id: str) -> Optional[str]:
+        """Get the pending guess for a user, if any."""
+        state = self._load_state()
+        return state.get("pending_guesses", {}).get(user_id)
+
+    def clear_pending_guess(self, user_id: str) -> None:
+        """Clear a user's pending guess."""
+        state = self._load_state()
+        pending = state.get("pending_guesses", {})
+        pending.pop(user_id, None)
+        state["pending_guesses"] = pending
+        self._save_state(state)
 
     def check_guess(self, user_id: str, guess: str, today: date) -> Dict[str, Any]:
         """Check if a guess matches the current case's diagnosis.
@@ -257,6 +279,7 @@ class MedHackClient:
         state["solved"] = False
         state["hint_level"] = 0
         state["guess_counts"] = {}
+        state["pending_guesses"] = {}
         state.setdefault("played_case_ids", [])
         if new_case["id"] not in state["played_case_ids"]:
             state["played_case_ids"].append(new_case["id"])

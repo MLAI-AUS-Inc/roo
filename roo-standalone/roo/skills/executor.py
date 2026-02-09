@@ -251,16 +251,52 @@ Original text:
         # If clearly a diagnosis guess, handle that first
         guess_patterns = ["i think it", "my diagnosis is", "my guess is", "is it ",
                           "could it be", "i reckon it", "the diagnosis is",
-                          "i believe it", "it must be", "it's got to be"]
+                          "i believe it", "it must be", "it's got to be",
+                          "lock in", "lock it in", "final answer"]
         is_guess = any(p in text_lower for p in guess_patterns)
+
+        # Confirmation patterns for locking in a pending guess
+        confirm_patterns = ["yes", "yeah", "yep", "yup", "lock in", "lock it in",
+                            "final answer", "confirm", "do it", "go for it",
+                            "that's my guess", "sure", "absolutely"]
+        cancel_patterns = ["no", "nah", "nope", "cancel", "never mind", "keep going",
+                           "not yet", "wait", "hold on", "keep digging"]
 
         current_case = client.get_current_case(today)
 
+        # --- Check for pending guess confirmation/cancellation ---
+        pending_guess = client.get_pending_guess(user_id) if current_case else None
+        if pending_guess and current_case and not current_case.get("solved"):
+            is_confirm = any(p in text_lower for p in confirm_patterns)
+            is_cancel = any(p in text_lower for p in cancel_patterns)
+
+            if is_confirm:
+                # Lock in the pending guess
+                client.clear_pending_guess(user_id)
+                result = client.check_guess(user_id, pending_guess, today)
+                return await self._handle_guess_result(
+                    result, user_id, skill, text, client, today,
+                    thread_history, channel_id, pending_guess
+                )
+
+            elif is_cancel:
+                client.clear_pending_guess(user_id)
+                return (
+                    f"<@{user_id}> No worries — guess cancelled. "
+                    f"Keep investigating and lock in your diagnosis when you're ready. "
+                    f"Remember, you only get *one guess* per case!"
+                )
+
+            # If they said something else while having a pending guess,
+            # remind them (but also let the LLM respond to their question)
+            # Clear the pending guess so it doesn't block future interactions
+            client.clear_pending_guess(user_id)
+
+        # --- New guess attempt ---
         if is_guess and current_case and not current_case.get("solved"):
-            # Check if user is locked out before processing guess
             if client.is_user_locked_out(user_id, today):
                 return (
-                    "Sorry mate, you've used all 3 of your guesses for today's case. "
+                    f"<@{user_id}> Sorry mate, you've already used your guess for today's case. "
                     "Come back tomorrow for a new one!"
                 )
 
@@ -269,87 +305,18 @@ Original text:
             for prefix in guess_patterns:
                 if prefix in text_lower:
                     idx = text_lower.index(prefix) + len(prefix)
-                    guess_text = text[idx:].strip().rstrip("?.!")
+                    candidate = text[idx:].strip().rstrip("?.!")
+                    if candidate:
+                        guess_text = candidate
                     break
 
-            result = client.check_guess(user_id, guess_text, today)
-
-            if result["correct"]:
-                diagnosis = result["diagnosis"]
-                # In-thread reply (concise congratulations)
-                thread_reply = f"*CORRECT!* The diagnosis is *{diagnosis}*! Well done, <@{user_id}>!"
-
-                # Post a public announcement as a NEW top-level message
-                try:
-                    announcement_parts = [
-                        f"*DIAGNOSIS SOLVED!*\n\n"
-                        f"<@{user_id}> correctly diagnosed today's case: *{diagnosis}*!"
-                    ]
-
-                    if result.get("is_first_solver"):
-                        announcement_parts.append(
-                            "They're the first to crack it! DM Dr Sam for a free ticket code to MedHack: Frontiers!"
-                        )
-
-                    # Award MLAI points
-                    points_msg = ""
-                    try:
-                        from ..config import get_settings
-                        from ..slack_client import get_bot_user_id
-                        settings = get_settings()
-
-                        if settings.MLAI_BACKEND_URL and settings.MLAI_API_KEY:
-                            from ..clients.mlai_backend import MLAIBackendClient
-                            points_client = MLAIBackendClient(
-                                base_url=settings.MLAI_BACKEND_URL,
-                                api_key=settings.MLAI_API_KEY,
-                                internal_api_key=settings.INTERNAL_API_KEY or settings.MLAI_API_KEY
-                            )
-                            bot_id = get_bot_user_id()
-                            diagnosis_points = 12
-                            await points_client.system_award_points(
-                                admin_slack_id=bot_id,
-                                target_slack_id=user_id,
-                                points=diagnosis_points,
-                                reason="Correct diagnosis in Guess the Diagnosis game"
-                            )
-                            points_msg = f"\n\n+{diagnosis_points} MLAI points awarded!"
-                    except Exception as e:
-                        print(f"⚠️ Failed to award diagnosis points: {e}")
-
-                    announcement_text = "\n\n".join(announcement_parts) + points_msg
-
-                    if channel_id:
-                        post_message(
-                            channel=channel_id,
-                            text=announcement_text,
-                        )
-                except Exception as e:
-                    print(f"⚠️ Failed to post win announcement: {e}")
-
-                return thread_reply
-
-            elif result.get("already_solved"):
-                return "You've already solved today's case! Nice work earlier. Come back tomorrow for a new one."
-
-            elif result.get("message") == "no_guesses_remaining":
-                return (
-                    "Sorry mate, you've used all 3 of your guesses for today's case. "
-                    "Come back tomorrow for a new one!"
-                )
-
-            else:
-                # Wrong guess - let the LLM respond in character, include remaining guesses
-                remaining = result.get("guesses_remaining", 0)
-                case_data = client.get_case_for_llm(today)
-                llm_response = await self._medhack_llm_response(
-                    skill, text, case_data, thread_history,
-                    extra_instruction="The user just made an INCORRECT diagnosis guess. "
-                    "Respond clinically: suggest they review the findings again. "
-                    "Do NOT reveal the correct diagnosis or hint at it."
-                )
-                guess_warning = f"\n\n_You have *{remaining}* guess{'es' if remaining != 1 else ''} remaining._"
-                return llm_response + guess_warning
+            # Store as pending and ask for confirmation
+            client.set_pending_guess(user_id, guess_text)
+            return (
+                f"<@{user_id}> You want to lock in *{guess_text}* as your final diagnosis?\n\n"
+                f"_Remember: you only get *one guess* per case. "
+                f"Reply *yes* to confirm or *no* to keep investigating._"
+            )
 
         # --- Repost the daily case (with image) ---
         repost_patterns = ["post the", "show the case", "show me the case",
@@ -368,7 +335,7 @@ Original text:
                 f"You can also request examinations and investigations, but be specific — "
                 f"the hospital has limited resources and inappropriate or costly tests may be denied.\n\n"
                 f"When you're ready, tell me your diagnosis!\n\n"
-                f"_You have 3 guesses. First correct answer wins 12 MLAI points "
+                f"_You get *one guess* — make it count! First correct answer wins 12 MLAI points "
                 f"+ DM Dr Sam for a free ticket code to MedHack: Frontiers!_"
             )
             return self._medhack_game_response(message, current_case.get("image_url", ""))
@@ -393,13 +360,13 @@ Original text:
             # Block locked-out users from asking questions too
             if client.is_user_locked_out(user_id, today):
                 return (
-                    "Sorry mate, you've used all 3 of your guesses for today's case "
+                    f"<@{user_id}> Sorry mate, you've already used your guess for today's case "
                     "so you can no longer interact with it. Come back tomorrow for a new one!"
                 )
 
             case_data = client.get_case_for_llm(today)
             llm_response = await self._medhack_llm_response(skill, text, case_data, thread_history)
-            return llm_response
+            return f"<@{user_id}> {llm_response}"
 
         if is_game_q and not current_case:
             return (
@@ -414,12 +381,12 @@ Original text:
         if current_case and not is_event_q and not current_case.get("solved"):
             if client.is_user_locked_out(user_id, today):
                 return (
-                    "Sorry mate, you've used all 3 of your guesses for today's case "
+                    f"<@{user_id}> Sorry mate, you've already used your guess for today's case "
                     "so you can no longer interact with it. Come back tomorrow for a new one!"
                 )
             case_data = client.get_case_for_llm(today)
             llm_response = await self._medhack_llm_response(skill, text, case_data, thread_history)
-            return llm_response
+            return f"<@{user_id}> {llm_response}"
 
         # --- Event info mode ---
         if is_event_q or (not is_game_q):
@@ -470,6 +437,83 @@ they keep an eye on the channel for updates. Keep your answer concise."""
                 ],
             }
         return text
+
+    async def _handle_guess_result(
+        self, result: dict, user_id: str, skill, text: str,
+        client, today, thread_history, channel_id: str, guess_text: str,
+    ) -> str:
+        """Process the result of a locked-in guess."""
+        from ..slack_client import post_message
+
+        if result["correct"]:
+            diagnosis = result["diagnosis"]
+            thread_reply = f"<@{user_id}> *CORRECT!* The diagnosis is *{diagnosis}*! Well done!"
+
+            try:
+                announcement_parts = [
+                    f"*DIAGNOSIS SOLVED!*\n\n"
+                    f"<@{user_id}> correctly diagnosed today's case: *{diagnosis}*!"
+                ]
+
+                if result.get("is_first_solver"):
+                    announcement_parts.append(
+                        "They're the first to crack it! DM Dr Sam for a free ticket code to MedHack: Frontiers!"
+                    )
+
+                points_msg = ""
+                try:
+                    from ..config import get_settings
+                    from ..slack_client import get_bot_user_id
+                    settings = get_settings()
+
+                    if settings.MLAI_BACKEND_URL and settings.MLAI_API_KEY:
+                        from ..clients.mlai_backend import MLAIBackendClient
+                        points_client = MLAIBackendClient(
+                            base_url=settings.MLAI_BACKEND_URL,
+                            api_key=settings.MLAI_API_KEY,
+                            internal_api_key=settings.INTERNAL_API_KEY or settings.MLAI_API_KEY
+                        )
+                        bot_id = get_bot_user_id()
+                        diagnosis_points = 12
+                        await points_client.system_award_points(
+                            admin_slack_id=bot_id,
+                            target_slack_id=user_id,
+                            points=diagnosis_points,
+                            reason="Correct diagnosis in Guess the Diagnosis game"
+                        )
+                        points_msg = f"\n\n+{diagnosis_points} MLAI points awarded!"
+                except Exception as e:
+                    print(f"⚠️ Failed to award diagnosis points: {e}")
+
+                announcement_text = "\n\n".join(announcement_parts) + points_msg
+
+                if channel_id:
+                    post_message(channel=channel_id, text=announcement_text)
+            except Exception as e:
+                print(f"⚠️ Failed to post win announcement: {e}")
+
+            return thread_reply
+
+        elif result.get("already_solved"):
+            return f"<@{user_id}> You've already solved today's case! Nice work earlier. Come back tomorrow for a new one."
+
+        elif result.get("message") == "no_guesses_remaining":
+            return (
+                f"<@{user_id}> Sorry mate, you've already used your guess for today's case. "
+                "Come back tomorrow for a new one!"
+            )
+
+        else:
+            # Wrong guess
+            case_data = client.get_case_for_llm(today)
+            llm_response = await self._medhack_llm_response(
+                skill, text, case_data, thread_history,
+                extra_instruction="The user just locked in an INCORRECT diagnosis guess. "
+                "Respond clinically: suggest they review the findings again. "
+                "Do NOT reveal the correct diagnosis or hint at it. "
+                "Let them know their guess was wrong and they're out for today's case."
+            )
+            return f"<@{user_id}> {llm_response}\n\n_That was your one guess for this case. Better luck tomorrow!_"
 
     async def _medhack_llm_response(
         self,
