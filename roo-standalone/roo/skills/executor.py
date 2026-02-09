@@ -261,13 +261,13 @@ Original text:
             from ..slack_client import post_message
 
             if requested_case_id is not None:
-                new_case = client.start_specific_case(requested_case_id, today)
+                new_case = await client.start_specific_case(requested_case_id, today, admin_slack_id=user_id)
                 if not new_case:
                     available = client.get_all_case_ids()
                     return f"Case #{requested_case_id} not found. Available case IDs: {available}"
             else:
                 # "next patient" — pick the next unplayed case
-                new_case = client.start_new_case(today)
+                new_case = await client.start_new_case(today, admin_slack_id=user_id)
                 if not new_case:
                     return "All cases have been played! No new cases available."
 
@@ -328,17 +328,8 @@ Original text:
         is_event_q = any(k in text_lower for k in event_keywords)
         is_game_q = any(k in text_lower for k in game_keywords)
 
-        # If clearly a diagnosis guess, handle that first
-        guess_patterns = ["i think it", "my diagnosis is", "my guess is", "is it ",
-                          "could it be", "i reckon it", "the diagnosis is",
-                          "i believe it", "it must be", "it's got to be",
-                          "does she have", "does he have", "do they have",
-                          "she has", "he has", "they have", "it could be",
-                          "maybe it's", "i'd say", "i'd guess",
-                          "has she got", "has he got", "have they got"]
-        # Patterns that are ONLY for confirmation, not new guesses
+        # Patterns for confirmation/lock-in only
         confirm_only_patterns = ["lock in", "lock it in", "final answer"]
-        is_guess = any(p in text_lower for p in guess_patterns)
         is_lock_in = any(p in text_lower for p in confirm_only_patterns)
 
         # Confirmation patterns for locking in a pending guess
@@ -348,25 +339,25 @@ Original text:
         cancel_patterns = ["no", "nah", "nope", "cancel", "never mind", "keep going",
                            "not yet", "wait", "hold on", "keep digging"]
 
-        current_case = client.get_current_case(today)
+        current_case = await client.get_current_case(today)
 
         # --- Check for pending guess confirmation/cancellation ---
-        pending_guess = client.get_pending_guess(user_id) if current_case else None
+        pending_guess = (await client.get_pending_guess(user_id)) if current_case else None
         if pending_guess and current_case and not current_case.get("solved"):
             is_confirm = any(p in text_lower for p in confirm_patterns)
             is_cancel = any(p in text_lower for p in cancel_patterns)
 
             if is_confirm:
                 # Lock in the pending guess
-                client.clear_pending_guess(user_id)
-                result = client.check_guess(user_id, pending_guess, today)
+                await client.clear_pending_guess(user_id)
+                result = await client.check_guess(user_id, pending_guess, today)
                 return await self._handle_guess_result(
                     result, user_id, skill, text, client, today,
                     thread_history, channel_id, pending_guess
                 )
 
             elif is_cancel:
-                client.clear_pending_guess(user_id)
+                await client.clear_pending_guess(user_id)
                 return (
                     f"<@{user_id}> No worries — guess cancelled. "
                     f"Keep investigating and lock in your diagnosis when you're ready. "
@@ -376,70 +367,18 @@ Original text:
             # If they said something else while having a pending guess,
             # remind them (but also let the LLM respond to their question)
             # Clear the pending guess so it doesn't block future interactions
-            client.clear_pending_guess(user_id)
+            await client.clear_pending_guess(user_id)
 
-        # --- "Lock it in" with no pending guess: search thread history ---
-        if is_lock_in and not is_guess and not pending_guess and current_case and not current_case.get("solved"):
-            if client.is_user_locked_out(user_id, today):
+        # --- "Lock it in" with no pending guess ---
+        if is_lock_in and not pending_guess and current_case and not current_case.get("solved"):
+            if await client.is_user_locked_out(user_id, today):
                 return (
                     f"<@{user_id}> Sorry mate, you've already used your guess for today's case. "
                     "Come back tomorrow for a new one!"
                 )
-            # Try to find their most recent guess-like message in thread history
-            extracted_guess = None
-            if thread_history:
-                for msg in reversed(thread_history) if isinstance(thread_history, list) else []:
-                    msg_user = msg.get("user", "")
-                    msg_text = msg.get("text", "").lower()
-                    if msg_user == user_id and msg_text != text_lower:
-                        # Check if this earlier message had a guess in it
-                        for p in guess_patterns:
-                            if p in msg_text:
-                                idx = msg_text.index(p) + len(p)
-                                candidate = msg.get("text", "")[idx:].strip().rstrip("?.!")
-                                if candidate:
-                                    extracted_guess = candidate
-                                    break
-                        if extracted_guess:
-                            break
-
-            if extracted_guess:
-                # Lock it in immediately
-                result = client.check_guess(user_id, extracted_guess, today)
-                return await self._handle_guess_result(
-                    result, user_id, skill, text, client, today,
-                    thread_history, channel_id, extracted_guess
-                )
-            else:
-                return (
-                    f"<@{user_id}> I'm not sure what diagnosis you want to lock in. "
-                    f"Please tell me your guess first, e.g. \"I think it's pneumonia\""
-                )
-
-        # --- New guess attempt ---
-        if is_guess and current_case and not current_case.get("solved"):
-            if client.is_user_locked_out(user_id, today):
-                return (
-                    f"<@{user_id}> Sorry mate, you've already used your guess for today's case. "
-                    "Come back tomorrow for a new one!"
-                )
-
-            # Extract the guess from the text
-            guess_text = text
-            for prefix in guess_patterns:
-                if prefix in text_lower:
-                    idx = text_lower.index(prefix) + len(prefix)
-                    candidate = text[idx:].strip().rstrip("?.!")
-                    if candidate:
-                        guess_text = candidate
-                    break
-
-            # Store as pending and ask for confirmation
-            client.set_pending_guess(user_id, guess_text)
             return (
-                f"<@{user_id}> You want to lock in *{guess_text}* as your final diagnosis?\n\n"
-                f"_Remember: you only get *one guess* per case. "
-                f"Reply *yes* to confirm or *no* to keep investigating._"
+                f"<@{user_id}> I'm not sure what diagnosis you want to lock in. "
+                f"Tell me your guess and I'll ask you to confirm before locking it in."
             )
 
         # --- Repost the daily case (with image) ---
@@ -464,53 +403,51 @@ Original text:
             )
             return self._medhack_game_response(message, current_case.get("image_url", ""))
 
-        # --- Game interaction (not a guess) ---
-        if is_game_q and current_case:
-            if current_case.get("solved"):
-                diagnosis_name = "already revealed"
-                # Get the actual diagnosis for the solved message
-                cases_data = client._load_cases()
-                solved_case = next((c for c in cases_data if c["id"] == current_case["id"]), None)
-                if solved_case:
-                    diagnosis_name = solved_case["diagnosis"]
-                winners = current_case.get("winners", [])
-                winner_mentions = ", ".join(f"<@{w}>" for w in winners)
+        # --- Solved case ---
+        if current_case and current_case.get("solved"):
+            diagnosis_name = "already revealed"
+            cases_data = client._load_cases()
+            solved_case = next((c for c in cases_data if c["id"] == current_case["id"]), None)
+            if solved_case:
+                diagnosis_name = solved_case["diagnosis"]
+            winners = current_case.get("winners", [])
+            winner_mentions = ", ".join(f"<@{w}>" for w in winners)
+            return (
+                f"Today's case has been solved! The diagnosis was *{diagnosis_name}*.\n\n"
+                f"Solved by: {winner_mentions}\n\n"
+                f"Come back tomorrow for a new case!"
+            )
+
+        # --- Locked out ---
+        if current_case and await client.is_user_locked_out(user_id, today):
+            return (
+                f"<@{user_id}> Sorry mate, you've already used your guess for today's case "
+                "so you can no longer interact with it. Come back tomorrow for a new one!"
+            )
+
+        # --- Active unsolved case: use LLM to classify intent ---
+        if current_case and not current_case.get("solved") and not is_event_q:
+            classification = await self._classify_medhack_intent(text)
+
+            if classification.get("is_guess") and classification.get("diagnosis"):
+                guess_text = classification["diagnosis"]
+                await client.set_pending_guess(user_id, guess_text)
                 return (
-                    f"Today's case has been solved! The diagnosis was *{diagnosis_name}*.\n\n"
-                    f"Solved by: {winner_mentions}\n\n"
-                    f"Come back tomorrow for a new case!"
+                    f"<@{user_id}> You want to lock in *{guess_text}* as your final diagnosis?\n\n"
+                    f"_Remember: you only get *one guess* per case. "
+                    f"Reply *yes* to confirm or *no* to keep investigating._"
                 )
 
-            # Block locked-out users from asking questions too
-            if client.is_user_locked_out(user_id, today):
-                return (
-                    f"<@{user_id}> Sorry mate, you've already used your guess for today's case "
-                    "so you can no longer interact with it. Come back tomorrow for a new one!"
-                )
-
-            case_data = client.get_case_for_llm(today)
+            # Not a guess — respond as PQM narrator
+            case_data = await client.get_case_for_llm(today)
             llm_response = await self._medhack_llm_response(skill, text, case_data, thread_history)
             return f"<@{user_id}> {llm_response}"
 
-        if is_game_q and not current_case:
+        if not current_case and is_game_q:
             return (
                 "No active case right now! A new clinical case is posted each day. "
                 "Keep an eye on this channel for the next one."
             )
-
-        # --- Default to game mode when there's an active unsolved case ---
-        # If the user's question doesn't match game keywords but there IS an
-        # active case and it's not clearly an event question, assume they're
-        # talking to the patient.
-        if current_case and not is_event_q and not current_case.get("solved"):
-            if client.is_user_locked_out(user_id, today):
-                return (
-                    f"<@{user_id}> Sorry mate, you've already used your guess for today's case "
-                    "so you can no longer interact with it. Come back tomorrow for a new one!"
-                )
-            case_data = client.get_case_for_llm(today)
-            llm_response = await self._medhack_llm_response(skill, text, case_data, thread_history)
-            return f"<@{user_id}> {llm_response}"
 
         # --- Event info mode ---
         if is_event_q or (not is_game_q):
@@ -542,6 +479,51 @@ they keep an eye on the channel for updates. Keep your answer concise."""
             return response.content
 
         return await self._execute_with_llm(skill, text, params, user_id, thread_history)
+
+    async def _classify_medhack_intent(self, text: str) -> dict:
+        """Use LLM to classify if a message is a diagnosis guess.
+
+        Returns dict with:
+            is_guess (bool): whether the user is guessing a diagnosis
+            diagnosis (str|None): the extracted diagnosis if is_guess
+        """
+        prompt = f"""You are classifying messages in a medical diagnosis guessing game. Players interact with a simulated patient and can ask questions or guess the diagnosis.
+
+A message is a DIAGNOSIS GUESS if the player is proposing what they think the medical diagnosis is. Examples:
+- "I think it's pneumonia" → guess: "pneumonia"
+- "Is it gastroenteritis?" → guess: "gastroenteritis"
+- "I guess Addison's disease" → guess: "Addison's disease"
+- "She has COPD" → guess: "COPD"
+- "Could it be lupus?" → guess: "lupus"
+- "My diagnosis is acute appendicitis" → guess: "acute appendicitis"
+- "gastroenteritis!" → guess: "gastroenteritis"
+
+NOT a guess (these are clinical questions or requests):
+- "What are her vitals?"
+- "Can I see the blood results?"
+- "Does she have any allergies?" (asking about patient history, not guessing)
+- "Order a chest X-ray"
+- "Tell me about her symptoms"
+- "What medications is she on?"
+
+Classify this message: "{text}"
+
+Respond with ONLY valid JSON, no markdown:
+{{"is_guess": true, "diagnosis": "the diagnosis"}} or {{"is_guess": false, "diagnosis": null}}"""
+
+        openai_client = get_llm_client("openai")
+        response = await openai_client.chat([
+            {"role": "user", "content": prompt}
+        ], model="gpt-4o-mini", max_tokens=100)
+
+        import json as _json
+        try:
+            content = response.content.strip()
+            if content.startswith("```"):
+                content = content.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+            return _json.loads(content)
+        except (ValueError, KeyError, IndexError):
+            return {"is_guess": False, "diagnosis": None}
 
     def _medhack_game_response(self, text: str, image_url: str = "") -> dict | str:
         """Wrap a game response with image blocks when the case has an image_url."""
@@ -629,7 +611,7 @@ they keep an eye on the channel for updates. Keep your answer concise."""
 
         else:
             # Wrong guess
-            case_data = client.get_case_for_llm(today)
+            case_data = await client.get_case_for_llm(today)
             llm_response = await self._medhack_llm_response(
                 skill, text, case_data, thread_history,
                 extra_instruction="The user just locked in an INCORRECT diagnosis guess. "

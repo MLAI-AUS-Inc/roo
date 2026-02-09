@@ -1,7 +1,9 @@
 """
 MedHack Client - Game state management for Guess the Diagnosis.
 
-Handles case loading, game state persistence, guess checking, and event info.
+Uses mlai-backend as the primary state store, with local JSON fallback.
+Case definitions (YAML) are always loaded locally — the backend only
+tracks game state (active case, guesses, winners, etc.).
 """
 import json
 from datetime import date
@@ -28,11 +30,64 @@ MAX_GUESSES_PER_USER = 1
 
 
 class MedHackClient:
-    """Manages the Guess the Diagnosis game state."""
+    """Manages the Guess the Diagnosis game state.
+
+    Tries mlai-backend first for all state operations.
+    Falls back to local JSON if the backend is unreachable.
+    """
 
     def __init__(self):
         self._cases: Optional[List[dict]] = None
         self._event_info: Optional[dict] = None
+        self._backend = None
+        self._backend_init = False
+        # Cache the backend case data for the lifetime of this client instance
+        # (one per Slack event), avoiding repeated API calls.
+        self._cached_backend_case = None
+        self._backend_case_fetched = False
+
+    # ------------------------------------------------------------------
+    # Backend helpers
+    # ------------------------------------------------------------------
+
+    def _get_backend(self):
+        """Lazily initialise the MLAIBackendClient."""
+        if not self._backend_init:
+            self._backend_init = True
+            try:
+                from roo.config import get_settings
+                from roo.clients.mlai_backend import MLAIBackendClient
+                settings = get_settings()
+                if settings.MLAI_BACKEND_URL and settings.MLAI_API_KEY:
+                    self._backend = MLAIBackendClient(
+                        base_url=settings.MLAI_BACKEND_URL,
+                        api_key=settings.MLAI_API_KEY,
+                        internal_api_key=getattr(settings, 'INTERNAL_API_KEY', None) or settings.MLAI_API_KEY
+                    )
+            except Exception as e:
+                print(f"⚠️ MedHack backend client init failed: {e}")
+        return self._backend
+
+    async def _get_backend_case(self) -> Optional[dict]:
+        """Fetch the current active case from the backend (cached per request)."""
+        if not self._backend_case_fetched:
+            self._backend_case_fetched = True
+            backend = self._get_backend()
+            if backend:
+                try:
+                    self._cached_backend_case = await backend.medhack_get_current_case()
+                except Exception as e:
+                    print(f"⚠️ Backend get_current_case failed: {e}")
+        return self._cached_backend_case
+
+    def _invalidate_cache(self):
+        """Reset cached backend data (call after state-changing operations)."""
+        self._cached_backend_case = None
+        self._backend_case_fetched = False
+
+    # ------------------------------------------------------------------
+    # Local helpers (YAML + JSON)
+    # ------------------------------------------------------------------
 
     def _load_cases(self) -> List[dict]:
         if self._cases is None:
@@ -66,175 +121,273 @@ class MedHackClient:
                 self._event_info = yaml.safe_load(f)
         return self._event_info
 
-    def get_current_case(self, today: date) -> Optional[dict]:
-        """Get today's active case (without the diagnosis answer).
+    def _case_result(self, case: dict) -> dict:
+        """Build the presentation dict returned by start_*_case methods."""
+        result = {
+            "id": case["id"],
+            "difficulty": case.get("difficulty", "medium"),
+            "presenting_complaint": case["presenting_complaint"],
+        }
+        if case.get("title"):
+            result["title"] = case["title"]
+        if case.get("ed_first_look"):
+            result["ed_first_look"] = case["ed_first_look"]
+        if case.get("image_url"):
+            result["image_url"] = case["image_url"]
+        return result
 
-        Returns None if no case is active for today.
-        """
+    def _fuzzy_match(self, guess: str, case: dict) -> bool:
+        """Check if a guess matches the case diagnosis via fuzzy matching."""
+        guess_clean = guess.strip().lower()
+        acceptable = case.get("acceptable_answers", [])
+        diagnosis = case.get("diagnosis", "").lower()
+
+        # Exact match against acceptable answers
+        if guess_clean in [a.lower() for a in acceptable]:
+            return True
+
+        # Fuzzy match against the primary diagnosis
+        if SequenceMatcher(None, guess_clean, diagnosis).ratio() >= 0.75:
+            return True
+
+        # Fuzzy match against acceptable answers
+        for answer in acceptable:
+            if SequenceMatcher(None, guess_clean, answer.lower()).ratio() >= 0.75:
+                return True
+
+        return False
+
+    # ------------------------------------------------------------------
+    # Public async API (backend-first, local fallback)
+    # ------------------------------------------------------------------
+
+    async def get_current_case(self, today: date) -> Optional[dict]:
+        """Get the active case (without the diagnosis answer)."""
+        backend_case = await self._get_backend_case()
+        if backend_case:
+            case_id = backend_case.get("case_id")
+            cases = self._load_cases()
+            case = next((c for c in cases if c["id"] == case_id), None)
+            if case:
+                safe_case = {k: v for k, v in case.items() if k not in ("diagnosis", "acceptable_answers")}
+                safe_case["solved"] = backend_case.get("solved", False)
+                safe_case["winners"] = backend_case.get("winners", [])
+                safe_case["hint_level"] = backend_case.get("hint_level", 0)
+                return safe_case
+            return None
+
+        # Local fallback
         state = self._load_state()
-
         if state["current_case_id"] is None:
             return None
-
         if state["posted_date"] != today.isoformat():
             return None
-
         cases = self._load_cases()
         case = next((c for c in cases if c["id"] == state["current_case_id"]), None)
         if case is None:
             return None
-
-        # Return case data without the answer
         safe_case = {k: v for k, v in case.items() if k not in ("diagnosis", "acceptable_answers")}
         safe_case["solved"] = state["solved"]
         safe_case["winners"] = state["winners"]
         safe_case["hint_level"] = state["hint_level"]
         return safe_case
 
-    def get_case_for_llm(self, today: date) -> Optional[dict]:
-        """Get full case data for LLM roleplay (excludes the diagnosis).
+    async def get_case_for_llm(self, today: date) -> Optional[dict]:
+        """Get full case data for LLM roleplay (excludes the diagnosis)."""
+        backend_case = await self._get_backend_case()
+        if backend_case:
+            case_id = backend_case.get("case_id")
+            cases = self._load_cases()
+            case = next((c for c in cases if c["id"] == case_id), None)
+            if case:
+                safe_case = {k: v for k, v in case.items() if k not in ("diagnosis", "acceptable_answers")}
+                safe_case["solved"] = backend_case.get("solved", False)
+                safe_case["hint_level"] = backend_case.get("hint_level", 0)
+                hints = case.get("hints", [])
+                safe_case["revealed_hints"] = hints[:backend_case.get("hint_level", 0)]
+                return safe_case
+            return None
 
-        The LLM uses this to answer questions about the patient in character.
-        The diagnosis is checked separately via check_guess().
-        """
+        # Local fallback
         state = self._load_state()
         if state["current_case_id"] is None or state["posted_date"] != today.isoformat():
             return None
-
         cases = self._load_cases()
         case = next((c for c in cases if c["id"] == state["current_case_id"]), None)
         if case is None:
             return None
-
-        # Include everything except the diagnosis for LLM context
         safe_case = {k: v for k, v in case.items() if k not in ("diagnosis", "acceptable_answers")}
         safe_case["solved"] = state["solved"]
         safe_case["hint_level"] = state["hint_level"]
-
-        # Include progressive hints up to current level
         hints = case.get("hints", [])
         safe_case["revealed_hints"] = hints[:state["hint_level"]]
         return safe_case
 
-    def get_user_guesses_remaining(self, user_id: str, today: date) -> int:
-        """Return how many guesses a user has left for today's case."""
+    async def is_user_locked_out(self, user_id: str, today: date) -> bool:
+        """Check if a user has exhausted all guesses for the active case."""
+        backend = self._get_backend()
+        if backend:
+            try:
+                status = await backend.medhack_get_user_status(user_id)
+                if status is not None:
+                    return status.get("locked_out", False)
+                return False
+            except Exception as e:
+                print(f"⚠️ Backend is_user_locked_out failed: {e}")
+
+        # Local fallback
         state = self._load_state()
         if state["current_case_id"] is None or state["posted_date"] != today.isoformat():
-            return 0
-        guess_counts = state.get("guess_counts", {})
-        used = guess_counts.get(user_id, 0)
-        return max(0, MAX_GUESSES_PER_USER - used)
+            return False
+        used = state.get("guess_counts", {}).get(user_id, 0)
+        return used >= MAX_GUESSES_PER_USER
 
-    def is_user_locked_out(self, user_id: str, today: date) -> bool:
-        """Check if a user has exhausted all guesses for today's case."""
-        return self.get_user_guesses_remaining(user_id, today) <= 0
+    async def set_pending_guess(self, user_id: str, guess: str) -> None:
+        """Store a pending guess that needs user confirmation."""
+        backend = self._get_backend()
+        backend_case = await self._get_backend_case()
+        if backend and backend_case:
+            try:
+                await backend.medhack_set_pending_guess(
+                    backend_case["case_id"], user_id, guess
+                )
+                return
+            except Exception as e:
+                print(f"⚠️ Backend set_pending_guess failed: {e}")
 
-    def set_pending_guess(self, user_id: str, guess: str) -> None:
-        """Store a pending guess that needs user confirmation before locking in."""
+        # Local fallback
         state = self._load_state()
         pending = state.get("pending_guesses", {})
         pending[user_id] = guess
         state["pending_guesses"] = pending
         self._save_state(state)
 
-    def get_pending_guess(self, user_id: str) -> Optional[str]:
+    async def get_pending_guess(self, user_id: str) -> Optional[str]:
         """Get the pending guess for a user, if any."""
+        backend = self._get_backend()
+        if backend:
+            try:
+                status = await backend.medhack_get_user_status(user_id)
+                if status is not None:
+                    return status.get("pending_guess")
+                return None
+            except Exception as e:
+                print(f"⚠️ Backend get_pending_guess failed: {e}")
+
+        # Local fallback
         state = self._load_state()
         return state.get("pending_guesses", {}).get(user_id)
 
-    def clear_pending_guess(self, user_id: str) -> None:
+    async def clear_pending_guess(self, user_id: str) -> None:
         """Clear a user's pending guess."""
+        backend = self._get_backend()
+        backend_case = await self._get_backend_case()
+        if backend and backend_case:
+            try:
+                await backend.medhack_clear_pending_guess(
+                    backend_case["case_id"], user_id
+                )
+                return
+            except Exception as e:
+                print(f"⚠️ Backend clear_pending_guess failed: {e}")
+
+        # Local fallback
         state = self._load_state()
         pending = state.get("pending_guesses", {})
         pending.pop(user_id, None)
         state["pending_guesses"] = pending
         self._save_state(state)
 
-    def check_guess(self, user_id: str, guess: str, today: date) -> Dict[str, Any]:
-        """Check if a guess matches the current case's diagnosis.
+    async def check_guess(self, user_id: str, guess: str, today: date) -> Dict[str, Any]:
+        """Check a guess against the current diagnosis. Records result on backend."""
+        backend = self._get_backend()
+        backend_case = await self._get_backend_case()
 
-        Returns:
-            dict with keys: correct (bool), already_solved (bool),
-            guesses_remaining (int), message (str)
-        """
-        state = self._load_state()
-
-        if state["current_case_id"] is None or state["posted_date"] != today.isoformat():
-            return {"correct": False, "already_solved": False, "guesses_remaining": 0, "message": "No active case today."}
-
-        if state["solved"] and user_id in state["winners"]:
-            return {"correct": False, "already_solved": True, "guesses_remaining": 0, "message": "You've already solved today's case!"}
-
-        # Check guess limit
-        guess_counts = state.get("guess_counts", {})
-        used = guess_counts.get(user_id, 0)
-        if used >= MAX_GUESSES_PER_USER:
-            return {
-                "correct": False,
-                "already_solved": False,
-                "guesses_remaining": 0,
-                "message": "no_guesses_remaining",
-            }
+        # Determine the active case_id
+        if backend_case:
+            case_id = backend_case["case_id"]
+        else:
+            state = self._load_state()
+            if state["current_case_id"] is None or state["posted_date"] != today.isoformat():
+                return {"correct": False, "already_solved": False, "guesses_remaining": 0, "message": "No active case today."}
+            case_id = state["current_case_id"]
 
         cases = self._load_cases()
-        case = next((c for c in cases if c["id"] == state["current_case_id"]), None)
+        case = next((c for c in cases if c["id"] == case_id), None)
         if case is None:
             return {"correct": False, "already_solved": False, "guesses_remaining": 0, "message": "Case not found."}
 
-        # Check against acceptable answers using fuzzy matching
-        guess_clean = guess.strip().lower()
-        acceptable = case.get("acceptable_answers", [])
-        diagnosis = case.get("diagnosis", "").lower()
+        # Fuzzy match locally (backend doesn't know diagnoses)
+        is_correct = self._fuzzy_match(guess, case)
 
-        is_correct = False
+        # Try to record on backend
+        if backend and backend_case:
+            try:
+                submit_result = await backend.medhack_submit_guess(
+                    case_id, user_id, guess, is_correct
+                )
+                if submit_result:
+                    if is_correct:
+                        is_first = not backend_case.get("solved", False)
+                        await backend.medhack_record_winner(case_id, user_id, is_first)
+                        self._invalidate_cache()
+                        return {
+                            "correct": True,
+                            "already_solved": False,
+                            "is_first_solver": is_first,
+                            "diagnosis": case["diagnosis"],
+                            "message": "correct",
+                        }
+                    else:
+                        self._invalidate_cache()
+                        return {
+                            "correct": False,
+                            "already_solved": False,
+                            "guesses_remaining": 0,
+                            "message": "incorrect",
+                        }
+            except Exception as e:
+                print(f"⚠️ Backend check_guess failed, using local: {e}")
 
-        # Exact match against acceptable answers
-        if guess_clean in [a.lower() for a in acceptable]:
-            is_correct = True
+        # Local fallback
+        if not backend_case:
+            state = self._load_state()
+        else:
+            state = self._load_state()
 
-        # Fuzzy match against the primary diagnosis
-        if not is_correct:
-            ratio = SequenceMatcher(None, guess_clean, diagnosis).ratio()
-            if ratio >= 0.75:
-                is_correct = True
+        if state.get("solved") and user_id in state.get("winners", []):
+            return {"correct": False, "already_solved": True, "guesses_remaining": 0, "message": "You've already solved today's case!"}
 
-        # Fuzzy match against acceptable answers
-        if not is_correct:
-            for answer in acceptable:
-                ratio = SequenceMatcher(None, guess_clean, answer.lower()).ratio()
-                if ratio >= 0.75:
-                    is_correct = True
-                    break
+        guess_counts = state.get("guess_counts", {})
+        used = guess_counts.get(user_id, 0)
+        if used >= MAX_GUESSES_PER_USER:
+            return {"correct": False, "already_solved": False, "guesses_remaining": 0, "message": "no_guesses_remaining"}
 
         if is_correct:
-            return self._record_win(state, user_id, case)
+            is_first = not state["solved"]
+            state["solved"] = True
+            if user_id not in state["winners"]:
+                state["winners"].append(user_id)
+            self._save_state(state)
+            return {
+                "correct": True,
+                "already_solved": False,
+                "is_first_solver": is_first,
+                "diagnosis": case["diagnosis"],
+                "message": "correct",
+            }
 
-        # Wrong guess - increment counter
+        # Wrong guess — increment counter locally
         guess_counts[user_id] = used + 1
         state["guess_counts"] = guess_counts
         self._save_state(state)
-
         remaining = MAX_GUESSES_PER_USER - (used + 1)
         return {"correct": False, "already_solved": False, "guesses_remaining": remaining, "message": "incorrect"}
 
-    def _record_win(self, state: dict, user_id: str, case: dict) -> Dict[str, Any]:
-        """Record a winner and save state."""
-        is_first = not state["solved"]
-        state["solved"] = True
-        if user_id not in state["winners"]:
-            state["winners"].append(user_id)
-        self._save_state(state)
-
-        return {
-            "correct": True,
-            "already_solved": False,
-            "is_first_solver": is_first,
-            "diagnosis": case["diagnosis"],
-            "message": "correct",
-        }
-
-    def advance_hint(self, today: date) -> Optional[str]:
+    async def advance_hint(self, today: date) -> Optional[str]:
         """Advance to the next hint level and return the new hint (if any)."""
+        # For now, hints are local-only (backend tracks hint_level but
+        # the advance endpoint isn't built yet).
         state = self._load_state()
         if state["current_case_id"] is None or state["posted_date"] != today.isoformat():
             return None
@@ -251,12 +404,8 @@ class MedHackClient:
             return hints[state["hint_level"] - 1]
         return None
 
-    def start_new_case(self, today: date) -> Optional[dict]:
-        """Select and activate the next unplayed case.
-
-        Returns the new case's presenting complaint for posting, or None
-        if all cases have been played.
-        """
+    async def start_new_case(self, today: date, admin_slack_id: Optional[str] = None) -> Optional[dict]:
+        """Select and activate the next unplayed case."""
         state = self._load_state()
         cases = self._load_cases()
 
@@ -264,7 +413,6 @@ class MedHackClient:
         available = [c for c in cases if c["id"] not in played]
 
         if not available:
-            # All cases played - reset
             played = set()
             available = cases
 
@@ -273,6 +421,17 @@ class MedHackClient:
 
         new_case = available[0]
 
+        # Try backend first
+        backend = self._get_backend()
+        if backend:
+            try:
+                sender = admin_slack_id or "system"
+                await backend.medhack_start_case(new_case["id"], sender)
+                self._invalidate_cache()
+            except Exception as e:
+                print(f"⚠️ Backend start_new_case failed: {e}")
+
+        # Always update local state too (fallback + played_case_ids tracking)
         state["current_case_id"] = new_case["id"]
         state["posted_date"] = today.isoformat()
         state["winners"] = []
@@ -285,29 +444,26 @@ class MedHackClient:
             state["played_case_ids"].append(new_case["id"])
         self._save_state(state)
 
-        result = {
-            "id": new_case["id"],
-            "difficulty": new_case.get("difficulty", "medium"),
-            "presenting_complaint": new_case["presenting_complaint"],
-        }
-        if new_case.get("title"):
-            result["title"] = new_case["title"]
-        if new_case.get("ed_first_look"):
-            result["ed_first_look"] = new_case["ed_first_look"]
-        if new_case.get("image_url"):
-            result["image_url"] = new_case["image_url"]
-        return result
+        return self._case_result(new_case)
 
-    def start_specific_case(self, case_id: int, today: date) -> Optional[dict]:
-        """Start a specific case by its ID (for admin manual advancement).
-
-        Returns the case presentation data, or None if case_id not found.
-        """
+    async def start_specific_case(self, case_id: int, today: date, admin_slack_id: Optional[str] = None) -> Optional[dict]:
+        """Start a specific case by its ID (for admin manual advancement)."""
         cases = self._load_cases()
         new_case = next((c for c in cases if c["id"] == case_id), None)
         if new_case is None:
             return None
 
+        # Try backend first
+        backend = self._get_backend()
+        if backend:
+            try:
+                sender = admin_slack_id or "system"
+                await backend.medhack_start_case(new_case["id"], sender)
+                self._invalidate_cache()
+            except Exception as e:
+                print(f"⚠️ Backend start_specific_case failed: {e}")
+
+        # Always update local state too
         state = self._load_state()
         state["current_case_id"] = new_case["id"]
         state["posted_date"] = today.isoformat()
@@ -321,18 +477,7 @@ class MedHackClient:
             state["played_case_ids"].append(new_case["id"])
         self._save_state(state)
 
-        result = {
-            "id": new_case["id"],
-            "difficulty": new_case.get("difficulty", "medium"),
-            "presenting_complaint": new_case["presenting_complaint"],
-        }
-        if new_case.get("title"):
-            result["title"] = new_case["title"]
-        if new_case.get("ed_first_look"):
-            result["ed_first_look"] = new_case["ed_first_look"]
-        if new_case.get("image_url"):
-            result["image_url"] = new_case["image_url"]
-        return result
+        return self._case_result(new_case)
 
     def get_all_case_ids(self) -> List[int]:
         """Return all available case IDs from cases.yaml."""
