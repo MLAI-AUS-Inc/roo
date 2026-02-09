@@ -297,9 +297,38 @@ Original text:
         today = get_current_date()
         text_lower = text.lower()
 
-        # --- Admin: manual case start ---
+        # --- Admin: manual case start & reset ---
         MEDHACK_ADMIN_ID = "U05QPB483K9"
         import re
+
+        # Check for reset command first
+        reset_pattern = r"(?:reset|clear)\s+(?:medhack|game)"
+        if re.search(reset_pattern, text_lower):
+            if user_id != MEDHACK_ADMIN_ID:
+                return f"<@{user_id}> Sorry, only admins can reset the game."
+
+            # Reset local game state
+            from pathlib import Path
+            skill_dir = Path(__file__).parent.parent.parent / "skills" / "medhack"
+            data_dir = Path("/app/data") if Path("/app/data").exists() else skill_dir
+            game_state_file = data_dir / "medhack_game_state.json"
+
+            if game_state_file.exists():
+                game_state_file.unlink()
+                print(f"✅ Deleted local game state: {game_state_file}")
+                status_msg = "Local game state file deleted."
+            else:
+                print(f"ℹ️ No game state file to delete: {game_state_file}")
+                status_msg = "No local game state found (already clean)."
+
+            return (
+                f"✅ *MedHack game reset complete!*\n\n"
+                f"{status_msg}\n\n"
+                "_Note: Backend state is NOT automatically cleared. If you need to clear backend guesses/winners, "
+                "contact the backend admin or use the backend admin panel._\n\n"
+                f"To start case 1, say: `@roo start patient 1`"
+            )
+
         admin_patterns = [
             r"(?:give me|start|begin|launch|lets begin|let's begin)\s+patient\s+(\d+)",
             r"(?:next patient|next case)",

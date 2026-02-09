@@ -19,10 +19,8 @@ trigger_keywords:
   - mri
 priority_channels:
   - medhack-frontiers
-  - medhack-testing
 exclusive_channels:
   - medhack-frontiers
-  - medhack-testing
 ---
 
 # MedHack Skill
