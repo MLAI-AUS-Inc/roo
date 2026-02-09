@@ -25,6 +25,7 @@ class SkillResult:
     message: str
     data: Optional[Any] = None
     error: Optional[str] = None
+    blocks: Optional[list] = None
 
 
 class SkillExecutor:
@@ -85,10 +86,17 @@ class SkillExecutor:
                 # Generic LLM-based execution
                 result = await self._execute_with_llm(skill, text, params, user_id, thread_history)
             
+            # Skill handlers can return a dict with "message" + "blocks" for rich responses
+            blocks = None
+            if isinstance(result, dict) and "message" in result:
+                blocks = result.get("blocks")
+                result = result["message"]
+
             return SkillResult(
                 success=True,
                 message=result,
-                data=params
+                data=params,
+                blocks=blocks
             )
             
         except Exception as e:
@@ -341,7 +349,10 @@ Original text:
                     "Do NOT reveal the correct diagnosis or hint at it."
                 )
                 guess_warning = f"\n\n_You have *{remaining}* guess{'es' if remaining != 1 else ''} remaining._"
-                return llm_response + guess_warning
+                return self._medhack_game_response(
+                    llm_response + guess_warning,
+                    current_case.get("image_url", "")
+                )
 
         # --- Game interaction (not a guess) ---
         if is_game_q and current_case:
@@ -368,7 +379,8 @@ Original text:
                 )
 
             case_data = client.get_case_for_llm(today)
-            return await self._medhack_llm_response(skill, text, case_data, thread_history)
+            llm_response = await self._medhack_llm_response(skill, text, case_data, thread_history)
+            return self._medhack_game_response(llm_response, current_case.get("image_url", ""))
 
         if is_game_q and not current_case:
             return (
@@ -387,7 +399,8 @@ Original text:
                     "so you can no longer interact with it. Come back tomorrow for a new one!"
                 )
             case_data = client.get_case_for_llm(today)
-            return await self._medhack_llm_response(skill, text, case_data, thread_history)
+            llm_response = await self._medhack_llm_response(skill, text, case_data, thread_history)
+            return self._medhack_game_response(llm_response, current_case.get("image_url", ""))
 
         # --- Event info mode ---
         if is_event_q or (not is_game_q):
@@ -419,6 +432,25 @@ they keep an eye on the channel for updates. Keep your answer concise."""
             return response.content
 
         return await self._execute_with_llm(skill, text, params, user_id, thread_history)
+
+    def _medhack_game_response(self, text: str, image_url: str = "") -> dict | str:
+        """Wrap a game response with image blocks when the case has an image_url."""
+        if image_url:
+            return {
+                "message": text,
+                "blocks": [
+                    {
+                        "type": "image",
+                        "image_url": image_url,
+                        "alt_text": "Patient case image",
+                    },
+                    {
+                        "type": "section",
+                        "text": {"type": "mrkdwn", "text": text},
+                    },
+                ],
+            }
+        return text
 
     async def _medhack_llm_response(
         self,

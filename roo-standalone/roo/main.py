@@ -267,12 +267,15 @@ async def _handle_mention(event: dict):
         )
         
         if result.get("message"):
-            post_message(
-                channel=channel_id,
-                text=result["message"],
-                thread_ts=thread_ts
-            )
-        
+            post_kwargs = {
+                "channel": channel_id,
+                "text": result["message"],
+                "thread_ts": thread_ts,
+            }
+            if result.get("blocks"):
+                post_kwargs["blocks"] = result["blocks"]
+            post_message(**post_kwargs)
+
         print(f"✅ Mention handled successfully (skill: {result.get('skill_used')})")
         
     except Exception as e:
@@ -311,12 +314,15 @@ async def _resume_intent(user_id: str, intent: dict):
         )
         
         if result.get("message"):
-            post_message(
-                channel=channel_id,
-                text=result["message"],
-                thread_ts=thread_ts
-            )
-            
+            post_kwargs = {
+                "channel": channel_id,
+                "text": result["message"],
+                "thread_ts": thread_ts,
+            }
+            if result.get("blocks"):
+                post_kwargs["blocks"] = result["blocks"]
+            post_message(**post_kwargs)
+
     except Exception as e:
         print(f"❌ Error resuming intent: {e}")
         if intent.get("channel"):

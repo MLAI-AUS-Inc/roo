@@ -102,7 +102,8 @@ class RooAgent:
             return {
                 "message": result.message,
                 "skill_used": skill.name,
-                "data": result.data
+                "data": result.data,
+                "blocks": result.blocks,
             }
         else:
             print("💬 No skill matched, generating general response")
