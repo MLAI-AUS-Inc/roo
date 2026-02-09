@@ -5,6 +5,7 @@ Uses mlai-backend as the primary state store, with local JSON fallback.
 Case definitions (YAML) are always loaded locally — the backend only
 tracks game state (active case, guesses, winners, etc.).
 """
+import asyncio
 import json
 from datetime import date
 from pathlib import Path
@@ -36,6 +37,9 @@ class MedHackClient:
     Falls back to local JSON if the backend is unreachable.
     """
 
+    # Class-level lock for auto-sync operations (shared across instances)
+    _sync_lock = asyncio.Lock()
+
     def __init__(self):
         self._cases: Optional[List[dict]] = None
         self._event_info: Optional[dict] = None
@@ -49,6 +53,31 @@ class MedHackClient:
     # ------------------------------------------------------------------
     # Backend helpers
     # ------------------------------------------------------------------
+
+    async def _retry_with_backoff(self, func, *args, max_retries=3, **kwargs):
+        """Retry a backend operation with exponential backoff.
+
+        Args:
+            func: Async function to call
+            max_retries: Maximum number of retry attempts (default 3)
+            *args, **kwargs: Arguments to pass to func
+
+        Returns:
+            Result from func, or None if all retries failed
+        """
+        for attempt in range(max_retries):
+            try:
+                return await func(*args, **kwargs)
+            except Exception as e:
+                if attempt == max_retries - 1:
+                    # Last attempt failed, log and return None
+                    print(f"⚠️ Backend operation failed after {max_retries} attempts: {e}")
+                    return None
+                # Exponential backoff: 0.5s, 1s, 2s
+                wait_time = 0.5 * (2 ** attempt)
+                print(f"⚠️ Backend operation failed (attempt {attempt + 1}/{max_retries}), retrying in {wait_time}s...")
+                await asyncio.sleep(wait_time)
+        return None
 
     def _get_backend(self):
         """Lazily initialise the MLAIBackendClient."""
@@ -188,14 +217,25 @@ class MedHackClient:
             return None
 
         # Sync to backend: local case exists but backend doesn't know about it
+        # Use lock to prevent race condition with concurrent requests
         backend = self._get_backend()
         if backend:
-            try:
-                await backend.medhack_start_case(state["current_case_id"], "system")
-                self._invalidate_cache()
-                print(f"🔄 Synced case #{state['current_case_id']} to backend")
-            except Exception as e:
-                print(f"⚠️ Backend case sync failed: {e}")
+            async with MedHackClient._sync_lock:
+                # Re-check backend state after acquiring lock
+                # (another request may have synced while we waited)
+                existing_case = await self._retry_with_backoff(
+                    backend.medhack_get_current_case
+                )
+                if existing_case is None:
+                    # Try to sync with retry
+                    sync_result = await self._retry_with_backoff(
+                        backend.medhack_start_case,
+                        state["current_case_id"],
+                        "system"
+                    )
+                    if sync_result:
+                        self._invalidate_cache()
+                        print(f"🔄 Synced case #{state['current_case_id']} to backend")
 
         safe_case = {k: v for k, v in case.items() if k not in ("diagnosis", "acceptable_answers")}
         safe_case["solved"] = state["solved"]
@@ -331,34 +371,37 @@ class MedHackClient:
         # Fuzzy match locally (backend doesn't know diagnoses)
         is_correct = self._fuzzy_match(guess, case)
 
-        # Try to record on backend
+        # Try to record on backend with retry logic
         if backend and backend_case:
-            try:
-                submit_result = await backend.medhack_submit_guess(
-                    case_id, user_id, guess, is_correct
-                )
-                if submit_result:
-                    if is_correct:
-                        is_first = not backend_case.get("solved", False)
-                        await backend.medhack_record_winner(case_id, user_id, is_first)
-                        self._invalidate_cache()
-                        return {
-                            "correct": True,
-                            "already_solved": False,
-                            "is_first_solver": is_first,
-                            "diagnosis": case["diagnosis"],
-                            "message": "correct",
-                        }
-                    else:
-                        self._invalidate_cache()
-                        return {
-                            "correct": False,
-                            "already_solved": False,
-                            "guesses_remaining": 0,
-                            "message": "incorrect",
-                        }
-            except Exception as e:
-                print(f"⚠️ Backend check_guess failed, using local: {e}")
+            # Invalidate cache BEFORE making state changes to prevent stale reads
+            self._invalidate_cache()
+
+            submit_result = await self._retry_with_backoff(
+                backend.medhack_submit_guess,
+                case_id, user_id, guess, is_correct
+            )
+            if submit_result:
+                if is_correct:
+                    is_first = not backend_case.get("solved", False)
+                    # Record winner with retry
+                    await self._retry_with_backoff(
+                        backend.medhack_record_winner,
+                        case_id, user_id, is_first
+                    )
+                    return {
+                        "correct": True,
+                        "already_solved": False,
+                        "is_first_solver": is_first,
+                        "diagnosis": case["diagnosis"],
+                        "message": "correct",
+                    }
+                else:
+                    return {
+                        "correct": False,
+                        "already_solved": False,
+                        "guesses_remaining": 0,
+                        "message": "incorrect",
+                    }
 
         # Local fallback
         if not backend_case:
@@ -432,15 +475,17 @@ class MedHackClient:
 
         new_case = available[0]
 
-        # Try backend first
+        # Try backend first with retry logic
         backend = self._get_backend()
         if backend:
-            try:
-                sender = admin_slack_id or "system"
-                await backend.medhack_start_case(new_case["id"], sender)
-                self._invalidate_cache()
-            except Exception as e:
-                print(f"⚠️ Backend start_new_case failed: {e}")
+            # Invalidate cache before making state changes
+            self._invalidate_cache()
+            sender = admin_slack_id or "system"
+            await self._retry_with_backoff(
+                backend.medhack_start_case,
+                new_case["id"],
+                sender
+            )
 
         # Always update local state too (fallback + played_case_ids tracking)
         state["current_case_id"] = new_case["id"]
@@ -464,15 +509,17 @@ class MedHackClient:
         if new_case is None:
             return None
 
-        # Try backend first
+        # Try backend first with retry logic
         backend = self._get_backend()
         if backend:
-            try:
-                sender = admin_slack_id or "system"
-                await backend.medhack_start_case(new_case["id"], sender)
-                self._invalidate_cache()
-            except Exception as e:
-                print(f"⚠️ Backend start_specific_case failed: {e}")
+            # Invalidate cache before making state changes
+            self._invalidate_cache()
+            sender = admin_slack_id or "system"
+            await self._retry_with_backoff(
+                backend.medhack_start_case,
+                new_case["id"],
+                sender
+            )
 
         # Always update local state too
         state = self._load_state()
