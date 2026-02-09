@@ -24,7 +24,7 @@ GAME_STATE_FILE = DATA_DIR / "medhack_game_state.json"
 DIAGNOSIS_WIN_POINTS = 12
 
 # Maximum guesses per user per case
-MAX_GUESSES_PER_USER = 3
+MAX_GUESSES_PER_USER = 1
 
 
 class MedHackClient:
@@ -53,6 +53,7 @@ class MedHackClient:
             "hint_level": 0,
             "played_case_ids": [],
             "guess_counts": {},
+            "pending_guesses": {},
         }
 
     def _save_state(self, state: dict) -> None:
@@ -127,6 +128,27 @@ class MedHackClient:
     def is_user_locked_out(self, user_id: str, today: date) -> bool:
         """Check if a user has exhausted all guesses for today's case."""
         return self.get_user_guesses_remaining(user_id, today) <= 0
+
+    def set_pending_guess(self, user_id: str, guess: str) -> None:
+        """Store a pending guess that needs user confirmation before locking in."""
+        state = self._load_state()
+        pending = state.get("pending_guesses", {})
+        pending[user_id] = guess
+        state["pending_guesses"] = pending
+        self._save_state(state)
+
+    def get_pending_guess(self, user_id: str) -> Optional[str]:
+        """Get the pending guess for a user, if any."""
+        state = self._load_state()
+        return state.get("pending_guesses", {}).get(user_id)
+
+    def clear_pending_guess(self, user_id: str) -> None:
+        """Clear a user's pending guess."""
+        state = self._load_state()
+        pending = state.get("pending_guesses", {})
+        pending.pop(user_id, None)
+        state["pending_guesses"] = pending
+        self._save_state(state)
 
     def check_guess(self, user_id: str, guess: str, today: date) -> Dict[str, Any]:
         """Check if a guess matches the current case's diagnosis.
@@ -257,6 +279,7 @@ class MedHackClient:
         state["solved"] = False
         state["hint_level"] = 0
         state["guess_counts"] = {}
+        state["pending_guesses"] = {}
         state.setdefault("played_case_ids", [])
         if new_case["id"] not in state["played_case_ids"]:
             state["played_case_ids"].append(new_case["id"])
@@ -274,3 +297,43 @@ class MedHackClient:
         if new_case.get("image_url"):
             result["image_url"] = new_case["image_url"]
         return result
+
+    def start_specific_case(self, case_id: int, today: date) -> Optional[dict]:
+        """Start a specific case by its ID (for admin manual advancement).
+
+        Returns the case presentation data, or None if case_id not found.
+        """
+        cases = self._load_cases()
+        new_case = next((c for c in cases if c["id"] == case_id), None)
+        if new_case is None:
+            return None
+
+        state = self._load_state()
+        state["current_case_id"] = new_case["id"]
+        state["posted_date"] = today.isoformat()
+        state["winners"] = []
+        state["solved"] = False
+        state["hint_level"] = 0
+        state["guess_counts"] = {}
+        state["pending_guesses"] = {}
+        state.setdefault("played_case_ids", [])
+        if new_case["id"] not in state["played_case_ids"]:
+            state["played_case_ids"].append(new_case["id"])
+        self._save_state(state)
+
+        result = {
+            "id": new_case["id"],
+            "difficulty": new_case.get("difficulty", "medium"),
+            "presenting_complaint": new_case["presenting_complaint"],
+        }
+        if new_case.get("title"):
+            result["title"] = new_case["title"]
+        if new_case.get("ed_first_look"):
+            result["ed_first_look"] = new_case["ed_first_look"]
+        if new_case.get("image_url"):
+            result["image_url"] = new_case["image_url"]
+        return result
+
+    def get_all_case_ids(self) -> List[int]:
+        """Return all available case IDs from cases.yaml."""
+        return [c["id"] for c in self._load_cases()]

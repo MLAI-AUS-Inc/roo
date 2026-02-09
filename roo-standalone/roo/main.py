@@ -78,9 +78,12 @@ async def _medhack_daily_case_loop():
                             f"{header}\n\n"
                             f"{scene}\n\n"
                             f"*Triage note:* {triage}\n\n"
-                            f"Ask me questions about this patient to work towards the diagnosis. "
+                            f"Tag *@Roo* to interact — I'm your gateway to the patient. "
+                            f"Ask me anything you'd ask them and I'll relay their answer. "
+                            f"You can also request examinations and investigations, but be specific — "
+                            f"the hospital has limited resources and inappropriate or costly tests may be denied.\n\n"
                             f"When you're ready, tell me your diagnosis!\n\n"
-                            f"_You have 3 guesses. First correct answer wins 12 MLAI points "
+                            f"_You get *one guess* — make it count! First correct answer wins 12 MLAI points "
                             f"+ DM Dr Sam for a free ticket code to MedHack: Frontiers!_"
                         )
                     else:
@@ -88,9 +91,12 @@ async def _medhack_daily_case_loop():
                         message = (
                             f"{header}\n\n"
                             f"{complaint}\n\n"
-                            f"Ask me questions about this patient to work towards the diagnosis. "
+                            f"Tag *@Roo* to interact — I'm your gateway to the patient. "
+                            f"Ask me anything you'd ask them and I'll relay their answer. "
+                            f"You can also request examinations and investigations, but be specific — "
+                            f"the hospital has limited resources and inappropriate or costly tests may be denied.\n\n"
                             f"When you're ready, tell me your diagnosis!\n\n"
-                            f"_You have 3 guesses. First correct answer wins 12 MLAI points "
+                            f"_You get *one guess* — make it count! First correct answer wins 12 MLAI points "
                             f"+ DM Dr Sam for a free ticket code to MedHack: Frontiers!_"
                         )
 
@@ -220,13 +226,13 @@ async def slack_events(request: Request):
     
     print(f"📨 Received Slack event: {event_type}")
 
-    # Process Quests
-    try:
-        from .quests import handle_quests
-        import asyncio
-        asyncio.create_task(handle_quests(event))
-    except Exception as e:
-        print(f"⚠️ Quest processing failed: {e}")
+    # Quests disabled for now
+    # try:
+    #     from .quests import handle_quests
+    #     import asyncio
+    #     asyncio.create_task(handle_quests(event))
+    # except Exception as e:
+    #     print(f"⚠️ Quest processing failed: {e}")
     
     if event_type == "app_mention":
         # Process mention asynchronously
