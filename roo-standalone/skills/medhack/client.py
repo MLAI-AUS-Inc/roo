@@ -186,6 +186,17 @@ class MedHackClient:
         case = next((c for c in cases if c["id"] == state["current_case_id"]), None)
         if case is None:
             return None
+
+        # Sync to backend: local case exists but backend doesn't know about it
+        backend = self._get_backend()
+        if backend:
+            try:
+                await backend.medhack_start_case(state["current_case_id"], "system")
+                self._invalidate_cache()
+                print(f"🔄 Synced case #{state['current_case_id']} to backend")
+            except Exception as e:
+                print(f"⚠️ Backend case sync failed: {e}")
+
         safe_case = {k: v for k, v in case.items() if k not in ("diagnosis", "acceptable_answers")}
         safe_case["solved"] = state["solved"]
         safe_case["winners"] = state["winners"]
