@@ -60,10 +60,10 @@ async def _medhack_daily_case_loop():
             client = mod.MedHackClient()
 
             # Check if there's already a case for today
-            current = client.get_current_case(today)
+            current = await client.get_current_case(today)
             if current is None:
                 # Start a new case
-                new_case = client.start_new_case(today)
+                new_case = await client.start_new_case(today)
                 if new_case:
                     difficulty = new_case.get("difficulty", "medium").upper()
                     title = new_case.get("title", "")

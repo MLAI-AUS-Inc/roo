@@ -261,13 +261,13 @@ Original text:
             from ..slack_client import post_message
 
             if requested_case_id is not None:
-                new_case = client.start_specific_case(requested_case_id, today)
+                new_case = await client.start_specific_case(requested_case_id, today, admin_slack_id=user_id)
                 if not new_case:
                     available = client.get_all_case_ids()
                     return f"Case #{requested_case_id} not found. Available case IDs: {available}"
             else:
                 # "next patient" — pick the next unplayed case
-                new_case = client.start_new_case(today)
+                new_case = await client.start_new_case(today, admin_slack_id=user_id)
                 if not new_case:
                     return "All cases have been played! No new cases available."
 
@@ -339,25 +339,25 @@ Original text:
         cancel_patterns = ["no", "nah", "nope", "cancel", "never mind", "keep going",
                            "not yet", "wait", "hold on", "keep digging"]
 
-        current_case = client.get_current_case(today)
+        current_case = await client.get_current_case(today)
 
         # --- Check for pending guess confirmation/cancellation ---
-        pending_guess = client.get_pending_guess(user_id) if current_case else None
+        pending_guess = (await client.get_pending_guess(user_id)) if current_case else None
         if pending_guess and current_case and not current_case.get("solved"):
             is_confirm = any(p in text_lower for p in confirm_patterns)
             is_cancel = any(p in text_lower for p in cancel_patterns)
 
             if is_confirm:
                 # Lock in the pending guess
-                client.clear_pending_guess(user_id)
-                result = client.check_guess(user_id, pending_guess, today)
+                await client.clear_pending_guess(user_id)
+                result = await client.check_guess(user_id, pending_guess, today)
                 return await self._handle_guess_result(
                     result, user_id, skill, text, client, today,
                     thread_history, channel_id, pending_guess
                 )
 
             elif is_cancel:
-                client.clear_pending_guess(user_id)
+                await client.clear_pending_guess(user_id)
                 return (
                     f"<@{user_id}> No worries — guess cancelled. "
                     f"Keep investigating and lock in your diagnosis when you're ready. "
@@ -367,11 +367,11 @@ Original text:
             # If they said something else while having a pending guess,
             # remind them (but also let the LLM respond to their question)
             # Clear the pending guess so it doesn't block future interactions
-            client.clear_pending_guess(user_id)
+            await client.clear_pending_guess(user_id)
 
         # --- "Lock it in" with no pending guess ---
         if is_lock_in and not pending_guess and current_case and not current_case.get("solved"):
-            if client.is_user_locked_out(user_id, today):
+            if await client.is_user_locked_out(user_id, today):
                 return (
                     f"<@{user_id}> Sorry mate, you've already used your guess for today's case. "
                     "Come back tomorrow for a new one!"
@@ -419,7 +419,7 @@ Original text:
             )
 
         # --- Locked out ---
-        if current_case and client.is_user_locked_out(user_id, today):
+        if current_case and await client.is_user_locked_out(user_id, today):
             return (
                 f"<@{user_id}> Sorry mate, you've already used your guess for today's case "
                 "so you can no longer interact with it. Come back tomorrow for a new one!"
@@ -431,7 +431,7 @@ Original text:
 
             if classification.get("is_guess") and classification.get("diagnosis"):
                 guess_text = classification["diagnosis"]
-                client.set_pending_guess(user_id, guess_text)
+                await client.set_pending_guess(user_id, guess_text)
                 return (
                     f"<@{user_id}> You want to lock in *{guess_text}* as your final diagnosis?\n\n"
                     f"_Remember: you only get *one guess* per case. "
@@ -439,7 +439,7 @@ Original text:
                 )
 
             # Not a guess — respond as PQM narrator
-            case_data = client.get_case_for_llm(today)
+            case_data = await client.get_case_for_llm(today)
             llm_response = await self._medhack_llm_response(skill, text, case_data, thread_history)
             return f"<@{user_id}> {llm_response}"
 
@@ -611,7 +611,7 @@ Respond with ONLY valid JSON, no markdown:
 
         else:
             # Wrong guess
-            case_data = client.get_case_for_llm(today)
+            case_data = await client.get_case_for_llm(today)
             llm_response = await self._medhack_llm_response(
                 skill, text, case_data, thread_history,
                 extra_instruction="The user just locked in an INCORRECT diagnosis guess. "
