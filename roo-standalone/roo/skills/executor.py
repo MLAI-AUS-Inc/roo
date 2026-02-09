@@ -349,10 +349,26 @@ Original text:
                     "Do NOT reveal the correct diagnosis or hint at it."
                 )
                 guess_warning = f"\n\n_You have *{remaining}* guess{'es' if remaining != 1 else ''} remaining._"
-                return self._medhack_game_response(
-                    llm_response + guess_warning,
-                    current_case.get("image_url", "")
-                )
+                return llm_response + guess_warning
+
+        # --- Repost the daily case (with image) ---
+        repost_patterns = ["post the", "show the case", "show me the case",
+                           "post again", "start again", "from the start",
+                           "show the patient", "post the patient",
+                           "present the case", "daily patient"]
+        if current_case and any(p in text_lower for p in repost_patterns):
+            complaint = current_case.get("ed_first_look") or current_case.get("presenting_complaint", "")
+            title = current_case.get("title", "Daily Case")
+            header = f"*Guess the Diagnosis — {title}*"
+            message = (
+                f"{header}\n\n"
+                f"{complaint}\n\n"
+                f"Ask me questions about this patient to work towards the diagnosis. "
+                f"When you're ready, tell me your diagnosis!\n\n"
+                f"_You have 3 guesses. First correct answer wins 12 MLAI points "
+                f"+ DM Dr Sam for a free ticket code to MedHack: Frontiers!_"
+            )
+            return self._medhack_game_response(message, current_case.get("image_url", ""))
 
         # --- Game interaction (not a guess) ---
         if is_game_q and current_case:
@@ -380,7 +396,7 @@ Original text:
 
             case_data = client.get_case_for_llm(today)
             llm_response = await self._medhack_llm_response(skill, text, case_data, thread_history)
-            return self._medhack_game_response(llm_response, current_case.get("image_url", ""))
+            return llm_response
 
         if is_game_q and not current_case:
             return (
@@ -400,7 +416,7 @@ Original text:
                 )
             case_data = client.get_case_for_llm(today)
             llm_response = await self._medhack_llm_response(skill, text, case_data, thread_history)
-            return self._medhack_game_response(llm_response, current_case.get("image_url", ""))
+            return llm_response
 
         # --- Event info mode ---
         if is_event_q or (not is_game_q):
