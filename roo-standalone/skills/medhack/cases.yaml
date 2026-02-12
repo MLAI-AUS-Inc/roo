@@ -407,7 +407,7 @@ cases:
   - id: 4
     difficulty: "hard"
     title: "Blue at the Mouth"
-    image_url: ""  # Add image URL if available
+    image_url: "https://firebasestorage.googleapis.com/v0/b/medhack-ai.firebasestorage.app/o/SimPatient4.jpg?alt=media&token=5b62f014-93a4-4819-a422-109d30837a69"  # Add image URL if available
     ed_first_look: >
       The curtain slides back and the cubicle light hits like a stage spotlight. A young man
       sits upright, elbows locked on the mattress, breathing fast like he's trying to outrun
@@ -678,3 +678,283 @@ cases:
       - "This patient has had multiple similar episodes. Have you asked about the pattern of recurrence and what makes the symptoms better or worse?"
       - "The normal lipase and imaging rule out many common causes. The key is in the social history - have you asked specifically about cannabis or other recreational substance use? What about unusual symptom relief methods?"
       - "The classic triad is cyclic vomiting, chronic cannabis use, and compulsive hot bathing/showering for relief. All three pieces need to come together from careful, nonjudgmental history taking."
+
+  - id: 7
+    difficulty: "really hard"
+    title: "The Headache That Hates Gravity"
+    image_url: "https://firebasestorage.googleapis.com/v0/b/medhack-ai.firebasestorage.app/o/SimPatient7.jpg?alt=media&token=827f712a-eae4-4ccc-a9a5-3d069526657f"  # Add image URL if available
+    ed_first_look: >
+      This cubicle feels quieter than it should, like the hospital is holding its breath.
+      Your patient is sitting very still, eyes half-lidded, one hand pressed to her forehead. She
+      looks like someone trying not to move because moving makes everything worse. Her hair is in
+      a messy bun that's been redone five times, the kind people do when they're overwhelmed and
+      need one small victory. The tiny nurse puppy in purple scrubs peeks up at the bedside rail,
+      paws resting there like a lifeline, face creased with concern. The patient opens her eyes and
+      focuses on you with effort. "I'm not... usually dramatic," she says softly. "But this headache
+      feels... wrong. And it gets worse when I lie down. Who gets worse lying down?"
+    presenting_complaint: >
+      33F, progressive headache 4 days, worse lying flat, nausea, intermittent blurred vision.
+      Brief R arm tingling earlier today. Vitals: BP 146/88, HR 96, RR 16, SpO2 99% RA, T 37.0°C.
+      Appears uncomfortable, no meningism. Plan: Neuro obs, analgesia, CT head; consider venous
+      thrombosis/intracranial pressure.
+    patient:
+      name: "Noor Al-Karim"
+      age: 33
+      gender: "Female"
+      vibe: >
+        Thoughtful, slightly anxious, tries to be precise. Apologizes too much.
+      historian_quality: >
+        Good-to-medium. Gives timelines well but underplays serious symptoms because she doesn't
+        want to be "a burden."
+      motivation: >
+        Scared she's going to die and leave her baby. Also terrified of being told it's "just stress."
+    history:
+      presenting_history: >
+        Headache for 4 days, gradually worsening. Worse when lying flat, better sitting up.
+        Nausea, reduced appetite. Intermittent blurred vision and brief "grey-outs" when standing
+        or straining. Pulsatile "whooshing" sound in ears at night (pulsatile tinnitus).
+      past_medical_history:
+        - "No significant past medical history"
+        - "No known clotting disorder (but family history includes 'a clot' in an aunt)"
+      medications:
+        - "Combined oral contraceptive (recently restarted after stopping breastfeeding)"
+        - "Multivitamin"
+      family_history: "Aunt had 'a clot' (unspecified thrombosis) - may reveal if asked about family clotting history"
+      social_history: >
+        7 weeks postpartum. Recently stopped breastfeeding and restarted combined OCP. Sleep-deprived.
+        Dehydrated. Recent long car trip. Non-smoker. Works as graphic designer.
+      history_disclosure_rules: >
+        Patient will NOT volunteer postpartum status or OCP restart unless asked about recent
+        life changes, medications, or pregnancy/childbirth. Will not volunteer transient neuro
+        symptoms (tingling, word-finding) unless asked specifically about arm symptoms, weakness,
+        or speech changes. Will describe positional headache if asked about what makes it better
+        or worse. Will mention visual symptoms only if asked about vision or eye symptoms.
+    symptoms:
+      main:
+        - "Headache for 4 days, gradually worsening"
+        - "Worse when lying flat, better sitting up - KEY CLUE"
+        - "Nausea, reduced appetite"
+        - "Intermittent blurred vision and brief 'grey-outs' when standing or straining"
+        - "Pulsatile 'whooshing' sound in ears at night (pulsatile tinnitus) - KEY CLUE"
+      transient_neuro_if_asked:
+        - "Brief episode (10 minutes) of right arm tingling and word-finding difficulty earlier today, resolved completely - KEY CLUE"
+        - "Mild clumsiness today, 'dropping my phone'"
+      associated_if_asked:
+        - "No high fever"
+        - "No photophobia like classic meningitis (light is annoying but not unbearable)"
+        - "Neck feels 'stiff from sleeping weird' but no true meningism"
+        - "Sleep deprivation, poor hydration"
+        - "7 weeks postpartum - only reveals if asked"
+        - "Recently restarted combined OCP after stopping breastfeeding - only reveals if asked about medications"
+        - "Recent long car trip - only reveals if asked about recent travel or prolonged immobility"
+      red_flag_negatives:
+        - "No thunderclap onset"
+        - "No head trauma"
+        - "No persistent focal weakness"
+        - "No seizures"
+    vitals:
+      heart_rate: 96
+      blood_pressure: "146/88"
+      respiratory_rate: 16
+      temperature: 37.0
+      spo2: "99% on room air"
+    examination:
+      general: "Uncomfortable but alert, oriented, cooperative."
+      neurological_basic: >
+        Usually normal on basic exam. May have very subtle findings only if careful detailed exam
+        performed: mild right-sided pronator drift, slight unsteadiness on tandem gait.
+      fundoscopy: >
+        KEY FINDING if ordered: Papilledema (bilateral blurred disc margins). This is the critical
+        examination finding that suggests raised intracranial pressure.
+      cranial_nerves: >
+        Possible mild sixth nerve palsy (horizontal diplopia on far lateral gaze) if specifically
+        tested for eye movements and diplopia.
+      neck: "Feels stiff to patient but no true meningism on examination (negative Kernig's, negative Brudzinski's)."
+      skin: "No rash."
+      cardiovascular: "Mildly hypertensive, otherwise normal."
+    investigations:
+      bloods:
+        wcc: "10.4 x10⁹/L (mildly elevated)"
+        haemoglobin: "132 g/L"
+        platelets: "410 x10⁹/L (mildly elevated - postpartum/reactive)"
+        sodium: "Normal"
+        potassium: "Normal"
+        creatinine: "Normal"
+        crp: "7 mg/L (low-mild)"
+        inr: "Normal"
+        aptt: "Normal"
+        d_dimer_if_ordered: "Elevated (weak clue, not definitive)"
+      pregnancy_test: "Urine β-hCG: Negative"
+      ct_head_plain: >
+        Non-contrast CT head: No acute hemorrhage. No mass. May show subtle "dense sinus sign"
+        (subtle hyperdensity in venous sinuses) - easy to miss and often initially reported as normal.
+      lumbar_puncture_if_performed:
+        opening_pressure: "33 cmH2O (elevated - normal is <25 cmH2O) - KEY FINDING"
+        csf_analysis: "Otherwise unremarkable (no pleocytosis, normal glucose/protein ratio, no organisms)"
+        note: "Only perform LP after imaging to rule out mass lesion. High opening pressure is a key clue."
+      key_diagnostic_test:
+        ct_venogram: "Thrombosis of the superior sagittal sinus and right transverse sinus with impaired venous drainage - DIAGNOSTIC"
+        mr_venogram: "Alternative to CT venogram - shows same findings: venous sinus thrombosis - DIAGNOSTIC"
+        note: >
+          Only reveal if specifically ordered. This is the KEY test needed for diagnosis. Plain CT
+          head is often normal or shows only subtle findings. Players must specifically request
+          venous phase imaging (CT venogram or MR venogram) to make the diagnosis.
+    diagnosis: "Cerebral Venous Sinus Thrombosis (CVST)"
+    acceptable_answers:
+      - "cerebral venous sinus thrombosis"
+      - "cvst"
+      - "dural venous sinus thrombosis"
+      - "venous sinus thrombosis"
+      - "sagittal sinus thrombosis"
+      - "transverse sinus thrombosis"
+      - "cerebral venous thrombosis"
+      - "intracranial venous thrombosis"
+    hints:
+      - "The positional nature of the headache (worse lying flat) is unusual and important. Combined with visual symptoms and pulsatile tinnitus, what does this suggest about intracranial pressure? Have you examined the optic discs?"
+      - "Plain CT head can be normal in this condition. The transient neurological symptoms, recent postpartum state, and OCP use are all risk factors. What specific type of imaging do you need to visualize the venous system?"
+      - "This is a case where fundoscopy is critical - have you looked for papilledema? The combination of raised intracranial pressure signs, hypercoagulable state (postpartum + OCP), and normal plain CT should prompt you to order CT venogram or MR venogram to look for cerebral venous sinus thrombosis."
+
+  - id: 9
+    difficulty: "really hard"
+    title: "The Ringing Air"
+    image_url: "https://firebasestorage.googleapis.com/v0/b/medhack-ai.firebasestorage.app/o/SimPatient8.jpg?alt=media&token=2f06f318-6a2d-44a7-8458-1758670b1bc4"  # Add image URL if available
+    ed_first_look: >
+      You hear him before you see him. Fast breathing. Not wheezy. Not struggling-through-mucus.
+      Just fast, deep, determined breaths like he is trying to ventilate a secret out of his body.
+      Your patient is perched on the edge of the bed, elbows on knees, hands pressed to the sides of
+      his head. His eyes keep darting to the monitor as if numbers might tell him what's happening.
+      Sweat shines at his hairline even though the room is cool. At the rail, the tiny nurse puppy
+      in purple scrubs grips the bed edge and looks up at you, brow furrowed in a way that is almost
+      comically serious. He looks up sharply and blurts, "Doc, I know this is going to sound like
+      anxiety, but I'm not anxious. I mean, I am now, because my ears are screaming and my lungs are
+      in sprint mode. I feel... poisoned." Then, quieter: "There's this ringing. Like a high note
+      that won't stop."
+    presenting_complaint: >
+      41M, nausea + vomiting + tinnitus + rapid breathing x 10 hours. Headache, diaphoresis.
+      Vitals: BP 128/78, HR 118, RR 32 (deep), SpO2 99% RA, T 37.8°C. Lungs clear. Appears sweaty,
+      restless. Plan: ABG/VBG, CMP, lactate, tox screen, ECG.
+    patient:
+      name: "Callum Reyes"
+      age: 41
+      gender: "Male"
+      vibe: >
+        Intelligent, slightly dramatic, tries to self-diagnose, hates feeling out of control.
+      historian_quality: >
+        Good-to-medium. Gives a timeline, but does not recognize which medication details matter,
+        so describes them vaguely unless asked with specificity (brand names, "anything containing
+        aspirin," stomach remedies, muscle rubs).
+      motivation: >
+        Single dad with a kid at home. Terrified he will pass out or die and no one will believe
+        him because he "looks fine."
+    history:
+      presenting_history: >
+        Ringing in ears (tinnitus), constant, high-pitched. Nausea and repeated vomiting. Fast deep
+        breathing, feels like he cannot slow it down. Headache and dizziness. Sweating, feeling hot
+        and shaky. Mild confusion, trouble focusing on questions.
+      past_medical_history:
+        - "No significant past medical history"
+        - "No psychiatric history (worried people will think it's anxiety)"
+      medications:
+        - "Multiple OTC products - only reveals details if asked specifically"
+        - "Aspirin-containing pain reliever (used frequently for toothache)"
+        - "Effervescent cold remedy containing aspirin (multiple doses)"
+        - "Bismuth subsalicylate (Pepto-Bismol type product) for nausea (several large doses)"
+      family_history: "Non-contributory"
+      social_history: >
+        Single father, works in IT. Non-smoker. Occasional social drinker. Recent toothache and
+        cold-like illness led to heavy OTC medication use over 24 hours. Believes OTC means safe.
+      history_disclosure_rules: >
+        Patient will say "just OTC stuff" if asked generally about medications. Will only reveal
+        specific products if asked directly and specifically: "any aspirin?", "any effervescent
+        cold tablets?", "any stomach medications like Pepto-Bismol?", "anything containing aspirin?".
+        He has no idea these products all contain salicylates and stack. Not attempting self-harm,
+        was "just trying to function" through toothache and viral illness.
+    symptoms:
+      main:
+        - "Ringing in ears (tinnitus), constant, high-pitched - KEY SYMPTOM"
+        - "Nausea and repeated vomiting"
+        - "Fast deep breathing, feels like he cannot slow it down (hyperpnea) - KEY SYMPTOM"
+        - "Headache and dizziness"
+        - "Sweating, feeling hot and shaky"
+        - "Mild confusion, trouble focusing on questions"
+      associated_if_asked:
+        - "Toothache and cold symptoms triggered heavy OTC use over past 24 hours"
+        - "Feels thirsty, dry mouth"
+        - "Occasional abdominal discomfort"
+        - "Light sensitivity is mild, mostly headache-related"
+      red_flag_negatives:
+        - "No chest pain"
+        - "No productive cough"
+        - "No neck stiffness"
+        - "No focal weakness"
+        - "No major diarrhea"
+        - "No suicidal ideation or intentional overdose"
+    vitals:
+      heart_rate: 118
+      blood_pressure: "128/78"
+      respiratory_rate: 32
+      temperature: 37.8
+      spo2: "99% on room air"
+      bgl: "6.0 mmol/L"
+    examination:
+      general: "Restless, sweaty, anxious but oriented. Mild confusion/slowed concentration."
+      respiratory: "Tachypneic with deep breaths (Kussmaul-like pattern); lungs clear, no wheeze, no crackles."
+      cardiovascular: "Tachycardic; warm peripheries; good volume."
+      abdominal: "Mild diffuse abdominal tenderness, no guarding, no rebound, no peritonism."
+      neurological: "No focal deficits, but slowed concentration and mild tremor."
+      breath_odor: >
+        If specifically asked about breath smell: "Sharp, chemical 'medicinal' note" - subtle clue
+        to salicylate toxicity.
+    investigations:
+      ecg: "Sinus tachycardia ~115 bpm, otherwise normal."
+      fingerstick_glucose: "6.0 mmol/L"
+      bloods:
+        sodium: "138 mmol/L"
+        potassium: "3.1 mmol/L (low)"
+        chloride: "101 mmol/L"
+        bicarbonate: "14 mmol/L (low) - KEY FINDING"
+        urea: "7.6 mmol/L"
+        creatinine: "98 µmol/L"
+        glucose_lab: "6.1 mmol/L"
+        wcc: "12.8 x10⁹/L (stress response)"
+        crp: "10 mg/L (mild)"
+        lactate: "2.8 mmol/L (mildly elevated)"
+        anion_gap: "23 (elevated - calculate if asked) - KEY FINDING: High anion gap metabolic acidosis"
+      abg_key_test:
+        ph: "7.48 (alkalotic)"
+        paco2: "22 mmHg (low - respiratory alkalosis)"
+        hco3: "16 mmol/L (low - metabolic acidosis)"
+        pao2: "110 mmHg (normal)"
+        interpretation: >
+          Mixed acid-base disorder: respiratory alkalosis (from hyperventilation) plus high anion
+          gap metabolic acidosis. This is a KEY FINDING suggesting salicylate toxicity.
+        note: "Only reveal if ABG/VBG ordered. This mixed picture is pathognomonic for salicylate toxicity."
+      confirmatory_test:
+        serum_salicylate_level: "58 mg/dL (toxic range: >30 mg/dL chronic, >45 mg/dL acute) - DIAGNOSTIC"
+        note: >
+          Only reveal if specifically ordered. This is the definitive diagnostic test. Players must
+          specifically request "salicylate level" or "aspirin level" to get this result.
+      cxr_if_ordered: "Clear lungs, no consolidation, no pulmonary edema."
+      urinalysis: "Ketones trace, otherwise normal."
+      toxicology_screen_if_ordered: >
+        Negative for common recreational drugs (opiates, cocaine, amphetamines, benzodiazepines,
+        cannabis). Standard tox screens do NOT detect salicylates - must order specific salicylate level.
+      medication_history_reveals:
+        general_question: "If asked 'any medications?' he says: 'Just OTC stuff, nothing serious.'"
+        specific_aspirin: "If asked 'any aspirin?' or 'aspirin-containing products?' he says: 'Yeah, the regular headache ones. I took quite a few for my toothache.'"
+        specific_cold_remedy: "If asked about 'effervescent cold tablets' or 'cold remedies' he admits: 'Yeah, those fizzy ones. I used them a lot yesterday.'"
+        specific_stomach_meds: "If asked about 'Pepto-Bismol' or 'bismuth' or 'pink stomach medicine' he says: 'Yes! A lot. My stomach was killing me.'"
+        realization: "He had no idea all these products contain salicylates and can stack to toxic levels."
+    diagnosis: "Salicylate Toxicity"
+    acceptable_answers:
+      - "salicylate toxicity"
+      - "aspirin toxicity"
+      - "salicylate poisoning"
+      - "aspirin poisoning"
+      - "salicylate overdose"
+      - "aspirin overdose"
+      - "salicylism"
+    hints:
+      - "The combination of tinnitus and hyperventilation is a classic toxidrome. What drug causes both of these symptoms? Have you done an ABG and calculated the anion gap?"
+      - "The mixed acid-base picture (respiratory alkalosis from hyperventilation plus high anion gap metabolic acidosis) is pathognomonic for a specific toxicity. Have you taken a detailed inventory of ALL over-the-counter medications, including cold remedies and stomach medications?"
+      - "Tinnitus + hyperventilation + mixed acid-base disorder = salicylate toxicity until proven otherwise. Many OTC products contain hidden aspirin (effervescent cold tablets, Pepto-Bismol/bismuth subsalicylate). Order a serum salicylate level to confirm."
