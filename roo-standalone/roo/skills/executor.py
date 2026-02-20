@@ -406,6 +406,79 @@ Original text:
 
             return f"Patient #{new_case['id']} ({title}) is now live!"
 
+        # --- Announcement creation ---
+        MEDHACK_ANNOUNCE_ADMIN_IDS = ["U08DD0DCL4D", "U05QPB483K9", "U08CWAPMQH0", "U07QJ5L0EHY"]
+        announce_keywords = ["announce", "announcement", "post announcement", "create announcement"]
+        is_announcement = any(k in text_lower for k in announce_keywords)
+
+        if is_announcement:
+            if user_id not in MEDHACK_ANNOUNCE_ADMIN_IDS:
+                return f"<@{user_id}> Sorry, only authorized MedHack admins can create announcements."
+
+            # Use LLM to extract title and body
+            extract_prompt = f"""Extract the announcement title and body from this message.
+The user wants to create an announcement for the MedHack: Frontiers website.
+
+User message: "{text}"
+
+Return ONLY valid JSON with two keys: "title" and "body".
+If you cannot determine a clear title or body from the message, set the missing field to null.
+
+Example: {{"title": "Workshop Schedule Update", "body": "The AI workshop has been moved to Room 3B at 2pm."}}
+
+JSON:"""
+            openai_client = get_llm_client("openai")
+            extract_response = await openai_client.chat([
+                {"role": "system", "content": "You extract structured data from text. Return valid JSON only."},
+                {"role": "user", "content": extract_prompt}
+            ], model="gpt-4o-mini", max_tokens=1024)
+
+            try:
+                content = extract_response.content.strip()
+                if content.startswith("```"):
+                    content = re.sub(r'^```\w*\n?', '', content)
+                    content = re.sub(r'\n?```$', '', content)
+                extracted = json.loads(content)
+            except json.JSONDecodeError:
+                extracted = {}
+
+            ann_title = extracted.get("title")
+            ann_body = extracted.get("body")
+
+            if not ann_title or not ann_body:
+                return (
+                    f"<@{user_id}> I need both a *title* and *body* for the announcement. "
+                    f"Please try again with something like:\n"
+                    f"_\"Create an announcement titled 'Workshop Update' with body 'The AI workshop is moved to 2pm.'\"_"
+                )
+
+            # Call the backend — use Roo's bot user ID so the announcement
+            # author avatar is always Roo's, not the requesting human's.
+            from ..clients.mlai_backend import MLAIBackendClient
+            from ..slack_client import get_bot_user_id
+            backend = MLAIBackendClient()
+            bot_id = get_bot_user_id()
+            result = await backend.medhack_create_announcement(ann_title, ann_body, bot_id or user_id)
+
+            if result is None:
+                return f"<@{user_id}> Something went wrong creating the announcement. Please try again later."
+
+            status_code = result.get("status_code")
+            if status_code == 400:
+                return f"<@{user_id}> The announcement couldn't be created — the server said something is missing. Details: {result.get('detail', 'unknown')}"
+            if status_code in (401, 403):
+                return f"<@{user_id}> Authorization error creating the announcement. Please contact an admin."
+            if status_code is not None:
+                return f"<@{user_id}> Unexpected error (HTTP {status_code}): {result.get('detail', 'unknown')}"
+
+            # Success — confirm and post to channel
+            confirm_msg = f"Announcement *\"{ann_title}\"* has been posted to the MedHack: Frontiers website."
+            if channel_id:
+                from ..slack_client import post_message
+                post_message(channel=channel_id, text=confirm_msg, thread_ts=thread_ts)
+
+            return confirm_msg
+
         # --- Determine mode: event info vs diagnosis game ---
         event_keywords = ["when", "where", "ticket", "register", "schedule", "speaker",
                           "venue", "price", "event", "medhack", "frontiers", "sign up"]
