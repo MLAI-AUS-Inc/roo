@@ -301,6 +301,28 @@ tracks:
       convincingly.
     data_used: "Real, de-identified Electronic Medical Record (EMR) data, plus your own research"
     scoring: "Teams submit a short video pitch. Judges select finalists who pitch live at Pitch Night."
+    scoring_criteria:
+      total: 50
+      categories:
+        - name: "Innovation"
+          max_score: 5
+          description: "Does the solution provide a new or significantly improved approach to what's currently available?"
+        - name: "Usefulness"
+          max_score: 10
+          description: "Does it truly address the needs of the user? Does it solve a large problem?"
+        - name: "Viability"
+          max_score: 10
+          description: "Is it scalable, cost-effective, and easy to adopt?"
+        - name: "Technical"
+          max_score: 10
+          description: "Is what the team built technically complex? Is their future vision technically feasible?"
+        - name: "Business"
+          max_score: 10
+          description: "Does it have the potential to be implemented and possibly funded?"
+        - name: "Sustainability"
+          max_score: 5
+          description: "Will it minimise long-term environmental impact and stand the test of time?"
+      note: "Not all categories are weighted equally. Usefulness, Viability, Technical, and Business are each worth up to 10 points, while Innovation and Sustainability are each worth up to 5. Scores from semifinal judges are normalised across panels to ensure fairness."
     one_liner: "Choose your problem + build a solution + pitch to judges"
     examples_of_solutions: "AI copilots, workflow tools, diagnostic support concepts, patient-first platforms, and other practical prototypes grounded in healthcare needs."
 
