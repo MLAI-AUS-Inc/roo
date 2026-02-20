@@ -5,18 +5,89 @@ event_name: "MedHack: Frontiers"
 tagline: "Where healthcare meets AI"
 
 description: >
-  A healthcare AI hackathon where clinicians, engineers, designers, and students
-  build real prototypes over an intense weekend. The best Big Tract teams then pitch
-  live at Pitch Night. The purpose is to bring healthcare and AI communities together
-  to solve meaningful healthcare challenges and showcase emerging talent.
+  MedHack is a 2 day hackathon, held between the 21st - 22nd of February, where
+  interdisciplinary teams work collaboratively to develop innovative solutions regarding
+  the health sector. The theme of this year's event is Frontiers, and it will be an
+  opportunity to explore problems faced globally and to develop innovative solutions to
+  healthcare's greatest challenges. During MedHack, participants will have the chance
+  to be introduced to the human centred design process in collaboration with experts
+  associated with each subtopic due to their work or their experiences (mentors).
+  Teams of 2-6 participants will have the guidance and support from carefully selected
+  mentors and experienced industry professionals from a range of backgrounds (health,
+  medtech, business, entrepreneurship) who will help refine the ideas and design.
+  Masterclass workshops facilitated by experts will educate and equip participants with
+  knowledge to effectively create a product.
+source_page: 3
+
+event_website: "mymi.org.au/medhack"
 
 hosted_by:
   - name: "MYMI"
-    description: "Monash Young Medtech Innovators - a student-led organisation affiliated with Monash University focused on medtech innovation."
+    description: >
+      MYMI is an interdisciplinary organisation dedicated to achieving positive impact
+      through medical technology, healthcare, and biomedical innovation. They bring
+      about collaboration between undergraduates, graduates, PhDs, and Early Career
+      Researchers (ECRs) regardless of home institution, discipline, creed, or
+      experience. MYMI is composed of a committee and a medtech project portfolio.
+      MYMI has focused on several projects which include Heart Hack, Nephros, Aesop
+      and project Dreampod.
+    source_page: 2
   - name: "MLAI"
-    description: "A not-for-profit community that teaches and supports people building with AI, from students to seasoned engineers."
+    description: >
+      MLAI (Machine Learning & AI Australia) is a community-driven network of
+      innovators, builders, and ambitious creators exploring the frontiers of artificial
+      intelligence. They host hackathons, practical workshops, and experimental
+      projects that connect developers, researchers, and founders from all over
+      Australia. Their goal is bold: help launch 1,000 Australian startups. From
+      building your first AI prototype to growing a high-impact company, MLAI supports
+      emerging talent with access to community, real opportunities, and a touch of
+      creative chaos - the kind that sparks breakthrough ideas.
+    source_page: 2
   - name: "ASME"
     description: "A not-for-profit for clinicians interested in entrepreneurship and innovation."
+
+# ---------------------
+# SUBTOPICS
+# ---------------------
+subtopics:
+  source_page: 3
+  list:
+    - name: "Aging Populations"
+      description: >
+        As populations age, healthcare systems face rising multi-morbidity,
+        frailty and demand for long-term support.
+    - name: "Ward"
+    - name: "Workforce Load"
+    - name: "Emergency Department"
+    - name: "Rural"
+
+# ---------------------
+# VIDEO PITCH SUBMISSION
+# ---------------------
+video_pitch_submission:
+  deadline: "Friday 27th of February, midnight"
+  submit_to: "info@mymi.org"
+  format: "3-minute video pitch"
+  source_page: 3
+
+# ---------------------
+# SOCIAL MEDIA
+# ---------------------
+social_media:
+  hashtag: "#MedHackFrontiers"
+  instagram: "monashyoungmedtechinnovators"
+  linkedin: "linkedin.com/company/mymi"
+  tiktok: "mymi.medtech"
+  source_page: 2
+
+# ---------------------
+# SPONSORS
+# ---------------------
+sponsors:
+  silver:
+    - name: "Medtech Actuator"
+    - name: "Victorian Medtech Skills and Devices Hub"
+      also_known_as: "The Generator / VMH"
 
 # ---------------------
 # KEY DATES
@@ -261,6 +332,116 @@ mentors:
   available: true
   help_with: "Brainstorming, solution design, AI/healthcare process insight, coding support (especially for Small Tract teams), and pitch preparation."
   availability: "Multiple mentor blocks each day. The first afternoon (Day 1) is especially valuable for getting your project on rails."
+  schedule:
+    day_1:
+      date: "Saturday 21/02"
+      time_blocks:
+        - "11am-3pm"
+        - "3pm-7:15pm"
+        - "6:45pm-9pm"
+      mentors:
+        - name: "Eddie Chen"
+          available: "11am-3pm; 3pm-7:15pm (until 5pm)"
+        - name: "Andrew Carey"
+          available: "11am-3pm"
+        - name: "Makenzie Thomas"
+          available: "no marked availability"
+        - name: "Matthew Jones"
+          available: "11am-3pm; 3pm-7:15pm (until 6pm)"
+        - name: "Wenjing Sun"
+          available: "11am-3pm; 3pm-7:15pm; 6:45pm-9pm"
+        - name: "Tyler Tranquille"
+          available: "11am-3pm"
+        - name: "John Forsythe"
+          available: "11am-3pm; 3pm-7:15pm"
+        - name: "Ellie McBain"
+          available: "11am-3pm; 3pm-7:15pm (until 5pm)"
+        - name: "Peter McKenna"
+          available: "11am-3pm; 3pm-7:15pm"
+        - name: "Vera Ignjatovic"
+          available: "no marked availability"
+        - name: "Bora Ith"
+          available: "11am-3pm; 3pm-7:15pm"
+        - name: "Jaber Jaber"
+          available: "11am-3pm"
+        - name: "Harjas Gill"
+          available: "11am-3pm"
+        - name: "Kailash Kumar Vinu"
+          available: "11am-3pm; 3pm-7:15pm"
+        - name: "Darren Rajit"
+          available: "11am-3pm"
+        - name: "Johnny Pham"
+          available: "3pm-7:15pm"
+        - name: "Som Sangu"
+          available: "11am-3pm"
+        - name: "Vlada Rozova"
+          available: "11am-3pm; 3pm-7:15pm"
+        - name: "Dinasha Wimalasiri"
+          available: "3pm-7:15pm"
+        - name: "Rachel Zhao"
+          available: "11am-3pm; 3pm-7:15pm; 6:45pm-9pm"
+        - name: "Yilin Wu"
+          available: "11am-3pm; 3pm-7:15pm"
+        - name: "Jordan Moshcovitis"
+          available: "11am-3pm"
+        - name: "Jessica Attenborough"
+          available: "no marked availability"
+        - name: "Brandon Glasser"
+          available: "11am-3pm"
+    day_2:
+      date: "Sunday 22/02"
+      time_blocks:
+        - "8:30am-12:30pm"
+        - "12:30pm-5:30pm"
+      mentors:
+        - name: "Eddie Chen"
+          available: "no marked availability"
+        - name: "Andrew Carey"
+          available: "8:30am-12:30pm"
+        - name: "Makenzie Thomas"
+          available: "8:30am-12:30pm"
+        - name: "Matthew Jones"
+          available: "no marked availability"
+        - name: "Wenjing Sun"
+          available: "no marked availability"
+        - name: "Tyler Tranquille"
+          available: "no marked availability"
+        - name: "John Forsythe"
+          available: "12:30pm-5:30pm"
+        - name: "Peter McKenna"
+          available: "8:30am-12:30pm; 12:30pm-5:30pm"
+        - name: "Vera Ignjatovic"
+          available: "12:30pm-5:30pm"
+        - name: "Bora Ith"
+          available: "8:30am-12:30pm; 12:30pm-5:30pm"
+        - name: "Jaber Jaber"
+          available: "8:30am-12:30pm; 12:30pm-5:30pm"
+        - name: "Harjas Gill"
+          available: "8:30am-12:30pm; 12:30pm-5:30pm"
+        - name: "Kailash Kumar Vinu"
+          available: "12:30pm-5:30pm"
+        - name: "Darren Rajit"
+          available: "no marked availability"
+        - name: "Johnny Pham"
+          available: "no marked availability"
+        - name: "Som Sangu"
+          available: "no marked availability"
+        - name: "Vlada Rozova"
+          available: "no marked availability"
+        - name: "Dinasha Wimalasiri"
+          available: "no marked availability"
+        - name: "Rachel Zhao"
+          available: "8:30am-12:30pm; 12:30pm-5:30pm"
+        - name: "Yilin Wu"
+          available: "12:30pm-5:30pm"
+        - name: "Jordan Moshcovitis"
+          available: "no marked availability"
+        - name: "Jessica Attenborough"
+          available: "8:30am-12:30pm"
+        - name: "Brandon Glasser"
+          available: "12:30pm-5:30pm"
+        - name: "Ellie McBain"
+          available: "8:30am-12:30pm"
 
 workshops:
   - name: "Workshop 1 (Technical)"

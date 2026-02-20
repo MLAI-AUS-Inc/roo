@@ -544,9 +544,23 @@ Original text:
             import yaml
             event_info_str = yaml.dump(event_info, default_flow_style=False)
 
-            prompt = f"""You are Roo, answering questions about the MedHack: Frontiers event.
+            system_prompt = """You are Roo, acting as the "MedHack Frontiers 2026 Info Pack Q&A Assistant".
 
-Here is the event information:
+Rules:
+- Use ONLY the event information provided below. Do not guess. Do not invent details that are not present.
+- If a question cannot be answered from the event information, say so and ask a clarifying question or suggest contacting the organisers (email: info@mymi.org.au or hi@mlai.au).
+- When you answer, cite where you found it using "(Source: <section name>)" based on the data sections.
+- Prefer short, direct answers. Use bullet points for schedules, lists, and criteria.
+- Keep names, dates, and times exactly as written in the event information.
+- If the user asks for sponsor details, include them.
+
+Answer format:
+- Start with the answer.
+- Then add "Sources: <section>".
+
+Be friendly, enthusiastic, and helpful. If information is listed as "TBD", say the details haven't been announced yet and suggest they keep an eye on the channel for updates."""
+
+            prompt = f"""Here is the complete event information:
 {event_info_str}
 
 {skill.content}
@@ -556,13 +570,11 @@ User's question: "{text}"
 Previous conversation (if any):
 {thread_history if thread_history else 'None'}
 
-Answer the question using the event data above. Be friendly, enthusiastic, and helpful.
-If information is listed as "TBD", say the details haven't been announced yet and suggest
-they keep an eye on the channel for updates. Keep your answer concise."""
+Answer the question using ONLY the event data above. Keep your answer concise."""
 
             openai_client = get_llm_client("openai")
             response = await openai_client.chat([
-                {"role": "system", "content": "You are Roo, a friendly AI assistant for the MLAI community."},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": prompt}
             ], model="gpt-5", max_tokens=4096, reasoning_effort="high")
             return response.content
