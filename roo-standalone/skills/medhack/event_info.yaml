@@ -50,16 +50,40 @@ hosted_by:
 # SUBTOPICS
 # ---------------------
 subtopics:
-  source_page: 3
-  list:
+  source_page: 4
+  pitching_subtopics:
     - name: "Aging Populations"
       description: >
-        As populations age, healthcare systems face rising multi-morbidity,
-        frailty and demand for long-term support.
+        As populations age, healthcare systems face rising multi-morbidity, frailty
+        and demand for long-term support. This stream focuses on improving quality of
+        life for older adults in areas around falls, dementia and mobility.
     - name: "Ward"
+      description: >
+        Inpatient wards are where most hospital care actually happens, and where small
+        failures can quietly escalate. This stream targets monitoring, communication
+        and coordination to improve outcomes during hospital stays.
     - name: "Workforce Load"
+      description: >
+        Healthcare workers are under sustained pressure from increasing demand and
+        limited resources. This stream targets systems that reduce cognitive load and
+        support safe, sustainable care delivery so clinicians can spend more time with
+        patients.
     - name: "Emergency Department"
+      description: >
+        Emergency departments operate under constant uncertainty and time pressure.
+        This stream focuses on triage, early decision-making and patient flow to
+        improve safety and responsiveness in acute care settings.
     - name: "Rural"
+      description: >
+        Geography remains a major determinant of health outcomes. This stream focuses
+        on delivering timely, high-quality care to rural and remote communities despite
+        distance, workforce shortages and limited infrastructure.
+  coding_subtopic:
+    - name: "Preventative Medicine"
+      description: >
+        Earlier insight can change outcomes. This stream explores how data, modelling,
+        and clinical indicators can be used to anticipate risk, personalise care, and
+        support better decision-making before deterioration occurs.
 
 # ---------------------
 # VIDEO PITCH SUBMISSION
@@ -485,42 +509,6 @@ intellectual_property:
   dataset_note: "If your project uses provided datasets, follow any dataset handling rules given during the event."
 
 # ---------------------
-# SCORING, JUDGING & WINNERS
-# ---------------------
-judging:
-  small_tract:
-    method: "Points-based. Build a vitals-monitoring AI bot and earn points based on performance against challenge criteria and test cases."
-    winner: "Team with the highest points wins."
-  big_tract:
-    method: "Submit a short video pitch. Judges select finalists. Finalists pitch live at Pitch Night."
-    finalist_pathway: "Video pitch submission → judged finalists → live pitch on Mar 4."
-    num_pitching_teams: 8
-    pitch_format: "Two blocks of four pitches."
-    scoring_rubric:
-      total_points: 50
-      categories:
-        - name: "Innovation"
-          max_score: 5
-          description: "Does the solution provide a new or significantly improved approach to what's currently available?"
-        - name: "Usefulness"
-          max_score: 10
-          description: "Does it truly address the needs of the user? Does it solve a large problem?"
-        - name: "Viability"
-          max_score: 10
-          description: "Is it scalable, cost-effective, and easy to adopt?"
-        - name: "Technical"
-          max_score: 10
-          description: "Is what the team built technically complex? Is their future vision technically feasible?"
-        - name: "Business"
-          max_score: 10
-          description: "Does it have the potential to be implemented and possibly funded?"
-        - name: "Sustainability"
-          max_score: 5
-          description: "Will it minimise long-term environmental impact and stand the test of time?"
-      note: "Usefulness, Viability, Technical, and Business are weighted higher (10 points each) than Innovation and Sustainability (5 points each). Focus on solving real problems with feasible, well-built solutions."
-  judges_span: "Healthcare, tech, and venture."
-
-# ---------------------
 # PRIZES
 # ---------------------
 prizes:
@@ -633,14 +621,6 @@ faq:
     answer: "Yes, and many teams do. If your project uses provided datasets, follow any dataset handling rules given during the event."
   - question: "Will we ever see identifiable patient data?"
     answer: "No. Datasets are de-identified or synthetic, and the event follows strict privacy and ethical guidelines."
-  - question: "How are winners selected in the Small Tract (Coding)?"
-    answer: "Points-based. Build a vitals-monitoring AI bot and earn points based on how well your system performs against the challenge criteria and test cases."
-  - question: "How are winners selected in the Big Tract (Pitching)?"
-    answer: "Submit a short video pitch, judges select finalists, and finalists pitch live at Pitch Night where final winners are chosen. Pitches are scored out of 50 across six categories: Innovation (/5), Usefulness (/10), Viability (/10), Technical (/10), Business (/10), and Sustainability (/5)."
-  - question: "What do judges look for?"
-    answer: "Usefulness (does it solve a real problem?), Viability (is it scalable and cost-effective?), Technical complexity and feasibility, Business potential (can it be implemented and funded?), Innovation, and Sustainability. Usefulness, Viability, Technical, and Business are weighted highest at 10 points each."
-  - question: "How are pitches scored?"
-    answer: "Pitches are scored out of 50 total points across six categories: Innovation (/5), Usefulness (/10), Viability (/10), Technical (/10), Business (/10), and Sustainability (/5). The heavier-weighted categories (Usefulness, Viability, Technical, Business) reward teams that solve real problems with feasible, well-built solutions."
   - question: "Are there prizes?"
     answer: "Yes. Winning teams receive prizes, including a cash prize pool around A$2,500. Winners are announced on Pitch Night."
   - question: "Can I get a refund?"
