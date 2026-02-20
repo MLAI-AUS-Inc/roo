@@ -5,6 +5,8 @@ trigger_keywords:
   - medhack
   - frontiers
   - diagnosis
+  - announcement
+  - announce
   - patient
   - symptoms
   - clinical case

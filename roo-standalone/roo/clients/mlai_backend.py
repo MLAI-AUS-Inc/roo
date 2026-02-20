@@ -1242,4 +1242,35 @@ class MLAIBackendClient:
             print(f"⚠️ MedHack get case history error: {e}")
             return []
 
+    async def medhack_create_announcement(self, title: str, body: str, slack_user_id: str) -> Optional[dict]:
+        """Create an announcement on the MedHack: Frontiers website.
+
+        Args:
+            title: Announcement title
+            body: Announcement body text
+            slack_user_id: Slack ID of the user creating the announcement
+
+        Returns:
+            Response dict on success (201), None on error
+        """
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    f"{self.base_url}/api/v1/medhack/announcements/",
+                    json={
+                        "title": title,
+                        "body": body,
+                        "slack_user_id": slack_user_id,
+                    },
+                    headers=self.headers,
+                    timeout=10.0
+                )
+                if response.status_code == 201:
+                    return response.json()
+                # Return error info for non-201 responses
+                return {"status_code": response.status_code, "detail": response.text}
+        except Exception as e:
+            print(f"⚠️ MedHack create announcement error: {e}")
+            return None
+
     # End of MLAIBackendClient
