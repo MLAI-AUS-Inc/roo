@@ -1801,11 +1801,14 @@ Keep the response concise but informative."""
         # ClientClass = skill.get_client_class("MLAIBackendClient")
         from roo.clients.mlai_backend import MLAIBackendClient
         ClientClass = MLAIBackendClient
-        
-        if ClientClass is None:
-            return "Sorry mate, the Points skill isn't properly configured. Missing implementation."
-        
+
         try:
+            # Ensure user exists before creating points client 
+            await self._ensure_user_exists(user_id)
+
+            if ClientClass is None:
+                return "Sorry mate, the Points skill isn't properly configured. Missing implementation."
+        
             settings = get_settings()
             if not settings.MLAI_BACKEND_URL:
                 return "Sorry mate, the Points API isn't configured. Ask the team to set MLAI_BACKEND_URL."
@@ -1884,7 +1887,17 @@ Keep the response concise but informative."""
             if e.response.status_code == 403:
                 return "Sorry mate, you're not authorized to do that. Only Points Admins can perform that action. 🔒"
             elif e.response.status_code == 404:
-                return "Hmm, couldn't find that. Double-check the ID or date and try again? 🤔"
+                    return await self._handle_points_action(
+                    client=client,
+                    action=action,
+                    params=params,
+                    text=text,
+                    user_id=user_id,
+                    channel_id=channel_id,
+                    thread_ts=thread_ts,
+                    skill=skill
+                )
+                # return "Hmm, couldn't find that. Double-check the ID or date and try again? 🤔"
             elif e.response.status_code == 400:
                 # Handle bad requests (e.g. insufficient funds)
                 try:
