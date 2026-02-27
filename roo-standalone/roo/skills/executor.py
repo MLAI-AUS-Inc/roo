@@ -722,7 +722,9 @@ Respond with ONLY valid JSON, no markdown:
         self, result: dict, user_id: str, skill, text: str,
         client, today, thread_history, channel_id: str, guess_text: str,
     ) -> str:
-        """Process the result of a locked-in guess."""
+        """Process the result of a locked-in guess. NOTE: Currently disabled."""
+        return f"<@{user_id}> The diagnosis game is currently disabled. Stay tuned for updates!"
+        # --- DISABLED: original implementation below ---
         from ..slack_client import post_message
 
         if result["correct"]:
@@ -804,6 +806,11 @@ Respond with ONLY valid JSON, no markdown:
         extra_instruction: str = "",
     ) -> str:
         """Generate an in-character clinical response for the diagnosis game.
+        NOTE: Currently disabled.
+        """
+        return "The patient simulator is currently disabled. Stay tuned for updates!"
+        # --- DISABLED: original implementation below ---
+        """
 
         Thread history is included so the LLM can follow the conversation flow
         within a thread. Each patient case lives in its own Slack thread, so
@@ -861,6 +868,8 @@ Respond in character as the PQM narrator. Remember: only reveal what was asked f
             {"role": "user", "content": prompt}
         ], model="gpt-5", max_tokens=4096, reasoning_effort="high")
         return response.content
+        """
+        # --- END DISABLED ---
 
     async def _execute_with_llm(
         self,
