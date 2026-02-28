@@ -151,15 +151,15 @@ async def lifespan(app: FastAPI):
     agent = get_agent()
     print(f"   Loaded {len(agent.skills)} skills")
 
-    # Start MedHack daily case scheduler
-    import asyncio
-    medhack_task = asyncio.create_task(_medhack_daily_case_loop())
-    print("   Started MedHack daily case scheduler")
+    # MedHack daily case scheduler (currently disabled)
+    # import asyncio
+    # medhack_task = asyncio.create_task(_medhack_daily_case_loop())
+    # print("   Started MedHack daily case scheduler")
 
     yield
 
-    # Cancel the background task on shutdown
-    medhack_task.cancel()
+    # Cancel the background task on shutdown (disabled)
+    # medhack_task.cancel()
     print("🦘 Roo Standalone shutting down...")
 
 
