@@ -810,65 +810,34 @@ Respond with ONLY valid JSON, no markdown:
         """
         return "The patient simulator is currently disabled. Stay tuned for updates!"
         # --- DISABLED: original implementation below ---
-        """
-
-        Thread history is included so the LLM can follow the conversation flow
-        within a thread. Each patient case lives in its own Slack thread, so
-        thread history is safe to pass and provides useful conversational context.
-        """
-        import yaml
-
-        case_str = yaml.dump(case_data, default_flow_style=False) if case_data else "No case data available."
-        hints_str = ""
-        if case_data and case_data.get("revealed_hints"):
-            hints_str = "\n\nHints already given:\n" + "\n".join(
-                f"- {h}" for h in case_data["revealed_hints"]
-            )
-
-        system_prompt = """You are the MedHack Patient Quest Master (PQM), a narrator and storyteller in a fast-paced emergency department roleplay game. Your job is to present a simulated patient case to players (participants) who will ask you questions as if they are clinicians. You must answer only what the players ask, while keeping the mystery alive. You are not giving real medical advice. This is a fictional case simulation.
-
-IMPORTANT: You know ONLY about the patient in the CASE FILE below. You have NO memory of any previous patients or cases. There is only one patient: the one described in today's case file. If someone asks about a different patient or references a previous case, say "I only have information about today's patient."
-
-TONE AND STYLE
-- You are a dungeon-master style narrator: vivid, concise, engaging.
-- Describe what the clinician sees, hears, and notices.
-- When the patient speaks, narrate how they say it and include their words in quotes.
-- Keep answers punchy. Add small character moments. Avoid long lectures unless asked.
-- The patient is a medium-to-poor historian: they ramble, minimize, and sometimes answer slightly off-target. They can still be guided with good questions.
-
-GAME RULES
-1) Only reveal information if asked. Do not volunteer findings.
-2) Maintain internal consistency with the case file. Never contradict your own results.
-3) If players ask for vitals, exam findings, or investigations, provide the relevant results from the case file. If they ask to "order" a test, respond as narrator: "You order X… results return: …"
-4) NEVER reveal or hint at the diagnosis directly. The diagnosis is checked separately.
-5) If asked about something not in the case data, provide a reasonable normal/unremarkable finding.
-6) Hidden information (patient backstory, concealed history, endocrine tests) must remain hidden unless a player earns it by asking the right questions.
-7) If the patient has history_disclosure_rules in their data, follow those rules for how and when to reveal sensitive history.
-8) If the player tries to force the answer ("tell me the diagnosis"), refuse playfully and prompt them to keep investigating.
-9) If asked about management ("what should we do?"), describe what the ED team would typically do in broad strokes (fluids, glucose, addressing electrolytes, contacting seniors). Do not give step-by-step dosing instructions."""
-
-        thread_context = ""
-        if thread_history:
-            thread_context = f"\n\nPrevious conversation in this thread:\n{thread_history}"
-
-        prompt = f"""CASE FILE (INTERNAL TRUTH - use this to answer questions):
-{case_str}
-{hints_str}
-{thread_context}
-
-{extra_instruction}
-
-Player's message: "{text}"
-
-Respond in character as the PQM narrator. Remember: only reveal what was asked for."""
-
-        openai_client = get_llm_client("openai")
-        response = await openai_client.chat([
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": prompt}
-        ], model="gpt-5", max_tokens=4096, reasoning_effort="high")
-        return response.content
-        """
+        #
+        # Thread history is included so the LLM can follow the conversation flow
+        # within a thread. Each patient case lives in its own Slack thread, so
+        # thread history is safe to pass and provides useful conversational context.
+        #
+        # import yaml
+        #
+        # case_str = yaml.dump(case_data, default_flow_style=False) if case_data else "No case data available."
+        # hints_str = ""
+        # if case_data and case_data.get("revealed_hints"):
+        #     hints_str = "\n\nHints already given:\n" + "\n".join(
+        #         f"- {h}" for h in case_data["revealed_hints"]
+        #     )
+        #
+        # system_prompt = (long prompt omitted)
+        #
+        # thread_context = ""
+        # if thread_history:
+        #     thread_context = f"\n\nPrevious conversation in this thread:\n{thread_history}"
+        #
+        # prompt = (long prompt omitted)
+        #
+        # openai_client = get_llm_client("openai")
+        # response = await openai_client.chat([
+        #     {"role": "system", "content": system_prompt},
+        #     {"role": "user", "content": prompt}
+        # ], model="gpt-5", max_tokens=4096, reasoning_effort="high")
+        # return response.content
         # --- END DISABLED ---
 
     async def _execute_with_llm(
