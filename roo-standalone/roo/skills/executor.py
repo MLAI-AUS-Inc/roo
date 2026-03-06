@@ -2557,8 +2557,57 @@ Keep the response concise but informative."""
             )
             
             if scan_result.get("error"):
-                 return f"❌ Scan failed: {scan_result.get('message')}"
-            
+                error_msg = scan_result.get("message", "Unknown error")
+                # Check if auth-related — show reconnect button
+                if scan_result.get("needs_github_auth"):
+                    oauth_url = scan_result.get("oauth_url")
+                    if not oauth_url:
+                        try:
+                            auth_resp = await api_client.get_github_auth_url(user_id)
+                            oauth_url = auth_resp.get("auth_url")
+                        except Exception:
+                            oauth_url = None
+                    if oauth_url and channel_id:
+                        blocks = [
+                            {
+                                "type": "section",
+                                "text": {
+                                    "type": "mrkdwn",
+                                    "text": f"❌ Scan failed: {error_msg}"
+                                }
+                            },
+                            {
+                                "type": "actions",
+                                "elements": [
+                                    {
+                                        "type": "button",
+                                        "text": {
+                                            "type": "plain_text",
+                                            "text": "Re-connect GitHub",
+                                            "emoji": True
+                                        },
+                                        "url": oauth_url,
+                                        "action_id": "connect_github",
+                                        "style": "danger"
+                                    },
+                                    {
+                                        "type": "button",
+                                        "text": {
+                                            "type": "plain_text",
+                                            "text": "I've Connected - Resume",
+                                            "emoji": True
+                                        },
+                                        "action_id": "resume_scan",
+                                        "value": "resume_scan",
+                                        "style": "primary"
+                                    }
+                                ]
+                            }
+                        ]
+                        post_message(channel_id, f"Scan failed: {error_msg}", thread_ts=thread_ts, blocks=blocks)
+                        return "Please re-connect your GitHub account using the button above. 🔌"
+                return f"❌ Scan failed: {error_msg}"
+
             # Backend might return status: 'started' or 'queued'
             return f"✅ Scan started for `{repo_name}`! I'll let you know when the backend updates."
             
