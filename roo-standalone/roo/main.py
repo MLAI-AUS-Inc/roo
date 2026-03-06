@@ -1138,21 +1138,80 @@ async def content_factory_callback(request: Request):
 
             # Provide specific error messages based on error_code
             if error_code == "INVALID_CREDENTIALS":
-                user_message = "❌ I need fresh GitHub access. Please reconnect your GitHub account and try again."
+                user_message = "❌ I need fresh GitHub access. Please reconnect your GitHub account to continue."
+                # Fetch auth URL so we can show a reconnect button
+                try:
+                    from .clients.mlai_backend import MLAIBackendClient
+                    settings = get_settings()
+                    auth_client = MLAIBackendClient(
+                        base_url=settings.MLAI_BACKEND_URL,
+                        api_key=settings.MLAI_API_KEY
+                    )
+                    auth_response = await auth_client.get_github_auth_url(slack_user_id, domain=domain)
+                    auth_url = auth_response.get("auth_url")
+                except Exception as auth_err:
+                    print(f"⚠️ Failed to fetch auth URL: {auth_err}")
+                    auth_url = None
+
+                blocks = [
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": user_message
+                        }
+                    }
+                ]
+                if auth_url:
+                    blocks.append({
+                        "type": "actions",
+                        "elements": [
+                            {
+                                "type": "button",
+                                "text": {
+                                    "type": "plain_text",
+                                    "text": "Re-connect GitHub",
+                                    "emoji": True
+                                },
+                                "url": auth_url,
+                                "action_id": "connect_github",
+                                "style": "danger"
+                            },
+                            {
+                                "type": "button",
+                                "text": {
+                                    "type": "plain_text",
+                                    "text": "I've Connected - Resume",
+                                    "emoji": True
+                                },
+                                "action_id": "resume_scan",
+                                "value": json.dumps({"domain": domain}),
+                                "style": "primary"
+                            }
+                        ]
+                    })
             elif error_code == "MISSING_CONFIG":
                 user_message = "❌ I don't have scan data for this site. Let me run a scan first."
+                blocks = [
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": user_message
+                        }
+                    }
+                ]
             else:
                 user_message = f"❌ Something went wrong setting up the articles directory: {error_message}\n\nLet me know if you'd like to try again."
-
-            blocks = [
-                {
-                    "type": "section",
-                    "text": {
-                        "type": "mrkdwn",
-                        "text": user_message
+                blocks = [
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": user_message
+                        }
                     }
-                }
-            ]
+                ]
 
             # Post in thread if context available, otherwise DM
             if channel_id and thread_ts:
@@ -1749,11 +1808,64 @@ async def slack_actions(request: Request):
             )
             if result.get("error"):
                 error_msg = result.get("message", "Unknown error")
-                post_message(
-                    channel=reply_channel,
-                    thread_ts=reply_thread_ts,
-                    text=f"❌ Scan failed: {error_msg}"
-                )
+                # Check if auth-related error — show reconnect button
+                if result.get("needs_github_auth"):
+                    oauth_url = result.get("oauth_url")
+                    if not oauth_url:
+                        try:
+                            auth_resp = await backend_client.get_github_auth_url(user_id, domain=domain)
+                            oauth_url = auth_resp.get("auth_url")
+                        except Exception:
+                            oauth_url = None
+                    blocks = [
+                        {
+                            "type": "section",
+                            "text": {
+                                "type": "mrkdwn",
+                                "text": f"❌ Scan failed: {error_msg}"
+                            }
+                        }
+                    ]
+                    if oauth_url:
+                        blocks.append({
+                            "type": "actions",
+                            "elements": [
+                                {
+                                    "type": "button",
+                                    "text": {
+                                        "type": "plain_text",
+                                        "text": "Re-connect GitHub",
+                                        "emoji": True
+                                    },
+                                    "url": oauth_url,
+                                    "action_id": "connect_github",
+                                    "style": "danger"
+                                },
+                                {
+                                    "type": "button",
+                                    "text": {
+                                        "type": "plain_text",
+                                        "text": "I've Connected - Resume",
+                                        "emoji": True
+                                    },
+                                    "action_id": "resume_scan",
+                                    "value": json.dumps({"domain": domain}),
+                                    "style": "primary"
+                                }
+                            ]
+                        })
+                    post_message(
+                        channel=reply_channel,
+                        thread_ts=reply_thread_ts,
+                        text=f"❌ Scan failed: {error_msg}",
+                        blocks=blocks
+                    )
+                else:
+                    post_message(
+                        channel=reply_channel,
+                        thread_ts=reply_thread_ts,
+                        text=f"❌ Scan failed: {error_msg}"
+                    )
             else:
                 print(f"✅ Scan triggered for {domain}")
         except Exception as e:
