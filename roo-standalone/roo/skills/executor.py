@@ -1456,52 +1456,6 @@ Keep the response concise but informative."""
         if not domain:
             return "I can help write that article! To get started, I just need to know the domain name (e.g., mlai.au)."
 
-        # Check scaffold prerequisite before article generation
-        if domain_info and not domain_info.get("articles_scaffolded"):
-            original_intent = {"action": "write"}
-            if topic:
-                original_intent["topic"] = topic
-            if target_keyword:
-                original_intent["target_keyword"] = target_keyword
-
-            blocks = [
-                {
-                    "type": "section",
-                    "text": {
-                        "type": "mrkdwn",
-                        "text": f"I need to set up your articles directory before I can write articles for *{domain}*.\n\nThis will create a PR with all the reusable components and a demo article so you can see how everything looks."
-                    }
-                },
-                {
-                    "type": "actions",
-                    "block_id": "prerequisite_actions",
-                    "elements": [
-                        {
-                            "type": "button",
-                            "text": {"type": "plain_text", "text": "Set Up Articles Directory", "emoji": True},
-                            "style": "primary",
-                            "value": json.dumps({
-                                "domain": domain,
-                                "slack_user_id": user_id,
-                                "channel_id": channel_id,
-                                "thread_ts": thread_ts,
-                                "original_intent": original_intent
-                            }),
-                            "action_id": "prerequisite_scaffold"
-                        },
-                        {
-                            "type": "button",
-                            "text": {"type": "plain_text", "text": "Cancel", "emoji": True},
-                            "value": json.dumps({"domain": domain}),
-                            "action_id": "prerequisite_cancel"
-                        }
-                    ]
-                }
-            ]
-            if channel_id:
-                post_message(channel_id, f"Articles directory needed for {domain}", thread_ts=thread_ts, blocks=blocks)
-            return "I need to set up your articles directory before I can write articles."
-
         try:
             # Start generation via MLAI Backend
             # Enhance context with thread history if available
