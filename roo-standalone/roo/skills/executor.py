@@ -1125,6 +1125,16 @@ Keep the response concise but informative."""
                     post_message(channel_id, msg, thread_ts)
                 return msg
 
+        # Refresh integration with domain context once we know the target domain.
+        # The generic top-level integration response may still show repo drift,
+        # while the domain-specific response can correctly say "research_article"
+        # or "write_article" without forcing a re-scan.
+        if domain:
+            domain_integration = await api_client.get_integration(user_id, domain=domain)
+            if domain_integration:
+                integration = domain_integration
+                connected_domains = integration.get("connected_domains", connected_domains)
+
         # Look up repo from connected_domains
         repo_name = None
         domain_info = None
@@ -1303,9 +1313,18 @@ Keep the response concise but informative."""
         # 4. Check scan status
         needs_scan = False
         scan_reason = ""
+        recommended_next_action = integration.get("recommended_next_action")
+        scan_completed = bool(
+            integration.get("scan_completed")
+            or integration.get("content_research_ready")
+            or (domain_info and domain_info.get("scanned"))
+        )
 
-        if domain_info:
-            # Use domain-specific scan status
+        # Trust the backend's domain-aware contract first.
+        if recommended_next_action == "scan":
+            needs_scan = True
+            scan_reason = "Initial scan required"
+        elif domain_info:
             if not domain_info.get("scanned"):
                 needs_scan = True
                 scan_reason = "Initial scan required"
@@ -1313,7 +1332,13 @@ Keep the response concise but informative."""
             needs_scan = True
             scan_reason = "Initial scan required"
 
-        if integration.get("has_updates"):
+        # Only use legacy has_updates as a fallback when the backend has not
+        # already told us that a usable scan exists for this domain.
+        if (
+            not scan_completed
+            and recommended_next_action in (None, "scan")
+            and integration.get("has_updates")
+        ):
             needs_scan = True
             scan_reason = "🔄 Updates detected in repository"
             
