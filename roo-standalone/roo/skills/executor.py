@@ -1481,6 +1481,82 @@ Keep the response concise but informative."""
         if not domain:
             return "I can help write that article! To get started, I just need to know the domain name (e.g., mlai.au)."
 
+        article_system = integration.get("article_system") or {}
+        if not article_system and domain_info:
+            article_system = domain_info.get("article_system") or {}
+
+        if topic and recommended_next_action == "confirm_article_system":
+            original_intent = {"action": "write", "topic": topic}
+            detected_location = (
+                article_system.get("directory_path")
+                or article_system.get("directory_name")
+                or "the detected article directory"
+            )
+            blocks = [
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": (
+                            f"I found what looks like your existing article system at *`{detected_location}`*, "
+                            f"but I need confirmation before I write into it."
+                        ),
+                    },
+                },
+                {
+                    "type": "actions",
+                    "block_id": "article_system_actions",
+                    "elements": [
+                        {
+                            "type": "button",
+                            "text": {"type": "plain_text", "text": "Use Detected Structure", "emoji": True},
+                            "style": "primary",
+                            "value": json.dumps(
+                                {
+                                    "domain": domain,
+                                    "slack_user_id": user_id,
+                                    "channel_id": channel_id,
+                                    "thread_ts": thread_ts,
+                                    "original_intent": original_intent,
+                                }
+                            ),
+                            "action_id": "article_system_use_detected",
+                        },
+                        {
+                            "type": "button",
+                            "text": {"type": "plain_text", "text": "Rescan Repo", "emoji": True},
+                            "value": json.dumps(
+                                {
+                                    "domain": domain,
+                                    "slack_user_id": user_id,
+                                    "channel_id": channel_id,
+                                    "thread_ts": thread_ts,
+                                    "original_intent": original_intent,
+                                }
+                            ),
+                            "action_id": "article_system_rescan",
+                        },
+                        {
+                            "type": "button",
+                            "text": {"type": "plain_text", "text": "Set Up Articles Directory", "emoji": True},
+                            "value": json.dumps(
+                                {
+                                    "domain": domain,
+                                    "slack_user_id": user_id,
+                                    "channel_id": channel_id,
+                                    "thread_ts": thread_ts,
+                                    "original_intent": original_intent,
+                                }
+                            ),
+                            "action_id": "article_system_scaffold",
+                        },
+                    ],
+                },
+            ]
+            if channel_id:
+                post_message(channel_id, f"Confirm article system for {domain}", thread_ts=thread_ts, blocks=blocks)
+            return "I found an existing article structure, but I need you to confirm whether I should use it."
+
         try:
             # Start generation via MLAI Backend
             # Enhance context with thread history if available
@@ -1522,6 +1598,126 @@ Keep the response concise but informative."""
                     error_data = e.response.json()
                 except Exception:
                     error_data = {}
+                error_code = error_data.get("error_code", "")
+                if error_code == "ARTICLE_SYSTEM_ACTION_REQUIRED":
+                    recommended_action = error_data.get("recommended_action", "scaffold")
+                    article_system = error_data.get("article_system") or {}
+                    resolution_source = error_data.get("article_system_resolution_source", "")
+                    detected_location = (
+                        article_system.get("directory_path")
+                        or article_system.get("directory_name")
+                        or "the detected article directory"
+                    )
+                    original_intent = {"action": "write"}
+                    if topic:
+                        original_intent["topic"] = topic
+
+                    if recommended_action == "confirm_article_system":
+                        blocks = [
+                            {
+                                "type": "section",
+                                "text": {
+                                    "type": "mrkdwn",
+                                    "text": (
+                                        f"I found what looks like your existing article system at *`{detected_location}`*, "
+                                        f"but I need confirmation before I write into it."
+                                    ),
+                                },
+                            },
+                            {
+                                "type": "actions",
+                                "block_id": "article_system_actions",
+                                "elements": [
+                                    {
+                                        "type": "button",
+                                        "text": {"type": "plain_text", "text": "Use Detected Structure", "emoji": True},
+                                        "style": "primary",
+                                        "value": json.dumps({
+                                            "domain": domain,
+                                            "slack_user_id": user_id,
+                                            "channel_id": channel_id,
+                                            "thread_ts": thread_ts,
+                                            "original_intent": original_intent,
+                                        }),
+                                        "action_id": "article_system_use_detected",
+                                    },
+                                    {
+                                        "type": "button",
+                                        "text": {"type": "plain_text", "text": "Rescan Repo", "emoji": True},
+                                        "value": json.dumps({
+                                            "domain": domain,
+                                            "slack_user_id": user_id,
+                                            "channel_id": channel_id,
+                                            "thread_ts": thread_ts,
+                                            "original_intent": original_intent,
+                                        }),
+                                        "action_id": "article_system_rescan",
+                                    },
+                                    {
+                                        "type": "button",
+                                        "text": {"type": "plain_text", "text": "Set Up Articles Directory", "emoji": True},
+                                        "value": json.dumps({
+                                            "domain": domain,
+                                            "slack_user_id": user_id,
+                                            "channel_id": channel_id,
+                                            "thread_ts": thread_ts,
+                                            "original_intent": original_intent,
+                                        }),
+                                        "action_id": "article_system_scaffold",
+                                    },
+                                ],
+                            },
+                        ]
+                        if channel_id:
+                            post_message(channel_id, f"Confirm article system for {domain}", thread_ts=thread_ts, blocks=blocks)
+                        return "I found an existing article structure, but I need you to confirm whether I should use it."
+
+                    if article_system.get("state") in {"existing", "roo_scaffolded"}:
+                        return (
+                            f"I found an existing article system at `{detected_location}`, but the backend still blocked "
+                            f"writing (resolved via {resolution_source or 'unknown'}). Please rescan the repo or try again."
+                        )
+
+                    blocks = [
+                        {
+                            "type": "section",
+                            "text": {
+                                "type": "mrkdwn",
+                                "text": (
+                                    f"I need to set up your articles directory before I can write articles for *{domain}*.\n\n"
+                                    f"This will create a PR with all the reusable components and a demo article so you can see how everything looks."
+                                ),
+                            },
+                        },
+                        {
+                            "type": "actions",
+                            "block_id": "prerequisite_actions",
+                            "elements": [
+                                {
+                                    "type": "button",
+                                    "text": {"type": "plain_text", "text": "Set Up Articles Directory", "emoji": True},
+                                    "style": "primary",
+                                    "value": json.dumps({
+                                        "domain": domain,
+                                        "slack_user_id": user_id,
+                                        "channel_id": channel_id,
+                                        "thread_ts": thread_ts,
+                                        "original_intent": original_intent,
+                                    }),
+                                    "action_id": "prerequisite_scaffold",
+                                },
+                                {
+                                    "type": "button",
+                                    "text": {"type": "plain_text", "text": "Cancel", "emoji": True},
+                                    "value": json.dumps({"domain": domain}),
+                                    "action_id": "prerequisite_cancel",
+                                },
+                            ],
+                        },
+                    ]
+                    if channel_id:
+                        post_message(channel_id, f"Scaffold required for {domain}", thread_ts=thread_ts, blocks=blocks)
+                    return "I need to set up your articles directory first."
                 missing_step = error_data.get("missing_step", "")
                 if missing_step == "scan":
                     original_intent = {"action": "write"}
