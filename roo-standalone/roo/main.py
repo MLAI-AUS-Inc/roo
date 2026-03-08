@@ -21,6 +21,28 @@ from .slack_client import post_message
 _pending_intents: dict = {}
 
 
+def _remember_content_thread_context(
+    channel_id: str | None,
+    thread_ts: str | None,
+    domain: str | None,
+    workflow: str,
+) -> None:
+    """Keep content-factory as the active skill for follow-ups in this thread."""
+    if not channel_id or not thread_ts:
+        return
+
+    try:
+        get_agent().remember_thread_context(
+            "content-factory",
+            channel_id,
+            thread_ts,
+            domain=domain,
+            workflow=workflow,
+        )
+    except Exception as e:
+        print(f"⚠️ Failed to persist content thread context: {e}")
+
+
 async def _medhack_daily_case_loop():
     """Background task that posts a new diagnosis case each day."""
     import asyncio
@@ -787,6 +809,7 @@ async def content_factory_callback(request: Request):
             pillar_names = payload.get("pillar_names")
 
             print(f"📦 Scan complete for {domain}: {components_count} components, {pillar_count} pillars")
+            _remember_content_thread_context(channel_id, thread_ts, domain, "scan")
 
             if components_count > 0:
                 # Build component summary: "ArticleHeroHeader, ArticleCard, ArticleFAQ, +27 more"
@@ -954,6 +977,7 @@ async def content_factory_callback(request: Request):
             build_verified = payload.get("build_verified", False)
 
             print(f"📁 Scaffold complete for {domain}: PR={pr_url}")
+            _remember_content_thread_context(channel_id, thread_ts, domain, "scaffold")
 
             if already_exists:
                 blocks = [

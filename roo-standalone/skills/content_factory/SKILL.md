@@ -2,12 +2,18 @@
 name: content-factory
 description: Generate SEO-optimized blog articles using the Content Factory pipeline
 trigger_keywords:
+  - write me an article
+  - write an article
   - write article
+  - research the best article
   - content factory
   - auto write
   - write content
   - generate article
+  - article topic
   - blog post
+  - target keyword
+  - seo keyword
   - scaffold
   - create articles
   - articles directory
