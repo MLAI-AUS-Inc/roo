@@ -42,7 +42,8 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = "INFO"
     SKILLS_DIR: str = "skills"
     TIMEZONE: str = "Australia/Melbourne"
-    
+    ROUTER_MODEL: str = "gpt-5.4"
+
     @property
     def default_llm_provider(self) -> str:
         """Determine default LLM provider based on available keys."""

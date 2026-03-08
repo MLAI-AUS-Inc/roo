@@ -4,6 +4,8 @@ Roo Agent - Core Orchestration Layer
 The agent receives user messages, selects appropriate skills,
 and executes them to generate responses.
 """
+import re
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, List
 from pathlib import Path
 
@@ -12,6 +14,9 @@ from .llm import chat
 from .skills.loader import Skill, load_skills
 from .skills.executor import SkillExecutor
 from .slack_client import get_thread_messages
+
+
+THREAD_CONTEXT_TTL = timedelta(minutes=20)
 
 
 class RooAgent:
@@ -32,10 +37,11 @@ class RooAgent:
         """Initialize the Roo agent with loaded skills."""
         settings = get_settings()
         skills_dir = Path(settings.SKILLS_DIR)
-        
+
         self.skills = load_skills(skills_dir)
         self.skill_executor = SkillExecutor()
-        
+        self._thread_skill_context: Dict[str, Dict[str, Any]] = {}
+
         print(f"🦘 RooAgent initialized with {len(self.skills)} skills:")
         for skill in self.skills:
             print(f"   - {skill.name}: {skill.description}")
@@ -86,10 +92,11 @@ class RooAgent:
             return fast_result
         
         # 2. Select appropriate skill (LLM Routing)
-        skill = await self._select_skill(clean_text, thread_history, channel_id)
-        
+        skill = await self._select_skill(clean_text, thread_history, channel_id, thread_ts)
+
         if skill:
             print(f"🎯 Selected skill: {skill.name}")
+            self._remember_selected_skill(skill.name, channel_id, thread_ts, clean_text)
             result = await self.skill_executor.execute(
                 skill=skill,
                 text=clean_text,
@@ -113,7 +120,178 @@ class RooAgent:
                 "skill_used": None,
                 "data": None
             }
-    
+
+    def remember_thread_context(
+        self,
+        skill_name: str,
+        channel_id: Optional[str],
+        thread_ts: Optional[str],
+        *,
+        domain: Optional[str] = None,
+        workflow: Optional[str] = None,
+    ) -> None:
+        """Persist recent thread routing context so follow-ups stay on the right skill."""
+        thread_key = self._thread_key(channel_id, thread_ts)
+        if not thread_key or not skill_name:
+            return
+
+        self._thread_skill_context[thread_key] = {
+            "skill_name": skill_name,
+            "domain": domain,
+            "workflow": workflow,
+            "updated_at": datetime.now(timezone.utc),
+        }
+
+    def _remember_selected_skill(
+        self,
+        skill_name: str,
+        channel_id: Optional[str],
+        thread_ts: Optional[str],
+        text: str,
+    ) -> None:
+        workflow = None
+        text_lower = text.lower()
+
+        if skill_name == "content-factory":
+            if any(term in text_lower for term in ("scan", "codebase", "repository", "repo")):
+                workflow = "scan"
+            elif any(term in text_lower for term in ("scaffold", "articles directory", "blog page")):
+                workflow = "scaffold"
+            elif any(term in text_lower for term in ("research", "keyword", "topic")):
+                workflow = "research"
+            elif any(term in text_lower for term in ("write", "article", "blog")):
+                workflow = "write"
+
+        self.remember_thread_context(
+            skill_name,
+            channel_id,
+            thread_ts,
+            domain=self._extract_domain(text),
+            workflow=workflow,
+        )
+
+    def _thread_key(self, channel_id: Optional[str], thread_ts: Optional[str]) -> Optional[str]:
+        if not channel_id or not thread_ts:
+            return None
+        return f"{channel_id}:{thread_ts}"
+
+    def _get_thread_context(
+        self,
+        channel_id: Optional[str],
+        thread_ts: Optional[str],
+    ) -> Optional[Dict[str, Any]]:
+        thread_key = self._thread_key(channel_id, thread_ts)
+        if not thread_key:
+            return None
+
+        context = self._thread_skill_context.get(thread_key)
+        if not context:
+            return None
+
+        updated_at = context.get("updated_at")
+        if not updated_at or datetime.now(timezone.utc) - updated_at > THREAD_CONTEXT_TTL:
+            self._thread_skill_context.pop(thread_key, None)
+            return None
+
+        return context
+
+    def _get_skill_by_name(self, skill_name: str) -> Optional[Skill]:
+        return next((skill for skill in self.skills if skill.name == skill_name), None)
+
+    def _extract_domain(self, text: str) -> Optional[str]:
+        match = re.search(r'\b(?:https?://)?([a-z0-9][a-z0-9.-]+\.[a-z]{2,})\b', text.lower())
+        return match.group(1) if match else None
+
+    def _looks_like_content_request(self, text: str) -> bool:
+        patterns = (
+            r'\barticle\b',
+            r'\bblog(?:\s+post)?\b',
+            r'\bseo\b',
+            r'\bkeyword\b',
+            r'\btopic\b',
+            r'\bwrite\b.*\b(article|blog(?:\s+post)?)\b',
+            r'\bresearch\b.*\b(article|topic|keyword)\b',
+            r'\bfor my domain\b',
+        )
+        return any(re.search(pattern, text) for pattern in patterns)
+
+    def _looks_like_points_request(self, text: str) -> bool:
+        patterns = (
+            r'\bpoints?\b',
+            r'\bbalance\b',
+            r'\bcoworking\b',
+            r'\brewards?\b',
+            r'\bclaim\s+task\b',
+            r'\bcreate\s+(?:a\s+)?task\b',
+            r'\btask\s+create\b',
+            r'\bworth\s+\d+\s+points?\b',
+        )
+        return any(re.search(pattern, text) for pattern in patterns)
+
+    def _looks_like_content_follow_up(self, text: str) -> bool:
+        patterns = (
+            r'\bwrite\b',
+            r'\bresearch\b',
+            r'\barticle\b',
+            r'\bblog\b',
+            r'\bkeyword\b',
+            r'\btopic\b',
+            r'\bdraft\b',
+            r'\boutline\b',
+            r'\bfor my domain\b',
+        )
+        return any(re.search(pattern, text) for pattern in patterns)
+
+    def _keyword_matches(self, text: str, keyword: str) -> bool:
+        keyword = keyword.lower().strip()
+        if not keyword:
+            return False
+
+        escaped = re.escape(keyword)
+        pattern = rf'(?<!\w){escaped}(?!\w)'
+        return re.search(pattern, text) is not None
+
+    def _select_skill_from_triggers(
+        self,
+        text: str,
+        thread_context: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Skill]:
+        text_lower = text.lower().strip()
+        content_skill = self._get_skill_by_name("content-factory")
+
+        if content_skill and self._looks_like_content_request(text_lower):
+            return content_skill
+
+        if (
+            thread_context
+            and thread_context.get("skill_name") == "content-factory"
+            and content_skill
+            and self._looks_like_content_follow_up(text_lower)
+            and not self._looks_like_points_request(text_lower)
+        ):
+            return content_skill
+
+        skill_scores: Dict[str, int] = {}
+        for skill in self.skills:
+            matched_keywords = [
+                keyword for keyword in skill.trigger_keywords
+                if self._keyword_matches(text_lower, keyword)
+            ]
+            if matched_keywords:
+                skill_scores[skill.name] = sum(len(keyword.split()) * 3 + len(keyword) for keyword in matched_keywords)
+
+        if not skill_scores:
+            return None
+
+        ranked = sorted(skill_scores.items(), key=lambda item: item[1], reverse=True)
+        best_skill_name, best_score = ranked[0]
+        runner_up_score = ranked[1][1] if len(ranked) > 1 else -1
+
+        if len(ranked) == 1 or best_score >= runner_up_score + 4:
+            return self._get_skill_by_name(best_skill_name)
+
+        return None
+
     async def _try_fast_path(
         self, 
         text: str, 
@@ -274,17 +452,21 @@ class RooAgent:
         cleaned = ' '.join(cleaned.split())
         return cleaned.strip()
     
-    async def _select_skill(self, text: str, history: List[dict] = None, channel_id: Optional[str] = None) -> Optional[Skill]:
+    async def _select_skill(
+        self,
+        text: str,
+        history: List[dict] = None,
+        channel_id: Optional[str] = None,
+        thread_ts: Optional[str] = None,
+    ) -> Optional[Skill]:
         """Use LLM to decide which skill to use."""
         if not self.skills:
             return None
 
-        # First check trigger keywords for quick matching
-        text_lower = text.lower()
-        for skill in self.skills:
-            for keyword in skill.trigger_keywords:
-                if keyword.lower() in text_lower:
-                    return skill
+        thread_context = self._get_thread_context(channel_id, thread_ts)
+        trigger_skill = self._select_skill_from_triggers(text, thread_context)
+        if trigger_skill:
+            return trigger_skill
 
         # Resolve channel name for priority matching
         channel_priority_hint = ""
@@ -314,6 +496,15 @@ class RooAgent:
             history_str = "\n".join([f"{msg.get('user')}: {msg.get('text')}" for msg in history[:-1]]) # Skip last as it's the current request usually
             history_context = f"Conversation History:\n{history_str}\n"
 
+        thread_context_hint = ""
+        if thread_context:
+            thread_context_hint = (
+                "Active Thread Context:\n"
+                f"- last skill: {thread_context.get('skill_name')}\n"
+                f"- domain: {thread_context.get('domain') or 'unknown'}\n"
+                f"- workflow: {thread_context.get('workflow') or 'unknown'}\n"
+            )
+
         prompt = f"""You are a skill router. Given the user's message and conversation context, decide which skill to use.
 
 Available skills:
@@ -321,15 +512,24 @@ Available skills:
 - none: Use this if no skill is appropriate (general conversation)
 {channel_priority_hint}
 {history_context}
+{thread_context_hint}
 User message: "{text}"
+
+Prefer content-factory for requests about writing, researching, or planning articles, blog posts, SEO topics, keywords, or content for a domain.
+
+Examples:
+- "please research the best article for me to write" -> content-factory
+- "write me an article about how to build an ai agent harness for long-running specific tasks" -> content-factory
+- "create a task called fix docs worth 5 points" -> mlai-points
 
 Respond with ONLY the skill name (e.g., "connect_users" or "none"):"""
 
         try:
+            settings = get_settings()
             response = await chat([
                 {"role": "system", "content": "You are a skill router. Respond with only the skill name."},
                 {"role": "user", "content": prompt}
-            ])
+            ], model=settings.ROUTER_MODEL, max_tokens=32, reasoning_effort="low")
 
             skill_name = response.content.strip().lower()
             # Normalize: both underscores and hyphens should match
