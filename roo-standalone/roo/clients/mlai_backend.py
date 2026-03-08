@@ -700,6 +700,36 @@ class MLAIBackendClient:
                 "data": response.json() if response.status_code < 500 else {}
             }
 
+    async def decide_article_system(
+        self,
+        *,
+        domain: str,
+        slack_user_id: str,
+        decision: str,
+    ) -> dict:
+        """Persist an article-system decision and optionally resume the pending write."""
+        if not self.base_url:
+            raise ValueError("MLAI_BACKEND_URL not configured")
+
+        clean_id = self._clean_slack_id(slack_user_id)
+        payload = {
+            "domain": domain,
+            "slack_user_id": clean_id,
+            "decision": decision,
+        }
+
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{self.base_url}/api/v1/content/article-system/decision",
+                json=payload,
+                headers=self.headers,
+                timeout=60.0,
+            )
+            return {
+                "status_code": response.status_code,
+                "data": response.json() if response.status_code < 500 else {},
+            }
+
     async def publish_article(self, job_id: str, slack_user_id: str) -> dict:
         """Request publication of a completed article."""
         if not self.base_url:

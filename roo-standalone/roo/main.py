@@ -1739,6 +1739,131 @@ async def slack_actions(request: Request):
 
         return JSONResponse(status_code=200, content={})
 
+    # Handler for article_system_* decisions
+    if action_id in {"article_system_use_detected", "article_system_rescan", "article_system_scaffold"}:
+        value = actions[0].get("value", "")
+        try:
+            value_data = json.loads(value)
+        except json.JSONDecodeError:
+            return JSONResponse(status_code=400, content={"error": "Invalid JSON value format"})
+
+        domain = value_data.get("domain")
+        value_channel_id = value_data.get("channel_id")
+        value_thread_ts = value_data.get("thread_ts")
+        original_intent = value_data.get("original_intent", {})
+
+        msg_channel = payload.get("channel", {}).get("id")
+        msg_ts = payload.get("message", {}).get("ts")
+
+        reply_channel = value_channel_id or msg_channel
+        reply_thread_ts = value_thread_ts or payload.get("message", {}).get("thread_ts") or msg_ts
+
+        if original_intent:
+            intent_key = f"{user_id}:{domain}"
+            _pending_intents[intent_key] = {
+                **original_intent,
+                "channel_id": reply_channel,
+                "thread_ts": reply_thread_ts,
+            }
+            print(f"   📌 Stored pending intent: {original_intent.get('action')} for {intent_key}")
+
+        decision = {
+            "article_system_use_detected": "use_detected",
+            "article_system_rescan": "rescan",
+            "article_system_scaffold": "scaffold",
+        }[action_id]
+
+        progress_text = {
+            "use_detected": "✅ Using detected article structure...",
+            "rescan": "✅ Re-scanning repository...",
+            "scaffold": "✅ Creating articles directory...",
+        }[decision]
+
+        try:
+            from .slack_client import get_slack_client
+            slack_client = get_slack_client()
+            original_blocks = payload.get("message", {}).get("blocks", [])
+            updated_blocks = [b for b in original_blocks if b.get("type") != "actions"]
+            updated_blocks.append({
+                "type": "context",
+                "elements": [{"type": "mrkdwn", "text": progress_text}],
+            })
+            slack_client.chat_update(
+                channel=msg_channel,
+                ts=msg_ts,
+                text=payload.get("message", {}).get("text", ""),
+                blocks=updated_blocks,
+            )
+        except Exception as e:
+            print(f"⚠️ Failed to update message: {e}")
+
+        from .clients.mlai_backend import MLAIBackendClient
+        settings = get_settings()
+        backend_client = MLAIBackendClient(
+            base_url=settings.MLAI_BACKEND_URL,
+            api_key=settings.MLAI_API_KEY,
+        )
+
+        try:
+            result = await backend_client.decide_article_system(
+                domain=domain,
+                slack_user_id=user_id,
+                decision=decision,
+            )
+            status_code = result.get("status_code")
+            data = result.get("data", {})
+
+            if status_code in {200, 202}:
+                if decision == "use_detected":
+                    detected = (
+                        (data.get("article_system") or {}).get("directory_path")
+                        or (data.get("article_system") or {}).get("directory_name")
+                        or "the detected article directory"
+                    )
+                    if data.get("resume_triggered"):
+                        post_message(
+                            channel=reply_channel,
+                            thread_ts=reply_thread_ts,
+                            text=(
+                                f"✅ Using the detected article system at `{detected}`.\n"
+                                f"I've resumed your pending article request."
+                            ),
+                        )
+                    else:
+                        post_message(
+                            channel=reply_channel,
+                            thread_ts=reply_thread_ts,
+                            text=f"✅ Using the detected article system at `{detected}`.",
+                        )
+                elif decision == "rescan":
+                    post_message(
+                        channel=reply_channel,
+                        thread_ts=reply_thread_ts,
+                        text=f"🔄 Re-scanning *{domain}* now. I'll reply here when it's complete.",
+                    )
+                else:
+                    post_message(
+                        channel=reply_channel,
+                        thread_ts=reply_thread_ts,
+                        text=f"📁 Setting up the articles directory for *{domain}* now.",
+                    )
+            else:
+                error_msg = data.get("error", f"Unexpected backend response ({status_code})")
+                post_message(
+                    channel=reply_channel,
+                    thread_ts=reply_thread_ts,
+                    text=f"❌ Could not process that article-system decision: {error_msg}",
+                )
+        except Exception as e:
+            print(f"❌ Failed to process article-system decision: {e}")
+            post_message(
+                channel=reply_channel,
+                thread_ts=reply_thread_ts,
+                text=f"❌ Error processing article-system decision: {e}",
+            )
+
+        return JSONResponse(status_code=200, content={})
+
     # Handler for prerequisite_scan
     # User clicked "Scan Codebase" from a prerequisite message
     if action_id == "prerequisite_scan":
