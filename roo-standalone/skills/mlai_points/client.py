@@ -626,15 +626,18 @@ class MLAIBackendClient:
     # Integration Endpoints (GitHub, Pending Intents)
     # =========================================================================
 
-    async def get_github_auth_url(self, slack_user_id: str) -> dict:
+    async def get_github_auth_url(self, slack_user_id: str, domain: Optional[str] = None) -> dict:
         """
         Get the GitHub OAuth URL for a user from the backend.
         """
         try:
+            params = {"slack_user_id": slack_user_id}
+            if domain:
+                params["domain"] = domain
             async with httpx.AsyncClient() as client:
                 response = await client.get(
                     f"{self.base_url}/api/v1/integrations/github/auth-url",
-                    params={"slack_user_id": slack_user_id},
+                    params=params,
                     headers=self.headers, # Use standard headers, no admin key needed usually
                     timeout=10.0
                 )
@@ -644,7 +647,7 @@ class MLAIBackendClient:
             print(f"Failed to get GitHub auth URL: {e}")
             return {"error": str(e)}
 
-    async def get_integration(self, slack_user_id: str) -> Optional[dict]:
+    async def get_integration(self, slack_user_id: str, domain: Optional[str] = None) -> Optional[dict]:
         """
         Check if user has a valid GitHub integration.
         Returns the integration dict if 200 OK, None if 404.
@@ -652,11 +655,15 @@ class MLAIBackendClient:
         try:
             # Clean ID first to be safe
             clean_id = self._clean_slack_id(slack_user_id)
+            params = {}
+            if domain:
+                params["domain"] = domain
             
             async with httpx.AsyncClient() as client:
                 response = await client.get(
                     f"{self.base_url}/api/v1/integrations/github/{clean_id}/",
                     headers=self.admin_headers,
+                    params=params,
                     timeout=10.0
                 )
                 if response.status_code == 404:
@@ -704,7 +711,13 @@ class MLAIBackendClient:
             )
             response.raise_for_status()
 
-    async def trigger_repo_scan(self, slack_user_id: str, domain: Optional[str] = None) -> dict:
+    async def trigger_repo_scan(
+        self,
+        slack_user_id: str,
+        slack_channel_id: Optional[str] = None,
+        slack_thread_ts: Optional[str] = None,
+        domain: Optional[str] = None,
+    ) -> dict:
         """
         Trigger a repository scan for a user via the backend.
         
@@ -724,6 +737,10 @@ class MLAIBackendClient:
             payload = {"slack_user_id": clean_id}
             if domain:
                 payload["domain"] = domain
+            if slack_channel_id:
+                payload["slack_channel_id"] = slack_channel_id
+            if slack_thread_ts:
+                payload["slack_thread_ts"] = slack_thread_ts
             
             async with httpx.AsyncClient() as client:
                 response = await client.post(

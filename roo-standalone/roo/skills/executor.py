@@ -2601,7 +2601,7 @@ Keep the response concise but informative."""
         
         # Get API client for GitHub token operations
         settings = get_settings()
-        from skills.mlai_points.client import MLAIBackendClient
+        from roo.clients.mlai_backend import MLAIBackendClient
         api_client = MLAIBackendClient(
             base_url=settings.MLAI_BACKEND_URL,
             api_key=settings.MLAI_API_KEY,
@@ -2609,7 +2609,8 @@ Keep the response concise but informative."""
         )
         
         # 1. Check for valid integration & handle errors
-        integration = await api_client.get_integration(user_id)
+        domain = params.get("domain")
+        integration = await api_client.get_integration(user_id, domain=domain)
         
         # Check for Expired Token or Other Errors (Same as content-factory)
         if integration and integration.get("error"):
@@ -2617,7 +2618,7 @@ Keep the response concise but informative."""
             error_msg = integration.get("error")
             
             if not auth_url:
-                auth_url_resp = await api_client.get_github_auth_url(user_id)
+                auth_url_resp = await api_client.get_github_auth_url(user_id, domain=domain)
                 auth_url = auth_url_resp.get("auth_url")
 
             blocks = [
@@ -2664,7 +2665,7 @@ Keep the response concise but informative."""
 
         if not integration:
             # Send Auth Button
-            auth_response = await api_client.get_github_auth_url(user_id)
+            auth_response = await api_client.get_github_auth_url(user_id, domain=domain)
             auth_url = auth_response.get("auth_url")
             
             if not auth_url:
@@ -2702,13 +2703,49 @@ Keep the response concise but informative."""
                 return "I've sent a button to connect your GitHub account. 🔌"
             return f"Please connect your GitHub account here: {auth_url}"
 
+        # If a specific domain was requested, require domain-level connectivity.
+        if domain and integration.get("needs_github_auth"):
+            auth_url = integration.get("oauth_url")
+            if not auth_url:
+                auth_response = await api_client.get_github_auth_url(user_id, domain=domain)
+                auth_url = auth_response.get("auth_url")
+            if channel_id and auth_url:
+                blocks = [
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": f"I need GitHub access for *{domain}* before I can scan that codebase."
+                        }
+                    },
+                    {
+                        "type": "actions",
+                        "elements": [
+                            {
+                                "type": "button",
+                                "text": {
+                                    "type": "plain_text",
+                                    "text": "Connect GitHub for Domain",
+                                    "emoji": True
+                                },
+                                "url": auth_url,
+                                "action_id": "connect_github",
+                                "style": "primary"
+                            }
+                        ]
+                    }
+                ]
+                post_message(channel_id, f"Connect GitHub for {domain}", thread_ts=thread_ts, blocks=blocks)
+                return f"I need domain-level GitHub access for {domain} before I can scan it."
+            return f"I need domain-level GitHub access for {domain} before I can scan it: {auth_url or 'please reconnect GitHub.'}"
+
         # 2. Determine Repo Name
-        # Prefer integration repo
-        repo_name = integration.get("github_repo")
+        # When the user names a domain explicitly, prefer the domain-resolved repo.
+        repo_name = integration.get("domain_github_repo") or integration.get("github_repo")
         
         if not repo_name:
              # Logic C: Connected but no repo selected
-             auth_response = await api_client.get_github_auth_url(user_id)
+             auth_response = await api_client.get_github_auth_url(user_id, domain=domain)
              auth_url = auth_response.get("auth_url")
              if channel_id:
                  # Reuse connection block but maybe change text logic if we wanted, for now simplistic
@@ -2717,7 +2754,6 @@ Keep the response concise but informative."""
              return f"Please select a repository here: {auth_url}"
 
         # 3. Trigger Scan via Backend
-        domain = params.get("domain")
         if channel_id:
             scan_msg = f"🔍 Requesting scan for `{repo_name}`..."
             post_message(channel_id, scan_msg, thread_ts=thread_ts)
@@ -2738,7 +2774,7 @@ Keep the response concise but informative."""
                     oauth_url = scan_result.get("oauth_url")
                     if not oauth_url:
                         try:
-                            auth_resp = await api_client.get_github_auth_url(user_id)
+                            auth_resp = await api_client.get_github_auth_url(user_id, domain=domain)
                             oauth_url = auth_resp.get("auth_url")
                         except Exception:
                             oauth_url = None
