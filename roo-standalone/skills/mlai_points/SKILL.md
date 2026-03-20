@@ -20,6 +20,7 @@ This skill enables Roo to interact with the MLAI Points System via API, allowing
 
 ### Member Actions
 - Check points balance and history
+- Request points for yourself in Slack for admin approval
 - View and claim open tasks
 - Submit completed work for approval
 - Book and cancel coworking days
@@ -47,11 +48,11 @@ Example responses:
 
 ## Parameters
 
-- **action**: The action to perform (required) - e.g., "balance", "book_coworking", "claim_task", "submit_task", "award_points", "create_task"
+- **action**: The action to perform (required) - e.g., "balance", "request_points", "book_coworking", "claim_task", "submit_task", "award_points", "create_task"
 - **task_id**: Task ID number for task-related actions
 - **date**: Date for coworking bookings (YYYY-MM-DD format)
 - **points**: The number of points to award (integer, positive only)
-- **reason**: A short description of why the points are being awarded
+- **reason**: A short description of why the points are being awarded or requested
 - **target_user**: A single Slack User ID (e.g., U012ABC) or mention (e.g., <@U012ABC>) of the person receiving points. For single-user awards.
 - **target_users**: A list of Slack User IDs extracted from mentions for multi-user awards. Extract ALL <@U...> patterns from the message. Example: ["U012ABC", "U034DEF"] or ["<@U012ABC>", "<@U034DEF>"]
 - **target_slack_id**: (Alias for target_user) A single Slack User ID
@@ -68,6 +69,7 @@ Parse user messages to identify the action and parameters:
 | Pattern | Action | Example |
 |---------|--------|---------|
 | `points`, `balance` | balance | "What's my points balance?", "@Roo points" |
+| `request <n> points for <reason>` | request_points | "Request 5 points for helping at the event" |
 | `points earn` | list_tasks | "How do I earn points?", "@Roo points earn" |
 | `tasks`, `tasks open` | list_tasks | "What tasks are available?" |
 | `task claim <id>` | claim_task | "I'll claim task 42" |
@@ -90,6 +92,7 @@ Parse user messages to identify the action and parameters:
 Parse the user's message to determine which action they want:
 - Look for action keywords (balance, book, claim, etc.)
 - Extract any IDs, dates, or amounts mentioned
+- Treat `request ... points for ...` as `request_points`, not `award_points`
 - For admin actions, verify the Slack mention format
 
 ### Step 2: Permission Check

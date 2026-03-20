@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 Roo Standalone - FastAPI Application
 
@@ -14,7 +16,7 @@ from fastapi.responses import JSONResponse
 
 from .config import get_settings, Settings
 from .agent import RooAgent, get_agent
-from .slack_client import post_message
+from .slack_client import post_message, send_dm
 
 # Pending intents for auto-continue after prerequisite steps complete.
 # Key: "{slack_user_id}:{domain}" → {"action": "write", "topic": "...", "channel_id": "...", "thread_ts": "..."}
@@ -231,6 +233,7 @@ async def slack_events(request: Request):
     - url_verification challenges
     - app_mention events
     - direct messages
+    - reaction approvals
     """
     try:
         payload = await request.json()
@@ -260,6 +263,11 @@ async def slack_events(request: Request):
         # Process mention asynchronously
         import asyncio
         asyncio.create_task(_handle_mention(event))
+        return JSONResponse(status_code=200, content={})
+
+    if event_type == "reaction_added":
+        import asyncio
+        asyncio.create_task(_handle_reaction_added(event))
         return JSONResponse(status_code=200, content={})
     
     if event_type == "message" and not event.get("bot_id") and not event.get("subtype"):
@@ -294,7 +302,7 @@ async def _handle_mention(event: dict):
             thread_ts=thread_ts
         )
         
-        if result.get("message"):
+        if result.get("message") and not result.get("suppress_post"):
             post_kwargs = {
                 "channel": channel_id,
                 "text": result["message"],
@@ -341,7 +349,7 @@ async def _resume_intent(user_id: str, intent: dict):
             thread_ts=thread_ts
         )
         
-        if result.get("message"):
+        if result.get("message") and not result.get("suppress_post"):
             post_kwargs = {
                 "channel": channel_id,
                 "text": result["message"],
@@ -355,6 +363,105 @@ async def _resume_intent(user_id: str, intent: dict):
         print(f"❌ Error resuming intent: {e}")
         if intent.get("channel"):
             post_message(intent["channel"], "Sorry, I had trouble resuming your request.", intent.get("ts"))
+
+
+def _extract_backend_error_message(exc: Exception) -> str:
+    """Pull the most useful error message from a backend exception."""
+    try:
+        import httpx
+
+        if isinstance(exc, httpx.HTTPStatusError):
+            try:
+                payload = exc.response.json()
+                if isinstance(payload, dict):
+                    return payload.get("error") or payload.get("detail") or str(exc)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    return str(exc)
+
+
+async def _handle_reaction_added(event: dict):
+    """Handle Slack emoji approvals for pending points requests."""
+    reactor_user_id = event.get("user")
+    reaction = event.get("reaction")
+    item = event.get("item", {})
+    channel_id = item.get("channel")
+    message_ts = item.get("ts")
+
+    if reaction != "white_check_mark":
+        return
+    if not reactor_user_id or item.get("type") != "message" or not channel_id or not message_ts:
+        return
+
+    print(f"✅ Reaction approval attempt from {reactor_user_id} on {channel_id}:{message_ts}")
+
+    try:
+        import httpx
+        from .clients.mlai_backend import MLAIBackendClient
+
+        settings = get_settings()
+        client = MLAIBackendClient(
+            base_url=settings.MLAI_BACKEND_URL,
+            api_key=settings.MLAI_API_KEY,
+            internal_api_key=settings.INTERNAL_API_KEY or settings.MLAI_API_KEY,
+        )
+
+        request_record = await client.get_points_request_by_slack_message(channel_id, message_ts)
+        if not request_record:
+            return
+
+        if request_record.get("status") not in (None, "", "pending"):
+            return
+
+        request_id = request_record.get("id")
+        if not request_id:
+            return
+
+        try:
+            result = await client.approve_points_request(int(request_id), reactor_user_id)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code in (404, 409):
+                return
+            send_dm(
+                reactor_user_id,
+                (
+                    "I couldn't approve that points request. "
+                    f"{_extract_backend_error_message(exc)}"
+                ),
+            )
+            return
+        except Exception as exc:
+            send_dm(
+                reactor_user_id,
+                (
+                    "I couldn't approve that points request just now. "
+                    f"{_extract_backend_error_message(exc)}"
+                ),
+            )
+            return
+
+        requester = request_record.get("target_slack_id") or request_record.get("requester_slack_id")
+        points = result.get("points_awarded", request_record.get("points", 0))
+        reason = request_record.get("reason", "No reason provided")
+        new_balance = result.get("new_balance")
+        balance_line = f"\nNew balance: {new_balance} pts" if new_balance is not None else ""
+        thread_ts = request_record.get("slack_thread_ts") or message_ts
+
+        post_message(
+            channel=channel_id,
+            text=(
+                f"✅ Points request approved by <@{reactor_user_id}>.\n\n"
+                f"<@{requester}> received {points} points.\n"
+                f"Reason: {reason}{balance_line}"
+            ),
+            thread_ts=thread_ts,
+        )
+
+    except Exception as exc:
+        print(f"❌ Error handling reaction approval: {exc}")
 
 
 @app.post("/slack/commands")
@@ -1751,6 +1858,120 @@ async def slack_actions(request: Request):
             updated_blocks.append({
                 "type": "context",
                 "elements": [{"type": "mrkdwn", "text": "Skipped. Say `@Roo write me an article about [topic]` anytime."}]
+            })
+            slack_client.chat_update(
+                channel=msg_channel,
+                ts=msg_ts,
+                text=payload.get("message", {}).get("text", ""),
+                blocks=updated_blocks
+            )
+        except Exception as e:
+            print(f"⚠️ Failed to update message: {e}")
+
+        return JSONResponse(status_code=200, content={})
+
+    # Handler for article_research_best
+    # Value format: JSON string with domain, slack_user_id, channel_id, thread_ts
+    if action_id == "article_research_best":
+        value = actions[0].get("value", "")
+        try:
+            value_data = json.loads(value)
+        except json.JSONDecodeError:
+            return JSONResponse(status_code=400, content={"error": "Invalid JSON value format"})
+
+        domain = value_data.get("domain")
+        original_user_id = value_data.get("slack_user_id")
+        value_channel_id = value_data.get("channel_id")
+        value_thread_ts = value_data.get("thread_ts")
+
+        msg_channel = payload.get("channel", {}).get("id")
+        msg_ts = payload.get("message", {}).get("ts")
+
+        if user_id != original_user_id:
+            return JSONResponse(status_code=200, content={
+                "response_type": "ephemeral",
+                "text": "⚠️ Only the user who initiated this request can choose the article direction."
+            })
+
+        reply_channel = value_channel_id or msg_channel
+        reply_thread_ts = value_thread_ts or payload.get("message", {}).get("thread_ts") or msg_ts
+        print(f"🔍 User {user_id} chose article discovery for {domain}")
+        _remember_content_thread_context(reply_channel, reply_thread_ts, domain, "research")
+
+        try:
+            from .slack_client import get_slack_client
+            slack_client = get_slack_client()
+            original_blocks = payload.get("message", {}).get("blocks", [])
+            updated_blocks = [b for b in original_blocks if b.get("type") != "actions"]
+            updated_blocks.append({
+                "type": "context",
+                "elements": [{"type": "mrkdwn", "text": f"✅ Researching the best article opportunity for *{domain}*..."}]
+            })
+            slack_client.chat_update(
+                channel=msg_channel,
+                ts=msg_ts,
+                text=payload.get("message", {}).get("text", ""),
+                blocks=updated_blocks
+            )
+        except Exception as e:
+            print(f"⚠️ Failed to update message: {e}")
+
+        import asyncio
+        asyncio.create_task(_handle_mention(
+            {
+                "user": user_id,
+                "text": f"research the best article for {domain}",
+                "channel": reply_channel,
+                "thread_ts": reply_thread_ts,
+            }
+        ))
+        return JSONResponse(status_code=200, content={})
+
+    # Handler for article_provide_topic
+    # Value format: JSON string with domain, slack_user_id, channel_id, thread_ts
+    if action_id == "article_provide_topic":
+        value = actions[0].get("value", "")
+        try:
+            value_data = json.loads(value)
+        except json.JSONDecodeError:
+            return JSONResponse(status_code=400, content={"error": "Invalid JSON value format"})
+
+        domain = value_data.get("domain")
+        original_user_id = value_data.get("slack_user_id")
+        value_channel_id = value_data.get("channel_id")
+        value_thread_ts = value_data.get("thread_ts")
+
+        msg_channel = payload.get("channel", {}).get("id")
+        msg_ts = payload.get("message", {}).get("ts")
+
+        if user_id != original_user_id:
+            return JSONResponse(status_code=200, content={
+                "response_type": "ephemeral",
+                "text": "⚠️ Only the user who initiated this request can choose the article direction."
+            })
+
+        reply_channel = value_channel_id or msg_channel
+        reply_thread_ts = value_thread_ts or payload.get("message", {}).get("thread_ts") or msg_ts
+        is_dm = bool(reply_channel and reply_channel.startswith("D"))
+        guidance_text = (
+            "✅ Reply here with the topic you want me to write about. "
+            "I'll still research the best keywords, title, and talking points so it has the best chance to rank."
+            if is_dm else
+            "✅ Reply in this thread with something like `@Roo write about AI for clinic workflows`. "
+            "I'll still research the best keywords, title, and talking points so it has the best chance to rank."
+        )
+
+        print(f"📝 User {user_id} will provide the article topic for {domain}")
+        _remember_content_thread_context(reply_channel, reply_thread_ts, domain, "write")
+
+        try:
+            from .slack_client import get_slack_client
+            slack_client = get_slack_client()
+            original_blocks = payload.get("message", {}).get("blocks", [])
+            updated_blocks = [b for b in original_blocks if b.get("type") != "actions"]
+            updated_blocks.append({
+                "type": "context",
+                "elements": [{"type": "mrkdwn", "text": guidance_text}]
             })
             slack_client.chat_update(
                 channel=msg_channel,

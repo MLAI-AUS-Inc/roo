@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 Skill Executor
 
@@ -26,6 +28,7 @@ class SkillResult:
     data: Optional[Any] = None
     error: Optional[str] = None
     blocks: Optional[list] = None
+    suppress_post: bool = False
 
 
 class SkillExecutor:
@@ -88,15 +91,20 @@ class SkillExecutor:
             
             # Skill handlers can return a dict with "message" + "blocks" for rich responses
             blocks = None
+            result_data = params
+            suppress_post = False
             if isinstance(result, dict) and "message" in result:
                 blocks = result.get("blocks")
+                result_data = result.get("data", params)
+                suppress_post = bool(result.get("suppress_post", False))
                 result = result["message"]
 
             return SkillResult(
                 success=True,
                 message=result,
-                data=params,
-                blocks=blocks
+                data=result_data,
+                blocks=blocks,
+                suppress_post=suppress_post
             )
             
         except Exception as e:
@@ -159,6 +167,95 @@ JSON:"""
             return json.loads(content)
         except json.JSONDecodeError:
             return {}
+
+    def _should_prompt_for_article_direction(self, text: str, params: dict) -> bool:
+        """Prompt for topic-vs-research only on generic article requests."""
+        if (params.get("topic") or "").strip():
+            return False
+
+        text_lower = text.lower()
+        explicit_research_phrases = (
+            "research the best article",
+            "discover the best article",
+            "find the best article",
+            "best article to write",
+            "best article for me",
+            "what should i write about",
+            "recommend a topic",
+            "suggest a topic",
+            "suggest an article topic",
+            "article topic idea",
+            "auto write",
+            "auto-write",
+        )
+        if any(phrase in text_lower for phrase in explicit_research_phrases):
+            return False
+
+        research_verbs = ("research", "discover", "find", "suggest", "recommend", "choose", "pick")
+        research_nouns = ("topic", "keyword", "article", "blog post", "idea")
+        if any(verb in text_lower for verb in research_verbs) and any(noun in text_lower for noun in research_nouns):
+            return False
+
+        return True
+
+    def _build_article_direction_blocks(
+        self,
+        domain: str,
+        user_id: str,
+        channel_id: Optional[str],
+        thread_ts: Optional[str],
+    ) -> list[dict]:
+        """Build the preflight prompt for generic article requests."""
+        button_value = json.dumps(
+            {
+                "domain": domain,
+                "slack_user_id": user_id,
+                "channel_id": channel_id,
+                "thread_ts": thread_ts,
+            }
+        )
+
+        return [
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": (
+                        f"Before I start on *{domain}*, do you already have a topic in mind?\n\n"
+                        "If you do, send it through and I'll still research the best keywords, title, "
+                        "and talking points so the article has the best chance to rank.\n\n"
+                        "If you don't, I can research the strongest article opportunity for you."
+                    ),
+                },
+            },
+            {
+                "type": "actions",
+                "block_id": "article_direction_actions",
+                "elements": [
+                    {
+                        "type": "button",
+                        "text": {
+                            "type": "plain_text",
+                            "text": "Research the Best Article for Me",
+                            "emoji": True,
+                        },
+                        "style": "primary",
+                        "value": button_value,
+                        "action_id": "article_research_best",
+                    },
+                    {
+                        "type": "button",
+                        "text": {
+                            "type": "plain_text",
+                            "text": "I'll Give You the Topic",
+                            "emoji": True,
+                        },
+                        "value": button_value,
+                        "action_id": "article_provide_topic",
+                    },
+                ],
+            },
+        ]
     
     async def _execute_tone_of_voice(
         self,
@@ -1481,6 +1578,15 @@ Keep the response concise but informative."""
         if not domain:
             return "I can help write that article! To get started, I just need to know the domain name (e.g., mlai.au)."
 
+        if self._should_prompt_for_article_direction(text, params):
+            return {
+                "message": (
+                    f"I can do that for {domain}. First, choose whether you want me to research the best article "
+                    "opportunity or whether you'll give me the topic."
+                ),
+                "blocks": self._build_article_direction_blocks(domain, user_id, channel_id, thread_ts),
+            }
+
         article_system = integration.get("article_system") or {}
         if not article_system and domain_info:
             article_system = domain_info.get("article_system") or {}
@@ -1580,14 +1686,24 @@ Keep the response concise but informative."""
             if not job_id:
                 return "Failed to start generation: No job ID returned from backend."
 
+            workflow = str(
+                response.get("workflow")
+                or ("auto_discovery" if not topic else "direct_generate")
+            ).strip().lower()
+
             # Launch background monitoring task
-            if channel_id:
+            if channel_id and workflow != "auto_discovery":
                 asyncio.create_task(
                     self._monitor_generation(api_client, job_id, channel_id, thread_ts, user_id)
                 )
             
             if topic:
-                return f"You beauty! I've started writing the article '{topic}' for {domain}. (Job ID: {job_id})\nI'll keep you posted on the progress right here! 🚀"
+                return (
+                    f"You beauty! I've started writing the article '{topic}' for {domain}. (Job ID: {job_id})\n"
+                    "I'll still research the strongest keywords, title, and talking points so it has the best "
+                    "chance to rank.\n"
+                    "I'll keep you posted on the progress right here! 🚀"
+                )
             else:
                 return f"You beauty! I've started researching the best article for {domain}. (Job ID: {job_id})\nI'll keep you posted on the progress right here! 🕵️"
             
@@ -1891,6 +2007,8 @@ Keep the response concise but informative."""
                         except Exception as e:
                             print(f"Failed to post progress: {e}")
 
+                    if state == "awaiting_confirmation":
+                        return
                     if state == "completed":
                         break
                     elif state == "failed":
@@ -1946,7 +2064,7 @@ Keep the response concise but informative."""
         user_id: str,
         channel_id: Optional[str],
         thread_ts: Optional[str]
-    ) -> str:
+    ) -> Any:
         """Execute the MLAI Points skill."""
         import httpx
         
@@ -1968,55 +2086,9 @@ Keep the response concise but informative."""
                 api_key=settings.MLAI_API_KEY,
                 internal_api_key=settings.INTERNAL_API_KEY or settings.MLAI_API_KEY
             )
-            
-            # Determine action from params or text
-            action = params.get("action", "").lower()
-            text_lower = text.lower()
-            
-            # Alias Handling for Common Mis-Extractions
-            if action == "book":
-                # LLM often extracts "book" instead of "book_coworking"
-                action = "book_coworking"
-            elif action in ["create", "task", "create_task"]:
-                # "task" or "create" often extracted for "create task"
-                if params.get("task_title") or "create" in text_lower:
-                    action = "create_task"
-            
-            # Fallback action detection from text
-            if not action or action == "task":
-                if any(w in text_lower for w in ["balance", "how many points", "my points"]):
-                    action = "balance"
-                elif "history" in text_lower:
-                    action = "history"
-                elif any(w in text_lower for w in ["tasks open", "open tasks", "available tasks", "tasks"]):
-                    action = "list_tasks"
-                elif "claim" in text_lower:
-                    action = "claim_task"
-                elif "submit" in text_lower:
-                    action = "submit_task"
-                elif any(w in text_lower for w in ["coworking check", "check coworking", "availability"]):
-                    action = "check_coworking"
-                elif any(w in text_lower for w in ["coworking book", "book coworking", "book me"]):
-                    action = "book_coworking"
-                elif "cancel" in text_lower and "coworking" in text_lower:
-                    action = "cancel_coworking"
-                elif any(w in text_lower for w in ["rate card", "point values", "how much is"]):
-                     action = "view_rate_card"
-                elif any(w in text_lower for w in ["rewards", "perks"]):
-                    action = "list_rewards"
-                elif "reward" in text_lower and "request" in text_lower:
-                    action = "request_reward"
-                elif "task" in text_lower and "create" in text_lower:
-                    action = "create_task"
-                elif "approve" in text_lower:
-                    action = "approve_task"
-                elif "reject" in text_lower:
-                    action = "reject_task"
-                elif any(w in text_lower for w in ["award", "give points", "reward"]):
-                    action = "award_points"
-                elif any(w in text_lower for w in ["deduct", "remove points"]):
-                    action = "deduct_points"
-            
+
+            action = self._resolve_points_action(params, text)
+
             # Execute the appropriate action
             return await self._handle_points_action(
                 client=client,
@@ -2067,7 +2139,94 @@ Keep the response concise but informative."""
             import traceback
             traceback.print_exc()
             return f"Had some trouble with the points system: {str(e)}"
-    
+
+    def _resolve_points_action(self, params: dict, text: str) -> str:
+        """Resolve the intended points action from extracted params and raw text."""
+        action = str(params.get("action", "") or "").lower().strip()
+        text_lower = text.lower()
+        explicit_points_request = "request" in text_lower and "point" in text_lower and "reward" not in text_lower
+
+        if explicit_points_request and action in ("", "task", "award", "award_points"):
+            return "request_points"
+
+        if action == "book":
+            action = "book_coworking"
+        elif action in ["create", "task", "create_task"]:
+            if params.get("task_title") or "create" in text_lower:
+                action = "create_task"
+
+        if action and action != "task":
+            return action
+
+        if any(w in text_lower for w in ["balance", "how many points", "my points"]):
+            return "balance"
+        if "history" in text_lower:
+            return "history"
+        if "request" in text_lower and "point" in text_lower and "reward" not in text_lower:
+            return "request_points"
+        if any(w in text_lower for w in ["tasks open", "open tasks", "available tasks", "tasks"]):
+            return "list_tasks"
+        if "claim" in text_lower:
+            return "claim_task"
+        if "submit" in text_lower:
+            return "submit_task"
+        if any(w in text_lower for w in ["coworking check", "check coworking", "availability"]):
+            return "check_coworking"
+        if any(w in text_lower for w in ["coworking book", "book coworking", "book me"]):
+            return "book_coworking"
+        if "cancel" in text_lower and "coworking" in text_lower:
+            return "cancel_coworking"
+        if any(w in text_lower for w in ["rate card", "point values", "how much is"]):
+            return "view_rate_card"
+        if any(w in text_lower for w in ["rewards", "perks"]):
+            return "list_rewards"
+        if "reward" in text_lower and "request" in text_lower:
+            return "request_reward"
+        if "task" in text_lower and "create" in text_lower:
+            return "create_task"
+        if "approve" in text_lower:
+            return "approve_task"
+        if "reject" in text_lower:
+            return "reject_task"
+        if any(w in text_lower for w in ["award", "give points", "reward"]):
+            return "award_points"
+        if any(w in text_lower for w in ["deduct", "remove points"]):
+            return "deduct_points"
+        return action
+
+    def _extract_points_request_reason(self, text: str, fallback_reason: str = "") -> str:
+        """Extract the reason from a natural-language points request."""
+        if fallback_reason:
+            return fallback_reason.strip()
+
+        patterns = (
+            r"request\s+\d+\s*(?:points?|pts?)\s+for\s+(.+)",
+            r"(?:can i|get me|i(?:'d| would)? like)\s+\d+\s*(?:points?|pts?)\s+for\s+(.+)",
+        )
+        for pattern in patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                return match.group(1).strip().rstrip(".!?")
+
+        return ""
+
+    def _extract_points_request_amount(self, text: str, fallback_points: Any = None) -> Optional[int]:
+        """Extract the requested points amount from the text when the LLM misses it."""
+        if fallback_points not in (None, "", 0, "0"):
+            try:
+                return int(fallback_points)
+            except (TypeError, ValueError):
+                pass
+
+        match = re.search(r"(?<![a-zA-Z])(\d+)\s*(?:points?|pts?)", text, re.IGNORECASE)
+        if not match:
+            return None
+
+        try:
+            return int(match.group(1))
+        except ValueError:
+            return None
+
     async def _handle_points_action(
         self,
         client,
@@ -2078,7 +2237,7 @@ Keep the response concise but informative."""
         channel_id: Optional[str],
         thread_ts: Optional[str],
         skill
-    ) -> str:
+    ) -> Any:
         """Handle individual points actions."""
         
         # =====================================================================
@@ -2115,6 +2274,88 @@ Keep the response concise but informative."""
             
             return "\n".join(lines)
         
+        elif action == "request_points":
+            if not channel_id:
+                return "Points requests only work from Slack channels or threads."
+            if channel_id and channel_id.startswith("D"):
+                return (
+                    "Points requests only work in a shared channel or thread so an admin can approve them with ✅. "
+                    "Pop this request into a channel and I'll queue it there."
+                )
+
+            points = self._extract_points_request_amount(text, params.get("points"))
+            reason = self._extract_points_request_reason(text, params.get("reason", ""))
+
+            if points is None:
+                return "How many points are you requesting? Try `request 5 points for helping at the event`."
+            if points <= 0:
+                return "Points requests need a positive number of points."
+            if not reason:
+                return "What are you requesting the points for? Try `request 5 points for helping at the event`."
+
+            from ..slack_client import get_bot_user_id
+            import re
+
+            try:
+                bot_id = get_bot_user_id()
+            except Exception:
+                bot_id = None
+
+            mentioned_users = [
+                mentioned_user
+                for mentioned_user in re.findall(r"<@([A-Z0-9]+)>", text)
+                if mentioned_user != bot_id
+            ]
+            if mentioned_users:
+                return "For now, points requests are only for yourself. Ask an admin to use the manual award flow for someone else."
+
+            request_record = await client.create_points_request(
+                requester_slack_id=user_id,
+                target_slack_id=user_id,
+                points=points,
+                reason=reason,
+                slack_channel_id=channel_id,
+                slack_thread_ts=thread_ts,
+            )
+
+            request_id = request_record.get("id")
+            summary_text = (
+                f"📝 *Points request pending*\n\n"
+                f"<@{user_id}> requested *{points} points* for: {reason}\n\n"
+                f"Points Admins can approve this by reacting with ✅ to this message."
+            )
+            summary_response = post_message(
+                channel=channel_id,
+                text=summary_text,
+                thread_ts=thread_ts,
+            )
+            summary_ts = summary_response.get("ts")
+
+            if request_id and summary_ts:
+                try:
+                    await client.attach_points_request_slack_summary(
+                        request_id=request_id,
+                        slack_channel_id=channel_id,
+                        slack_thread_ts=thread_ts,
+                        slack_summary_message_ts=summary_ts,
+                    )
+                except Exception:
+                    return (
+                        "I posted the points request, but I couldn't register emoji approval for it. "
+                        "Please ask a Points Admin to use the existing manual award flow for now."
+                    )
+
+                return {
+                    "message": "",
+                    "data": {"action": action, "request_id": request_id},
+                    "suppress_post": True,
+                }
+
+            return (
+                "I created the points request, but I couldn't finish wiring up emoji approval for it. "
+                "Please ask a Points Admin to use the existing manual award flow for now."
+            )
+
         elif action == "list_tasks":
             status = params.get("status", "open")
             portfolio = params.get("portfolio")

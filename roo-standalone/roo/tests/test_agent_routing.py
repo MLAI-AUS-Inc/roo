@@ -4,6 +4,7 @@ import types
 from pathlib import Path
 from types import SimpleNamespace
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 sys.modules.setdefault("frontmatter", SimpleNamespace(load=lambda *args, **kwargs: None))
 fake_executor_module = types.ModuleType("roo.skills.executor")
 fake_executor_module.SkillExecutor = type("SkillExecutor", (), {})
@@ -63,6 +64,15 @@ def test_points_request_still_routes_to_points():
     agent = _make_agent()
 
     skill = agent._select_skill_from_triggers("create a task called 'Fix docs' worth 5 points")
+
+    assert skill is not None
+    assert skill.name == "mlai-points"
+
+
+def test_request_points_phrase_routes_to_points():
+    agent = _make_agent()
+
+    skill = agent._select_skill_from_triggers("request 5 points for helping at the event")
 
     assert skill is not None
     assert skill.name == "mlai-points"
