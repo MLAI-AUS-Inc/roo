@@ -1686,8 +1686,13 @@ Keep the response concise but informative."""
             if not job_id:
                 return "Failed to start generation: No job ID returned from backend."
 
+            workflow = str(
+                response.get("workflow")
+                or ("auto_discovery" if not topic else "direct_generate")
+            ).strip().lower()
+
             # Launch background monitoring task
-            if channel_id:
+            if channel_id and workflow != "auto_discovery":
                 asyncio.create_task(
                     self._monitor_generation(api_client, job_id, channel_id, thread_ts, user_id)
                 )
@@ -2002,6 +2007,8 @@ Keep the response concise but informative."""
                         except Exception as e:
                             print(f"Failed to post progress: {e}")
 
+                    if state == "awaiting_confirmation":
+                        return
                     if state == "completed":
                         break
                     elif state == "failed":
