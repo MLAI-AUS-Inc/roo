@@ -357,7 +357,100 @@ class MLAIBackendClient:
             )
             response.raise_for_status()
             return response.json()
-    
+
+    async def create_points_request(
+        self,
+        requester_slack_id: str,
+        target_slack_id: str,
+        points: int,
+        reason: str,
+        slack_channel_id: Optional[str] = None,
+        slack_thread_ts: Optional[str] = None
+    ) -> dict:
+        """Create a pending points request."""
+        payload = {
+            "requester_slack_id": requester_slack_id,
+            "target_slack_id": self._clean_slack_id(target_slack_id),
+            "points": points,
+            "reason": reason,
+        }
+        if slack_channel_id:
+            payload["slack_channel_id"] = slack_channel_id
+        if slack_thread_ts:
+            payload["slack_thread_ts"] = slack_thread_ts
+
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{self._points_base}/requests/",
+                json=payload,
+                headers=self.headers,
+                timeout=10.0
+            )
+            response.raise_for_status()
+            return response.json()
+
+    async def attach_points_request_slack_summary(
+        self,
+        request_id: int,
+        slack_channel_id: str,
+        slack_thread_ts: Optional[str],
+        slack_summary_message_ts: str
+    ) -> dict:
+        """Attach the Roo summary message identifiers to a points request."""
+        payload = {
+            "slack_channel_id": slack_channel_id,
+            "slack_summary_message_ts": slack_summary_message_ts,
+        }
+        if slack_thread_ts:
+            payload["slack_thread_ts"] = slack_thread_ts
+
+        async with httpx.AsyncClient() as client:
+            response = await client.patch(
+                f"{self._points_base}/requests/{request_id}/slack-summary/",
+                json=payload,
+                headers=self.admin_headers,
+                timeout=10.0
+            )
+            response.raise_for_status()
+            return response.json()
+
+    async def get_points_request_by_slack_message(
+        self,
+        slack_channel_id: str,
+        slack_message_ts: str
+    ) -> Optional[dict]:
+        """Look up a points request by the Roo summary message it is attached to."""
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"{self._points_base}/requests/by-slack-message/",
+                params={
+                    "slack_channel_id": slack_channel_id,
+                    "slack_message_ts": slack_message_ts,
+                },
+                headers=self.admin_headers,
+                timeout=10.0
+            )
+            if response.status_code == 404:
+                return None
+            response.raise_for_status()
+            return response.json()
+
+    async def approve_points_request(
+        self,
+        request_id: int,
+        admin_slack_id: str
+    ) -> dict:
+        """Approve a pending points request."""
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{self._points_base}/requests/{request_id}/approve/",
+                json={"admin_slack_id": admin_slack_id},
+                headers=self.admin_headers,
+                timeout=15.0
+            )
+            response.raise_for_status()
+            return response.json()
+
     # =========================================================================
     # Admin Endpoints
     # =========================================================================

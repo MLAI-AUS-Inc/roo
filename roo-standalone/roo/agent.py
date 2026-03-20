@@ -111,6 +111,7 @@ class RooAgent:
                 "skill_used": skill.name,
                 "data": result.data,
                 "blocks": result.blocks,
+                "suppress_post": result.suppress_post,
             }
         else:
             print("💬 No skill matched, generating general response")
