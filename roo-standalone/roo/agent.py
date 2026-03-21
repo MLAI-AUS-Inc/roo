@@ -52,6 +52,7 @@ class RooAgent:
         user_id: str,
         channel_id: Optional[str] = None,
         thread_ts: Optional[str] = None,
+        param_overrides: Optional[Dict[str, Any]] = None,
         **kwargs
     ) -> Dict[str, Any]:
         """
@@ -104,6 +105,7 @@ class RooAgent:
                 channel_id=channel_id,
                 thread_ts=thread_ts,
                 thread_history=thread_history,
+                param_overrides=param_overrides,
                 **kwargs
             )
             return {

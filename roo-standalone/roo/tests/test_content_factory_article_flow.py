@@ -154,6 +154,38 @@ async def test_generic_article_request_prompts_for_direction(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_requirements_prompt_serializes_original_request_for_resume(monkeypatch):
+    executor = SkillExecutor()
+    posted_messages = []
+    _patch_content_factory(monkeypatch)
+    FakeContentFactoryClient.generic_integration = None
+    monkeypatch.setattr(
+        executor_module,
+        "post_message",
+        lambda *args, **kwargs: posted_messages.append({"args": args, "kwargs": kwargs}) or {"ts": "111.222"},
+    )
+
+    result = await executor._execute_content_factory(
+        skill=None,
+        text="write an article for my website woofya.com.au",
+        params={"domain": "woofya.com.au"},
+        user_id="U05QPB483K9",
+        channel_id="C123",
+        thread_ts="111.222",
+    )
+
+    assert result == "Please review the requirements above to get started! 👆"
+    button = posted_messages[0]["kwargs"]["blocks"][2]["elements"][0]
+    assert button["action_id"] == "confirm_content_factory"
+    assert json.loads(button["value"]) == {
+        "text": "write an article for my website woofya.com.au",
+        "params": {"domain": "woofya.com.au"},
+        "channel_id": "C123",
+        "thread_ts": "111.222",
+    }
+
+
+@pytest.mark.asyncio
 async def test_new_domain_requests_domain_github_auth_without_falling_back_to_generic_repo(monkeypatch):
     executor = SkillExecutor()
     posted_messages = []
@@ -290,6 +322,36 @@ async def test_new_domain_requires_repo_selection_without_falling_back_to_generi
             },
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_execute_applies_param_overrides_after_extraction(monkeypatch):
+    executor = SkillExecutor()
+    captured_params = {}
+
+    async def fake_extract(skill, text, user_id, history=None):
+        return {"domain": "wrong-domain.com", "topic": "Original topic"}
+
+    async def fake_content_factory(skill, text, params, user_id, channel_id, thread_ts, thread_history=None):
+        captured_params.update(params)
+        return "ok"
+
+    monkeypatch.setattr(executor, "_extract_parameters", fake_extract)
+    monkeypatch.setattr(executor, "_execute_content_factory", fake_content_factory)
+
+    result = await executor.execute(
+        skill=SimpleNamespace(name="content-factory"),
+        text="write an article for woofya.com.au",
+        user_id="U05QPB483K9",
+        param_overrides={"domain": "woofya.com.au", "confirmed": True},
+    )
+
+    assert result.success is True
+    assert captured_params == {
+        "domain": "woofya.com.au",
+        "topic": "Original topic",
+        "confirmed": True,
+    }
 
 
 @pytest.mark.asyncio
@@ -510,3 +572,128 @@ def test_article_provide_topic_action_updates_message(monkeypatch):
     updated_blocks = updated_messages[0]["blocks"]
     assert all(block.get("type") != "actions" for block in updated_blocks)
     assert "@Roo write about AI for clinic workflows" in updated_blocks[-1]["elements"][0]["text"]
+
+
+def test_confirm_content_factory_action_resumes_original_request(monkeypatch):
+    agent_calls = []
+    posted_messages = []
+
+    def capture_task(coro):
+        coro.close()
+        return SimpleNamespace(cancel=lambda: None)
+
+    class FakeAgent:
+        def handle_mention(self, **kwargs):
+            agent_calls.append(kwargs)
+
+            async def done():
+                return {}
+
+            return done()
+
+    monkeypatch.setattr(main_module, "get_agent", lambda: FakeAgent())
+    monkeypatch.setattr(main_module, "post_message", lambda *args, **kwargs: posted_messages.append((args, kwargs)))
+    monkeypatch.setattr(asyncio, "create_task", capture_task)
+
+    payload = {
+        "user": {"id": "U05QPB483K9"},
+        "channel": {"id": "C123"},
+        "message": {
+            "ts": "111.222",
+            "thread_ts": "111.222",
+            "text": "Please review the requirements above.",
+        },
+        "actions": [
+            {
+                "action_id": "confirm_content_factory",
+                "value": json.dumps(
+                    {
+                        "text": "write an article for my website woofya.com.au",
+                        "params": {"domain": "woofya.com.au"},
+                        "channel_id": "C123",
+                        "thread_ts": "111.222",
+                    }
+                ),
+            }
+        ],
+    }
+
+    class FakeRequest:
+        async def form(self):
+            return {"payload": json.dumps(payload)}
+
+    response = asyncio.run(main_module.slack_actions(FakeRequest()))
+
+    assert response.status_code == 200
+    assert posted_messages == []
+    assert agent_calls == [
+        {
+            "text": "write an article for my website woofya.com.au",
+            "user_id": "U05QPB483K9",
+            "channel_id": "C123",
+            "thread_ts": "111.222",
+            "param_overrides": {
+                "domain": "woofya.com.au",
+                "confirmed": True,
+            },
+        }
+    ]
+
+
+def test_confirm_content_factory_action_without_context_prompts_to_resend(monkeypatch):
+    agent_calls = []
+    posted_messages = []
+
+    def capture_task(coro):
+        coro.close()
+        return SimpleNamespace(cancel=lambda: None)
+
+    class FakeAgent:
+        def handle_mention(self, **kwargs):
+            agent_calls.append(kwargs)
+
+            async def done():
+                return {}
+
+            return done()
+
+    monkeypatch.setattr(main_module, "get_agent", lambda: FakeAgent())
+    monkeypatch.setattr(
+        main_module,
+        "post_message",
+        lambda *args, **kwargs: posted_messages.append((args, kwargs)),
+    )
+    monkeypatch.setattr(asyncio, "create_task", capture_task)
+
+    payload = {
+        "user": {"id": "U05QPB483K9"},
+        "channel": {"id": "C123"},
+        "message": {
+            "ts": "111.222",
+            "thread_ts": "111.222",
+            "text": "Please review the requirements above.",
+        },
+        "actions": [
+            {
+                "action_id": "confirm_content_factory",
+            }
+        ],
+    }
+
+    class FakeRequest:
+        async def form(self):
+            return {"payload": json.dumps(payload)}
+
+    response = asyncio.run(main_module.slack_actions(FakeRequest()))
+
+    assert response.status_code == 200
+    assert agent_calls == []
+    assert posted_messages == [
+        (
+            (
+                "C123",
+                "I couldn't recover your original content request. Please resend the article request so I can continue.",
+            ),
+            {"thread_ts": "111.222"},
+        )
+    ]

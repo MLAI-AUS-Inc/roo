@@ -1436,24 +1436,39 @@ async def slack_actions(request: Request):
 
     if action_id == "confirm_content_factory":
         print(f"✅ User {user_id} confirmed content factory requirements")
-        
-        # Trigger re-entry into the skill, but this time imply confirmation
+
+        value = actions[0].get("value", "")
+        try:
+            value_data = json.loads(value) if value else {}
+        except json.JSONDecodeError:
+            value_data = {}
+
+        original_text = value_data.get("text")
+        original_channel_id = value_data.get("channel_id") or channel_id
+        original_thread_ts = value_data.get("thread_ts") or thread_ts
+        param_overrides = value_data.get("params") or {}
+        if not isinstance(param_overrides, dict):
+            param_overrides = {}
+
+        if not original_text:
+            if channel_id:
+                post_message(
+                    channel_id,
+                    "I couldn't recover your original content request. Please resend the article request so I can continue.",
+                    thread_ts=thread_ts,
+                )
+            return JSONResponse(status_code=200, content={})
+
         import asyncio
         agent = get_agent()
-        
-        # We act as if the user said "Proceed with content factory confirmed=true"
-        # The LLM extraction in executor.py will pick up 'confirmed': True (or we hope so)
-        # Actually, to be safer, we should rely on the saved pending intent or just
-        # send a text that explicitly sets the param if possible, OR
-        # better yet, since we use LLM extraction, adding "confirmed=true" to text might work
-        # providing the LLM understands it.
-        # Let's try sending a clear directive.
-        
+        resumed_params = {**param_overrides, "confirmed": True}
+
         asyncio.create_task(agent.handle_mention(
-            text="Proceed with content factory. confirmed=True",
+            text=original_text,
             user_id=user_id,
-            channel_id=channel_id,
-            thread_ts=thread_ts
+            channel_id=original_channel_id,
+            thread_ts=original_thread_ts,
+            param_overrides=resumed_params,
         ))
         return JSONResponse(status_code=200, content={})
 

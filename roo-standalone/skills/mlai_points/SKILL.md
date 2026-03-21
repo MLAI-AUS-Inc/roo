@@ -32,6 +32,10 @@ This skill enables Roo to interact with the MLAI Points System via API, allowing
 - Award points manually
 - Set coworking capacity overrides
 
+### Super Admin Actions (restricted to Slack user `U05QPB483K9`)
+- Promote one tagged user to Points Admin
+- Change one tagged Points Admin's weekly points allowance
+
 ### Admin Weekly Allowance
 
 Each Points Admin has a weekly allowance limiting how many points they can award. The allowance resets every Monday (ISO week).
@@ -56,6 +60,7 @@ Example responses:
 - **target_user**: A single Slack User ID (e.g., U012ABC) or mention (e.g., <@U012ABC>) of the person receiving points. For single-user awards.
 - **target_users**: A list of Slack User IDs extracted from mentions for multi-user awards. Extract ALL <@U...> patterns from the message. Example: ["U012ABC", "U034DEF"] or ["<@U012ABC>", "<@U034DEF>"]
 - **target_slack_id**: (Alias for target_user) A single Slack User ID
+- **weekly_allowance**: (Super Admin) Positive integer weekly allowance for one tagged Points Admin
 - **submission_text**: Description of work completed for task submissions
 - **reward_code**: Code for reward redemption requests
 - **task_title**: (Admin) Title for a new task
@@ -85,6 +90,10 @@ Parse user messages to identify the action and parameters:
 | `task approve <id>` | approve_task | (Admin) "Approve task 42" |
 | `points award @user +5 reason` | award_points | (Admin) "Give @sam 5 points for helping out" |
 | `reward @user for <activity>` | award_points | (Admin) "Reward @sam for newsletter" (suggests points from rate card) |
+| `promote <@USER> to roo points admin` | promote_points_admin | (Super Admin) "Promote <@U123> to roo points admin" |
+| `make <@USER> a roo points admin` | promote_points_admin | (Super Admin) "Make <@U123> a roo points admin" |
+| `set <@USER> weekly points allowance to <n>` | set_points_admin_allowance | (Super Admin) "Set <@U123> weekly points allowance to 150" |
+| `change <@USER> weekly points allowance to <n>` | set_points_admin_allowance | (Super Admin) "Change <@U123> weekly points allowance to 150" |
 
 ## Workflow
 
@@ -94,11 +103,16 @@ Parse the user's message to determine which action they want:
 - Extract any IDs, dates, or amounts mentioned
 - Treat `request ... points for ...` as `request_points`, not `award_points`
 - For admin actions, verify the Slack mention format
+- For super admin actions, require exactly one tagged Slack user and a positive numeric allowance when changing allowance
 
 ### Step 2: Permission Check
 For admin-only actions (create, approve, award):
 - The API will validate the requester's Slack ID
 - If 403 returned, respond with friendly denial
+
+For super admin actions (promote admin, change allowance):
+- Roo must fail fast unless the requester Slack ID is `U05QPB483K9`
+- The backend must still validate the requester for defense in depth
 
 ### Step 3: Execute via API
 Call the appropriate MLAIBackendClient method with extracted parameters.
