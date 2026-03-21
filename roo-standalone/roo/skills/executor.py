@@ -1003,6 +1003,60 @@ Keep the response concise but informative."""
         # Note: Vector search is disabled until API endpoint is implemented
         # For now, fall back to LLM-based execution
         return await self._execute_with_llm(skill, text, params, user_id)
+
+    async def _save_content_factory_pending_intent(
+        self,
+        api_client: Any,
+        user_id: str,
+        params: dict,
+        text: str,
+        channel_id: Optional[str],
+        thread_ts: Optional[str],
+    ) -> None:
+        """Persist the original content request so GitHub auth/repo selection can resume it."""
+        if params.get("confirmed"):
+            return
+
+        intent_data = json.dumps({
+            "skill": "content-factory",
+            "params": params,
+            "text": text,
+            "channel": channel_id,
+            "ts": thread_ts,
+        })
+        await api_client.save_pending_intent(user_id, intent_data)
+
+    def _get_connected_domain_info(
+        self,
+        connected_domains: List[dict],
+        domain: Optional[str],
+    ) -> Optional[dict]:
+        """Return the connected domain record for the requested domain."""
+        if not domain or not connected_domains:
+            return None
+
+        return next(
+            (domain_info for domain_info in connected_domains if domain_info.get("domain") == domain),
+            None,
+        )
+
+    def _resolve_content_factory_repo_name(
+        self,
+        integration: dict,
+        connected_domains: List[dict],
+        domain: Optional[str],
+    ) -> tuple[Optional[str], Optional[dict]]:
+        """Resolve the repo Roo should use for content-factory flows."""
+        domain_info = self._get_connected_domain_info(connected_domains, domain)
+
+        if domain:
+            return (
+                integration.get("domain_github_repo")
+                or (domain_info or {}).get("github_repo"),
+                domain_info,
+            )
+
+        return integration.get("github_repo"), domain_info
     
     async def _execute_content_factory(
         self,
@@ -1182,15 +1236,14 @@ Keep the response concise but informative."""
             
             # Save pending intent before asking for auth
             # Critically: Do NOT overwrite the intent if we are just confirming requirements (which has no domain/topic)
-            if not params.get("confirmed"):
-                intent_data = json.dumps({
-                    "skill": "content-factory",
-                    "params": params,
-                    "text": text,
-                    "channel": channel_id,
-                    "ts": thread_ts
-                })
-                await api_client.save_pending_intent(user_id, intent_data)
+            await self._save_content_factory_pending_intent(
+                api_client,
+                user_id,
+                params,
+                text,
+                channel_id,
+                thread_ts,
+            )
             
             if channel_id:
                 post_message(channel_id, "Please connect GitHub", thread_ts=thread_ts, blocks=blocks)
@@ -1232,19 +1285,60 @@ Keep the response concise but informative."""
                 integration = domain_integration
                 connected_domains = integration.get("connected_domains", connected_domains)
 
-        # Look up repo from connected_domains
-        repo_name = None
-        domain_info = None
-        if domain and connected_domains:
-            domain_info = next(
-                (d for d in connected_domains if d.get("domain") == domain), None
-            )
-            if domain_info:
-                repo_name = domain_info.get("github_repo")
+        repo_name, domain_info = self._resolve_content_factory_repo_name(
+            integration,
+            connected_domains,
+            domain,
+        )
 
-        # Fallback to top-level github_repo if domain not in connected_domains
-        if not repo_name:
-            repo_name = integration.get("github_repo")
+        if domain and integration.get("needs_github_auth"):
+            auth_url = integration.get("oauth_url")
+            if not auth_url:
+                auth_response = await api_client.get_github_auth_url(user_id, domain=domain)
+                auth_url = auth_response.get("auth_url")
+
+            if not auth_url:
+                return "Sorry mate, I couldn't get the authorization URL. Try again?"
+
+            await self._save_content_factory_pending_intent(
+                api_client,
+                user_id,
+                params,
+                text,
+                channel_id,
+                thread_ts,
+            )
+
+            blocks = [
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": f"⚠️ GitHub isn't connected for *{domain}*.\nClick below to connect your GitHub repo for this domain."
+                    }
+                },
+                {
+                    "type": "actions",
+                    "elements": [
+                        {
+                            "type": "button",
+                            "text": {
+                                "type": "plain_text",
+                                "text": "Connect GitHub for " + domain,
+                                "emoji": True
+                            },
+                            "url": auth_url,
+                            "action_id": "connect_github",
+                            "style": "primary"
+                        }
+                    ]
+                }
+            ]
+
+            if channel_id:
+                post_message(channel_id, f"GitHub not connected for {domain}", thread_ts=thread_ts, blocks=blocks)
+                return f"GitHub isn't connected for {domain}. Click the button above to connect, then try again! 🔌"
+            return f"GitHub isn't connected for {domain}. Connect here: {auth_url}"
 
         # No repo at all — prompt to connect
         if not repo_name:
@@ -1254,12 +1348,26 @@ Keep the response concise but informative."""
             if not auth_url:
                 return "Sorry mate, I couldn't get the authorization URL. Try again?"
 
+            await self._save_content_factory_pending_intent(
+                api_client,
+                user_id,
+                params,
+                text,
+                channel_id,
+                thread_ts,
+            )
+
             blocks = [
                 {
                     "type": "section",
                     "text": {
                         "type": "mrkdwn",
-                        "text": "I see you're connected, but no repository is selected. Click below to choose one."
+                        "text": (
+                            f"I see you're connected for *{domain}*, but no repository is selected for that domain. "
+                            "Click below to choose one."
+                            if domain
+                            else "I see you're connected, but no repository is selected. Click below to choose one."
+                        )
                     }
                 },
                 {
@@ -2146,7 +2254,7 @@ Keep the response concise but informative."""
         text_lower = text.lower()
         explicit_points_request = "request" in text_lower and "point" in text_lower and "reward" not in text_lower
 
-        if explicit_points_request and action in ("", "task", "award", "award_points"):
+        if explicit_points_request:
             return "request_points"
 
         if action == "book":
@@ -2201,6 +2309,7 @@ Keep the response concise but informative."""
 
         patterns = (
             r"request\s+\d+\s*(?:points?|pts?)\s+for\s+(.+)",
+            r"(?:i\s*(?:am|'m)\s+)?requesting\s+\d+\s*(?:points?|pts?)\s+for\s+(.+)",
             r"(?:can i|get me|i(?:'d| would)? like)\s+\d+\s*(?:points?|pts?)\s+for\s+(.+)",
         )
         for pattern in patterns:
