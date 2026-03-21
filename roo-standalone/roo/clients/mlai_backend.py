@@ -866,6 +866,61 @@ class MLAIBackendClient:
             print(f"❌ Failed to fetch admin allowance: {e}")
             return {'error': str(e)}
 
+    async def promote_points_admin(
+        self,
+        requester_slack_id: str,
+        target_slack_id: str,
+    ) -> dict:
+        """Promote a user to Points Admin using the privileged admin API."""
+        cleaned_target = self._clean_slack_id(target_slack_id)
+        payload = {
+            "requester_slack_id": requester_slack_id,
+            "target_slack_id": cleaned_target,
+        }
+
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{self._points_base}/admins/",
+                json=payload,
+                headers=self.admin_headers,
+                timeout=10.0,
+            )
+
+            if response.status_code == 409:
+                return response.json()
+
+            response.raise_for_status()
+            result = response.json()
+            self._admin_cache[cleaned_target] = True
+            return result
+
+    async def set_points_admin_weekly_allowance(
+        self,
+        requester_slack_id: str,
+        target_slack_id: str,
+        weekly_allowance: int,
+    ) -> dict:
+        """Update a specific Points Admin's weekly allowance."""
+        cleaned_target = self._clean_slack_id(target_slack_id)
+        payload = {
+            "requester_slack_id": requester_slack_id,
+            "weekly_allowance": weekly_allowance,
+        }
+
+        async with httpx.AsyncClient() as client:
+            response = await client.patch(
+                f"{self._points_base}/admins/{cleaned_target}/",
+                json=payload,
+                headers=self.admin_headers,
+                timeout=10.0,
+            )
+
+            if response.status_code == 404:
+                return response.json()
+
+            response.raise_for_status()
+            return response.json()
+
     async def create_task(
         self,
         admin_slack_id: str,

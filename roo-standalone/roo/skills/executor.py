@@ -20,6 +20,9 @@ from ..slack_client import post_message
 from ..config import get_settings
 
 
+POINTS_SUPER_ADMIN_SLACK_ID = "U05QPB483K9"
+
+
 @dataclass
 class SkillResult:
     """Result from skill execution."""
@@ -49,6 +52,7 @@ class SkillExecutor:
         channel_id: Optional[str] = None,
         thread_ts: Optional[str] = None,
         thread_history: Optional[List[dict]] = None,
+        param_overrides: Optional[dict] = None,
         **kwargs
     ) -> SkillResult:
         """
@@ -70,6 +74,9 @@ class SkillExecutor:
         try:
             # Extract parameters using LLM
             params = await self._extract_parameters(skill, text, user_id, thread_history)
+            if param_overrides:
+                params = {**params, **param_overrides}
+                print(f"   Applied param overrides: {param_overrides}")
             print(f"   Extracted params: {params}")
             
             # Check for skill-specific implementation
@@ -1092,15 +1099,23 @@ Keep the response concise but informative."""
         # 1. New User Disclaimer & Education
         # If user has no integration AND hasn't confirmed the disclaimer yet
         if not integration and not params.get("confirmed"):
-            # Save pending intent so we don't lose the original params (domain/topic)
-            intent_data = json.dumps({
-                "skill": "content-factory",
-                "params": params,
-                "text": text,
-                "channel": channel_id,
-                "ts": thread_ts
-            })
-            await api_client.save_pending_intent(user_id, intent_data)
+            await self._save_content_factory_pending_intent(
+                api_client,
+                user_id,
+                params,
+                text,
+                channel_id,
+                thread_ts,
+            )
+
+            confirm_value = json.dumps(
+                {
+                    "text": text,
+                    "params": params,
+                    "channel_id": channel_id,
+                    "thread_ts": thread_ts,
+                }
+            )
             
             blocks = [
                 {
@@ -1137,6 +1152,7 @@ Keep the response concise but informative."""
                                 "emoji": True
                             },
                             "action_id": "confirm_content_factory",
+                            "value": confirm_value,
                             "style": "primary"
                         }
                     ]
@@ -2254,6 +2270,15 @@ Keep the response concise but informative."""
         text_lower = text.lower()
         explicit_points_request = "request" in text_lower and "point" in text_lower and "reward" not in text_lower
 
+        if action in ["promote_points_admin", "set_points_admin_allowance"]:
+            return action
+
+        if self._is_points_admin_promotion_command(text):
+            return "promote_points_admin"
+
+        if self._is_points_allowance_change_command(text):
+            return "set_points_admin_allowance"
+
         if explicit_points_request:
             return "request_points"
 
@@ -2301,6 +2326,86 @@ Keep the response concise but informative."""
         if any(w in text_lower for w in ["deduct", "remove points"]):
             return "deduct_points"
         return action
+
+    def _is_points_super_admin(self, user_id: str) -> bool:
+        """Return true when the requester can manage points admins and allowances."""
+        return user_id == POINTS_SUPER_ADMIN_SLACK_ID
+
+    def _points_super_admin_denial(self) -> str:
+        """Fixed denial response for restricted points super-admin actions."""
+        return (
+            f"Sorry mate, only <@{POINTS_SUPER_ADMIN_SLACK_ID}> can manage "
+            "Points Admin access and weekly allowances. 🔒"
+        )
+
+    def _is_points_admin_promotion_command(self, text: str) -> bool:
+        """Detect commands that promote a tagged user to Points Admin."""
+        return bool(
+            re.search(r"\b(?:promote|make)\b", text, re.IGNORECASE)
+            and re.search(r"<@[A-Z0-9]+>", text)
+            and re.search(r"\b(?:roo\s+)?points\s+admin\b", text, re.IGNORECASE)
+        )
+
+    def _is_points_allowance_change_command(self, text: str) -> bool:
+        """Detect commands that change a tagged admin's weekly allowance."""
+        return bool(
+            re.search(r"\b(?:set|change)\b", text, re.IGNORECASE)
+            and re.search(r"<@[A-Z0-9]+>", text)
+            and re.search(r"\bweekly\s+(?:points\s+)?allowance\b", text, re.IGNORECASE)
+        )
+
+    def _extract_non_roo_mentions(self, text: str, bot_id: Optional[str] = None) -> list[str]:
+        """Extract unique tagged Slack user IDs, excluding Roo when present."""
+        target_ids: list[str] = []
+        seen: set[str] = set()
+
+        for target_id in re.findall(r"<@([A-Z0-9]+)>", text):
+            if target_id == bot_id or target_id in seen:
+                continue
+            seen.add(target_id)
+            target_ids.append(target_id)
+
+        return target_ids
+
+    def _extract_single_admin_target(
+        self,
+        text: str,
+        *,
+        bot_id: Optional[str],
+        action_label: str,
+    ) -> tuple[Optional[str], Optional[str]]:
+        """Extract exactly one tagged target user for privileged admin actions."""
+        target_ids = self._extract_non_roo_mentions(text, bot_id=bot_id)
+
+        if not target_ids:
+            return None, f"Tag exactly one user to {action_label}."
+        if len(target_ids) > 1:
+            return None, f"Tag exactly one user to {action_label}. I found multiple mentions there."
+
+        return target_ids[0], None
+
+    def _extract_weekly_allowance(self, text: str, fallback_allowance: Any = None) -> Optional[int]:
+        """Extract the requested weekly allowance from params or text."""
+        if fallback_allowance not in (None, "", "0"):
+            try:
+                return int(fallback_allowance)
+            except (TypeError, ValueError):
+                pass
+
+        patterns = (
+            r"weekly\s+(?:points\s+)?allowance\s+(?:to|of)\s+(-?\d+)\b",
+            r"allowance\s+(?:to|of)\s+(-?\d+)\b",
+            r"(?<![A-Z0-9])(-?\d+)\b",
+        )
+        for pattern in patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                try:
+                    return int(match.group(1))
+                except ValueError:
+                    return None
+
+        return None
 
     def _extract_points_request_reason(self, text: str, fallback_reason: str = "") -> str:
         """Extract the reason from a natural-language points request."""
@@ -2689,6 +2794,93 @@ Keep the response concise but informative."""
         # =====================================================================
         # Admin Actions
         # =====================================================================
+
+        elif action == "promote_points_admin":
+            from ..slack_client import get_bot_user_id
+
+            if not self._is_points_super_admin(user_id):
+                return self._points_super_admin_denial()
+
+            try:
+                bot_id = get_bot_user_id()
+            except Exception:
+                bot_id = None
+
+            target_slack_id, target_error = self._extract_single_admin_target(
+                text,
+                bot_id=bot_id,
+                action_label="promote them to Roo Points Admin",
+            )
+            if target_error:
+                return target_error
+
+            await self._ensure_user_exists(target_slack_id)
+            result = await client.promote_points_admin(user_id, target_slack_id)
+
+            error_message = str(result.get("error") or result.get("detail") or "").strip()
+            promoted_target = client._clean_slack_id(
+                result.get("target_slack_id") or target_slack_id
+            )
+
+            if result.get("already_admin") or (
+                "already" in error_message.lower() and "admin" in error_message.lower()
+            ):
+                return f"<@{promoted_target}> is already a Roo Points Admin."
+            if error_message:
+                return f"Couldn't promote <@{promoted_target}> to Roo Points Admin: {error_message}"
+
+            return f"✅ <@{promoted_target}> is now a Roo Points Admin."
+
+        elif action == "set_points_admin_allowance":
+            from ..slack_client import get_bot_user_id
+
+            if not self._is_points_super_admin(user_id):
+                return self._points_super_admin_denial()
+
+            try:
+                bot_id = get_bot_user_id()
+            except Exception:
+                bot_id = None
+
+            target_slack_id, target_error = self._extract_single_admin_target(
+                text,
+                bot_id=bot_id,
+                action_label="change their weekly points allowance",
+            )
+            if target_error:
+                return target_error
+
+            weekly_allowance = self._extract_weekly_allowance(
+                text,
+                params.get("weekly_allowance"),
+            )
+            if weekly_allowance is None:
+                return (
+                    "What weekly allowance should I set? Give me a positive number of points, "
+                    "like `set <@user> weekly points allowance to 150`."
+                )
+            if weekly_allowance <= 0:
+                return "Weekly points allowance has to be a positive number."
+
+            result = await client.set_points_admin_weekly_allowance(
+                user_id,
+                target_slack_id,
+                weekly_allowance,
+            )
+
+            error_message = str(result.get("error") or result.get("detail") or "").strip()
+            if error_message:
+                if "not a points admin" in error_message.lower():
+                    return f"<@{target_slack_id}> isn't a Points Admin yet, so I can't update their allowance."
+                return f"Couldn't update <@{target_slack_id}>'s weekly allowance: {error_message}"
+
+            effective_allowance = result.get("weekly_allowance", result.get("allowance", weekly_allowance))
+            updated_target = client._clean_slack_id(result.get("target_slack_id") or target_slack_id)
+
+            return (
+                f"✅ Set <@{updated_target}>'s weekly points allowance to "
+                f"{effective_allowance} points."
+            )
         
         elif action == "create_task":
             # 1. Parameter Aliases

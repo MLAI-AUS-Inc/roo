@@ -57,6 +57,48 @@ class FakePointsClient:
         return {"ok": True}
 
 
+class FakePointsAdminClient:
+    def __init__(self):
+        self.promote_args = None
+        self.allowance_args = None
+
+    def _clean_slack_id(self, user_id):
+        return str(user_id).strip("<@>")
+
+    async def promote_points_admin(self, requester_slack_id, target_slack_id):
+        self.promote_args = (requester_slack_id, target_slack_id)
+        return {"target_slack_id": target_slack_id}
+
+    async def set_points_admin_weekly_allowance(
+        self,
+        requester_slack_id,
+        target_slack_id,
+        weekly_allowance,
+    ):
+        self.allowance_args = (requester_slack_id, target_slack_id, weekly_allowance)
+        return {
+            "target_slack_id": target_slack_id,
+            "weekly_allowance": weekly_allowance,
+        }
+
+
+class FakeAlreadyAdminClient(FakePointsAdminClient):
+    async def promote_points_admin(self, requester_slack_id, target_slack_id):
+        self.promote_args = (requester_slack_id, target_slack_id)
+        return {"target_slack_id": target_slack_id, "already_admin": True}
+
+
+class FakeMissingPointsAdminClient(FakePointsAdminClient):
+    async def set_points_admin_weekly_allowance(
+        self,
+        requester_slack_id,
+        target_slack_id,
+        weekly_allowance,
+    ):
+        self.allowance_args = (requester_slack_id, target_slack_id, weekly_allowance)
+        return {"error": "Not a points admin"}
+
+
 def test_resolve_points_action_prefers_request_points():
     executor = SkillExecutor()
 
@@ -97,6 +139,28 @@ def test_extract_points_request_reason_supports_award_me_phrase():
     )
 
     assert reason == "volunteering at medhack"
+
+
+def test_resolve_points_action_maps_promote_points_admin():
+    executor = SkillExecutor()
+
+    action = executor._resolve_points_action(
+        {},
+        "please promote <@U123ABC> to roo points admin",
+    )
+
+    assert action == "promote_points_admin"
+
+
+def test_resolve_points_action_maps_points_allowance_change():
+    executor = SkillExecutor()
+
+    action = executor._resolve_points_action(
+        {},
+        "change <@U123ABC> weekly points allowance to 150",
+    )
+
+    assert action == "set_points_admin_allowance"
 
 
 @pytest.mark.asyncio
@@ -219,6 +283,232 @@ async def test_request_points_rejected_in_dm():
     )
 
     assert "shared channel or thread" in result
+
+
+@pytest.mark.asyncio
+async def test_promote_points_admin_authorized(monkeypatch):
+    executor = SkillExecutor()
+    client = FakePointsAdminClient()
+    ensured_users = []
+
+    async def fake_ensure_user_exists(user_id):
+        ensured_users.append(user_id)
+
+    monkeypatch.setattr(executor, "_ensure_user_exists", fake_ensure_user_exists)
+    monkeypatch.setattr(slack_client_module, "get_bot_user_id", lambda: "UBOT")
+
+    result = await executor._handle_points_action(
+        client=client,
+        action="promote_points_admin",
+        params={},
+        text="promote <@UTARGET> to roo points admin",
+        user_id=executor_module.POINTS_SUPER_ADMIN_SLACK_ID,
+        channel_id="C123",
+        thread_ts="111.222",
+        skill=None,
+    )
+
+    assert ensured_users == ["UTARGET"]
+    assert client.promote_args == (
+        executor_module.POINTS_SUPER_ADMIN_SLACK_ID,
+        "UTARGET",
+    )
+    assert "<@UTARGET> is now a Roo Points Admin" in result
+
+
+@pytest.mark.asyncio
+async def test_promote_points_admin_denies_unauthorized_user(monkeypatch):
+    executor = SkillExecutor()
+    client = FakePointsAdminClient()
+    ensured_users = []
+
+    async def fake_ensure_user_exists(user_id):
+        ensured_users.append(user_id)
+
+    monkeypatch.setattr(executor, "_ensure_user_exists", fake_ensure_user_exists)
+    monkeypatch.setattr(slack_client_module, "get_bot_user_id", lambda: "UBOT")
+
+    result = await executor._handle_points_action(
+        client=client,
+        action="promote_points_admin",
+        params={},
+        text="promote <@UTARGET> to roo points admin",
+        user_id="UNAUTHORIZED",
+        channel_id="C123",
+        thread_ts="111.222",
+        skill=None,
+    )
+
+    assert "only <@U05QPB483K9> can manage Points Admin access and weekly allowances" in result
+    assert client.promote_args is None
+    assert ensured_users == []
+
+
+@pytest.mark.asyncio
+async def test_promote_points_admin_requires_exactly_one_tagged_user(monkeypatch):
+    executor = SkillExecutor()
+    client = FakePointsAdminClient()
+
+    monkeypatch.setattr(slack_client_module, "get_bot_user_id", lambda: "UBOT")
+
+    missing_result = await executor._handle_points_action(
+        client=client,
+        action="promote_points_admin",
+        params={},
+        text="promote sam to roo points admin",
+        user_id=executor_module.POINTS_SUPER_ADMIN_SLACK_ID,
+        channel_id="C123",
+        thread_ts="111.222",
+        skill=None,
+    )
+    multiple_result = await executor._handle_points_action(
+        client=client,
+        action="promote_points_admin",
+        params={},
+        text="promote <@UONE> and <@UTWO> to roo points admin",
+        user_id=executor_module.POINTS_SUPER_ADMIN_SLACK_ID,
+        channel_id="C123",
+        thread_ts="111.222",
+        skill=None,
+    )
+
+    assert "Tag exactly one user to promote them to Roo Points Admin." in missing_result
+    assert "I found multiple mentions there" in multiple_result
+
+
+@pytest.mark.asyncio
+async def test_promote_points_admin_handles_already_admin_idempotently(monkeypatch):
+    executor = SkillExecutor()
+    client = FakeAlreadyAdminClient()
+
+    async def fake_ensure_user_exists(_user_id):
+        return None
+
+    monkeypatch.setattr(executor, "_ensure_user_exists", fake_ensure_user_exists)
+    monkeypatch.setattr(slack_client_module, "get_bot_user_id", lambda: "UBOT")
+
+    result = await executor._handle_points_action(
+        client=client,
+        action="promote_points_admin",
+        params={},
+        text="make <@UTARGET> a roo points admin",
+        user_id=executor_module.POINTS_SUPER_ADMIN_SLACK_ID,
+        channel_id="C123",
+        thread_ts="111.222",
+        skill=None,
+    )
+
+    assert client.promote_args == (
+        executor_module.POINTS_SUPER_ADMIN_SLACK_ID,
+        "UTARGET",
+    )
+    assert "<@UTARGET> is already a Roo Points Admin." == result
+
+
+@pytest.mark.asyncio
+async def test_set_points_admin_allowance_authorized(monkeypatch):
+    executor = SkillExecutor()
+    client = FakePointsAdminClient()
+
+    monkeypatch.setattr(slack_client_module, "get_bot_user_id", lambda: "UBOT")
+
+    result = await executor._handle_points_action(
+        client=client,
+        action="set_points_admin_allowance",
+        params={},
+        text="change <@UTARGET> weekly points allowance to 150",
+        user_id=executor_module.POINTS_SUPER_ADMIN_SLACK_ID,
+        channel_id="C123",
+        thread_ts="111.222",
+        skill=None,
+    )
+
+    assert client.allowance_args == (
+        executor_module.POINTS_SUPER_ADMIN_SLACK_ID,
+        "UTARGET",
+        150,
+    )
+    assert "✅ Set <@UTARGET>'s weekly points allowance to 150 points." == result
+
+
+@pytest.mark.asyncio
+async def test_set_points_admin_allowance_denies_unauthorized_user(monkeypatch):
+    executor = SkillExecutor()
+    client = FakePointsAdminClient()
+
+    monkeypatch.setattr(slack_client_module, "get_bot_user_id", lambda: "UBOT")
+
+    result = await executor._handle_points_action(
+        client=client,
+        action="set_points_admin_allowance",
+        params={},
+        text="set <@UTARGET> weekly points allowance to 150",
+        user_id="UNAUTHORIZED",
+        channel_id="C123",
+        thread_ts="111.222",
+        skill=None,
+    )
+
+    assert "only <@U05QPB483K9> can manage Points Admin access and weekly allowances" in result
+    assert client.allowance_args is None
+
+
+@pytest.mark.asyncio
+async def test_set_points_admin_allowance_requires_numeric_positive_value(monkeypatch):
+    executor = SkillExecutor()
+    client = FakePointsAdminClient()
+
+    monkeypatch.setattr(slack_client_module, "get_bot_user_id", lambda: "UBOT")
+
+    missing_result = await executor._handle_points_action(
+        client=client,
+        action="set_points_admin_allowance",
+        params={},
+        text="set <@UTARGET> weekly points allowance",
+        user_id=executor_module.POINTS_SUPER_ADMIN_SLACK_ID,
+        channel_id="C123",
+        thread_ts="111.222",
+        skill=None,
+    )
+    invalid_result = await executor._handle_points_action(
+        client=client,
+        action="set_points_admin_allowance",
+        params={},
+        text="set <@UTARGET> weekly points allowance to 0",
+        user_id=executor_module.POINTS_SUPER_ADMIN_SLACK_ID,
+        channel_id="C123",
+        thread_ts="111.222",
+        skill=None,
+    )
+
+    assert "What weekly allowance should I set?" in missing_result
+    assert "Weekly points allowance has to be a positive number." == invalid_result
+
+
+@pytest.mark.asyncio
+async def test_set_points_admin_allowance_surfaces_target_not_admin(monkeypatch):
+    executor = SkillExecutor()
+    client = FakeMissingPointsAdminClient()
+
+    monkeypatch.setattr(slack_client_module, "get_bot_user_id", lambda: "UBOT")
+
+    result = await executor._handle_points_action(
+        client=client,
+        action="set_points_admin_allowance",
+        params={},
+        text="set <@UTARGET> weekly points allowance to 150",
+        user_id=executor_module.POINTS_SUPER_ADMIN_SLACK_ID,
+        channel_id="C123",
+        thread_ts="111.222",
+        skill=None,
+    )
+
+    assert client.allowance_args == (
+        executor_module.POINTS_SUPER_ADMIN_SLACK_ID,
+        "UTARGET",
+        150,
+    )
+    assert "<@UTARGET> isn't a Points Admin yet, so I can't update their allowance." == result
 
 
 class FakeApprovalClient:
