@@ -2311,6 +2311,7 @@ Keep the response concise but informative."""
             r"request\s+\d+\s*(?:points?|pts?)\s+for\s+(.+)",
             r"(?:i\s*(?:am|'m)\s+)?requesting\s+\d+\s*(?:points?|pts?)\s+for\s+(.+)",
             r"(?:can i|get me|i(?:'d| would)? like)\s+\d+\s*(?:points?|pts?)\s+for\s+(.+)",
+            r"(?:please\s+)?(?:award|give|reward)\s+(?:me|myself|<@[A-Z0-9]+>)\s+\d+\s*(?:roo\s+)?(?:points?|pts?)\s+for\s+(.+)",
         )
         for pattern in patterns:
             match = re.search(pattern, text, re.IGNORECASE)
@@ -2335,6 +2336,39 @@ Keep the response concise but informative."""
             return int(match.group(1))
         except ValueError:
             return None
+
+    def _is_self_directed_points_award(
+        self,
+        text: str,
+        params: dict,
+        user_id: str,
+        bot_id: Optional[str] = None,
+    ) -> bool:
+        """Detect an award command that is actually asking Roo to award the requester themselves."""
+        text_lower = text.lower()
+        if re.search(r"\b(?:award|give|reward)\s+(?:me|myself)\b", text_lower):
+            return True
+
+        mentioned_users = [
+            mentioned_user
+            for mentioned_user in re.findall(r"<@([A-Z0-9]+)>", text)
+            if mentioned_user != bot_id
+        ]
+        if mentioned_users and all(mentioned_user == user_id for mentioned_user in mentioned_users):
+            return True
+
+        param_targets: list[str] = []
+        for param_target in params.get("target_users", []) or []:
+            cleaned_target = re.sub(r"[<@>]", "", str(param_target))
+            if cleaned_target and cleaned_target != bot_id:
+                param_targets.append(cleaned_target)
+
+        for param_target in (params.get("target_user"), params.get("target_slack_id")):
+            cleaned_target = re.sub(r"[<@>]", "", str(param_target or ""))
+            if cleaned_target and cleaned_target != bot_id:
+                param_targets.append(cleaned_target)
+
+        return bool(param_targets) and all(param_target == user_id for param_target in param_targets)
 
     async def _handle_points_action(
         self,
@@ -2415,7 +2449,8 @@ Keep the response concise but informative."""
                 for mentioned_user in re.findall(r"<@([A-Z0-9]+)>", text)
                 if mentioned_user != bot_id
             ]
-            if mentioned_users:
+            non_self_mentions = [mentioned_user for mentioned_user in mentioned_users if mentioned_user != user_id]
+            if non_self_mentions:
                 return "For now, points requests are only for yourself. Ask an admin to use the manual award flow for someone else."
 
             request_record = await client.create_points_request(
@@ -2763,6 +2798,24 @@ Keep the response concise but informative."""
             return "Sorry mate, I can only award points, not deduct them! 🚫"
             
         elif action in ["award_points", "award"]:
+            from ..slack_client import get_bot_user_id
+            try:
+                bot_id = get_bot_user_id()
+            except Exception:
+                bot_id = None
+
+            if self._is_self_directed_points_award(text, params, user_id, bot_id=bot_id):
+                return await self._handle_points_action(
+                    client=client,
+                    action="request_points",
+                    params=params,
+                    text=text,
+                    user_id=user_id,
+                    channel_id=channel_id,
+                    thread_ts=thread_ts,
+                    skill=skill,
+                )
+
             # Early allowance check for award actions (before LLM/rate card lookup)
             if action in ["award_points", "award"]:
                 try:
@@ -2788,12 +2841,6 @@ Keep the response concise but informative."""
 
             
             # Get Roo's bot ID to filter it from target users
-            from ..slack_client import get_bot_user_id
-            try:
-                bot_id = get_bot_user_id()
-            except Exception:
-                bot_id = None
-            
             # Extract ALL user mentions from the text (excluding Roo)
             import re
             all_mentions = re.findall(r'<@([A-Z0-9]+)>', text)

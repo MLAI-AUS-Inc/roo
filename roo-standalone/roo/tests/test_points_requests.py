@@ -89,6 +89,16 @@ def test_extract_points_request_reason_supports_requesting_phrase():
     assert reason == "volunteering at MedHack"
 
 
+def test_extract_points_request_reason_supports_award_me_phrase():
+    executor = SkillExecutor()
+
+    reason = executor._extract_points_request_reason(
+        "please award me 6 roo points for volunteering at medhack"
+    )
+
+    assert reason == "volunteering at medhack"
+
+
 @pytest.mark.asyncio
 async def test_request_points_creates_request_and_suppresses_auto_post(monkeypatch):
     executor = SkillExecutor()
@@ -161,6 +171,36 @@ async def test_request_points_handles_im_requesting_phrase(monkeypatch):
     assert client.created["points"] == 6
     assert client.created["reason"] == "volunteering at MedHack"
     assert "requested *6 points* for: volunteering at MedHack" in posted_messages[0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_award_me_phrase_is_converted_into_points_request(monkeypatch):
+    executor = SkillExecutor()
+    client = FakePointsClient()
+    posted_messages = []
+
+    monkeypatch.setattr(
+        executor_module,
+        "post_message",
+        lambda **kwargs: posted_messages.append(kwargs) or {"ts": "222.333"},
+    )
+    monkeypatch.setattr(slack_client_module, "get_bot_user_id", lambda: "UBOT")
+
+    result = await executor._handle_points_action(
+        client=client,
+        action="award_points",
+        params={"action": "award_points", "points": 6, "reason": ""},
+        text="please award me 6 roo points for volunteering at medhack",
+        user_id="U123",
+        channel_id="C123",
+        thread_ts="111.222",
+        skill=None,
+    )
+
+    assert result["suppress_post"] is True
+    assert client.created["target_slack_id"] == "U123"
+    assert client.created["reason"] == "volunteering at medhack"
+    assert "requested *6 points* for: volunteering at medhack" in posted_messages[0]["text"]
 
 
 @pytest.mark.asyncio
