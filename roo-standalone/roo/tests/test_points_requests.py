@@ -68,6 +68,27 @@ def test_resolve_points_action_prefers_request_points():
     assert action == "request_points"
 
 
+def test_resolve_points_action_maps_plain_request_to_request_points():
+    executor = SkillExecutor()
+
+    action = executor._resolve_points_action(
+        {"action": "request"},
+        "I'm requesting 6 points for volunteering at MedHack",
+    )
+
+    assert action == "request_points"
+
+
+def test_extract_points_request_reason_supports_requesting_phrase():
+    executor = SkillExecutor()
+
+    reason = executor._extract_points_request_reason(
+        "I'm requesting 6 points for volunteering at MedHack"
+    )
+
+    assert reason == "volunteering at MedHack"
+
+
 @pytest.mark.asyncio
 async def test_request_points_creates_request_and_suppresses_auto_post(monkeypatch):
     executor = SkillExecutor()
@@ -110,6 +131,36 @@ async def test_request_points_creates_request_and_suppresses_auto_post(monkeypat
     }
     assert posted_messages[0]["thread_ts"] == "111.222"
     assert "Points Admins can approve this by reacting with ✅" in posted_messages[0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_request_points_handles_im_requesting_phrase(monkeypatch):
+    executor = SkillExecutor()
+    client = FakePointsClient()
+    posted_messages = []
+
+    monkeypatch.setattr(
+        executor_module,
+        "post_message",
+        lambda **kwargs: posted_messages.append(kwargs) or {"ts": "222.333"},
+    )
+    monkeypatch.setattr(slack_client_module, "get_bot_user_id", lambda: "UBOT")
+
+    result = await executor._handle_points_action(
+        client=client,
+        action="request_points",
+        params={"action": "request", "points": 6, "reason": ""},
+        text="I'm requesting 6 points for volunteering at MedHack",
+        user_id="U123",
+        channel_id="C123",
+        thread_ts="111.222",
+        skill=None,
+    )
+
+    assert result["suppress_post"] is True
+    assert client.created["points"] == 6
+    assert client.created["reason"] == "volunteering at MedHack"
+    assert "requested *6 points* for: volunteering at MedHack" in posted_messages[0]["text"]
 
 
 @pytest.mark.asyncio

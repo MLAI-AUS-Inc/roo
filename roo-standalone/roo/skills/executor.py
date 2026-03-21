@@ -2146,7 +2146,7 @@ Keep the response concise but informative."""
         text_lower = text.lower()
         explicit_points_request = "request" in text_lower and "point" in text_lower and "reward" not in text_lower
 
-        if explicit_points_request and action in ("", "task", "award", "award_points"):
+        if explicit_points_request:
             return "request_points"
 
         if action == "book":
@@ -2201,6 +2201,7 @@ Keep the response concise but informative."""
 
         patterns = (
             r"request\s+\d+\s*(?:points?|pts?)\s+for\s+(.+)",
+            r"(?:i\s*(?:am|'m)\s+)?requesting\s+\d+\s*(?:points?|pts?)\s+for\s+(.+)",
             r"(?:can i|get me|i(?:'d| would)? like)\s+\d+\s*(?:points?|pts?)\s+for\s+(.+)",
         )
         for pattern in patterns:
