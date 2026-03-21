@@ -21,6 +21,10 @@ SkillExecutor = executor_module.SkillExecutor
 
 class FakeContentFactoryClient:
     last_instance = None
+    generic_integration = None
+    domain_integrations = {}
+    auth_urls = {}
+    saved_intents = []
 
     def __init__(self, *args, **kwargs):
         self.trigger_calls = []
@@ -28,20 +32,25 @@ class FakeContentFactoryClient:
         FakeContentFactoryClient.last_instance = self
 
     async def get_integration(self, user_id, domain=None):
+        if domain is not None:
+            return FakeContentFactoryClient.domain_integrations.get(domain)
+        return FakeContentFactoryClient.generic_integration
+
+    async def get_github_auth_url(self, user_id, domain=None):
         return {
-            "github_repo": "MLAI-AUS-Inc/mlai-au",
-            "project_scanned": True,
-            "last_scanned_at": "2026-03-15T10:39:17.784628Z",
-            "last_article": None,
-            "recommended_next_action": None,
-            "connected_domains": [
-                {
-                    "domain": "mlai.au",
-                    "github_repo": "MLAI-AUS-Inc/mlai-au",
-                    "scanned": True,
-                }
-            ],
+            "auth_url": FakeContentFactoryClient.auth_urls.get(
+                domain,
+                FakeContentFactoryClient.auth_urls.get("default", "https://github.test/auth"),
+            )
         }
+
+    async def save_pending_intent(self, slack_user_id, intent_data):
+        FakeContentFactoryClient.saved_intents.append(
+            {
+                "slack_user_id": slack_user_id,
+                "intent_data": json.loads(intent_data),
+            }
+        )
 
     async def trigger_article_generation(
         self,
@@ -81,6 +90,27 @@ class FakeContentFactoryClient:
 
 
 def _patch_content_factory(monkeypatch):
+    default_integration = {
+        "github_repo": "MLAI-AUS-Inc/mlai-au",
+        "domain_github_repo": "MLAI-AUS-Inc/mlai-au",
+        "project_scanned": True,
+        "last_scanned_at": "2026-03-15T10:39:17.784628Z",
+        "last_article": None,
+        "recommended_next_action": None,
+        "connected_domains": [
+            {
+                "domain": "mlai.au",
+                "github_repo": "MLAI-AUS-Inc/mlai-au",
+                "scanned": True,
+            }
+        ],
+    }
+    FakeContentFactoryClient.generic_integration = default_integration
+    FakeContentFactoryClient.domain_integrations = {"mlai.au": default_integration}
+    FakeContentFactoryClient.auth_urls = {"default": "https://github.test/auth"}
+    FakeContentFactoryClient.saved_intents = []
+    FakeContentFactoryClient.last_instance = None
+
     monkeypatch.setattr(
         executor_module,
         "get_settings",
@@ -121,6 +151,145 @@ async def test_generic_article_request_prompts_for_direction(monkeypatch):
     }
     assert "Status Report" in posted_messages[0]["args"][1]
     assert FakeContentFactoryClient.last_instance.trigger_calls == []
+
+
+@pytest.mark.asyncio
+async def test_new_domain_requests_domain_github_auth_without_falling_back_to_generic_repo(monkeypatch):
+    executor = SkillExecutor()
+    posted_messages = []
+    _patch_content_factory(monkeypatch)
+    FakeContentFactoryClient.generic_integration = {
+        "github_repo": "drsamdonegan/borderline-main",
+        "project_scanned": True,
+        "last_scanned_at": "2026-03-15T10:39:17.784628Z",
+        "last_article": None,
+        "recommended_next_action": None,
+        "connected_domains": [
+            {
+                "domain": "mlai.au",
+                "github_repo": "MLAI-AUS-Inc/mlai-au",
+                "scanned": True,
+            }
+        ],
+    }
+    FakeContentFactoryClient.domain_integrations["woofya.com.au"] = {
+        "project_scanned": False,
+        "last_scanned_at": "Never",
+        "last_article": None,
+        "recommended_next_action": None,
+        "connected_domains": [
+            {
+                "domain": "mlai.au",
+                "github_repo": "MLAI-AUS-Inc/mlai-au",
+                "scanned": True,
+            }
+        ],
+        "needs_github_auth": True,
+        "oauth_url": "https://github.test/auth/woofya",
+    }
+    monkeypatch.setattr(
+        executor_module,
+        "post_message",
+        lambda *args, **kwargs: posted_messages.append({"args": args, "kwargs": kwargs}) or {"ts": "111.222"},
+    )
+
+    result = await executor._execute_content_factory(
+        skill=None,
+        text="write an article for my website woofya.com.au",
+        params={"domain": "woofya.com.au"},
+        user_id="U05QPB483K9",
+        channel_id="C123",
+        thread_ts="111.222",
+    )
+
+    assert "GitHub isn't connected for woofya.com.au" in result
+    assert len(posted_messages) == 1
+    assert posted_messages[0]["args"][1] == "GitHub not connected for woofya.com.au"
+    assert "woofya.com.au" in posted_messages[0]["kwargs"]["blocks"][0]["text"]["text"]
+    assert "Status Report" not in json.dumps(posted_messages)
+    assert "borderline-main" not in json.dumps(posted_messages)
+    assert FakeContentFactoryClient.last_instance.trigger_calls == []
+    assert FakeContentFactoryClient.saved_intents == [
+        {
+            "slack_user_id": "U05QPB483K9",
+            "intent_data": {
+                "skill": "content-factory",
+                "params": {"domain": "woofya.com.au"},
+                "text": "write an article for my website woofya.com.au",
+                "channel": "C123",
+                "ts": "111.222",
+            },
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_new_domain_requires_repo_selection_without_falling_back_to_generic_repo(monkeypatch):
+    executor = SkillExecutor()
+    posted_messages = []
+    _patch_content_factory(monkeypatch)
+    FakeContentFactoryClient.generic_integration = {
+        "github_repo": "drsamdonegan/borderline-main",
+        "project_scanned": True,
+        "last_scanned_at": "2026-03-15T10:39:17.784628Z",
+        "last_article": None,
+        "recommended_next_action": None,
+        "connected_domains": [
+            {
+                "domain": "mlai.au",
+                "github_repo": "MLAI-AUS-Inc/mlai-au",
+                "scanned": True,
+            }
+        ],
+    }
+    FakeContentFactoryClient.domain_integrations["woofya.com.au"] = {
+        "project_scanned": False,
+        "last_scanned_at": "Never",
+        "last_article": None,
+        "recommended_next_action": None,
+        "connected_domains": [
+            {
+                "domain": "mlai.au",
+                "github_repo": "MLAI-AUS-Inc/mlai-au",
+                "scanned": True,
+            }
+        ],
+        "needs_github_auth": False,
+    }
+    monkeypatch.setattr(
+        executor_module,
+        "post_message",
+        lambda *args, **kwargs: posted_messages.append({"args": args, "kwargs": kwargs}) or {"ts": "111.222"},
+    )
+
+    result = await executor._execute_content_factory(
+        skill=None,
+        text="write an article for my website woofya.com.au",
+        params={"domain": "woofya.com.au"},
+        user_id="U05QPB483K9",
+        channel_id="C123",
+        thread_ts="111.222",
+    )
+
+    assert result == "Please choose a repository to use with the Content Factory. 🔌"
+    assert len(posted_messages) == 1
+    assert posted_messages[0]["args"][1] == "Please select a repository"
+    assert "woofya.com.au" in posted_messages[0]["kwargs"]["blocks"][0]["text"]["text"]
+    assert "Status Report" not in json.dumps(posted_messages)
+    assert "borderline-main" not in json.dumps(posted_messages)
+    assert FakeContentFactoryClient.last_instance.trigger_calls == []
+    assert FakeContentFactoryClient.saved_intents == [
+        {
+            "slack_user_id": "U05QPB483K9",
+            "intent_data": {
+                "skill": "content-factory",
+                "params": {"domain": "woofya.com.au"},
+                "text": "write an article for my website woofya.com.au",
+                "channel": "C123",
+                "ts": "111.222",
+            },
+        }
+    ]
 
 
 @pytest.mark.asyncio
