@@ -10,6 +10,7 @@ import hmac
 import hashlib
 import time
 from contextlib import asynccontextmanager
+from typing import Any, Optional
 
 from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.responses import JSONResponse
@@ -21,6 +22,182 @@ from .slack_client import post_message, send_dm
 # Pending intents for auto-continue after prerequisite steps complete.
 # Key: "{slack_user_id}:{domain}" → {"action": "write", "topic": "...", "channel_id": "...", "thread_ts": "..."}
 _pending_intents: dict = {}
+_pending_intents_by_job: dict[str, str] = {}
+PENDING_INTENT_TTL_SECONDS = 30 * 60
+
+
+def _pending_intent_key(slack_user_id: Optional[str], domain: Optional[str]) -> Optional[str]:
+    if not slack_user_id or not domain:
+        return None
+    return f"{slack_user_id}:{domain}"
+
+
+def _pop_pending_intent_by_key(intent_key: Optional[str]) -> Optional[dict[str, Any]]:
+    if not intent_key:
+        return None
+    pending = _pending_intents.pop(intent_key, None)
+    if not pending:
+        return None
+    pending_job_id = pending.get("job_id")
+    if pending_job_id and _pending_intents_by_job.get(pending_job_id) == intent_key:
+        _pending_intents_by_job.pop(pending_job_id, None)
+    return pending
+
+
+def _prune_pending_intents(now: Optional[float] = None) -> None:
+    current_time = now if now is not None else time.time()
+    for intent_key, pending in list(_pending_intents.items()):
+        expires_at = pending.get("expires_at")
+        if expires_at is not None and expires_at <= current_time:
+            _pop_pending_intent_by_key(intent_key)
+
+
+def _remember_pending_intent(
+    slack_user_id: Optional[str],
+    domain: Optional[str],
+    *,
+    intent_data: Optional[dict[str, Any]] = None,
+    channel_id: Optional[str] = None,
+    thread_ts: Optional[str] = None,
+    wait_for: str,
+    job_id: Optional[str] = None,
+    clear_job_id: bool = False,
+) -> Optional[dict[str, Any]]:
+    _prune_pending_intents()
+    intent_key = _pending_intent_key(slack_user_id, domain)
+    if not intent_key:
+        return None
+
+    existing = _pending_intents.get(intent_key, {})
+    previous_job_id = existing.get("job_id")
+    if previous_job_id and previous_job_id != job_id and _pending_intents_by_job.get(previous_job_id) == intent_key:
+        _pending_intents_by_job.pop(previous_job_id, None)
+
+    now = time.time()
+    pending = dict(existing)
+    if intent_data:
+        pending.update(intent_data)
+    if channel_id is not None:
+        pending["channel_id"] = channel_id
+    if thread_ts is not None:
+        pending["thread_ts"] = thread_ts
+    pending["wait_for"] = wait_for
+    pending["created_at"] = pending.get("created_at", now)
+    pending["updated_at"] = now
+    pending["expires_at"] = now + PENDING_INTENT_TTL_SECONDS
+    if job_id:
+        pending["job_id"] = job_id
+        _pending_intents_by_job[job_id] = intent_key
+    elif clear_job_id:
+        pending.pop("job_id", None)
+
+    _pending_intents[intent_key] = pending
+    return pending
+
+
+def _get_pending_intent(
+    slack_user_id: Optional[str],
+    domain: Optional[str],
+    *,
+    job_id: Optional[str] = None,
+    wait_for: Optional[str] = None,
+    consume: bool = False,
+) -> Optional[dict[str, Any]]:
+    _prune_pending_intents()
+
+    intent_key = _pending_intents_by_job.get(job_id) if job_id else None
+    if intent_key:
+        pending = _pending_intents.get(intent_key)
+        if not pending:
+            _pending_intents_by_job.pop(job_id, None)
+            return None
+        if wait_for and pending.get("wait_for") != wait_for:
+            return None
+        return _pop_pending_intent_by_key(intent_key) if consume else pending
+
+    intent_key = _pending_intent_key(slack_user_id, domain)
+    if not intent_key:
+        return None
+    pending = _pending_intents.get(intent_key)
+    if not pending:
+        return None
+    if wait_for and pending.get("wait_for") != wait_for:
+        return None
+    return _pop_pending_intent_by_key(intent_key) if consume else pending
+
+
+def _extract_job_id(payload: Optional[dict[str, Any]]) -> Optional[str]:
+    if not isinstance(payload, dict):
+        return None
+
+    for key in ("job_id", "run_id"):
+        value = payload.get(key)
+        if value:
+            return str(value)
+
+    nested_data = payload.get("data")
+    if isinstance(nested_data, dict):
+        nested_job_id = _extract_job_id(nested_data)
+        if nested_job_id:
+            return nested_job_id
+
+    nested_job = payload.get("job")
+    if isinstance(nested_job, dict):
+        nested_job_id = _extract_job_id(nested_job)
+        if nested_job_id:
+            return nested_job_id
+
+    return None
+
+
+async def _trigger_article_generation_from_pending(
+    pending: dict[str, Any],
+    *,
+    slack_user_id: str,
+    domain: str,
+    fallback_channel_id: Optional[str] = None,
+    fallback_thread_ts: Optional[str] = None,
+) -> bool:
+    intent_channel = pending.get("channel_id") or fallback_channel_id
+    intent_thread = pending.get("thread_ts") or fallback_thread_ts
+    topic = pending.get("topic")
+
+    print(f"🔄 Auto-continuing: triggering article generation for {domain} (topic: {topic})")
+
+    if intent_channel:
+        topic_note = f" about *{topic}*" if topic else ""
+        post_message(
+            channel=intent_channel,
+            thread_ts=intent_thread,
+            text=f"✅ Articles directory is ready! Now writing your article{topic_note}..."
+        )
+
+    from .clients.mlai_backend import MLAIBackendClient
+    settings = get_settings()
+    backend_client = MLAIBackendClient(
+        base_url=settings.MLAI_BACKEND_URL,
+        api_key=settings.MLAI_API_KEY
+    )
+    try:
+        await backend_client.trigger_article_generation(
+            slack_user_id=slack_user_id,
+            domain=domain,
+            topic=topic,
+            target_keyword=pending.get("target_keyword"),
+            slack_channel_id=intent_channel,
+            slack_thread_ts=intent_thread
+        )
+        print(f"✅ Auto-generation triggered for {domain}")
+        return True
+    except Exception as e:
+        print(f"❌ Auto-generation failed: {e}")
+        if intent_channel:
+            post_message(
+                channel=intent_channel,
+                thread_ts=intent_thread,
+                text=f"❌ Error starting article generation: {e}"
+            )
+        return False
 
 
 def _remember_content_thread_context(
@@ -1024,8 +1201,12 @@ async def content_factory_callback(request: Request):
                     )
 
             # Auto-continue: check for pending intent after scan completes
-            intent_key = f"{slack_user_id}:{domain}"
-            pending = _pending_intents.get(intent_key)
+            pending = _get_pending_intent(
+                slack_user_id,
+                domain,
+                job_id=job_id,
+                wait_for="scan_complete",
+            )
             if pending:
                 pending_action = pending.get("action")
                 intent_channel = pending.get("channel_id") or channel_id
@@ -1034,9 +1215,6 @@ async def content_factory_callback(request: Request):
                 if pending_action in ("scaffold", "write"):
                     # Auto-trigger scaffold (keep intent for write auto-continue)
                     print(f"🔄 Auto-continuing: triggering scaffold for {domain} (pending intent: {pending_action})")
-                    if pending_action == "scaffold":
-                        _pending_intents.pop(intent_key, None)
-
                     from .clients.mlai_backend import MLAIBackendClient
                     settings = get_settings()
                     backend_client = MLAIBackendClient(
@@ -1052,6 +1230,22 @@ async def content_factory_callback(request: Request):
                         )
                         status_code = result.get("status_code")
                         if status_code == 202:
+                            if pending_action == "write":
+                                _remember_pending_intent(
+                                    slack_user_id,
+                                    domain,
+                                    wait_for="scaffold_complete",
+                                    job_id=_extract_job_id(result),
+                                    clear_job_id=True,
+                                )
+                            else:
+                                _get_pending_intent(
+                                    slack_user_id,
+                                    domain,
+                                    job_id=job_id,
+                                    wait_for="scan_complete",
+                                    consume=True,
+                                )
                             if intent_channel:
                                 post_message(
                                     channel=intent_channel,
@@ -1059,13 +1253,43 @@ async def content_factory_callback(request: Request):
                                     text=f"📁 Scan complete! Now creating articles directory for *{domain}*..."
                                 )
                         elif status_code == 200:
-                            if intent_channel:
+                            consumed = _get_pending_intent(
+                                slack_user_id,
+                                domain,
+                                job_id=job_id,
+                                wait_for="scan_complete",
+                                consume=True,
+                            ) or pending
+                            if pending_action == "write":
+                                await _trigger_article_generation_from_pending(
+                                    consumed,
+                                    slack_user_id=slack_user_id,
+                                    domain=domain,
+                                    fallback_channel_id=channel_id,
+                                    fallback_thread_ts=thread_ts,
+                                )
+                            elif intent_channel:
                                 post_message(
                                     channel=intent_channel,
                                     thread_ts=intent_thread,
                                     text=f"📁 Articles directory already exists for *{domain}*."
                                 )
+                        else:
+                            _get_pending_intent(
+                                slack_user_id,
+                                domain,
+                                job_id=job_id,
+                                wait_for="scan_complete",
+                                consume=True,
+                            )
                     except Exception as e:
+                        _get_pending_intent(
+                            slack_user_id,
+                            domain,
+                            job_id=job_id,
+                            wait_for="scan_complete",
+                            consume=True,
+                        )
                         print(f"❌ Auto-scaffold failed: {e}")
 
             return {"status": "ok"}
@@ -1212,47 +1436,21 @@ async def content_factory_callback(request: Request):
                     )
 
             # Auto-continue: check for pending write intent after scaffold completes
-            intent_key = f"{slack_user_id}:{domain}"
-            pending = _pending_intents.pop(intent_key, None)
+            pending = _get_pending_intent(
+                slack_user_id,
+                domain,
+                job_id=job_id,
+                wait_for="scaffold_complete",
+                consume=True,
+            )
             if pending and pending.get("action") == "write":
-                intent_channel = pending.get("channel_id") or channel_id
-                intent_thread = pending.get("thread_ts") or thread_ts
-                topic = pending.get("topic")
-
-                print(f"🔄 Auto-continuing: triggering article generation for {domain} (topic: {topic})")
-
-                if intent_channel:
-                    topic_note = f" about *{topic}*" if topic else ""
-                    post_message(
-                        channel=intent_channel,
-                        thread_ts=intent_thread,
-                        text=f"✅ Articles directory is ready! Now writing your article{topic_note}..."
-                    )
-
-                from .clients.mlai_backend import MLAIBackendClient
-                settings = get_settings()
-                backend_client = MLAIBackendClient(
-                    base_url=settings.MLAI_BACKEND_URL,
-                    api_key=settings.MLAI_API_KEY
+                await _trigger_article_generation_from_pending(
+                    pending,
+                    slack_user_id=slack_user_id,
+                    domain=domain,
+                    fallback_channel_id=channel_id,
+                    fallback_thread_ts=thread_ts,
                 )
-                try:
-                    await backend_client.trigger_article_generation(
-                        slack_user_id=slack_user_id,
-                        domain=domain,
-                        topic=topic,
-                        target_keyword=pending.get("target_keyword"),
-                        slack_channel_id=intent_channel,
-                        slack_thread_ts=intent_thread
-                    )
-                    print(f"✅ Auto-generation triggered for {domain}")
-                except Exception as e:
-                    print(f"❌ Auto-generation failed: {e}")
-                    if intent_channel:
-                        post_message(
-                            channel=intent_channel,
-                            thread_ts=intent_thread,
-                            text=f"❌ Error starting article generation: {e}"
-                        )
 
             return {"status": "ok"}
 
@@ -1266,6 +1464,20 @@ async def content_factory_callback(request: Request):
             stage = payload.get("stage", "generation")  # scan, scaffold, generation
 
             print(f"❌ Generation failed for {domain} at {stage}: {error_message} (code: {error_code})")
+            wait_for = {
+                "scan": "scan_complete",
+                "scaffold": "scaffold_complete",
+            }.get(stage)
+            if wait_for:
+                cleared_pending = _get_pending_intent(
+                    slack_user_id,
+                    domain,
+                    job_id=job_id,
+                    wait_for=wait_for,
+                    consume=True,
+                )
+                if cleared_pending:
+                    print(f"🧹 Cleared pending intent after {stage} failure for {slack_user_id}:{domain}")
 
             # Provide specific error messages based on error_code
             if error_code == "INVALID_CREDENTIALS":
@@ -2018,20 +2230,15 @@ async def slack_actions(request: Request):
         reply_channel = value_channel_id or msg_channel
         reply_thread_ts = value_thread_ts or payload.get("message", {}).get("thread_ts") or msg_ts
 
-        if original_intent:
-            intent_key = f"{user_id}:{domain}"
-            _pending_intents[intent_key] = {
-                **original_intent,
-                "channel_id": reply_channel,
-                "thread_ts": reply_thread_ts,
-            }
-            print(f"   📌 Stored pending intent: {original_intent.get('action')} for {intent_key}")
-
         decision = {
             "article_system_use_detected": "use_detected",
             "article_system_rescan": "rescan",
             "article_system_scaffold": "scaffold",
         }[action_id]
+        pending_wait_for = {
+            "rescan": "scan_complete",
+            "scaffold": "scaffold_complete",
+        }.get(decision)
 
         progress_text = {
             "use_detected": "✅ Using detected article structure...",
@@ -2074,6 +2281,22 @@ async def slack_actions(request: Request):
             data = result.get("data", {})
 
             if status_code in {200, 202}:
+                if original_intent and pending_wait_for:
+                    pending = _remember_pending_intent(
+                        user_id,
+                        domain,
+                        intent_data=original_intent,
+                        channel_id=reply_channel,
+                        thread_ts=reply_thread_ts,
+                        wait_for=pending_wait_for,
+                        job_id=_extract_job_id(data),
+                        clear_job_id=True,
+                    )
+                    if pending:
+                        print(f"   📌 Stored pending intent: {original_intent.get('action')} for {user_id}:{domain}")
+                elif decision == "use_detected":
+                    _get_pending_intent(user_id, domain, consume=True)
+
                 if decision == "use_detected":
                     detected = (
                         (data.get("article_system") or {}).get("directory_path")
@@ -2146,16 +2369,6 @@ async def slack_actions(request: Request):
 
         reply_channel = value_channel_id or msg_channel
         reply_thread_ts = value_thread_ts or payload.get("message", {}).get("thread_ts") or msg_ts
-
-        # Store pending intent for auto-continue after scan completes
-        if original_intent:
-            intent_key = f"{user_id}:{domain}"
-            _pending_intents[intent_key] = {
-                **original_intent,
-                "channel_id": reply_channel,
-                "thread_ts": reply_thread_ts
-            }
-            print(f"   📌 Stored pending intent: {original_intent.get('action')} for {intent_key}")
 
         # Remove buttons and show status
         try:
@@ -2252,6 +2465,19 @@ async def slack_actions(request: Request):
                         text=f"❌ Scan failed: {error_msg}"
                     )
             else:
+                if original_intent:
+                    pending = _remember_pending_intent(
+                        user_id,
+                        domain,
+                        intent_data=original_intent,
+                        channel_id=reply_channel,
+                        thread_ts=reply_thread_ts,
+                        wait_for="scan_complete",
+                        job_id=_extract_job_id(result),
+                        clear_job_id=True,
+                    )
+                    if pending:
+                        print(f"   📌 Stored pending intent: {original_intent.get('action')} for {user_id}:{domain}")
                 print(f"✅ Scan triggered for {domain}")
         except Exception as e:
             print(f"❌ Failed to trigger scan: {e}")
@@ -2285,16 +2511,6 @@ async def slack_actions(request: Request):
 
         reply_channel = value_channel_id or msg_channel
         reply_thread_ts = value_thread_ts or payload.get("message", {}).get("thread_ts") or msg_ts
-
-        # Store pending intent for auto-continue after scaffold completes
-        if original_intent:
-            intent_key = f"{user_id}:{domain}"
-            _pending_intents[intent_key] = {
-                **original_intent,
-                "channel_id": reply_channel,
-                "thread_ts": reply_thread_ts
-            }
-            print(f"   📌 Stored pending intent: {original_intent.get('action')} for {intent_key}")
 
         # Remove buttons and show status
         try:
@@ -2337,11 +2553,24 @@ async def slack_actions(request: Request):
             if status_code == 200:
                 pr_url = data.get("pr_url", "")
                 pr_text = f" PR: {pr_url}" if pr_url else ""
-                post_message(
-                    channel=reply_channel,
-                    thread_ts=reply_thread_ts,
-                    text=f"📁 Articles directory already exists for *{domain}*.{pr_text}"
-                )
+                if original_intent and original_intent.get("action") == "write":
+                    await _trigger_article_generation_from_pending(
+                        {
+                            **original_intent,
+                            "channel_id": reply_channel,
+                            "thread_ts": reply_thread_ts,
+                        },
+                        slack_user_id=user_id,
+                        domain=domain,
+                        fallback_channel_id=reply_channel,
+                        fallback_thread_ts=reply_thread_ts,
+                    )
+                else:
+                    post_message(
+                        channel=reply_channel,
+                        thread_ts=reply_thread_ts,
+                        text=f"📁 Articles directory already exists for *{domain}*.{pr_text}"
+                    )
             elif status_code == 400:
                 error = data.get("error", "Unknown error")
                 if data.get("needs_github_auth"):
@@ -2358,6 +2587,19 @@ async def slack_actions(request: Request):
                         text=f"❌ Scaffolding failed: {error}"
                     )
             elif status_code == 202:
+                if original_intent:
+                    pending = _remember_pending_intent(
+                        user_id,
+                        domain,
+                        intent_data=original_intent,
+                        channel_id=reply_channel,
+                        thread_ts=reply_thread_ts,
+                        wait_for="scaffold_complete",
+                        job_id=_extract_job_id(result),
+                        clear_job_id=True,
+                    )
+                    if pending:
+                        print(f"   📌 Stored pending intent: {original_intent.get('action')} for {user_id}:{domain}")
                 print(f"✅ Scaffold initiated for {domain}")
             else:
                 post_message(
@@ -2391,8 +2633,7 @@ async def slack_actions(request: Request):
         print(f"⏭️ User {user_id} cancelled prerequisite for {domain}")
 
         # Clear any pending intent
-        intent_key = f"{user_id}:{domain}"
-        _pending_intents.pop(intent_key, None)
+        _get_pending_intent(user_id, domain, consume=True)
 
         # Replace buttons with context block
         try:

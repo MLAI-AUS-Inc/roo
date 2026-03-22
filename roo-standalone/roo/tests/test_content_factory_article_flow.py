@@ -28,6 +28,7 @@ class FakeContentFactoryClient:
 
     def __init__(self, *args, **kwargs):
         self.trigger_calls = []
+        self.repo_scan_calls = []
         self.status_checks = []
         FakeContentFactoryClient.last_instance = self
 
@@ -87,6 +88,23 @@ class FakeContentFactoryClient:
             "preview_url": "https://preview.test/article",
             "pr_url": "https://github.test/pr/123",
         }
+
+    async def trigger_repo_scan(
+        self,
+        slack_user_id,
+        slack_channel_id=None,
+        slack_thread_ts=None,
+        domain=None,
+    ):
+        self.repo_scan_calls.append(
+            {
+                "slack_user_id": slack_user_id,
+                "slack_channel_id": slack_channel_id,
+                "slack_thread_ts": slack_thread_ts,
+                "domain": domain,
+            }
+        )
+        return {"status": "accepted", "message": "Scan queued successfully."}
 
 
 def _patch_content_factory(monkeypatch):
@@ -355,6 +373,71 @@ async def test_execute_applies_param_overrides_after_extraction(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_explicit_content_factory_scan_with_existing_scan_prompts_for_confirmation(monkeypatch):
+    executor = SkillExecutor()
+    posted_messages = []
+    _patch_content_factory(monkeypatch)
+    monkeypatch.setattr(
+        executor_module,
+        "post_message",
+        lambda *args, **kwargs: posted_messages.append({"args": args, "kwargs": kwargs}) or {"ts": "111.222"},
+    )
+
+    result = await executor._execute_content_factory(
+        skill=None,
+        text="scan mlai.au",
+        params={"domain": "mlai.au", "action": "scan"},
+        user_id="U05QPB483K9",
+        channel_id="C123",
+        thread_ts="111.222",
+    )
+
+    assert isinstance(result, dict)
+    assert "run another scan anyway" in result["message"].lower()
+    assert posted_messages == []
+    buttons = result["blocks"][1]["elements"]
+    assert buttons[0]["action_id"] == "prerequisite_scan"
+    assert buttons[0]["text"]["text"] == "Scan Again"
+    assert json.loads(buttons[0]["value"]) == {
+        "domain": "mlai.au",
+        "slack_user_id": "U05QPB483K9",
+        "channel_id": "C123",
+        "thread_ts": "111.222",
+        "rescan": True,
+    }
+    assert buttons[1]["action_id"] == "prerequisite_cancel"
+    assert FakeContentFactoryClient.last_instance.trigger_calls == []
+    assert FakeContentFactoryClient.last_instance.repo_scan_calls == []
+
+
+@pytest.mark.asyncio
+async def test_explicit_github_scan_with_existing_scan_prompts_for_confirmation(monkeypatch):
+    executor = SkillExecutor()
+    posted_messages = []
+    _patch_content_factory(monkeypatch)
+    monkeypatch.setattr(
+        executor_module,
+        "post_message",
+        lambda *args, **kwargs: posted_messages.append({"args": args, "kwargs": kwargs}) or {"ts": "111.222"},
+    )
+
+    result = await executor._execute_github_integration(
+        skill=None,
+        text="scan mlai.au",
+        params={"domain": "mlai.au", "action": "scan"},
+        user_id="U05QPB483K9",
+        channel_id="C123",
+        thread_ts="111.222",
+    )
+
+    assert isinstance(result, dict)
+    assert "run another scan anyway" in result["message"].lower()
+    assert posted_messages == []
+    assert result["blocks"][1]["elements"][0]["action_id"] == "prerequisite_scan"
+    assert FakeContentFactoryClient.last_instance.repo_scan_calls == []
+
+
+@pytest.mark.asyncio
 async def test_explicit_research_request_starts_generation(monkeypatch):
     executor = SkillExecutor()
     _patch_content_factory(monkeypatch)
@@ -572,6 +655,103 @@ def test_article_provide_topic_action_updates_message(monkeypatch):
     updated_blocks = updated_messages[0]["blocks"]
     assert all(block.get("type") != "actions" for block in updated_blocks)
     assert "@Roo write about AI for clinic workflows" in updated_blocks[-1]["elements"][0]["text"]
+
+
+def test_prerequisite_scan_action_triggers_backend_from_repeat_scan_prompt(monkeypatch):
+    trigger_calls = []
+    updated_messages = []
+    posted_messages = []
+
+    class FakeScanTriggerClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def trigger_repo_scan(
+            self,
+            slack_user_id,
+            slack_channel_id=None,
+            slack_thread_ts=None,
+            domain=None,
+        ):
+            trigger_calls.append(
+                {
+                    "slack_user_id": slack_user_id,
+                    "slack_channel_id": slack_channel_id,
+                    "slack_thread_ts": slack_thread_ts,
+                    "domain": domain,
+                }
+            )
+            return {"status": "accepted", "message": "Scan queued successfully."}
+
+        async def get_github_auth_url(self, user_id, domain=None):
+            return {"auth_url": "https://github.test/auth"}
+
+    monkeypatch.setattr(
+        main_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            MLAI_BACKEND_URL="https://backend.test",
+            MLAI_API_KEY="api-key",
+        ),
+    )
+    monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeScanTriggerClient)
+    monkeypatch.setattr(
+        slack_client_module,
+        "get_slack_client",
+        lambda: SimpleNamespace(chat_update=lambda **kwargs: updated_messages.append(kwargs)),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "post_message",
+        lambda *args, **kwargs: posted_messages.append((args, kwargs)),
+    )
+
+    payload = {
+        "user": {"id": "U05QPB483K9"},
+        "channel": {"id": "C123"},
+        "message": {
+            "ts": "111.222",
+            "thread_ts": "111.222",
+            "text": "I already have a scan for mlai.au. Do you want me to run another scan anyway?",
+            "blocks": [
+                {"type": "section", "text": {"type": "mrkdwn", "text": "Existing scan found."}},
+                {"type": "actions", "elements": []},
+            ],
+        },
+        "actions": [
+            {
+                "action_id": "prerequisite_scan",
+                "value": json.dumps(
+                    {
+                        "domain": "mlai.au",
+                        "slack_user_id": "U05QPB483K9",
+                        "channel_id": "C123",
+                        "thread_ts": "111.222",
+                        "rescan": True,
+                    }
+                ),
+            }
+        ],
+    }
+
+    class FakeRequest:
+        async def form(self):
+            return {"payload": json.dumps(payload)}
+
+    response = asyncio.run(main_module.slack_actions(FakeRequest()))
+
+    assert response.status_code == 200
+    assert trigger_calls == [
+        {
+            "slack_user_id": "U05QPB483K9",
+            "slack_channel_id": "C123",
+            "slack_thread_ts": "111.222",
+            "domain": "mlai.au",
+        }
+    ]
+    assert posted_messages == []
+    assert len(updated_messages) == 1
+    assert updated_messages[0]["blocks"][-1]["elements"][0]["text"] == "✅ Scanning codebase..."
 
 
 def test_confirm_content_factory_action_resumes_original_request(monkeypatch):

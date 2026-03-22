@@ -263,6 +263,92 @@ JSON:"""
                 ],
             },
         ]
+
+    def _is_explicit_scan_request(self, text: str, params: dict) -> bool:
+        """Return True when the user is explicitly asking Roo to scan a repo/codebase."""
+        action = str(params.get("action") or "").strip().lower()
+        if action == "scan":
+            return True
+
+        text_lower = text.lower().strip()
+        scan_patterns = (
+            r"^(?:please\s+)?(?:re-?scan|scan|analy[sz]e)\b",
+            r"\b(?:can|could)\s+you\s+(?:re-?scan|scan|analy[sz]e)\b",
+            r"\b(?:re-?scan|scan|analy[sz]e)\s+(?:my\s+)?(?:repo(?:sitory)?|codebase)\b",
+            r"\b(?:re-?scan|scan|analy[sz]e)\s+(?:https?://)?[a-z0-9][a-z0-9.-]+\.[a-z]{2,}\b",
+        )
+        return any(re.search(pattern, text_lower) for pattern in scan_patterns)
+
+    def _build_existing_scan_confirmation(
+        self,
+        *,
+        domain: Optional[str],
+        repo_name: Optional[str],
+        last_scanned: Optional[str],
+        user_id: str,
+        channel_id: Optional[str],
+        thread_ts: Optional[str],
+    ) -> dict:
+        """Prompt the user before triggering a fresh scan when one already exists."""
+        target = f"*{domain}*" if domain else f"`{repo_name or 'this repository'}`"
+        repo_line = f"\n• Repository: `{repo_name}`" if repo_name else ""
+        last_scanned_display = last_scanned or "Unknown"
+
+        return {
+            "message": (
+                f"I already have a scan for {domain or repo_name or 'this codebase'}. "
+                f"Last scanned: {last_scanned_display}. "
+                "Do you want me to run another scan anyway?"
+            ),
+            "blocks": [
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": (
+                            f"I've already scanned {target}.{repo_line}\n"
+                            f"• Last scanned: {last_scanned_display}\n\n"
+                            "Do you want me to run another scan anyway?"
+                        ),
+                    },
+                },
+                {
+                    "type": "actions",
+                    "block_id": "repeat_scan_actions",
+                    "elements": [
+                        {
+                            "type": "button",
+                            "text": {
+                                "type": "plain_text",
+                                "text": "Scan Again",
+                                "emoji": True,
+                            },
+                            "style": "primary",
+                            "value": json.dumps(
+                                {
+                                    "domain": domain,
+                                    "slack_user_id": user_id,
+                                    "channel_id": channel_id,
+                                    "thread_ts": thread_ts,
+                                    "rescan": True,
+                                }
+                            ),
+                            "action_id": "prerequisite_scan",
+                        },
+                        {
+                            "type": "button",
+                            "text": {
+                                "type": "plain_text",
+                                "text": "Keep Existing Scan",
+                                "emoji": True,
+                            },
+                            "value": json.dumps({"domain": domain}),
+                            "action_id": "prerequisite_cancel",
+                        },
+                    ],
+                },
+            ],
+        }
     
     async def _execute_tone_of_voice(
         self,
@@ -1562,7 +1648,19 @@ Keep the response concise but informative."""
         ):
             needs_scan = True
             scan_reason = "🔄 Updates detected in repository"
-            
+
+        # Explicit scan requests should confirm before re-scanning an already scanned repo.
+        last_scanned = integration.get("last_scanned_at", "Never")
+        if self._is_explicit_scan_request(text, params) and scan_completed and not needs_scan:
+            return self._build_existing_scan_confirmation(
+                domain=domain,
+                repo_name=repo_name,
+                last_scanned=last_scanned,
+                user_id=user_id,
+                channel_id=channel_id,
+                thread_ts=thread_ts,
+            )
+
         # Compile Status Report
         last_scanned = integration.get("last_scanned_at", "Never")
         last_article = (integration.get("last_article") or {}).get("title", "None")
@@ -3330,7 +3428,12 @@ Keep the response concise but informative."""
 
         # 2. Determine Repo Name
         # When the user names a domain explicitly, prefer the domain-resolved repo.
-        repo_name = integration.get("domain_github_repo") or integration.get("github_repo")
+        connected_domains = integration.get("connected_domains", [])
+        repo_name, domain_info = self._resolve_content_factory_repo_name(
+            integration,
+            connected_domains,
+            domain,
+        )
         
         if not repo_name:
              # Logic C: Connected but no repo selected
@@ -3341,6 +3444,27 @@ Keep the response concise but informative."""
                  post_message(channel_id, f"You are connected but I don't see a repository linked. Please select one: {auth_url}", thread_ts=thread_ts)
                  return "Please select a repository to scan."
              return f"Please select a repository here: {auth_url}"
+
+        scan_completed = bool(
+            integration.get("scan_completed")
+            or integration.get("content_research_ready")
+            or integration.get("project_scanned")
+            or (domain_info and domain_info.get("scanned"))
+        )
+        if (
+            self._is_explicit_scan_request(text, params)
+            and scan_completed
+            and integration.get("recommended_next_action") != "scan"
+            and not integration.get("has_updates")
+        ):
+            return self._build_existing_scan_confirmation(
+                domain=domain,
+                repo_name=repo_name,
+                last_scanned=integration.get("last_scanned_at", "Never"),
+                user_id=user_id,
+                channel_id=channel_id,
+                thread_ts=thread_ts,
+            )
 
         # 3. Trigger Scan via Backend
         if channel_id:
