@@ -19,6 +19,15 @@ main_module = importlib.import_module("roo.main")
 SkillExecutor = executor_module.SkillExecutor
 
 
+@pytest.fixture(autouse=True)
+def reset_roo_pending_state():
+    main_module._pending_intents.clear()
+    main_module._pending_intents_by_job.clear()
+    yield
+    main_module._pending_intents.clear()
+    main_module._pending_intents_by_job.clear()
+
+
 class FakeContentFactoryClient:
     last_instance = None
     generic_integration = None
@@ -752,6 +761,211 @@ def test_prerequisite_scan_action_triggers_backend_from_repeat_scan_prompt(monke
     assert posted_messages == []
     assert len(updated_messages) == 1
     assert updated_messages[0]["blocks"][-1]["elements"][0]["text"] == "✅ Scanning codebase..."
+
+
+def test_prerequisite_scan_action_stores_pending_intent_after_accepted(monkeypatch):
+    updated_messages = []
+
+    class FakeScanTriggerClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def trigger_repo_scan(
+            self,
+            slack_user_id,
+            slack_channel_id=None,
+            slack_thread_ts=None,
+            domain=None,
+        ):
+            return {
+                "status": "scan_initiated",
+                "job_id": "scan-job-123",
+                "domain": domain,
+            }
+
+        async def get_github_auth_url(self, user_id, domain=None):
+            return {"auth_url": "https://github.test/auth"}
+
+    monkeypatch.setattr(
+        main_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            MLAI_BACKEND_URL="https://backend.test",
+            MLAI_API_KEY="api-key",
+        ),
+    )
+    monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeScanTriggerClient)
+    monkeypatch.setattr(
+        slack_client_module,
+        "get_slack_client",
+        lambda: SimpleNamespace(chat_update=lambda **kwargs: updated_messages.append(kwargs)),
+    )
+    monkeypatch.setattr(main_module, "post_message", lambda *args, **kwargs: None)
+
+    payload = {
+        "user": {"id": "U05QPB483K9"},
+        "channel": {"id": "C123"},
+        "message": {
+            "ts": "111.222",
+            "thread_ts": "111.222",
+            "text": "Scan codebase first",
+            "blocks": [
+                {"type": "section", "text": {"type": "mrkdwn", "text": "Existing scan found."}},
+                {"type": "actions", "elements": []},
+            ],
+        },
+        "actions": [
+            {
+                "action_id": "prerequisite_scan",
+                "value": json.dumps(
+                    {
+                        "domain": "mlai.au",
+                        "slack_user_id": "U05QPB483K9",
+                        "channel_id": "C123",
+                        "thread_ts": "111.222",
+                        "original_intent": {
+                            "action": "write",
+                            "topic": "AI for clinic workflows",
+                            "target_keyword": "clinic ai",
+                        },
+                    }
+                ),
+            }
+        ],
+    }
+
+    class FakeRequest:
+        async def form(self):
+            return {"payload": json.dumps(payload)}
+
+    response = asyncio.run(main_module.slack_actions(FakeRequest()))
+
+    assert response.status_code == 200
+    pending = main_module._pending_intents["U05QPB483K9:mlai.au"]
+    assert pending["action"] == "write"
+    assert pending["topic"] == "AI for clinic workflows"
+    assert pending["wait_for"] == "scan_complete"
+    assert pending["job_id"] == "scan-job-123"
+    assert pending["channel_id"] == "C123"
+    assert pending["thread_ts"] == "111.222"
+    assert len(updated_messages) == 1
+
+
+def test_generation_failed_callback_clears_pending_intent_for_failed_stage(monkeypatch):
+    posted_messages = []
+
+    main_module._remember_pending_intent(
+        "U05QPB483K9",
+        "mlai.au",
+        intent_data={"action": "write", "topic": "AI for clinic workflows"},
+        channel_id="C123",
+        thread_ts="111.222",
+        wait_for="scan_complete",
+        job_id="scan-job-123",
+    )
+
+    monkeypatch.setattr(
+        main_module,
+        "post_message",
+        lambda *args, **kwargs: posted_messages.append((args, kwargs)),
+    )
+
+    payload = {
+        "event_type": "generation_failed",
+        "slack_user_id": "U05QPB483K9",
+        "job_id": "scan-job-123",
+        "domain": "mlai.au",
+        "channel_id": "C123",
+        "thread_ts": "111.222",
+        "stage": "scan",
+        "error_message": "Scan exploded",
+    }
+
+    class FakeRequest:
+        async def json(self):
+            return payload
+
+    response = asyncio.run(main_module.content_factory_callback(FakeRequest()))
+
+    assert response == {"status": "ok"}
+    assert main_module._pending_intents == {}
+    assert main_module._pending_intents_by_job == {}
+    assert posted_messages
+
+
+def test_scan_complete_auto_write_clears_pending_when_scaffold_already_exists(monkeypatch):
+    posted_messages = []
+    trigger_calls = []
+
+    main_module._remember_pending_intent(
+        "U05QPB483K9",
+        "mlai.au",
+        intent_data={
+            "action": "write",
+            "topic": "AI for clinic workflows",
+            "target_keyword": "clinic ai",
+        },
+        channel_id="C123",
+        thread_ts="111.222",
+        wait_for="scan_complete",
+    )
+
+    class FakeAutoContinueClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def scaffold_articles(self, **kwargs):
+            return {
+                "status_code": 200,
+                "data": {"pr_url": "https://github.test/pr/123"},
+            }
+
+        async def trigger_article_generation(self, **kwargs):
+            trigger_calls.append(kwargs)
+            return {"job_id": "article-job-123"}
+
+    monkeypatch.setattr(
+        main_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            MLAI_BACKEND_URL="https://backend.test",
+            MLAI_API_KEY="api-key",
+        ),
+    )
+    monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeAutoContinueClient)
+    monkeypatch.setattr(
+        main_module,
+        "post_message",
+        lambda *args, **kwargs: posted_messages.append((args, kwargs)),
+    )
+
+    payload = {
+        "event_type": "scan_complete",
+        "slack_user_id": "U05QPB483K9",
+        "job_id": "scan-job-123",
+        "domain": "mlai.au",
+        "channel_id": "C123",
+        "thread_ts": "111.222",
+        "components_count": 3,
+        "component_names": ["ArticleHero", "ArticleCard", "ArticleFAQ"],
+        "pillar_count": 1,
+        "pillar_names": ["SEO"],
+    }
+
+    class FakeRequest:
+        async def json(self):
+            return payload
+
+    response = asyncio.run(main_module.content_factory_callback(FakeRequest()))
+
+    assert response == {"status": "ok"}
+    assert len(trigger_calls) == 1
+    assert trigger_calls[0]["slack_user_id"] == "U05QPB483K9"
+    assert trigger_calls[0]["domain"] == "mlai.au"
+    assert trigger_calls[0]["topic"] == "AI for clinic workflows"
+    assert trigger_calls[0]["target_keyword"] == "clinic ai"
+    assert main_module._pending_intents == {}
+    assert posted_messages
 
 
 def test_confirm_content_factory_action_resumes_original_request(monkeypatch):

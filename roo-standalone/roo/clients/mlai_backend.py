@@ -628,7 +628,12 @@ class MLAIBackendClient:
                     timeout=60.0
                 )
                 if response.status_code == 202:
-                    return {"status": "accepted", "message": "Scan queued successfully."}
+                    data = response.json()
+                    return {
+                        "status": data.get("status", "accepted"),
+                        "message": data.get("message", "Scan queued successfully."),
+                        **data,
+                    }
                 if response.status_code == 404:
                     return {"error": "no_integration", "message": "No GitHub integration found for this user."}
                 if response.status_code == 400:
