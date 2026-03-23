@@ -9,6 +9,8 @@ import httpx
 
 from ..config import get_settings
 
+CONTENT_FACTORY_REQUEST_SOURCE = "roo_slackbot"
+
 
 class MLAIBackendClient:
     """Client for mlai-backend API."""
@@ -219,7 +221,13 @@ class MLAIBackendClient:
         target_keyword: Optional[str] = None,
         context: Optional[str] = None,
         slack_channel_id: Optional[str] = None,
-        slack_thread_ts: Optional[str] = None
+        slack_thread_ts: Optional[str] = None,
+        client_request_id: Optional[str] = None,
+        request_source: str = CONTENT_FACTORY_REQUEST_SOURCE,
+        user_email: Optional[str] = None,
+        user_first_name: Optional[str] = None,
+        user_last_name: Optional[str] = None,
+        user_avatar_url: Optional[str] = None,
     ) -> dict:
         """
         Trigger article generation via mlai-backend.
@@ -242,7 +250,8 @@ class MLAIBackendClient:
         payload = {
             "slack_user_id": slack_user_id,
             "domain": domain,
-            "context": context
+            "context": context,
+            "request_source": request_source,
         }
 
         # Only add topic/keyword if provided (omitting them triggers auto-research)
@@ -254,6 +263,16 @@ class MLAIBackendClient:
             payload["slack_channel_id"] = slack_channel_id
         if slack_thread_ts:
             payload["slack_thread_ts"] = slack_thread_ts
+        if client_request_id:
+            payload["client_request_id"] = client_request_id
+        if user_email:
+            payload["user_email"] = user_email
+        if user_first_name:
+            payload["user_first_name"] = user_first_name
+        if user_last_name:
+            payload["user_last_name"] = user_last_name
+        if user_avatar_url:
+            payload["user_avatar_url"] = user_avatar_url
 
         async with httpx.AsyncClient() as client:
             response = await client.post(
@@ -272,7 +291,8 @@ class MLAIBackendClient:
         domain: Optional[str] = None,
         confirmed_keyword: Optional[str] = None,
         custom_title: Optional[str] = None,
-        option_index: int = 0
+        option_index: int = 0,
+        request_source: str = CONTENT_FACTORY_REQUEST_SOURCE,
     ) -> dict:
         """
         Confirm topic selection for article generation.
@@ -295,7 +315,8 @@ class MLAIBackendClient:
         payload = {
             "action": "write",
             "slack_user_id": self._clean_slack_id(slack_user_id),
-            "option_index": option_index
+            "option_index": option_index,
+            "request_source": request_source,
         }
 
         if confirmed_keyword:
