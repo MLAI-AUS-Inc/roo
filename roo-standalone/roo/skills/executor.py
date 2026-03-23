@@ -2474,14 +2474,12 @@ Keep the response concise but informative."""
         text_lower = text.lower()
         explicit_points_request = "request" in text_lower and "point" in text_lower and "reward" not in text_lower
 
-        if action in ["promote_points_admin", "set_points_admin_allowance"]:
-            return action
-
-        if self._is_points_admin_promotion_command(text):
-            return "promote_points_admin"
-
-        if self._is_points_allowance_change_command(text):
-            return "set_points_admin_allowance"
+        management_action = self._resolve_points_admin_management_action(
+            text,
+            explicit_action=action,
+        )
+        if management_action:
+            return management_action
 
         if explicit_points_request:
             return "request_points"
@@ -2531,6 +2529,31 @@ Keep the response concise but informative."""
             return "deduct_points"
         return action
 
+    def _resolve_points_admin_management_action(
+        self,
+        text: str,
+        *,
+        explicit_action: str = "",
+    ) -> str:
+        """Resolve privileged points-admin management intent from text or extracted action."""
+        if explicit_action in [
+            "promote_points_admin",
+            "revoke_points_admin",
+            "set_points_admin_allowance",
+        ]:
+            return explicit_action
+
+        if self._is_points_admin_promotion_command(text):
+            return "promote_points_admin"
+
+        if self._is_points_admin_revocation_command(text):
+            return "revoke_points_admin"
+
+        if self._is_points_allowance_change_command(text):
+            return "set_points_admin_allowance"
+
+        return ""
+
     def _is_points_super_admin(self, user_id: str) -> bool:
         """Return true when the requester can manage points admins and allowances."""
         return user_id == POINTS_SUPER_ADMIN_SLACK_ID
@@ -2546,16 +2569,30 @@ Keep the response concise but informative."""
         """Detect commands that promote a tagged user to Points Admin."""
         return bool(
             re.search(r"\b(?:promote|make)\b", text, re.IGNORECASE)
-            and re.search(r"<@[A-Z0-9]+>", text)
+            and re.search(r"\b(?:roo\s+)?points\s+admin\b", text, re.IGNORECASE)
+        )
+
+    def _is_points_admin_revocation_command(self, text: str) -> bool:
+        """Detect commands that revoke a user's Points Admin access."""
+        return bool(
+            re.search(r"\b(?:revoke|remove)\b", text, re.IGNORECASE)
             and re.search(r"\b(?:roo\s+)?points\s+admin\b", text, re.IGNORECASE)
         )
 
     def _is_points_allowance_change_command(self, text: str) -> bool:
         """Detect commands that change a tagged admin's weekly allowance."""
+        text_lower = text.lower()
+
         return bool(
-            re.search(r"\b(?:set|change)\b", text, re.IGNORECASE)
-            and re.search(r"<@[A-Z0-9]+>", text)
-            and re.search(r"\bweekly\s+(?:points\s+)?allowance\b", text, re.IGNORECASE)
+            re.search(r"\b(?:set|change|update|increase|decrease)\b", text_lower)
+            and (
+                re.search(r"\bweekly\s+(?:points\s+)?allowance\b", text_lower)
+                or re.search(
+                    r"\b(?:number\s+of\s+points|how\s+many\s+points|points)\b.*\bcan\s+give\s+out\s+weekly\b",
+                    text_lower,
+                )
+                or re.search(r"\bcan\s+give\s+out\s+weekly\b", text_lower)
+            )
         )
 
     def _extract_non_roo_mentions(self, text: str, bot_id: Optional[str] = None) -> list[str]:
@@ -2597,6 +2634,8 @@ Keep the response concise but informative."""
                 pass
 
         patterns = (
+            r"(?:number\s+of\s+points|how\s+many\s+points).*?\bcan\s+give\s+out\s+weekly\s+(?:to|of)\s+(-?\d+)\b",
+            r"\bcan\s+give\s+out\s+weekly\s+(?:to|of)\s+(-?\d+)\b",
             r"weekly\s+(?:points\s+)?allowance\s+(?:to|of)\s+(-?\d+)\b",
             r"allowance\s+(?:to|of)\s+(-?\d+)\b",
             r"(?<![A-Z0-9])(-?\d+)\b",
@@ -3035,6 +3074,41 @@ Keep the response concise but informative."""
 
             return f"✅ <@{promoted_target}> is now a Roo Points Admin."
 
+        elif action == "revoke_points_admin":
+            from ..slack_client import get_bot_user_id
+
+            if not self._is_points_super_admin(user_id):
+                return self._points_super_admin_denial()
+
+            try:
+                bot_id = get_bot_user_id()
+            except Exception:
+                bot_id = None
+
+            target_slack_id, target_error = self._extract_single_admin_target(
+                text,
+                bot_id=bot_id,
+                action_label="remove their Roo Points Admin access",
+            )
+            if target_error:
+                return target_error
+
+            result = await client.revoke_points_admin(user_id, target_slack_id)
+
+            error_message = str(result.get("error") or result.get("detail") or "").strip()
+            revoked_target = client._clean_slack_id(
+                result.get("target_slack_id") or target_slack_id
+            )
+
+            if result.get("already_revoked"):
+                return f"<@{revoked_target}> already doesn't have Roo Points Admin access."
+            if error_message:
+                if "not a points admin" in error_message.lower():
+                    return f"<@{revoked_target}> isn't a Points Admin right now."
+                return f"Couldn't revoke Roo Points Admin access for <@{revoked_target}>: {error_message}"
+
+            return f"✅ Removed Roo Points Admin access from <@{revoked_target}>."
+
         elif action == "set_points_admin_allowance":
             from ..slack_client import get_bot_user_id
 
@@ -3199,6 +3273,22 @@ Keep the response concise but informative."""
                 bot_id = get_bot_user_id()
             except Exception:
                 bot_id = None
+
+            management_action = self._resolve_points_admin_management_action(
+                text,
+                explicit_action=str(params.get("action", "") or "").lower().strip(),
+            )
+            if management_action:
+                return await self._handle_points_action(
+                    client=client,
+                    action=management_action,
+                    params=params,
+                    text=text,
+                    user_id=user_id,
+                    channel_id=channel_id,
+                    thread_ts=thread_ts,
+                    skill=skill,
+                )
 
             if self._is_self_directed_points_award(text, params, user_id, bot_id=bot_id):
                 return await self._handle_points_action(

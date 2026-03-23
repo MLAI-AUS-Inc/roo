@@ -34,7 +34,8 @@ This skill enables Roo to interact with the MLAI Points System via API, allowing
 
 ### Super Admin Actions (restricted to Slack user `U05QPB483K9`)
 - Promote one tagged user to Points Admin
-- Change one tagged Points Admin's weekly points allowance
+- Revoke one tagged user's Points Admin access
+- Change one tagged Points Admin's weekly allowance
 
 ### Admin Weekly Allowance
 
@@ -92,8 +93,12 @@ Parse user messages to identify the action and parameters:
 | `reward @user for <activity>` | award_points | (Admin) "Reward @sam for newsletter" (suggests points from rate card) |
 | `promote <@USER> to roo points admin` | promote_points_admin | (Super Admin) "Promote <@U123> to roo points admin" |
 | `make <@USER> a roo points admin` | promote_points_admin | (Super Admin) "Make <@U123> a roo points admin" |
+| `revoke <@USER> as roo points admin` | revoke_points_admin | (Super Admin) "Revoke <@U123> as roo points admin" |
+| `remove <@USER> as roo points admin` | revoke_points_admin | (Super Admin) "Remove <@U123> as roo points admin" |
 | `set <@USER> weekly points allowance to <n>` | set_points_admin_allowance | (Super Admin) "Set <@U123> weekly points allowance to 150" |
 | `change <@USER> weekly points allowance to <n>` | set_points_admin_allowance | (Super Admin) "Change <@U123> weekly points allowance to 150" |
+| `increase the number of points <@USER> can give out weekly to <n>` | set_points_admin_allowance | (Super Admin) "Increase the number of points <@U123> can give out weekly to 48" |
+| `update how many points <@USER> can give out weekly to <n>` | set_points_admin_allowance | (Super Admin) "Update how many points <@U123> can give out weekly to 60" |
 
 ## Workflow
 
@@ -103,14 +108,14 @@ Parse the user's message to determine which action they want:
 - Extract any IDs, dates, or amounts mentioned
 - Treat `request ... points for ...` as `request_points`, not `award_points`
 - For admin actions, verify the Slack mention format
-- For super admin actions, require exactly one tagged Slack user and a positive numeric allowance when changing allowance
+- For super admin actions, require exactly one tagged Slack user, never fall through into `award_points`, and require a positive numeric allowance when changing allowance
 
 ### Step 2: Permission Check
 For admin-only actions (create, approve, award):
 - The API will validate the requester's Slack ID
 - If 403 returned, respond with friendly denial
 
-For super admin actions (promote admin, change allowance):
+For super admin actions (promote admin, revoke admin, change allowance):
 - Roo must fail fast unless the requester Slack ID is `U05QPB483K9`
 - The backend must still validate the requester for defense in depth
 

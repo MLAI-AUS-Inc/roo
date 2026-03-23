@@ -96,6 +96,26 @@ def test_points_allowance_phrase_routes_to_points():
     assert skill.name == "mlai-points"
 
 
+def test_natural_language_points_allowance_phrase_routes_to_points():
+    agent = _make_agent()
+
+    skill = agent._select_skill_from_triggers(
+        "increase the number of points <@U123ABC> can give out weekly to 48"
+    )
+
+    assert skill is not None
+    assert skill.name == "mlai-points"
+
+
+def test_revoke_points_admin_phrase_routes_to_points():
+    agent = _make_agent()
+
+    skill = agent._select_skill_from_triggers("remove <@U123ABC> as roo points admin")
+
+    assert skill is not None
+    assert skill.name == "mlai-points"
+
+
 def test_content_thread_context_keeps_follow_up_on_content(monkeypatch):
     agent = _make_agent()
     agent.remember_thread_context(

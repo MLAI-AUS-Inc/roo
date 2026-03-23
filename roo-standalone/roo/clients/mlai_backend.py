@@ -947,6 +947,32 @@ class MLAIBackendClient:
             response.raise_for_status()
             return response.json()
 
+    async def revoke_points_admin(
+        self,
+        requester_slack_id: str,
+        target_slack_id: str,
+    ) -> dict:
+        """Revoke a user's Points Admin access using the privileged admin API."""
+        cleaned_target = self._clean_slack_id(target_slack_id)
+        payload = {"requester_slack_id": requester_slack_id}
+
+        async with httpx.AsyncClient() as client:
+            response = await client.request(
+                "DELETE",
+                f"{self._points_base}/admins/{cleaned_target}/",
+                json=payload,
+                headers=self.admin_headers,
+                timeout=10.0,
+            )
+
+            if response.status_code == 404:
+                return response.json()
+
+            response.raise_for_status()
+            result = response.json()
+            self._admin_cache[cleaned_target] = False
+            return result
+
     async def create_task(
         self,
         admin_slack_id: str,
