@@ -30,6 +30,7 @@ class Settings(BaseSettings):
     CONTENT_FACTORY_API_KEY: Optional[str] = None
     MLAI_BACKEND_URL: Optional[str] = None
     MLAI_API_KEY: Optional[str] = None
+    ROO_API_KEY: Optional[str] = None
     INTERNAL_API_KEY: Optional[str] = None
 
     # GitHub OAuth

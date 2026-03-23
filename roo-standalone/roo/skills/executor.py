@@ -12,6 +12,7 @@ import asyncio
 from dataclasses import dataclass
 from typing import Any, Optional, List
 from difflib import SequenceMatcher
+from uuid import uuid4
 import httpx
 
 from .loader import Skill
@@ -21,6 +22,8 @@ from ..config import get_settings
 
 
 POINTS_SUPER_ADMIN_SLACK_ID = "U05QPB483K9"
+CONTENT_FACTORY_ARTICLE_COST_POINTS = 6
+CONTENT_FACTORY_REQUEST_SOURCE = "roo_slackbot"
 
 
 @dataclass
@@ -211,6 +214,7 @@ JSON:"""
         user_id: str,
         channel_id: Optional[str],
         thread_ts: Optional[str],
+        client_request_id: str,
     ) -> list[dict]:
         """Build the preflight prompt for generic article requests."""
         button_value = json.dumps(
@@ -219,6 +223,7 @@ JSON:"""
                 "slack_user_id": user_id,
                 "channel_id": channel_id,
                 "thread_ts": thread_ts,
+                "client_request_id": client_request_id,
             }
         )
 
@@ -231,7 +236,8 @@ JSON:"""
                         f"Before I start on *{domain}*, do you already have a topic in mind?\n\n"
                         "If you do, send it through and I'll still research the best keywords, title, "
                         "and talking points so the article has the best chance to rank.\n\n"
-                        "If you don't, I can research the strongest article opportunity for you."
+                        "If you don't, I can research the strongest article opportunity for you.\n\n"
+                        f"*Cost:* Starting the article run deducts {CONTENT_FACTORY_ARTICLE_COST_POINTS} Roo points."
                     ),
                 },
             },
@@ -1119,6 +1125,67 @@ Keep the response concise but informative."""
         })
         await api_client.save_pending_intent(user_id, intent_data)
 
+    @staticmethod
+    def _get_content_factory_client_request_id(params: dict) -> str:
+        existing = str(params.get("client_request_id") or "").strip()
+        if existing:
+            return existing
+        return f"content-factory-{uuid4().hex}"
+
+    async def _validate_content_factory_paid_access(
+        self,
+        api_client: Any,
+        user_id: str,
+    ) -> Optional[str]:
+        from ..slack_client import get_user_info
+
+        slack_info = get_user_info(user_id)
+        email = str(slack_info.get("email") or "").strip().lower()
+        if not email:
+            return (
+                "I need access to your real Slack email before I can start Content Factory for you. "
+                f"Once that's available, creating an article costs {CONTENT_FACTORY_ARTICLE_COST_POINTS} Roo points."
+            )
+
+        real_name = str(slack_info.get("real_name") or "").strip()
+        name_parts = real_name.split(" ", 1) if real_name else []
+        first_name = name_parts[0] if name_parts else ""
+        last_name = name_parts[1] if len(name_parts) > 1 else ""
+        avatar_url = str(slack_info.get("image_192") or "").strip() or None
+
+        try:
+            await api_client.ensure_slack_user_registered(
+                slack_id=user_id,
+                email=email,
+                first_name=first_name,
+                last_name=last_name,
+                avatar_url=avatar_url,
+            )
+        except Exception as exc:
+            print(f"⚠️ Failed to register content-factory user {user_id}: {exc}")
+            return (
+                "I couldn't link your Slack account to MLAI yet, so I haven't charged anything. "
+                "Please try again in a moment."
+            )
+
+        try:
+            balance_data = await api_client.get_balance(user_id)
+        except Exception as exc:
+            print(f"⚠️ Failed to fetch Roo points balance for {user_id}: {exc}")
+            return (
+                "I couldn't check your Roo points balance just now, so I haven't started the article yet. "
+                "Please try again in a moment."
+            )
+
+        balance = int(balance_data.get("balance") or 0)
+        if balance < CONTENT_FACTORY_ARTICLE_COST_POINTS:
+            return (
+                f"Creating an article costs {CONTENT_FACTORY_ARTICLE_COST_POINTS} Roo points, and you currently have "
+                f"{balance}. Earn a few more Roo points first, then ask me again."
+            )
+
+        return None
+
     def _get_connected_domain_info(
         self,
         connected_domains: List[dict],
@@ -1162,19 +1229,16 @@ Keep the response concise but informative."""
         thread_history: Optional[List[dict]] = None
     ) -> str:
         """Execute the content factory generation workflow."""
-        
-        # 0. Access Control (Private Beta)
-        ALLOWED_USER_ID = "U05QPB483K9"
-        if user_id != ALLOWED_USER_ID:
-            return "Sorry mate, this skill is currently in private beta. 🔒"
+        params = dict(params or {})
+        params["client_request_id"] = self._get_content_factory_client_request_id(params)
         
         # Get a MLAIBackendClient for API calls
         settings = get_settings()
         from roo.clients.mlai_backend import MLAIBackendClient
         api_client = MLAIBackendClient(
             base_url=settings.MLAI_BACKEND_URL,
-            api_key=settings.MLAI_API_KEY,
-            internal_api_key=settings.INTERNAL_API_KEY or settings.MLAI_API_KEY
+            api_key=settings.ROO_API_KEY or settings.MLAI_API_KEY,
+            internal_api_key=settings.INTERNAL_API_KEY or settings.ROO_API_KEY or settings.MLAI_API_KEY
         )
         domain = params.get("domain")
         org_config_cached = None
@@ -1219,6 +1283,9 @@ Keep the response concise but informative."""
                         "text": (
                             "Before we start, a quick heads-up! This skill works best with **Next.js & Tailwind CSS** projects "
                             "and requires a connected **GitHub repository**.\n\n"
+                            f"*Cost:* Creating an article costs **{CONTENT_FACTORY_ARTICLE_COST_POINTS} Roo points**. "
+                            "Those points are deducted when article research/generation starts. "
+                            "If something goes wrong, message Dr Sam on Slack and he can help sort out a refund.\n\n"
                             "*How it works:*\n"
                             "1. 🏗️ **Scans** your repo for blog structure (creates it if missing)\n"
                             "2. 🧩 **Checks** for reusable components (Hero, CTAs) or creates them\n"
@@ -1806,7 +1873,13 @@ Keep the response concise but informative."""
                     f"I can do that for {domain}. First, choose whether you want me to research the best article "
                     "opportunity or whether you'll give me the topic."
                 ),
-                "blocks": self._build_article_direction_blocks(domain, user_id, channel_id, thread_ts),
+                "blocks": self._build_article_direction_blocks(
+                    domain,
+                    user_id,
+                    channel_id,
+                    thread_ts,
+                    params["client_request_id"],
+                ),
             }
 
         article_system = integration.get("article_system") or {}
@@ -1814,7 +1887,11 @@ Keep the response concise but informative."""
             article_system = domain_info.get("article_system") or {}
 
         if topic and recommended_next_action == "confirm_article_system":
-            original_intent = {"action": "write", "topic": topic}
+            original_intent = {
+                "action": "write",
+                "topic": topic,
+                "client_request_id": params["client_request_id"],
+            }
             detected_location = (
                 article_system.get("directory_path")
                 or article_system.get("directory_name")
@@ -1892,6 +1969,15 @@ Keep the response concise but informative."""
             if thread_history:
                 history_str = "\n".join([f"{msg.get('user')}: {msg.get('text')}" for msg in thread_history[:-1]])
                 full_context = f"Context from Thread:\n{history_str}\n\nCurrent Request: {text}"
+
+            access_error = await self._validate_content_factory_paid_access(api_client, user_id)
+            if access_error:
+                return access_error
+
+            from ..slack_client import get_user_info
+            slack_info = get_user_info(user_id)
+            real_name = str(slack_info.get("real_name") or "").strip()
+            name_parts = real_name.split(" ", 1) if real_name else []
             
             # Note: topic can be None (triggers Auto-Write / Research Mode)
             response = await api_client.trigger_article_generation(
@@ -1901,7 +1987,13 @@ Keep the response concise but informative."""
                 target_keyword=target_keyword,
                 context=full_context,
                 slack_channel_id=channel_id,
-                slack_thread_ts=thread_ts
+                slack_thread_ts=thread_ts,
+                client_request_id=params["client_request_id"],
+                request_source=CONTENT_FACTORY_REQUEST_SOURCE,
+                user_email=str(slack_info.get("email") or "").strip().lower() or None,
+                user_first_name=name_parts[0] if name_parts else None,
+                user_last_name=name_parts[1] if len(name_parts) > 1 else None,
+                user_avatar_url=str(slack_info.get("image_192") or "").strip() or None,
             )
             
             job_id = response.get("job_id")
@@ -1922,12 +2014,17 @@ Keep the response concise but informative."""
             if topic:
                 return (
                     f"You beauty! I've started writing the article '{topic}' for {domain}. (Job ID: {job_id})\n"
+                    f"I've kicked off the paid run now, so {CONTENT_FACTORY_ARTICLE_COST_POINTS} Roo points will be deducted at the start of research/generation.\n"
                     "I'll still research the strongest keywords, title, and talking points so it has the best "
                     "chance to rank.\n"
                     "I'll keep you posted on the progress right here! 🚀"
                 )
             else:
-                return f"You beauty! I've started researching the best article for {domain}. (Job ID: {job_id})\nI'll keep you posted on the progress right here! 🕵️"
+                return (
+                    f"You beauty! I've started researching the best article for {domain}. (Job ID: {job_id})\n"
+                    f"I've kicked off the paid run now, so {CONTENT_FACTORY_ARTICLE_COST_POINTS} Roo points will be deducted at the start of research/generation.\n"
+                    "I'll keep you posted on the progress right here! 🕵️"
+                )
             
         except httpx.HTTPStatusError as e:
             print(f"Content Generation HTTP Error: {e}")
@@ -1946,7 +2043,10 @@ Keep the response concise but informative."""
                         or article_system.get("directory_name")
                         or "the detected article directory"
                     )
-                    original_intent = {"action": "write"}
+                    original_intent = {
+                        "action": "write",
+                        "client_request_id": params["client_request_id"],
+                    }
                     if topic:
                         original_intent["topic"] = topic
 
@@ -2058,7 +2158,10 @@ Keep the response concise but informative."""
                     return "I need to set up your articles directory first."
                 missing_step = error_data.get("missing_step", "")
                 if missing_step == "scan":
-                    original_intent = {"action": "write"}
+                    original_intent = {
+                        "action": "write",
+                        "client_request_id": params["client_request_id"],
+                    }
                     if topic:
                         original_intent["topic"] = topic
                     blocks = [
@@ -2099,7 +2202,10 @@ Keep the response concise but informative."""
                         post_message(channel_id, f"Scan required for {domain}", thread_ts=thread_ts, blocks=blocks)
                     return "I need to scan your codebase first."
                 elif missing_step == "scaffold":
-                    original_intent = {"action": "write"}
+                    original_intent = {
+                        "action": "write",
+                        "client_request_id": params["client_request_id"],
+                    }
                     if topic:
                         original_intent["topic"] = topic
                     blocks = [

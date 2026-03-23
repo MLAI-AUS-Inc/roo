@@ -11,6 +11,7 @@ import hashlib
 import time
 from contextlib import asynccontextmanager
 from typing import Any, Optional
+from uuid import uuid4
 
 from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.responses import JSONResponse
@@ -173,19 +174,29 @@ async def _trigger_article_generation_from_pending(
         )
 
     from .clients.mlai_backend import MLAIBackendClient
+    from .slack_client import get_user_info
     settings = get_settings()
     backend_client = MLAIBackendClient(
         base_url=settings.MLAI_BACKEND_URL,
-        api_key=settings.MLAI_API_KEY
+        api_key=settings.ROO_API_KEY or settings.MLAI_API_KEY
     )
     try:
+        slack_info = get_user_info(slack_user_id)
+        real_name = str(slack_info.get("real_name") or "").strip()
+        name_parts = real_name.split(" ", 1) if real_name else []
         await backend_client.trigger_article_generation(
             slack_user_id=slack_user_id,
             domain=domain,
             topic=topic,
             target_keyword=pending.get("target_keyword"),
             slack_channel_id=intent_channel,
-            slack_thread_ts=intent_thread
+            slack_thread_ts=intent_thread,
+            client_request_id=pending.get("client_request_id"),
+            request_source="roo_slackbot",
+            user_email=str(slack_info.get("email") or "").strip().lower() or None,
+            user_first_name=name_parts[0] if name_parts else None,
+            user_last_name=name_parts[1] if len(name_parts) > 1 else None,
+            user_avatar_url=str(slack_info.get("image_192") or "").strip() or None,
         )
         print(f"✅ Auto-generation triggered for {domain}")
         return True
@@ -467,6 +478,7 @@ async def _handle_mention(event: dict):
         text = event.get("text", "")
         channel_id = event.get("channel")
         thread_ts = event.get("thread_ts") or event.get("ts")
+        param_overrides = event.get("param_overrides")
         
         print(f"\n🦘 ROO MENTION: from {user_id} in {channel_id}")
         print(f"   Text: {text[:100]}...")
@@ -476,7 +488,8 @@ async def _handle_mention(event: dict):
             text=text,
             user_id=user_id,
             channel_id=channel_id,
-            thread_ts=thread_ts
+            thread_ts=thread_ts,
+            param_overrides=param_overrides if isinstance(param_overrides, dict) else None,
         )
         
         if result.get("message") and not result.get("suppress_post"):
@@ -582,8 +595,8 @@ async def _handle_reaction_added(event: dict):
         settings = get_settings()
         client = MLAIBackendClient(
             base_url=settings.MLAI_BACKEND_URL,
-            api_key=settings.MLAI_API_KEY,
-            internal_api_key=settings.INTERNAL_API_KEY or settings.MLAI_API_KEY,
+            api_key=settings.ROO_API_KEY or settings.MLAI_API_KEY,
+            internal_api_key=settings.INTERNAL_API_KEY or settings.ROO_API_KEY or settings.MLAI_API_KEY,
         )
 
         request_record = await client.get_points_request_by_slack_message(channel_id, message_ts)
@@ -662,7 +675,7 @@ async def slack_commands(request: Request):
         try:
             client = MLAIBackendClient(
                 base_url=settings.MLAI_BACKEND_URL,
-                api_key=settings.MLAI_API_KEY
+                api_key=settings.ROO_API_KEY or settings.MLAI_API_KEY
             )
             
             # Get Auth URL
@@ -1142,7 +1155,8 @@ async def content_factory_callback(request: Request):
                                     "domain": domain,
                                     "slack_user_id": slack_user_id,
                                     "channel_id": channel_id,
-                                    "thread_ts": thread_ts
+                                    "thread_ts": thread_ts,
+                                    "client_request_id": f"content-factory-{uuid4().hex}",
                                 }),
                                 "action_id": "scaffold_confirm"
                             },
@@ -1219,7 +1233,7 @@ async def content_factory_callback(request: Request):
                     settings = get_settings()
                     backend_client = MLAIBackendClient(
                         base_url=settings.MLAI_BACKEND_URL,
-                        api_key=settings.MLAI_API_KEY
+                        api_key=settings.ROO_API_KEY or settings.MLAI_API_KEY
                     )
                     try:
                         result = await backend_client.scaffold_articles(
@@ -1488,7 +1502,7 @@ async def content_factory_callback(request: Request):
                     settings = get_settings()
                     auth_client = MLAIBackendClient(
                         base_url=settings.MLAI_BACKEND_URL,
-                        api_key=settings.MLAI_API_KEY
+                        api_key=settings.ROO_API_KEY or settings.MLAI_API_KEY
                     )
                     auth_response = await auth_client.get_github_auth_url(slack_user_id, domain=domain)
                     auth_url = auth_response.get("auth_url")
@@ -1704,26 +1718,27 @@ async def slack_actions(request: Request):
         settings = get_settings()
         client = MLAIBackendClient(
             base_url=settings.MLAI_BACKEND_URL,
-            api_key=settings.MLAI_API_KEY
+            api_key=settings.ROO_API_KEY or settings.MLAI_API_KEY
         )
 
         try:
             await client.confirm_article_topic(
                 job_id=job_id,
                 slack_user_id=user_id,
-                confirmed_keyword=keyword
+                confirmed_keyword=keyword,
+                request_source="roo_slackbot",
             )
 
             return JSONResponse(status_code=200, content={
                 "response_type": "ephemeral",
                 "replace_original": True,
-                "text": f"⏳ Queued generation for `{keyword}`...",
+                "text": f"⏳ Queued generation for `{keyword}`. No additional Roo points will be charged for this confirmation.",
                 "blocks": [
                     {
                         "type": "section",
                         "text": {
                             "type": "mrkdwn",
-                            "text": f"⏳ Queued generation for `{keyword}`..."
+                            "text": f"⏳ Queued generation for `{keyword}`.\n_No additional Roo points will be charged for topic confirmation._"
                         }
                     }
                 ]
@@ -1758,26 +1773,27 @@ async def slack_actions(request: Request):
         settings = get_settings()
         client = MLAIBackendClient(
             base_url=settings.MLAI_BACKEND_URL,
-            api_key=settings.MLAI_API_KEY
+            api_key=settings.ROO_API_KEY or settings.MLAI_API_KEY
         )
 
         try:
             await client.confirm_article_topic(
                 job_id=job_id,
                 slack_user_id=user_id,
-                confirmed_keyword=keyword
+                confirmed_keyword=keyword,
+                request_source="roo_slackbot",
             )
 
             return JSONResponse(status_code=200, content={
                 "response_type": "ephemeral",
                 "replace_original": True,
-                "text": f"⏳ Queued generation for `{keyword}`...",
+                "text": f"⏳ Queued generation for `{keyword}`. No additional Roo points will be charged for this confirmation.",
                 "blocks": [
                     {
                         "type": "section",
                         "text": {
                             "type": "mrkdwn",
-                            "text": f"⏳ Queued generation for `{keyword}`..."
+                            "text": f"⏳ Queued generation for `{keyword}`.\n_No additional Roo points will be charged for topic confirmation._"
                         }
                     }
                 ]
@@ -1806,7 +1822,7 @@ async def slack_actions(request: Request):
                 settings = get_settings()
                 client = MLAIBackendClient(
                     base_url=settings.MLAI_BACKEND_URL,
-                    api_key=settings.MLAI_API_KEY
+                    api_key=settings.ROO_API_KEY or settings.MLAI_API_KEY
                 )
                 await client.cancel_job(job_id, user_id)
             except Exception as e:
@@ -1882,7 +1898,7 @@ async def slack_actions(request: Request):
         settings = get_settings()
         backend_client = MLAIBackendClient(
             base_url=settings.MLAI_BACKEND_URL,
-            api_key=settings.MLAI_API_KEY
+            api_key=settings.ROO_API_KEY or settings.MLAI_API_KEY
         )
 
         try:
@@ -2021,7 +2037,7 @@ async def slack_actions(request: Request):
             updated_blocks = [b for b in original_blocks if b.get("type") != "actions"]
             updated_blocks.append({
                 "type": "context",
-                "elements": [{"type": "mrkdwn", "text": "✅ Starting article generation..."}]
+                "elements": [{"type": "mrkdwn", "text": "✅ Starting article generation. This paid run will deduct 6 Roo points once research begins."}]
             })
             slack_client.chat_update(
                 channel=msg_channel,
@@ -2034,18 +2050,28 @@ async def slack_actions(request: Request):
 
         # 2. Trigger article generation (no topic = auto-research)
         from .clients.mlai_backend import MLAIBackendClient
+        from .slack_client import get_user_info
         settings = get_settings()
         backend_client = MLAIBackendClient(
             base_url=settings.MLAI_BACKEND_URL,
-            api_key=settings.MLAI_API_KEY
+            api_key=settings.ROO_API_KEY or settings.MLAI_API_KEY
         )
 
         try:
+            slack_info = get_user_info(user_id)
+            real_name = str(slack_info.get("real_name") or "").strip()
+            name_parts = real_name.split(" ", 1) if real_name else []
             result = await backend_client.trigger_article_generation(
                 slack_user_id=user_id,
                 domain=domain,
                 slack_channel_id=reply_channel,
-                slack_thread_ts=reply_thread_ts
+                slack_thread_ts=reply_thread_ts,
+                client_request_id=client_request_id,
+                request_source="roo_slackbot",
+                user_email=str(slack_info.get("email") or "").strip().lower() or None,
+                user_first_name=name_parts[0] if name_parts else None,
+                user_last_name=name_parts[1] if len(name_parts) > 1 else None,
+                user_avatar_url=str(slack_info.get("image_192") or "").strip() or None,
             )
             print(f"✅ Article generation triggered for {domain}: {result}")
         except Exception as e:
@@ -2132,7 +2158,7 @@ async def slack_actions(request: Request):
             updated_blocks = [b for b in original_blocks if b.get("type") != "actions"]
             updated_blocks.append({
                 "type": "context",
-                "elements": [{"type": "mrkdwn", "text": f"✅ Researching the best article opportunity for *{domain}*..."}]
+                "elements": [{"type": "mrkdwn", "text": f"✅ Researching the best article opportunity for *{domain}*.\nStarting the article run will deduct 6 Roo points."}]
             })
             slack_client.chat_update(
                 channel=msg_channel,
@@ -2150,6 +2176,10 @@ async def slack_actions(request: Request):
                 "text": f"research the best article for {domain}",
                 "channel": reply_channel,
                 "thread_ts": reply_thread_ts,
+                "param_overrides": {
+                    "domain": domain,
+                    "client_request_id": client_request_id,
+                },
             }
         ))
         return JSONResponse(status_code=200, content={})
@@ -2182,10 +2212,12 @@ async def slack_actions(request: Request):
         is_dm = bool(reply_channel and reply_channel.startswith("D"))
         guidance_text = (
             "✅ Reply here with the topic you want me to write about. "
-            "I'll still research the best keywords, title, and talking points so it has the best chance to rank."
+            "I'll still research the best keywords, title, and talking points so it has the best chance to rank. "
+            "Starting the article run deducts 6 Roo points."
             if is_dm else
             "✅ Reply in this thread with something like `@Roo write about AI for clinic workflows`. "
-            "I'll still research the best keywords, title, and talking points so it has the best chance to rank."
+            "I'll still research the best keywords, title, and talking points so it has the best chance to rank. "
+            "Starting the article run deducts 6 Roo points."
         )
 
         print(f"📝 User {user_id} will provide the article topic for {domain}")
@@ -2268,7 +2300,7 @@ async def slack_actions(request: Request):
         settings = get_settings()
         backend_client = MLAIBackendClient(
             base_url=settings.MLAI_BACKEND_URL,
-            api_key=settings.MLAI_API_KEY,
+            api_key=settings.ROO_API_KEY or settings.MLAI_API_KEY,
         )
 
         try:
@@ -2394,7 +2426,7 @@ async def slack_actions(request: Request):
         settings = get_settings()
         backend_client = MLAIBackendClient(
             base_url=settings.MLAI_BACKEND_URL,
-            api_key=settings.MLAI_API_KEY
+            api_key=settings.ROO_API_KEY or settings.MLAI_API_KEY
         )
 
         try:
@@ -2536,7 +2568,7 @@ async def slack_actions(request: Request):
         settings = get_settings()
         backend_client = MLAIBackendClient(
             base_url=settings.MLAI_BACKEND_URL,
-            api_key=settings.MLAI_API_KEY
+            api_key=settings.ROO_API_KEY or settings.MLAI_API_KEY
         )
 
         try:
@@ -2687,7 +2719,7 @@ async def slack_actions(request: Request):
             updated_blocks = [b for b in original_blocks if b.get("type") != "actions"]
             updated_blocks.append({
                 "type": "context",
-                "elements": [{"type": "mrkdwn", "text": "✅ Generating article..."}]
+                "elements": [{"type": "mrkdwn", "text": "✅ Generating article. No additional Roo points will be charged for this confirmation."}]
             })
             slack_client.chat_update(
                 channel=msg_channel,
@@ -2703,14 +2735,15 @@ async def slack_actions(request: Request):
         settings = get_settings()
         client = MLAIBackendClient(
             base_url=settings.MLAI_BACKEND_URL,
-            api_key=settings.MLAI_API_KEY
+            api_key=settings.ROO_API_KEY or settings.MLAI_API_KEY
         )
 
         try:
             await client.confirm_article_topic(
                 job_id=job_id,
                 slack_user_id=user_id,
-                option_index=option_index
+                option_index=option_index,
+                request_source="roo_slackbot",
             )
             print(f"✅ Topic confirmed for job {job_id}")
         except Exception as e:

@@ -19,17 +19,31 @@ main_module = importlib.import_module("roo.main")
 SkillExecutor = executor_module.SkillExecutor
 
 
+@pytest.fixture(autouse=True)
+def reset_roo_pending_state():
+    main_module._pending_intents.clear()
+    main_module._pending_intents_by_job.clear()
+    yield
+    main_module._pending_intents.clear()
+    main_module._pending_intents_by_job.clear()
+
+
 class FakeContentFactoryClient:
     last_instance = None
     generic_integration = None
     domain_integrations = {}
     auth_urls = {}
     saved_intents = []
+    balance_by_user = {}
+    user_profiles = {}
 
     def __init__(self, *args, **kwargs):
         self.trigger_calls = []
         self.repo_scan_calls = []
         self.status_checks = []
+        self.user_registration_calls = []
+        self.balance_checks = []
+        self.confirm_calls = []
         FakeContentFactoryClient.last_instance = self
 
     async def get_integration(self, user_id, domain=None):
@@ -62,6 +76,12 @@ class FakeContentFactoryClient:
         context=None,
         slack_channel_id=None,
         slack_thread_ts=None,
+        client_request_id=None,
+        request_source="roo_slackbot",
+        user_email=None,
+        user_first_name=None,
+        user_last_name=None,
+        user_avatar_url=None,
     ):
         self.trigger_calls.append(
             {
@@ -72,12 +92,44 @@ class FakeContentFactoryClient:
                 "context": context,
                 "slack_channel_id": slack_channel_id,
                 "slack_thread_ts": slack_thread_ts,
+                "client_request_id": client_request_id,
+                "request_source": request_source,
+                "user_email": user_email,
+                "user_first_name": user_first_name,
+                "user_last_name": user_last_name,
+                "user_avatar_url": user_avatar_url,
             }
         )
         return {
             "job_id": "job-123",
             "workflow": "auto_discovery" if not topic else "direct_generate",
         }
+
+    async def ensure_slack_user_registered(
+        self,
+        slack_id,
+        email,
+        first_name=None,
+        last_name=None,
+        avatar_url=None,
+    ):
+        payload = {
+            "slack_id": slack_id,
+            "email": email,
+            "first_name": first_name,
+            "last_name": last_name,
+            "avatar_url": avatar_url,
+        }
+        self.user_registration_calls.append(payload)
+        return {"user_id": 1, "slack_id": slack_id, "email": email, "created": False}
+
+    async def get_balance(self, slack_user_id):
+        self.balance_checks.append(slack_user_id)
+        return {"balance": FakeContentFactoryClient.balance_by_user.get(slack_user_id, 12)}
+
+    async def confirm_article_topic(self, *args, **kwargs):
+        self.confirm_calls.append({"args": args, "kwargs": kwargs})
+        return {"job_id": "confirmed-job-123", "status": "confirmed"}
 
     async def check_generation_status(self, job_id):
         self.status_checks.append(job_id)
@@ -127,6 +179,21 @@ def _patch_content_factory(monkeypatch):
     FakeContentFactoryClient.domain_integrations = {"mlai.au": default_integration}
     FakeContentFactoryClient.auth_urls = {"default": "https://github.test/auth"}
     FakeContentFactoryClient.saved_intents = []
+    FakeContentFactoryClient.balance_by_user = {}
+    FakeContentFactoryClient.user_profiles = {
+        "U05QPB483K9": {
+            "id": "U05QPB483K9",
+            "email": "sam@example.com",
+            "real_name": "Sam Donegan",
+            "image_192": "https://avatar.test/sam.png",
+        },
+        "U999FREE": {
+            "id": "U999FREE",
+            "email": "new.user@example.com",
+            "real_name": "New User",
+            "image_192": "https://avatar.test/new-user.png",
+        },
+    }
     FakeContentFactoryClient.last_instance = None
 
     monkeypatch.setattr(
@@ -136,6 +203,20 @@ def _patch_content_factory(monkeypatch):
             MLAI_BACKEND_URL="https://backend.test",
             MLAI_API_KEY="api-key",
             INTERNAL_API_KEY="internal-key",
+            ROO_API_KEY="roo-api-key",
+        ),
+    )
+    monkeypatch.setattr(
+        slack_client_module,
+        "get_user_info",
+        lambda user_id: FakeContentFactoryClient.user_profiles.get(
+            user_id,
+            {
+                "id": user_id,
+                "email": "default@example.com",
+                "real_name": "Default User",
+                "image_192": "https://avatar.test/default.png",
+            },
         ),
     )
     monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeContentFactoryClient)
@@ -156,7 +237,7 @@ async def test_generic_article_request_prompts_for_direction(monkeypatch):
         skill=None,
         text="write an article for my website mlai.au",
         params={"domain": "mlai.au"},
-        user_id="U05QPB483K9",
+        user_id="U999FREE",
         channel_id="C123",
         thread_ts="111.222",
     )
@@ -195,12 +276,12 @@ async def test_requirements_prompt_serializes_original_request_for_resume(monkey
     assert result == "Please review the requirements above to get started! 👆"
     button = posted_messages[0]["kwargs"]["blocks"][2]["elements"][0]
     assert button["action_id"] == "confirm_content_factory"
-    assert json.loads(button["value"]) == {
-        "text": "write an article for my website woofya.com.au",
-        "params": {"domain": "woofya.com.au"},
-        "channel_id": "C123",
-        "thread_ts": "111.222",
-    }
+    button_value = json.loads(button["value"])
+    assert button_value["text"] == "write an article for my website woofya.com.au"
+    assert button_value["params"]["domain"] == "woofya.com.au"
+    assert button_value["params"]["client_request_id"].startswith("content-factory-")
+    assert button_value["channel_id"] == "C123"
+    assert button_value["thread_ts"] == "111.222"
 
 
 @pytest.mark.asyncio
@@ -259,18 +340,15 @@ async def test_new_domain_requests_domain_github_auth_without_falling_back_to_ge
     assert "Status Report" not in json.dumps(posted_messages)
     assert "borderline-main" not in json.dumps(posted_messages)
     assert FakeContentFactoryClient.last_instance.trigger_calls == []
-    assert FakeContentFactoryClient.saved_intents == [
-        {
-            "slack_user_id": "U05QPB483K9",
-            "intent_data": {
-                "skill": "content-factory",
-                "params": {"domain": "woofya.com.au"},
-                "text": "write an article for my website woofya.com.au",
-                "channel": "C123",
-                "ts": "111.222",
-            },
-        }
-    ]
+    assert len(FakeContentFactoryClient.saved_intents) == 1
+    saved_intent = FakeContentFactoryClient.saved_intents[0]
+    assert saved_intent["slack_user_id"] == "U05QPB483K9"
+    assert saved_intent["intent_data"]["skill"] == "content-factory"
+    assert saved_intent["intent_data"]["params"]["domain"] == "woofya.com.au"
+    assert saved_intent["intent_data"]["params"]["client_request_id"].startswith("content-factory-")
+    assert saved_intent["intent_data"]["text"] == "write an article for my website woofya.com.au"
+    assert saved_intent["intent_data"]["channel"] == "C123"
+    assert saved_intent["intent_data"]["ts"] == "111.222"
 
 
 @pytest.mark.asyncio
@@ -328,18 +406,15 @@ async def test_new_domain_requires_repo_selection_without_falling_back_to_generi
     assert "Status Report" not in json.dumps(posted_messages)
     assert "borderline-main" not in json.dumps(posted_messages)
     assert FakeContentFactoryClient.last_instance.trigger_calls == []
-    assert FakeContentFactoryClient.saved_intents == [
-        {
-            "slack_user_id": "U05QPB483K9",
-            "intent_data": {
-                "skill": "content-factory",
-                "params": {"domain": "woofya.com.au"},
-                "text": "write an article for my website woofya.com.au",
-                "channel": "C123",
-                "ts": "111.222",
-            },
-        }
-    ]
+    assert len(FakeContentFactoryClient.saved_intents) == 1
+    saved_intent = FakeContentFactoryClient.saved_intents[0]
+    assert saved_intent["slack_user_id"] == "U05QPB483K9"
+    assert saved_intent["intent_data"]["skill"] == "content-factory"
+    assert saved_intent["intent_data"]["params"]["domain"] == "woofya.com.au"
+    assert saved_intent["intent_data"]["params"]["client_request_id"].startswith("content-factory-")
+    assert saved_intent["intent_data"]["text"] == "write an article for my website woofya.com.au"
+    assert saved_intent["intent_data"]["channel"] == "C123"
+    assert saved_intent["intent_data"]["ts"] == "111.222"
 
 
 @pytest.mark.asyncio
@@ -466,17 +541,66 @@ async def test_explicit_research_request_starts_generation(monkeypatch):
     assert "started researching the best article for mlai.au" in result.lower()
     assert created_tasks == []
     assert len(posted_messages) == 1
-    assert FakeContentFactoryClient.last_instance.trigger_calls == [
-        {
-            "slack_user_id": "U05QPB483K9",
-            "domain": "mlai.au",
-            "topic": None,
-            "target_keyword": "",
-            "context": "research the best article for mlai.au",
-            "slack_channel_id": "C123",
-            "slack_thread_ts": "111.222",
-        }
-    ]
+    trigger_call = FakeContentFactoryClient.last_instance.trigger_calls[0]
+    assert trigger_call["slack_user_id"] == "U05QPB483K9"
+    assert trigger_call["domain"] == "mlai.au"
+    assert trigger_call["topic"] is None
+    assert trigger_call["target_keyword"] == ""
+    assert trigger_call["context"] == "research the best article for mlai.au"
+    assert trigger_call["slack_channel_id"] == "C123"
+    assert trigger_call["slack_thread_ts"] == "111.222"
+    assert trigger_call["request_source"] == "roo_slackbot"
+    assert trigger_call["client_request_id"].startswith("content-factory-")
+    assert trigger_call["user_email"] == "sam@example.com"
+
+
+@pytest.mark.asyncio
+async def test_content_factory_blocks_when_user_has_insufficient_points(monkeypatch):
+    executor = SkillExecutor()
+    _patch_content_factory(monkeypatch)
+    FakeContentFactoryClient.balance_by_user["U999FREE"] = 5
+    monkeypatch.setattr(executor_module, "post_message", lambda *args, **kwargs: {"ts": "111.222"})
+
+    result = await executor._execute_content_factory(
+        skill=None,
+        text="research the best article for mlai.au",
+        params={"domain": "mlai.au"},
+        user_id="U999FREE",
+        channel_id="C123",
+        thread_ts="111.222",
+    )
+
+    assert "Creating an article costs 6 Roo points" in result
+    assert "currently have 5" in result
+    assert FakeContentFactoryClient.last_instance.trigger_calls == []
+    assert FakeContentFactoryClient.last_instance.balance_checks == ["U999FREE"]
+
+
+@pytest.mark.asyncio
+async def test_content_factory_blocks_when_slack_email_missing(monkeypatch):
+    executor = SkillExecutor()
+    _patch_content_factory(monkeypatch)
+    monkeypatch.setattr(executor_module, "post_message", lambda *args, **kwargs: {"ts": "111.222"})
+    FakeContentFactoryClient.user_profiles["U_NO_EMAIL"] = {
+        "id": "U_NO_EMAIL",
+        "email": "",
+        "real_name": "No Email",
+        "image_192": "",
+    }
+
+    result = await executor._execute_content_factory(
+        skill=None,
+        text="research the best article for mlai.au",
+        params={"domain": "mlai.au"},
+        user_id="U_NO_EMAIL",
+        channel_id="C123",
+        thread_ts="111.222",
+    )
+
+    assert "real Slack email" in result
+    assert "6 Roo points" in result
+    assert FakeContentFactoryClient.last_instance.trigger_calls == []
+    assert FakeContentFactoryClient.last_instance.user_registration_calls == []
 
 
 @pytest.mark.asyncio
@@ -536,17 +660,17 @@ async def test_topic_led_article_request_starts_monitor_when_threaded(monkeypatc
     assert "best chance to rank" in result
     assert len(created_tasks) == 1
     assert len(posted_messages) == 1
-    assert FakeContentFactoryClient.last_instance.trigger_calls == [
-        {
-            "slack_user_id": "U05QPB483K9",
-            "domain": "mlai.au",
-            "topic": "AI for clinic workflows",
-            "target_keyword": "",
-            "context": "write an article for mlai.au about AI for clinic workflows",
-            "slack_channel_id": "C123",
-            "slack_thread_ts": "111.222",
-        }
-    ]
+    trigger_call = FakeContentFactoryClient.last_instance.trigger_calls[0]
+    assert trigger_call["slack_user_id"] == "U05QPB483K9"
+    assert trigger_call["domain"] == "mlai.au"
+    assert trigger_call["topic"] == "AI for clinic workflows"
+    assert trigger_call["target_keyword"] == ""
+    assert trigger_call["context"] == "write an article for mlai.au about AI for clinic workflows"
+    assert trigger_call["slack_channel_id"] == "C123"
+    assert trigger_call["slack_thread_ts"] == "111.222"
+    assert trigger_call["request_source"] == "roo_slackbot"
+    assert trigger_call["client_request_id"].startswith("content-factory-")
+    assert trigger_call["user_email"] == "sam@example.com"
 
 
 @pytest.mark.asyncio
@@ -600,7 +724,12 @@ def test_article_provide_topic_action_updates_message(monkeypatch):
     monkeypatch.setattr(
         main_module,
         "get_settings",
-        lambda: SimpleNamespace(default_llm_provider="openai", SKILLS_DIR="skills"),
+        lambda: SimpleNamespace(
+            default_llm_provider="openai",
+            SKILLS_DIR="skills",
+            ROO_API_KEY="roo-api-key",
+            MLAI_API_KEY="api-key",
+        ),
     )
     monkeypatch.setattr(main_module, "get_agent", lambda: SimpleNamespace(skills=[]))
     monkeypatch.setattr(
@@ -655,6 +784,7 @@ def test_article_provide_topic_action_updates_message(monkeypatch):
     updated_blocks = updated_messages[0]["blocks"]
     assert all(block.get("type") != "actions" for block in updated_blocks)
     assert "@Roo write about AI for clinic workflows" in updated_blocks[-1]["elements"][0]["text"]
+    assert "6 Roo points" in updated_blocks[-1]["elements"][0]["text"]
 
 
 def test_prerequisite_scan_action_triggers_backend_from_repeat_scan_prompt(monkeypatch):
@@ -692,6 +822,7 @@ def test_prerequisite_scan_action_triggers_backend_from_repeat_scan_prompt(monke
         lambda: SimpleNamespace(
             MLAI_BACKEND_URL="https://backend.test",
             MLAI_API_KEY="api-key",
+            ROO_API_KEY="roo-api-key",
         ),
     )
     monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeScanTriggerClient)
@@ -752,6 +883,225 @@ def test_prerequisite_scan_action_triggers_backend_from_repeat_scan_prompt(monke
     assert posted_messages == []
     assert len(updated_messages) == 1
     assert updated_messages[0]["blocks"][-1]["elements"][0]["text"] == "✅ Scanning codebase..."
+
+
+def test_prerequisite_scan_action_stores_pending_intent_after_accepted(monkeypatch):
+    updated_messages = []
+
+    class FakeScanTriggerClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def trigger_repo_scan(
+            self,
+            slack_user_id,
+            slack_channel_id=None,
+            slack_thread_ts=None,
+            domain=None,
+        ):
+            return {
+                "status": "scan_initiated",
+                "job_id": "scan-job-123",
+                "domain": domain,
+            }
+
+        async def get_github_auth_url(self, user_id, domain=None):
+            return {"auth_url": "https://github.test/auth"}
+
+    monkeypatch.setattr(
+        main_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            MLAI_BACKEND_URL="https://backend.test",
+            MLAI_API_KEY="api-key",
+            ROO_API_KEY="roo-api-key",
+        ),
+    )
+    monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeScanTriggerClient)
+    monkeypatch.setattr(
+        slack_client_module,
+        "get_slack_client",
+        lambda: SimpleNamespace(chat_update=lambda **kwargs: updated_messages.append(kwargs)),
+    )
+    monkeypatch.setattr(main_module, "post_message", lambda *args, **kwargs: None)
+
+    payload = {
+        "user": {"id": "U05QPB483K9"},
+        "channel": {"id": "C123"},
+        "message": {
+            "ts": "111.222",
+            "thread_ts": "111.222",
+            "text": "Scan codebase first",
+            "blocks": [
+                {"type": "section", "text": {"type": "mrkdwn", "text": "Existing scan found."}},
+                {"type": "actions", "elements": []},
+            ],
+        },
+        "actions": [
+            {
+                "action_id": "prerequisite_scan",
+                "value": json.dumps(
+                    {
+                        "domain": "mlai.au",
+                        "slack_user_id": "U05QPB483K9",
+                        "channel_id": "C123",
+                        "thread_ts": "111.222",
+                        "original_intent": {
+                            "action": "write",
+                            "topic": "AI for clinic workflows",
+                            "target_keyword": "clinic ai",
+                        },
+                    }
+                ),
+            }
+        ],
+    }
+
+    class FakeRequest:
+        async def form(self):
+            return {"payload": json.dumps(payload)}
+
+    response = asyncio.run(main_module.slack_actions(FakeRequest()))
+
+    assert response.status_code == 200
+    pending = main_module._pending_intents["U05QPB483K9:mlai.au"]
+    assert pending["action"] == "write"
+    assert pending["topic"] == "AI for clinic workflows"
+    assert pending["wait_for"] == "scan_complete"
+    assert pending["job_id"] == "scan-job-123"
+    assert pending["channel_id"] == "C123"
+    assert pending["thread_ts"] == "111.222"
+    assert len(updated_messages) == 1
+
+
+def test_generation_failed_callback_clears_pending_intent_for_failed_stage(monkeypatch):
+    posted_messages = []
+
+    main_module._remember_pending_intent(
+        "U05QPB483K9",
+        "mlai.au",
+        intent_data={"action": "write", "topic": "AI for clinic workflows"},
+        channel_id="C123",
+        thread_ts="111.222",
+        wait_for="scan_complete",
+        job_id="scan-job-123",
+    )
+
+    monkeypatch.setattr(
+        main_module,
+        "post_message",
+        lambda *args, **kwargs: posted_messages.append((args, kwargs)),
+    )
+
+    payload = {
+        "event_type": "generation_failed",
+        "slack_user_id": "U05QPB483K9",
+        "job_id": "scan-job-123",
+        "domain": "mlai.au",
+        "channel_id": "C123",
+        "thread_ts": "111.222",
+        "stage": "scan",
+        "error_message": "Scan exploded",
+    }
+
+    class FakeRequest:
+        async def json(self):
+            return payload
+
+    response = asyncio.run(main_module.content_factory_callback(FakeRequest()))
+
+    assert response == {"status": "ok"}
+    assert main_module._pending_intents == {}
+    assert main_module._pending_intents_by_job == {}
+    assert posted_messages
+
+
+def test_scan_complete_auto_write_clears_pending_when_scaffold_already_exists(monkeypatch):
+    posted_messages = []
+    trigger_calls = []
+
+    main_module._remember_pending_intent(
+        "U05QPB483K9",
+        "mlai.au",
+        intent_data={
+            "action": "write",
+            "topic": "AI for clinic workflows",
+            "target_keyword": "clinic ai",
+        },
+        channel_id="C123",
+        thread_ts="111.222",
+        wait_for="scan_complete",
+    )
+
+    class FakeAutoContinueClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def scaffold_articles(self, **kwargs):
+            return {
+                "status_code": 200,
+                "data": {"pr_url": "https://github.test/pr/123"},
+            }
+
+        async def trigger_article_generation(self, **kwargs):
+            trigger_calls.append(kwargs)
+            return {"job_id": "article-job-123"}
+
+    monkeypatch.setattr(
+        main_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            MLAI_BACKEND_URL="https://backend.test",
+            MLAI_API_KEY="api-key",
+            ROO_API_KEY="roo-api-key",
+        ),
+    )
+    monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeAutoContinueClient)
+    monkeypatch.setattr(
+        main_module,
+        "post_message",
+        lambda *args, **kwargs: posted_messages.append((args, kwargs)),
+    )
+    monkeypatch.setattr(
+        slack_client_module,
+        "get_user_info",
+        lambda user_id: {
+            "id": user_id,
+            "email": "sam@example.com",
+            "real_name": "Sam Donegan",
+            "image_192": "https://avatar.test/sam.png",
+        },
+    )
+
+    payload = {
+        "event_type": "scan_complete",
+        "slack_user_id": "U05QPB483K9",
+        "job_id": "scan-job-123",
+        "domain": "mlai.au",
+        "channel_id": "C123",
+        "thread_ts": "111.222",
+        "components_count": 3,
+        "component_names": ["ArticleHero", "ArticleCard", "ArticleFAQ"],
+        "pillar_count": 1,
+        "pillar_names": ["SEO"],
+    }
+
+    class FakeRequest:
+        async def json(self):
+            return payload
+
+    response = asyncio.run(main_module.content_factory_callback(FakeRequest()))
+
+    assert response == {"status": "ok"}
+    assert len(trigger_calls) == 1
+    assert trigger_calls[0]["slack_user_id"] == "U05QPB483K9"
+    assert trigger_calls[0]["domain"] == "mlai.au"
+    assert trigger_calls[0]["topic"] == "AI for clinic workflows"
+    assert trigger_calls[0]["target_keyword"] == "clinic ai"
+    assert trigger_calls[0]["request_source"] == "roo_slackbot"
+    assert trigger_calls[0]["user_email"] == "sam@example.com"
+    assert main_module._pending_intents == {}
+    assert posted_messages
 
 
 def test_confirm_content_factory_action_resumes_original_request(monkeypatch):
@@ -818,6 +1168,63 @@ def test_confirm_content_factory_action_resumes_original_request(monkeypatch):
             },
         }
     ]
+
+
+def test_confirm_topic_action_uses_roo_request_source_and_mentions_no_extra_charge(monkeypatch):
+    confirm_calls = []
+
+    class FakeConfirmClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def confirm_article_topic(self, **kwargs):
+            confirm_calls.append(kwargs)
+            return {"job_id": "job-123", "status": "confirmed"}
+
+    monkeypatch.setattr(
+        main_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            MLAI_BACKEND_URL="https://backend.test",
+            MLAI_API_KEY="api-key",
+            ROO_API_KEY="roo-api-key",
+        ),
+    )
+    monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeConfirmClient)
+
+    payload = {
+        "user": {"id": "U05QPB483K9"},
+        "channel": {"id": "C123"},
+        "message": {
+            "ts": "111.222",
+            "thread_ts": "111.222",
+            "text": "Choose a topic",
+        },
+        "actions": [
+            {
+                "action_id": "confirm_topic",
+                "value": "confirm:ai agents:job-123",
+            }
+        ],
+    }
+
+    class FakeRequest:
+        async def form(self):
+            return {"payload": json.dumps(payload)}
+
+    response = asyncio.run(main_module.slack_actions(FakeRequest()))
+    body = json.loads(response.body)
+
+    assert response.status_code == 200
+    assert confirm_calls == [
+        {
+            "job_id": "job-123",
+            "slack_user_id": "U05QPB483K9",
+            "confirmed_keyword": "ai agents",
+            "request_source": "roo_slackbot",
+        }
+    ]
+    assert "No additional Roo points will be charged" in body["text"]
 
 
 def test_confirm_content_factory_action_without_context_prompts_to_resend(monkeypatch):
