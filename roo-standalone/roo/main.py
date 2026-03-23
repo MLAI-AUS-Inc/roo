@@ -19,7 +19,12 @@ from fastapi.responses import JSONResponse
 
 from .config import get_settings, Settings
 from .agent import RooAgent, get_agent
-from .content_factory_progress import CONTENT_FACTORY_REQUEST_SOURCE, build_live_status_blocks
+from .content_factory_progress import (
+    CONTENT_FACTORY_REQUEST_SOURCE,
+    build_live_status_blocks,
+    get_content_factory_article_cost_points,
+    normalize_content_factory_domain,
+)
 from .slack_client import post_message, send_dm
 
 # Pending intents for auto-continue after prerequisite steps complete.
@@ -2397,14 +2402,21 @@ async def slack_actions(request: Request):
         reply_channel = value_channel_id or msg_channel
         reply_thread_ts = value_thread_ts or payload.get("message", {}).get("thread_ts") or msg_ts
         is_dm = bool(reply_channel and reply_channel.startswith("D"))
+        normalized_domain = normalize_content_factory_domain(domain) or domain or "this domain"
+        article_cost_points = get_content_factory_article_cost_points(domain)
+        cost_guidance = (
+            f"Articles for {normalized_domain} are free."
+            if article_cost_points == 0
+            else f"Starting the article run deducts {article_cost_points} Roo points."
+        )
         guidance_text = (
             "✅ Reply here with the topic you want me to write about. "
             "I'll still research the best keywords, title, and talking points so it has the best chance to rank. "
-            "Starting the article run deducts 6 Roo points."
+            f"{cost_guidance}"
             if is_dm else
             "✅ Reply in this thread with something like `@Roo write about AI for clinic workflows`. "
             "I'll still research the best keywords, title, and talking points so it has the best chance to rank. "
-            "Starting the article run deducts 6 Roo points."
+            f"{cost_guidance}"
         )
 
         print(f"📝 User {user_id} will provide the article topic for {domain}")

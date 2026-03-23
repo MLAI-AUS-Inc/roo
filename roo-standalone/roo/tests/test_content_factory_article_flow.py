@@ -192,7 +192,19 @@ def _patch_content_factory(monkeypatch):
         ],
     }
     FakeContentFactoryClient.generic_integration = default_integration
-    FakeContentFactoryClient.domain_integrations = {"mlai.au": default_integration}
+    FakeContentFactoryClient.domain_integrations = {
+        "mlai.au": default_integration,
+        "woofya.com.au": {
+            **default_integration,
+            "connected_domains": [
+                {
+                    "domain": "woofya.com.au",
+                    "github_repo": "MLAI-AUS-Inc/mlai-au",
+                    "scanned": True,
+                }
+            ],
+        },
+    }
     FakeContentFactoryClient.auth_urls = {"default": "https://github.test/auth"}
     FakeContentFactoryClient.saved_intents = []
     FakeContentFactoryClient.balance_by_user = {}
@@ -616,6 +628,7 @@ async def test_explicit_research_request_starts_generation(monkeypatch):
     assert trigger_call["request_source"] == "roo_slackbot"
     assert trigger_call["client_request_id"].startswith("content-factory-")
     assert trigger_call["user_email"] == "sam@example.com"
+    assert FakeContentFactoryClient.last_instance.balance_checks == []
 
 
 @pytest.mark.asyncio
@@ -627,8 +640,8 @@ async def test_content_factory_blocks_when_user_has_insufficient_points(monkeypa
 
     result = await executor._execute_content_factory(
         skill=None,
-        text="research the best article for mlai.au",
-        params={"domain": "mlai.au"},
+        text="research the best article for woofya.com.au",
+        params={"domain": "woofya.com.au"},
         user_id="U999FREE",
         channel_id="C123",
         thread_ts="111.222",
@@ -662,7 +675,7 @@ async def test_content_factory_blocks_when_slack_email_missing(monkeypatch):
     )
 
     assert "real Slack email" in result
-    assert "6 Roo points" in result
+    assert "articles for mlai.au are free" in result.lower()
     assert FakeContentFactoryClient.last_instance.trigger_calls == []
     assert FakeContentFactoryClient.last_instance.user_registration_calls == []
 
@@ -851,7 +864,7 @@ def test_article_provide_topic_action_updates_message(monkeypatch):
     updated_blocks = updated_messages[0]["blocks"]
     assert all(block.get("type") != "actions" for block in updated_blocks)
     assert "@Roo write about AI for clinic workflows" in updated_blocks[-1]["elements"][0]["text"]
-    assert "6 Roo points" in updated_blocks[-1]["elements"][0]["text"]
+    assert "free" in updated_blocks[-1]["elements"][0]["text"].lower()
 
 
 def test_prerequisite_scan_action_triggers_backend_from_repeat_scan_prompt(monkeypatch):
