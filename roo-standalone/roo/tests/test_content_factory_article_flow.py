@@ -867,6 +867,216 @@ def test_article_provide_topic_action_updates_message(monkeypatch):
     assert "free" in updated_blocks[-1]["elements"][0]["text"].lower()
 
 
+def test_article_research_best_action_triggers_backend_with_client_request_id(monkeypatch):
+    trigger_calls = []
+    updated_messages = []
+    remembered_context = []
+    posted_messages = []
+    scheduled_job_ids = []
+
+    class FakeTriggerClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def trigger_article_generation(self, **kwargs):
+            trigger_calls.append(kwargs)
+            return {"job_id": "job-123"}
+
+    async def fake_watchdog(job_id):
+        scheduled_job_ids.append(job_id)
+
+    def capture_task(coro):
+        try:
+            coro.send(None)
+        except StopIteration:
+            pass
+        return SimpleNamespace(cancel=lambda: None)
+
+    monkeypatch.setattr(
+        main_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            MLAI_BACKEND_URL="https://backend.test",
+            MLAI_API_KEY="api-key",
+            ROO_API_KEY="roo-api-key",
+        ),
+    )
+    monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeTriggerClient)
+    monkeypatch.setattr(
+        slack_client_module,
+        "get_slack_client",
+        lambda: SimpleNamespace(chat_update=lambda **kwargs: updated_messages.append(kwargs)),
+    )
+    monkeypatch.setattr(
+        slack_client_module,
+        "get_user_info",
+        lambda user_id: {
+            "id": user_id,
+            "email": "sam@example.com",
+            "real_name": "Sam Donegan",
+            "image_192": "https://avatar.test/sam.png",
+        },
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_remember_content_thread_context",
+        lambda channel_id, thread_ts, domain, workflow: remembered_context.append(
+            (channel_id, thread_ts, domain, workflow)
+        ),
+    )
+    monkeypatch.setattr(main_module, "_watch_content_factory_quiet_run", fake_watchdog)
+    monkeypatch.setattr(main_module, "post_message", lambda *args, **kwargs: posted_messages.append((args, kwargs)))
+    monkeypatch.setattr(asyncio, "create_task", capture_task)
+
+    payload = {
+        "user": {"id": "U05QPB483K9"},
+        "channel": {"id": "C123"},
+        "message": {
+            "ts": "111.222",
+            "thread_ts": "111.222",
+            "text": "Choose article direction",
+            "blocks": [
+                {"type": "section", "text": {"type": "mrkdwn", "text": "Before I start..."}},
+                {"type": "actions", "elements": []},
+            ],
+        },
+        "actions": [
+            {
+                "action_id": "article_research_best",
+                "value": json.dumps(
+                    {
+                        "domain": "mlai.au",
+                        "slack_user_id": "U05QPB483K9",
+                        "channel_id": "C123",
+                        "thread_ts": "111.222",
+                        "client_request_id": "content-factory-request-123",
+                    }
+                ),
+            }
+        ],
+    }
+
+    class FakeRequest:
+        async def form(self):
+            return {"payload": json.dumps(payload)}
+
+    response = asyncio.run(main_module.slack_actions(FakeRequest()))
+
+    assert response.status_code == 200
+    assert remembered_context == [("C123", "111.222", "mlai.au", "research")]
+    assert len(updated_messages) == 1
+    assert posted_messages == []
+    assert trigger_calls == [
+        {
+            "slack_user_id": "U05QPB483K9",
+            "domain": "mlai.au",
+            "slack_channel_id": "C123",
+            "slack_thread_ts": "111.222",
+            "progress_message_ts": "111.222",
+            "client_request_id": "content-factory-request-123",
+            "request_source": "roo_slackbot",
+            "user_email": "sam@example.com",
+            "user_first_name": "Sam",
+            "user_last_name": "Donegan",
+            "user_avatar_url": "https://avatar.test/sam.png",
+        }
+    ]
+    assert scheduled_job_ids == ["job-123"]
+
+
+def test_write_first_article_action_generates_client_request_id_when_missing(monkeypatch):
+    trigger_calls = []
+    updated_messages = []
+    posted_messages = []
+    scheduled_job_ids = []
+
+    class FakeTriggerClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def trigger_article_generation(self, **kwargs):
+            trigger_calls.append(kwargs)
+            return {"job_id": "job-123"}
+
+    async def fake_watchdog(job_id):
+        scheduled_job_ids.append(job_id)
+
+    def capture_task(coro):
+        try:
+            coro.send(None)
+        except StopIteration:
+            pass
+        return SimpleNamespace(cancel=lambda: None)
+
+    monkeypatch.setattr(
+        main_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            MLAI_BACKEND_URL="https://backend.test",
+            MLAI_API_KEY="api-key",
+            ROO_API_KEY="roo-api-key",
+        ),
+    )
+    monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeTriggerClient)
+    monkeypatch.setattr(
+        slack_client_module,
+        "get_slack_client",
+        lambda: SimpleNamespace(chat_update=lambda **kwargs: updated_messages.append(kwargs)),
+    )
+    monkeypatch.setattr(
+        slack_client_module,
+        "get_user_info",
+        lambda user_id: {
+            "id": user_id,
+            "email": "sam@example.com",
+            "real_name": "Sam Donegan",
+            "image_192": "https://avatar.test/sam.png",
+        },
+    )
+    monkeypatch.setattr(main_module, "_watch_content_factory_quiet_run", fake_watchdog)
+    monkeypatch.setattr(main_module, "post_message", lambda *args, **kwargs: posted_messages.append((args, kwargs)))
+    monkeypatch.setattr(asyncio, "create_task", capture_task)
+
+    payload = {
+        "user": {"id": "U05QPB483K9"},
+        "channel": {"id": "C123"},
+        "message": {
+            "ts": "111.222",
+            "thread_ts": "111.222",
+            "text": "Ready to write your first article?",
+        },
+        "actions": [
+            {
+                "action_id": "write_first_article",
+                "value": json.dumps(
+                    {
+                        "domain": "mlai.au",
+                        "slack_user_id": "U05QPB483K9",
+                        "channel_id": "C123",
+                        "thread_ts": "111.222",
+                    }
+                ),
+            }
+        ],
+    }
+
+    class FakeRequest:
+        async def form(self):
+            return {"payload": json.dumps(payload)}
+
+    response = asyncio.run(main_module.slack_actions(FakeRequest()))
+
+    assert response.status_code == 200
+    assert len(updated_messages) == 1
+    assert posted_messages == []
+    assert len(trigger_calls) == 1
+    assert trigger_calls[0]["slack_user_id"] == "U05QPB483K9"
+    assert trigger_calls[0]["domain"] == "mlai.au"
+    assert trigger_calls[0]["client_request_id"].startswith("content-factory-")
+    assert trigger_calls[0]["request_source"] == "roo_slackbot"
+    assert scheduled_job_ids == ["job-123"]
+
+
 def test_prerequisite_scan_action_triggers_backend_from_repeat_scan_prompt(monkeypatch):
     trigger_calls = []
     updated_messages = []

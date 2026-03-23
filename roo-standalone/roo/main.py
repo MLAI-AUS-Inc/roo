@@ -71,6 +71,14 @@ def _prune_pending_intents(now: Optional[float] = None) -> None:
             _pop_pending_intent_by_key(intent_key)
 
 
+def _content_factory_client_request_id(raw_value: Any) -> str:
+    """Return a stable request id, generating one for older Slack buttons."""
+    client_request_id = str(raw_value or "").strip()
+    if client_request_id:
+        return client_request_id
+    return f"content-factory-{uuid4().hex}"
+
+
 def _remember_pending_intent(
     slack_user_id: Optional[str],
     domain: Optional[str],
@@ -1484,6 +1492,7 @@ async def content_factory_callback(request: Request):
             already_exists = payload.get("already_exists", False)
             preview_url = payload.get("preview_url")
             build_verified = payload.get("build_verified", False)
+            client_request_id = _content_factory_client_request_id(payload.get("client_request_id"))
 
             print(f"📁 Scaffold complete for {domain}: PR={pr_url}")
             _remember_content_thread_context(channel_id, thread_ts, domain, "scaffold")
@@ -1555,7 +1564,8 @@ async def content_factory_callback(request: Request):
                                     "domain": domain,
                                     "slack_user_id": slack_user_id,
                                     "channel_id": channel_id,
-                                    "thread_ts": thread_ts
+                                    "thread_ts": thread_ts,
+                                    "client_request_id": client_request_id,
                                 }),
                                 "action_id": "write_first_article"
                             },
@@ -2181,6 +2191,7 @@ async def slack_actions(request: Request):
         original_user_id = value_data.get("slack_user_id")
         value_channel_id = value_data.get("channel_id")
         value_thread_ts = value_data.get("thread_ts")
+        client_request_id = _content_factory_client_request_id(value_data.get("client_request_id"))
 
         msg_channel = payload.get("channel", {}).get("id")
         msg_ts = payload.get("message", {}).get("ts")
@@ -2306,6 +2317,7 @@ async def slack_actions(request: Request):
         original_user_id = value_data.get("slack_user_id")
         value_channel_id = value_data.get("channel_id")
         value_thread_ts = value_data.get("thread_ts")
+        client_request_id = _content_factory_client_request_id(value_data.get("client_request_id"))
 
         msg_channel = payload.get("channel", {}).get("id")
         msg_ts = payload.get("message", {}).get("ts")
