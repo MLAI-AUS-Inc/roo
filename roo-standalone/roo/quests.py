@@ -14,7 +14,7 @@ except ImportError:
     from backports import zoneinfo
 
 from .config import get_settings
-from skills.mlai_points.client import MLAIBackendClient
+from .clients.mlai_backend import MLAIBackendClient
 from .slack_client import get_bot_user_id, post_message, get_channel_id
 
 # Configuration for quests

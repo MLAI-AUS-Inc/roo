@@ -10,6 +10,7 @@ from typing import Optional, Dict, Any, List
 from pathlib import Path
 
 from .config import get_settings
+from .content_intent import extract_domain, normalize_slack_text, parse_routing_intent
 from .llm import chat
 from .skills.loader import Skill, load_skills
 from .skills.executor import SkillExecutor
@@ -70,6 +71,8 @@ class RooAgent:
         """
         # Clean the message
         clean_text = self._clean_mention(text)
+        thread_context = self._get_thread_context(channel_id, thread_ts)
+        routing_intent = self._get_routing_intent(clean_text, thread_context)
         
         print(f"🔍 Processing: {clean_text[:100]}...")
         
@@ -93,11 +96,22 @@ class RooAgent:
             return fast_result
         
         # 2. Select appropriate skill (LLM Routing)
-        skill = await self._select_skill(clean_text, thread_history, channel_id, thread_ts)
+        skill = routing_intent["skill"] if routing_intent else await self._select_skill(
+            clean_text,
+            thread_history,
+            channel_id,
+            thread_ts,
+        )
 
         if skill:
             print(f"🎯 Selected skill: {skill.name}")
             self._remember_selected_skill(skill.name, channel_id, thread_ts, clean_text)
+            effective_param_overrides = dict(param_overrides or {})
+            if routing_intent and skill.name == routing_intent["skill"].name:
+                effective_param_overrides = {
+                    **routing_intent.get("params", {}),
+                    **effective_param_overrides,
+                }
             result = await self.skill_executor.execute(
                 skill=skill,
                 text=clean_text,
@@ -105,7 +119,7 @@ class RooAgent:
                 channel_id=channel_id,
                 thread_ts=thread_ts,
                 thread_history=thread_history,
-                param_overrides=param_overrides,
+                param_overrides=effective_param_overrides or None,
                 **kwargs
             )
             return {
@@ -202,8 +216,29 @@ class RooAgent:
         return next((skill for skill in self.skills if skill.name == skill_name), None)
 
     def _extract_domain(self, text: str) -> Optional[str]:
-        match = re.search(r'\b(?:https?://)?([a-z0-9][a-z0-9.-]+\.[a-z]{2,})\b', text.lower())
-        return match.group(1) if match else None
+        return extract_domain(text)
+
+    def _get_routing_intent(
+        self,
+        text: str,
+        thread_context: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        route = parse_routing_intent(
+            text,
+            thread_skill_name=(thread_context or {}).get("skill_name"),
+            thread_domain=(thread_context or {}).get("domain"),
+        )
+        if not route:
+            return None
+
+        skill = self._get_skill_by_name(route["skill_name"])
+        if not skill:
+            return None
+
+        return {
+            "skill": skill,
+            "params": dict(route.get("params") or {}),
+        }
 
     def _looks_like_content_request(self, text: str) -> bool:
         patterns = (
@@ -259,6 +294,10 @@ class RooAgent:
         text: str,
         thread_context: Optional[Dict[str, Any]] = None,
     ) -> Optional[Skill]:
+        routing_intent = self._get_routing_intent(text, thread_context)
+        if routing_intent:
+            return routing_intent["skill"]
+
         text_lower = text.lower().strip()
         content_skill = self._get_skill_by_name("content-factory")
 
@@ -451,6 +490,7 @@ class RooAgent:
             # Fallback: remove first mention if we can't get bot ID
             cleaned = re.sub(r'<@[A-Z0-9]+>', '', text, count=1)
         
+        cleaned = normalize_slack_text(cleaned)
         # Remove extra whitespace
         cleaned = ' '.join(cleaned.split())
         return cleaned.strip()
@@ -467,6 +507,10 @@ class RooAgent:
             return None
 
         thread_context = self._get_thread_context(channel_id, thread_ts)
+        routing_intent = self._get_routing_intent(text, thread_context)
+        if routing_intent:
+            return routing_intent["skill"]
+
         trigger_skill = self._select_skill_from_triggers(text, thread_context)
         if trigger_skill:
             return trigger_skill
@@ -496,7 +540,8 @@ class RooAgent:
         # Format history for context
         history_context = ""
         if history:
-            history_str = "\n".join([f"{msg.get('user')}: {msg.get('text')}" for msg in history[:-1]]) # Skip last as it's the current request usually
+            trimmed_history = history[:-1][-4:]
+            history_str = "\n".join([f"{msg.get('user')}: {msg.get('text')}" for msg in trimmed_history]) # Skip last as it's the current request usually
             history_context = f"Conversation History:\n{history_str}\n"
 
         thread_context_hint = ""
@@ -508,7 +553,7 @@ class RooAgent:
                 f"- workflow: {thread_context.get('workflow') or 'unknown'}\n"
             )
 
-        prompt = f"""You are a skill router. Given the user's message and conversation context, decide which skill to use.
+        prompt = f"""Choose the best skill for the user's message.
 
 Available skills:
 {skill_descriptions}
@@ -518,10 +563,16 @@ Available skills:
 {thread_context_hint}
 User message: "{text}"
 
-Prefer content-factory for requests about writing, researching, or planning articles, blog posts, SEO topics, keywords, or content for a domain.
+Routing rules:
+- Prefer content-factory for domain-backed repo scans, article/blog writing, SEO research, content planning, scaffolding blog/article pages, and requests like "scan the domain mlai.au" or "scan the repo for the domain mlai.au".
+- Prefer github-integration for GitHub auth, reconnecting GitHub, or account/integration management.
+- Prefer mlai-points for points, rewards, coworking, and task management.
 
 Examples:
 - "please research the best article for me to write" -> content-factory
+- "scan the repo for the domain woofya.com.au" -> content-factory
+- "scan the domain woofya.com.au" -> content-factory
+- "reconnect github for woofya.com.au" -> github-integration
 - "write me an article about how to build an ai agent harness for long-running specific tasks" -> content-factory
 - "create a task called fix docs worth 5 points" -> mlai-points
 
@@ -532,7 +583,7 @@ Respond with ONLY the skill name (e.g., "connect_users" or "none"):"""
             response = await chat([
                 {"role": "system", "content": "You are a skill router. Respond with only the skill name."},
                 {"role": "user", "content": prompt}
-            ], model=settings.ROUTER_MODEL, max_tokens=32, reasoning_effort="low")
+            ], model=settings.ROUTER_MODEL, max_tokens=96, reasoning_effort="low")
 
             skill_name = response.content.strip().lower()
             # Normalize: both underscores and hyphens should match

@@ -24,6 +24,15 @@ trigger_keywords:
   - add blog
   - scan codebase
   - scan my codebase
+  - scan repo
+  - scan repository
+  - scan the repo
+  - scan the domain
+  - scan domain
+  - analyze repo
+  - analyse repo
+  - analyze domain
+  - analyse domain
   - connect to
 ---
 

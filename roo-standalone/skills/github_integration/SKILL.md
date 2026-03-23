@@ -2,10 +2,11 @@
 name: github-integration
 description: Interact with the user's GitHub repositories (scan, analyze, access).
 trigger_keywords:
-  - scan repo
   - connect github
-  - analyze repo
   - github integration
+  - reconnect github
+  - github auth
+  - github access
 requires_auth: true
 parameters:
   - repo_name: The name of the repository to scan (e.g. owner/project).

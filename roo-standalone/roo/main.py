@@ -5,6 +5,7 @@ Roo Standalone - FastAPI Application
 
 Main entrypoint for the Roo AI agent service.
 """
+import asyncio
 import json
 import hmac
 import hashlib
@@ -18,6 +19,7 @@ from fastapi.responses import JSONResponse
 
 from .config import get_settings, Settings
 from .agent import RooAgent, get_agent
+from .content_factory_progress import CONTENT_FACTORY_REQUEST_SOURCE, build_live_status_blocks
 from .slack_client import post_message, send_dm
 
 # Pending intents for auto-continue after prerequisite steps complete.
@@ -25,6 +27,17 @@ from .slack_client import post_message, send_dm
 _pending_intents: dict = {}
 _pending_intents_by_job: dict[str, str] = {}
 PENDING_INTENT_TTL_SECONDS = 30 * 60
+CONTENT_FACTORY_WATCHDOG_POLL_SECONDS = 120
+CONTENT_FACTORY_WATCHDOG_STOP_STATUSES = {
+    "awaiting_confirmation",
+    "completed",
+    "failed",
+    "error",
+    "blocked",
+    "blocked_verification",
+    "denied",
+    "cancelled",
+}
 
 
 def _pending_intent_key(slack_user_id: Optional[str], domain: Optional[str]) -> Optional[str]:
@@ -151,6 +164,77 @@ def _extract_job_id(payload: Optional[dict[str, Any]]) -> Optional[str]:
     return None
 
 
+async def _watch_content_factory_quiet_run(job_id: str) -> None:
+    from .clients.mlai_backend import MLAIBackendClient
+
+    settings = get_settings()
+    client = MLAIBackendClient(
+        base_url=settings.MLAI_BACKEND_URL,
+        api_key=settings.ROO_API_KEY or settings.MLAI_API_KEY,
+    )
+    consecutive_failures = 0
+
+    while True:
+        await asyncio.sleep(CONTENT_FACTORY_WATCHDOG_POLL_SECONDS)
+        try:
+            status_data = await client.check_generation_status(job_id)
+            consecutive_failures = 0
+            status_value = str(status_data.get("status") or "").strip().lower()
+            if not status_value or status_value in CONTENT_FACTORY_WATCHDOG_STOP_STATUSES:
+                return
+            await client.maybe_send_content_still_working(
+                job_id,
+                request_source=CONTENT_FACTORY_REQUEST_SOURCE,
+            )
+        except Exception as exc:
+            consecutive_failures += 1
+            print(f"⚠️ Quiet-run watchdog failed for {job_id} ({consecutive_failures}/5): {exc}")
+            if consecutive_failures >= 5:
+                return
+
+
+async def _maybe_attach_content_factory_progress(
+    result_data: Any,
+    post_response: Optional[dict],
+    *,
+    channel_id: Optional[str],
+    thread_ts: Optional[str],
+) -> None:
+    if not isinstance(result_data, dict):
+        return
+
+    job_id = str(result_data.get("content_factory_progress_job_id") or "").strip()
+    if not job_id:
+        return
+
+    message_ts = str((post_response or {}).get("ts") or "").strip()
+    if not message_ts:
+        return
+
+    from .clients.mlai_backend import MLAIBackendClient
+
+    settings = get_settings()
+    client = MLAIBackendClient(
+        base_url=settings.MLAI_BACKEND_URL,
+        api_key=settings.ROO_API_KEY or settings.MLAI_API_KEY,
+    )
+    try:
+        await client.attach_content_progress_message(
+            job_id,
+            progress_message_ts=message_ts,
+            slack_channel_id=channel_id,
+            slack_thread_ts=thread_ts,
+            slack_root_message_ts=thread_ts,
+            request_source=CONTENT_FACTORY_REQUEST_SOURCE,
+        )
+    except Exception as exc:
+        print(f"⚠️ Failed to attach progress message {message_ts} to job {job_id}: {exc}")
+        return
+
+    if result_data.get("content_factory_watchdog"):
+        asyncio.create_task(_watch_content_factory_quiet_run(job_id))
+
+
 async def _trigger_article_generation_from_pending(
     pending: dict[str, Any],
     *,
@@ -162,16 +246,37 @@ async def _trigger_article_generation_from_pending(
     intent_channel = pending.get("channel_id") or fallback_channel_id
     intent_thread = pending.get("thread_ts") or fallback_thread_ts
     topic = pending.get("topic")
+    include_decision_stage = not bool(topic)
 
     print(f"🔄 Auto-continuing: triggering article generation for {domain} (topic: {topic})")
 
+    progress_message_ts = None
     if intent_channel:
-        topic_note = f" about *{topic}*" if topic else ""
-        post_message(
+        topic_note = f" for *{topic}*" if topic else ""
+        summary_text = (
+            f"Articles directory is ready. Starting article generation{topic_note}. I'll keep this message updated."
+            if topic
+            else "Articles directory is ready. Starting discovery to find the best article opportunity. I'll keep this message updated."
+        )
+        response = post_message(
             channel=intent_channel,
             thread_ts=intent_thread,
-            text=f"✅ Articles directory is ready! Now writing your article{topic_note}..."
+            text=f"Starting Content Factory for {domain}",
+            blocks=build_live_status_blocks(
+                domain,
+                summary_text=summary_text,
+                include_decision_stage=include_decision_stage,
+                current_stage="preparing",
+            ),
         )
+        progress_message_ts = str((response or {}).get("ts") or "").strip() or None
+
+    _remember_content_thread_context(
+        intent_channel,
+        intent_thread,
+        domain,
+        "research" if include_decision_stage else "write",
+    )
 
     from .clients.mlai_backend import MLAIBackendClient
     from .slack_client import get_user_info
@@ -184,21 +289,24 @@ async def _trigger_article_generation_from_pending(
         slack_info = get_user_info(slack_user_id)
         real_name = str(slack_info.get("real_name") or "").strip()
         name_parts = real_name.split(" ", 1) if real_name else []
-        await backend_client.trigger_article_generation(
+        result = await backend_client.trigger_article_generation(
             slack_user_id=slack_user_id,
             domain=domain,
             topic=topic,
             target_keyword=pending.get("target_keyword"),
             slack_channel_id=intent_channel,
             slack_thread_ts=intent_thread,
+            progress_message_ts=progress_message_ts,
             client_request_id=pending.get("client_request_id"),
-            request_source="roo_slackbot",
+            request_source=CONTENT_FACTORY_REQUEST_SOURCE,
             user_email=str(slack_info.get("email") or "").strip().lower() or None,
             user_first_name=name_parts[0] if name_parts else None,
             user_last_name=name_parts[1] if len(name_parts) > 1 else None,
             user_avatar_url=str(slack_info.get("image_192") or "").strip() or None,
         )
         print(f"✅ Auto-generation triggered for {domain}")
+        if result.get("job_id") or result.get("run_id"):
+            asyncio.create_task(_watch_content_factory_quiet_run(result.get("job_id") or result.get("run_id")))
         return True
     except Exception as e:
         print(f"❌ Auto-generation failed: {e}")
@@ -449,26 +557,65 @@ async def slack_events(request: Request):
     
     if event_type == "app_mention":
         # Process mention asynchronously
-        import asyncio
         asyncio.create_task(_handle_mention(event))
         return JSONResponse(status_code=200, content={})
 
     if event_type == "reaction_added":
-        import asyncio
         asyncio.create_task(_handle_reaction_added(event))
         return JSONResponse(status_code=200, content={})
     
     if event_type == "message" and not event.get("bot_id") and not event.get("subtype"):
-        # Note: #_start-here logic is now handled by quests.py
+        from .slack_client import get_channel_id
+
+        start_here_id = get_channel_id("_start-here")
+        if start_here_id and event.get("channel") == start_here_id:
+            if event.get("thread_ts"):
+                print(f"🧵 Ignoring thread reply in #_start-here from {event.get('user')}")
+                return JSONResponse(status_code=200, content={})
+
+            asyncio.create_task(_handle_start_here_intro(event))
+            return JSONResponse(status_code=200, content={})
         
         is_dm = event.get("channel_type") == "im"
         if is_dm:
             print(f"📨 Received DM from {event.get('user')}")
-            import asyncio
             asyncio.create_task(_handle_mention(event))
             return JSONResponse(status_code=200, content={})
     
     return JSONResponse(status_code=200, content={})
+
+
+async def _handle_start_here_intro(event: dict):
+    """Award the intro bonus for a qualifying top-level #_start-here post."""
+    user_id = event.get("user")
+    channel_id = event.get("channel")
+    message_ts = event.get("ts")
+
+    if not user_id or not channel_id or not message_ts:
+        return
+
+    try:
+        from .clients.mlai_backend import MLAIBackendClient
+
+        settings = get_settings()
+        client = MLAIBackendClient(
+            base_url=settings.MLAI_BACKEND_URL,
+            api_key=settings.ROO_API_KEY or settings.MLAI_API_KEY,
+            internal_api_key=settings.INTERNAL_API_KEY or settings.ROO_API_KEY or settings.MLAI_API_KEY,
+        )
+        result = await client.award_first_channel_post(user_id, channel_id)
+    except Exception as exc:
+        print(f"⚠️ Failed to process #_start-here intro award for {user_id} in {channel_id}: {exc}")
+        return
+
+    if not result.get("awarded"):
+        return
+
+    post_message(
+        channel=channel_id,
+        thread_ts=message_ts,
+        text=f"Welcome <@{user_id}>! You've earned 2 Roo points for introducing yourself here.",
+    )
 
 
 async def _handle_mention(event: dict):
@@ -500,7 +647,13 @@ async def _handle_mention(event: dict):
             }
             if result.get("blocks"):
                 post_kwargs["blocks"] = result["blocks"]
-            post_message(**post_kwargs)
+            response = post_message(**post_kwargs)
+            await _maybe_attach_content_factory_progress(
+                result.get("data"),
+                response,
+                channel_id=channel_id,
+                thread_ts=thread_ts,
+            )
 
         print(f"✅ Mention handled successfully (skill: {result.get('skill_used')})")
         
@@ -547,7 +700,13 @@ async def _resume_intent(user_id: str, intent: dict):
             }
             if result.get("blocks"):
                 post_kwargs["blocks"] = result["blocks"]
-            post_message(**post_kwargs)
+            response = post_message(**post_kwargs)
+            await _maybe_attach_content_factory_progress(
+                result.get("data"),
+                response,
+                channel_id=channel_id,
+                thread_ts=thread_ts,
+            )
 
     except Exception as e:
         print(f"❌ Error resuming intent: {e}")
@@ -670,7 +829,7 @@ async def slack_commands(request: Request):
     # Handle "connect github"
     if "connect github" in text.lower():
         settings = get_settings()
-        from .skills.mlai_points.client import MLAIBackendClient
+        from .clients.mlai_backend import MLAIBackendClient
         
         try:
             client = MLAIBackendClient(
@@ -1648,7 +1807,6 @@ async def slack_actions(request: Request):
         # Acknowledge immediately (prevents timeout error on button)
         # In background, trigger the scan command as if user typed "@Roo scan repo"
         # This will trigger the backend scan and subsequent flow
-        import asyncio
         agent = get_agent()
         asyncio.create_task(agent.handle_mention(
             text="scan repo",
@@ -1685,16 +1843,16 @@ async def slack_actions(request: Request):
                 )
             return JSONResponse(status_code=200, content={})
 
-        import asyncio
-        agent = get_agent()
         resumed_params = {**param_overrides, "confirmed": True}
 
-        asyncio.create_task(agent.handle_mention(
-            text=original_text,
-            user_id=user_id,
-            channel_id=original_channel_id,
-            thread_ts=original_thread_ts,
-            param_overrides=resumed_params,
+        asyncio.create_task(_handle_mention(
+            {
+                "user": user_id,
+                "text": original_text,
+                "channel": original_channel_id,
+                "thread_ts": original_thread_ts,
+                "param_overrides": resumed_params,
+            }
         ))
         return JSONResponse(status_code=200, content={})
 
@@ -1722,12 +1880,14 @@ async def slack_actions(request: Request):
         )
 
         try:
-            await client.confirm_article_topic(
+            result = await client.confirm_article_topic(
                 job_id=job_id,
                 slack_user_id=user_id,
                 confirmed_keyword=keyword,
-                request_source="roo_slackbot",
+                request_source=CONTENT_FACTORY_REQUEST_SOURCE,
             )
+            if result.get("job_id") or result.get("run_id"):
+                asyncio.create_task(_watch_content_factory_quiet_run(result.get("job_id") or result.get("run_id")))
 
             return JSONResponse(status_code=200, content={
                 "response_type": "ephemeral",
@@ -1777,12 +1937,14 @@ async def slack_actions(request: Request):
         )
 
         try:
-            await client.confirm_article_topic(
+            result = await client.confirm_article_topic(
                 job_id=job_id,
                 slack_user_id=user_id,
                 confirmed_keyword=keyword,
-                request_source="roo_slackbot",
+                request_source=CONTENT_FACTORY_REQUEST_SOURCE,
             )
+            if result.get("job_id") or result.get("run_id"):
+                asyncio.create_task(_watch_content_factory_quiet_run(result.get("job_id") or result.get("run_id")))
 
             return JSONResponse(status_code=200, content={
                 "response_type": "ephemeral",
@@ -2033,16 +2195,16 @@ async def slack_actions(request: Request):
         try:
             from .slack_client import get_slack_client
             slack_client = get_slack_client()
-            original_blocks = payload.get("message", {}).get("blocks", [])
-            updated_blocks = [b for b in original_blocks if b.get("type") != "actions"]
-            updated_blocks.append({
-                "type": "context",
-                "elements": [{"type": "mrkdwn", "text": "✅ Starting article generation. This paid run will deduct 6 Roo points once research begins."}]
-            })
+            updated_blocks = build_live_status_blocks(
+                domain,
+                summary_text="Starting article generation. I'll keep this message updated.",
+                include_decision_stage=False,
+                current_stage="preparing",
+            )
             slack_client.chat_update(
                 channel=msg_channel,
                 ts=msg_ts,
-                text=payload.get("message", {}).get("text", ""),
+                text=f"Starting Content Factory for {domain}",
                 blocks=updated_blocks
             )
         except Exception as e:
@@ -2066,6 +2228,7 @@ async def slack_actions(request: Request):
                 domain=domain,
                 slack_channel_id=reply_channel,
                 slack_thread_ts=reply_thread_ts,
+                progress_message_ts=msg_ts,
                 client_request_id=client_request_id,
                 request_source="roo_slackbot",
                 user_email=str(slack_info.get("email") or "").strip().lower() or None,
@@ -2074,6 +2237,8 @@ async def slack_actions(request: Request):
                 user_avatar_url=str(slack_info.get("image_192") or "").strip() or None,
             )
             print(f"✅ Article generation triggered for {domain}: {result}")
+            if result.get("job_id") or result.get("run_id"):
+                asyncio.create_task(_watch_content_factory_quiet_run(result.get("job_id") or result.get("run_id")))
         except Exception as e:
             print(f"❌ Failed to trigger article generation: {e}")
             import traceback
@@ -2154,34 +2319,56 @@ async def slack_actions(request: Request):
         try:
             from .slack_client import get_slack_client
             slack_client = get_slack_client()
-            original_blocks = payload.get("message", {}).get("blocks", [])
-            updated_blocks = [b for b in original_blocks if b.get("type") != "actions"]
-            updated_blocks.append({
-                "type": "context",
-                "elements": [{"type": "mrkdwn", "text": f"✅ Researching the best article opportunity for *{domain}*.\nStarting the article run will deduct 6 Roo points."}]
-            })
+            updated_blocks = build_live_status_blocks(
+                domain,
+                summary_text="Starting discovery to find the best article opportunity. I'll keep this message updated.",
+                include_decision_stage=True,
+                current_stage="preparing",
+            )
             slack_client.chat_update(
                 channel=msg_channel,
                 ts=msg_ts,
-                text=payload.get("message", {}).get("text", ""),
+                text=f"Starting Content Factory for {domain}",
                 blocks=updated_blocks
             )
         except Exception as e:
             print(f"⚠️ Failed to update message: {e}")
 
-        import asyncio
-        asyncio.create_task(_handle_mention(
-            {
-                "user": user_id,
-                "text": f"research the best article for {domain}",
-                "channel": reply_channel,
-                "thread_ts": reply_thread_ts,
-                "param_overrides": {
-                    "domain": domain,
-                    "client_request_id": client_request_id,
-                },
-            }
-        ))
+        from .clients.mlai_backend import MLAIBackendClient
+        from .slack_client import get_user_info
+
+        settings = get_settings()
+        backend_client = MLAIBackendClient(
+            base_url=settings.MLAI_BACKEND_URL,
+            api_key=settings.ROO_API_KEY or settings.MLAI_API_KEY,
+        )
+        try:
+            slack_info = get_user_info(user_id)
+            real_name = str(slack_info.get("real_name") or "").strip()
+            name_parts = real_name.split(" ", 1) if real_name else []
+            result = await backend_client.trigger_article_generation(
+                slack_user_id=user_id,
+                domain=domain,
+                slack_channel_id=reply_channel,
+                slack_thread_ts=reply_thread_ts,
+                progress_message_ts=msg_ts,
+                client_request_id=client_request_id,
+                request_source=CONTENT_FACTORY_REQUEST_SOURCE,
+                user_email=str(slack_info.get("email") or "").strip().lower() or None,
+                user_first_name=name_parts[0] if name_parts else None,
+                user_last_name=name_parts[1] if len(name_parts) > 1 else None,
+                user_avatar_url=str(slack_info.get("image_192") or "").strip() or None,
+            )
+            print(f"✅ Article discovery triggered for {domain}: {result}")
+            if result.get("job_id") or result.get("run_id"):
+                asyncio.create_task(_watch_content_factory_quiet_run(result.get("job_id") or result.get("run_id")))
+        except Exception as e:
+            print(f"❌ Failed to trigger article discovery: {e}")
+            post_message(
+                channel=reply_channel,
+                thread_ts=reply_thread_ts,
+                text=f"❌ Error starting article discovery: {e}"
+            )
         return JSONResponse(status_code=200, content={})
 
     # Handler for article_provide_topic
@@ -2739,13 +2926,15 @@ async def slack_actions(request: Request):
         )
 
         try:
-            await client.confirm_article_topic(
+            result = await client.confirm_article_topic(
                 job_id=job_id,
                 slack_user_id=user_id,
                 option_index=option_index,
-                request_source="roo_slackbot",
+                request_source=CONTENT_FACTORY_REQUEST_SOURCE,
             )
             print(f"✅ Topic confirmed for job {job_id}")
+            if result.get("job_id") or result.get("run_id"):
+                asyncio.create_task(_watch_content_factory_quiet_run(result.get("job_id") or result.get("run_id")))
         except Exception as e:
             print(f"❌ Failed to confirm topic: {e}")
             import traceback

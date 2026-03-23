@@ -43,6 +43,10 @@ def _make_agent() -> RooAgent:
             "mlai-points",
             ["points", "balance", "coworking", "book", "task", "tasks", "reward", "rewards"],
         ),
+        _make_skill(
+            "github-integration",
+            ["connect github", "github integration", "reconnect github", "github auth"],
+        ),
     ]
     agent.skill_executor = SimpleNamespace()
     agent._thread_skill_context = {}
@@ -137,6 +141,99 @@ def test_content_thread_context_keeps_follow_up_on_content(monkeypatch):
 
     assert skill is not None
     assert skill.name == "content-factory"
+
+
+def test_content_thread_context_keeps_scan_follow_up_on_content(monkeypatch):
+    agent = _make_agent()
+    agent.remember_thread_context(
+        "content-factory",
+        "C123",
+        "1772971600.288239",
+        domain="woofya.com.au",
+        workflow="scan",
+    )
+
+    async def fail_chat(*args, **kwargs):
+        raise AssertionError("LLM router should not be needed for scan follow-up")
+
+    monkeypatch.setattr("roo.agent.chat", fail_chat)
+
+    skill = asyncio.run(agent._select_skill("scan it", [], "C123", "1772971600.288239"))
+
+    assert skill is not None
+    assert skill.name == "content-factory"
+
+
+def test_scan_domain_phrase_routes_to_content_factory():
+    agent = _make_agent()
+
+    skill = agent._select_skill_from_triggers("scan the domain woofya.com.au")
+
+    assert skill is not None
+    assert skill.name == "content-factory"
+
+
+def test_scan_repo_for_domain_phrase_routes_to_content_factory():
+    agent = _make_agent()
+
+    skill = agent._select_skill_from_triggers("scan the repo for the domain woofya.com.au")
+
+    assert skill is not None
+    assert skill.name == "content-factory"
+
+
+def test_scan_domain_phrase_skips_llm_router(monkeypatch):
+    agent = _make_agent()
+
+    async def fail_chat(*args, **kwargs):
+        raise AssertionError("LLM router should not be needed for domain scan routing")
+
+    monkeypatch.setattr("roo.agent.chat", fail_chat)
+
+    skill = asyncio.run(agent._select_skill("scan the domain woofya.com.au", [], None, None))
+
+    assert skill is not None
+    assert skill.name == "content-factory"
+
+
+def test_handle_mention_normalizes_slack_link_and_passes_scan_params(monkeypatch):
+    agent = _make_agent()
+    captured = {}
+
+    class FakeExecutor:
+        async def execute(self, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(
+                message="ok",
+                data=kwargs.get("param_overrides"),
+                blocks=None,
+                suppress_post=False,
+            )
+
+    agent.skill_executor = FakeExecutor()
+
+    async def fail_chat(*args, **kwargs):
+        raise AssertionError("LLM router should not be needed for Slack link scans")
+
+    monkeypatch.setattr("roo.agent.chat", fail_chat)
+    monkeypatch.setattr("roo.agent.get_thread_messages", lambda channel, thread_ts: [])
+    monkeypatch.setattr("roo.slack_client.get_bot_user_id", lambda: "U090FV0GTT4")
+
+    result = asyncio.run(
+        agent.handle_mention(
+            text="<@U090FV0GTT4> scan the repo for the domain <http://woofya.com.au|woofya.com.au>",
+            user_id="U05QPB483K9",
+            channel_id="C123",
+            thread_ts="123.456",
+        )
+    )
+
+    assert result["skill_used"] == "content-factory"
+    assert captured["text"] == "scan the repo for the domain woofya.com.au"
+    assert captured["param_overrides"] == {
+        "action": "scan",
+        "domain": "woofya.com.au",
+    }
 
 
 def test_llm_router_uses_gpt_5_4(monkeypatch):
