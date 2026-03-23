@@ -20,6 +20,9 @@ from ..content_factory_progress import (
     CONTENT_FACTORY_ARTICLE_COST_POINTS,
     CONTENT_FACTORY_REQUEST_SOURCE,
     build_live_status_blocks,
+    get_content_factory_article_cost_points,
+    is_free_content_factory_domain,
+    normalize_content_factory_domain,
 )
 from ..content_intent import is_explicit_scan_request
 from ..llm import chat, embed, get_llm_client
@@ -221,6 +224,13 @@ JSON:"""
         client_request_id: str,
     ) -> list[dict]:
         """Build the preflight prompt for generic article requests."""
+        normalized_domain = normalize_content_factory_domain(domain) or domain
+        cost_points = get_content_factory_article_cost_points(domain)
+        cost_text = (
+            f"*Cost:* Articles for *{normalized_domain}* are free. No Roo points will be deducted for this run."
+            if cost_points == 0
+            else f"*Cost:* Starting the article run deducts {cost_points} Roo points."
+        )
         button_value = json.dumps(
             {
                 "domain": domain,
@@ -241,7 +251,7 @@ JSON:"""
                         "If you do, send it through and I'll still research the best keywords, title, "
                         "and talking points so the article has the best chance to rank.\n\n"
                         "If you don't, I can research the strongest article opportunity for you.\n\n"
-                        f"*Cost:* Starting the article run deducts {CONTENT_FACTORY_ARTICLE_COST_POINTS} Roo points."
+                        f"{cost_text}"
                     ),
                 },
             },
@@ -1129,15 +1139,23 @@ Keep the response concise but informative."""
         self,
         api_client: Any,
         user_id: str,
+        domain: Optional[str],
     ) -> Optional[str]:
         from ..slack_client import get_user_info
 
+        normalized_domain = normalize_content_factory_domain(domain) or "this domain"
+        cost_points = get_content_factory_article_cost_points(domain)
         slack_info = get_user_info(user_id)
         email = str(slack_info.get("email") or "").strip().lower()
         if not email:
+            if cost_points == 0:
+                return (
+                    "I need access to your real Slack email before I can start Content Factory for you. "
+                    f"Once that's available, articles for {normalized_domain} are free."
+                )
             return (
                 "I need access to your real Slack email before I can start Content Factory for you. "
-                f"Once that's available, creating an article costs {CONTENT_FACTORY_ARTICLE_COST_POINTS} Roo points."
+                f"Once that's available, creating an article costs {cost_points} Roo points."
             )
 
         real_name = str(slack_info.get("real_name") or "").strip()
@@ -1161,6 +1179,9 @@ Keep the response concise but informative."""
                 "Please try again in a moment."
             )
 
+        if cost_points == 0:
+            return None
+
         try:
             balance_data = await api_client.get_balance(user_id)
         except Exception as exc:
@@ -1171,9 +1192,9 @@ Keep the response concise but informative."""
             )
 
         balance = int(balance_data.get("balance") or 0)
-        if balance < CONTENT_FACTORY_ARTICLE_COST_POINTS:
+        if balance < cost_points:
             return (
-                f"Creating an article costs {CONTENT_FACTORY_ARTICLE_COST_POINTS} Roo points, and you currently have "
+                f"Creating an article costs {cost_points} Roo points, and you currently have "
                 f"{balance}. Earn a few more Roo points first, then ask me again."
             )
 
@@ -1292,6 +1313,16 @@ Keep the response concise but informative."""
                     "thread_ts": thread_ts,
                 }
             )
+            disclaimer_cost_text = (
+                f"*Cost:* Articles for **{normalize_content_factory_domain(domain) or domain or 'this domain'}** are free. "
+                "No Roo points will be deducted for this run.\n\n"
+                if is_free_content_factory_domain(domain)
+                else (
+                    f"*Cost:* Creating an article costs **{CONTENT_FACTORY_ARTICLE_COST_POINTS} Roo points**. "
+                    "Those points are deducted when article research/generation starts. "
+                    "If something goes wrong, message Dr Sam on Slack and he can help sort out a refund.\n\n"
+                )
+            )
             
             blocks = [
                 {
@@ -1309,9 +1340,7 @@ Keep the response concise but informative."""
                         "text": (
                             "Before we start, a quick heads-up! This skill works best with **Next.js & Tailwind CSS** projects "
                             "and requires a connected **GitHub repository**.\n\n"
-                            f"*Cost:* Creating an article costs **{CONTENT_FACTORY_ARTICLE_COST_POINTS} Roo points**. "
-                            "Those points are deducted when article research/generation starts. "
-                            "If something goes wrong, message Dr Sam on Slack and he can help sort out a refund.\n\n"
+                            f"{disclaimer_cost_text}"
                             "*How it works:*\n"
                             "1. 🏗️ **Scans** your repo for blog structure (creates it if missing)\n"
                             "2. 🧩 **Checks** for reusable components (Hero, CTAs) or creates them\n"
@@ -1996,7 +2025,7 @@ Keep the response concise but informative."""
                 history_str = "\n".join([f"{msg.get('user')}: {msg.get('text')}" for msg in thread_history[:-1]])
                 full_context = f"Context from Thread:\n{history_str}\n\nCurrent Request: {text}"
 
-            access_error = await self._validate_content_factory_paid_access(api_client, user_id)
+            access_error = await self._validate_content_factory_paid_access(api_client, user_id, domain)
             if access_error:
                 return access_error
 
