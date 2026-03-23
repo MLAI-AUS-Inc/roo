@@ -18,8 +18,13 @@ class MLAIBackendClient:
     def __init__(self, base_url: Optional[str] = None, api_key: Optional[str] = None, internal_api_key: Optional[str] = None):
         settings = get_settings()
         self.base_url = base_url or settings.MLAI_BACKEND_URL
-        self.api_key = api_key or settings.MLAI_API_KEY
-        self.internal_api_key = internal_api_key or settings.INTERNAL_API_KEY
+        self.api_key = api_key or settings.ROO_API_KEY or settings.MLAI_API_KEY
+        self.internal_api_key = (
+            internal_api_key
+            or settings.INTERNAL_API_KEY
+            or settings.ROO_API_KEY
+            or settings.MLAI_API_KEY
+        )
         self.base_url = self.base_url.rstrip('/') if self.base_url else ""
         self._points_base = f"{self.base_url}/api/v1/points"
         self._admin_cache: Dict[str, bool] = {}
@@ -55,6 +60,45 @@ class MLAIBackendClient:
         elif self.api_key:
             headers["X-API-Key"] = self.api_key
         return headers
+
+    def _extract_response_body(self, response: httpx.Response) -> str:
+        """Return a compact, log-friendly response body."""
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = response.text.strip()
+
+        if payload in (None, "", [], {}):
+            return ""
+        return repr(payload)
+
+    def _log_points_request_step(
+        self,
+        *,
+        step: str,
+        endpoint: str,
+        status: Any,
+        error_body: str = "",
+    ) -> None:
+        """Emit consistent logs for points-request API calls."""
+        suffix = f" error_body={error_body}" if error_body else ""
+        print(
+            f"🧾 Points request step={step} endpoint={endpoint} "
+            f"status={status}{suffix}"
+        )
+
+    def _log_points_request_transport_error(
+        self,
+        *,
+        step: str,
+        endpoint: str,
+        exc: Exception,
+    ) -> None:
+        """Log network/transport failures for points-request API calls."""
+        print(
+            f"🧾 Points request step={step} endpoint={endpoint} "
+            f"status=transport_error error_body={exc}"
+        )
     
     async def save_article_generation(
         self,
@@ -222,6 +266,7 @@ class MLAIBackendClient:
         context: Optional[str] = None,
         slack_channel_id: Optional[str] = None,
         slack_thread_ts: Optional[str] = None,
+        progress_message_ts: Optional[str] = None,
         client_request_id: Optional[str] = None,
         request_source: str = CONTENT_FACTORY_REQUEST_SOURCE,
         user_email: Optional[str] = None,
@@ -263,6 +308,8 @@ class MLAIBackendClient:
             payload["slack_channel_id"] = slack_channel_id
         if slack_thread_ts:
             payload["slack_thread_ts"] = slack_thread_ts
+        if progress_message_ts:
+            payload["progress_message_ts"] = progress_message_ts
         if client_request_id:
             payload["client_request_id"] = client_request_id
         if user_email:
@@ -280,6 +327,59 @@ class MLAIBackendClient:
                 json=payload,
                 headers=self.headers,
                 timeout=30.0
+            )
+            response.raise_for_status()
+            return response.json()
+
+    async def attach_content_progress_message(
+        self,
+        job_id: str,
+        *,
+        progress_message_ts: str,
+        slack_channel_id: Optional[str] = None,
+        slack_thread_ts: Optional[str] = None,
+        slack_root_message_ts: Optional[str] = None,
+        request_source: str = CONTENT_FACTORY_REQUEST_SOURCE,
+    ) -> dict:
+        if not self.base_url:
+            raise ValueError("MLAI_BACKEND_URL not configured")
+
+        payload = {
+            "progress_message_ts": progress_message_ts,
+            "request_source": request_source,
+        }
+        if slack_channel_id:
+            payload["slack_channel_id"] = slack_channel_id
+        if slack_thread_ts:
+            payload["slack_thread_ts"] = slack_thread_ts
+        if slack_root_message_ts:
+            payload["slack_root_message_ts"] = slack_root_message_ts
+
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{self.base_url}/api/v1/content/jobs/{job_id}/progress-message",
+                json=payload,
+                headers=self.headers,
+                timeout=15.0,
+            )
+            response.raise_for_status()
+            return response.json()
+
+    async def maybe_send_content_still_working(
+        self,
+        job_id: str,
+        *,
+        request_source: str = CONTENT_FACTORY_REQUEST_SOURCE,
+    ) -> dict:
+        if not self.base_url:
+            raise ValueError("MLAI_BACKEND_URL not configured")
+
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{self.base_url}/api/v1/content/jobs/{job_id}/still-working",
+                json={"request_source": request_source},
+                headers=self.headers,
+                timeout=15.0,
             )
             response.raise_for_status()
             return response.json()
@@ -947,6 +1047,32 @@ class MLAIBackendClient:
             response.raise_for_status()
             return response.json()
 
+    async def revoke_points_admin(
+        self,
+        requester_slack_id: str,
+        target_slack_id: str,
+    ) -> dict:
+        """Revoke a user's Points Admin access using the privileged admin API."""
+        cleaned_target = self._clean_slack_id(target_slack_id)
+        payload = {"requester_slack_id": requester_slack_id}
+
+        async with httpx.AsyncClient() as client:
+            response = await client.request(
+                "DELETE",
+                f"{self._points_base}/admins/{cleaned_target}/",
+                json=payload,
+                headers=self.admin_headers,
+                timeout=10.0,
+            )
+
+            if response.status_code == 404:
+                return response.json()
+
+            response.raise_for_status()
+            result = response.json()
+            self._admin_cache[cleaned_target] = False
+            return result
+
     async def create_task(
         self,
         admin_slack_id: str,
@@ -1171,15 +1297,41 @@ class MLAIBackendClient:
         if slack_thread_ts:
             payload["slack_thread_ts"] = slack_thread_ts
 
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{self._points_base}/requests/",
-                json=payload,
-                headers=self.headers,
-                timeout=10.0,
+        endpoint = f"{self._points_base}/requests/"
+
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    endpoint,
+                    json=payload,
+                    headers=self.headers,
+                    timeout=10.0,
+                )
+        except Exception as exc:
+            self._log_points_request_transport_error(
+                step="create_points_request",
+                endpoint=endpoint,
+                exc=exc,
             )
+            raise
+
+        try:
             response.raise_for_status()
-            return response.json()
+        except httpx.HTTPStatusError:
+            self._log_points_request_step(
+                step="create_points_request",
+                endpoint=endpoint,
+                status=response.status_code,
+                error_body=self._extract_response_body(response),
+            )
+            raise
+
+        self._log_points_request_step(
+            step="create_points_request",
+            endpoint=endpoint,
+            status=response.status_code,
+        )
+        return response.json()
 
     async def attach_points_request_slack_summary(
         self,
@@ -1196,15 +1348,41 @@ class MLAIBackendClient:
         if slack_thread_ts:
             payload["slack_thread_ts"] = slack_thread_ts
 
-        async with httpx.AsyncClient() as client:
-            response = await client.patch(
-                f"{self._points_base}/requests/{request_id}/slack-summary/",
-                json=payload,
-                headers=self.admin_headers,
-                timeout=10.0,
+        endpoint = f"{self._points_base}/requests/{request_id}/slack-summary/"
+
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.patch(
+                    endpoint,
+                    json=payload,
+                    headers=self.admin_headers,
+                    timeout=10.0,
+                )
+        except Exception as exc:
+            self._log_points_request_transport_error(
+                step="attach_points_request_slack_summary",
+                endpoint=endpoint,
+                exc=exc,
             )
+            raise
+
+        try:
             response.raise_for_status()
-            return response.json()
+        except httpx.HTTPStatusError:
+            self._log_points_request_step(
+                step="attach_points_request_slack_summary",
+                endpoint=endpoint,
+                status=response.status_code,
+                error_body=self._extract_response_body(response),
+            )
+            raise
+
+        self._log_points_request_step(
+            step="attach_points_request_slack_summary",
+            endpoint=endpoint,
+            status=response.status_code,
+        )
+        return response.json()
 
     async def get_points_request_by_slack_message(
         self,
@@ -1212,32 +1390,91 @@ class MLAIBackendClient:
         slack_message_ts: str,
     ) -> Optional[dict]:
         """Look up a points request by the Roo summary message it is attached to."""
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                f"{self._points_base}/requests/by-slack-message/",
-                params={
-                    "slack_channel_id": slack_channel_id,
-                    "slack_message_ts": slack_message_ts,
-                },
-                headers=self.admin_headers,
-                timeout=10.0,
+        endpoint = f"{self._points_base}/requests/by-slack-message/"
+
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    endpoint,
+                    params={
+                        "slack_channel_id": slack_channel_id,
+                        "slack_message_ts": slack_message_ts,
+                    },
+                    headers=self.admin_headers,
+                    timeout=10.0,
+                )
+        except Exception as exc:
+            self._log_points_request_transport_error(
+                step="get_points_request_by_slack_message",
+                endpoint=endpoint,
+                exc=exc,
             )
-            if response.status_code == 404:
-                return None
+            raise
+
+        if response.status_code == 404:
+            self._log_points_request_step(
+                step="get_points_request_by_slack_message",
+                endpoint=endpoint,
+                status=response.status_code,
+                error_body=self._extract_response_body(response),
+            )
+            return None
+
+        try:
             response.raise_for_status()
-            return response.json()
+        except httpx.HTTPStatusError:
+            self._log_points_request_step(
+                step="get_points_request_by_slack_message",
+                endpoint=endpoint,
+                status=response.status_code,
+                error_body=self._extract_response_body(response),
+            )
+            raise
+
+        self._log_points_request_step(
+            step="get_points_request_by_slack_message",
+            endpoint=endpoint,
+            status=response.status_code,
+        )
+        return response.json()
 
     async def approve_points_request(self, request_id: int, admin_slack_id: str) -> dict:
         """Approve a pending points request."""
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{self._points_base}/requests/{request_id}/approve/",
-                json={"admin_slack_id": admin_slack_id},
-                headers=self.admin_headers,
-                timeout=15.0,
+        endpoint = f"{self._points_base}/requests/{request_id}/approve/"
+
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    endpoint,
+                    json={"admin_slack_id": admin_slack_id},
+                    headers=self.admin_headers,
+                    timeout=15.0,
+                )
+        except Exception as exc:
+            self._log_points_request_transport_error(
+                step="approve_points_request",
+                endpoint=endpoint,
+                exc=exc,
             )
+            raise
+
+        try:
             response.raise_for_status()
-            return response.json()
+        except httpx.HTTPStatusError:
+            self._log_points_request_step(
+                step="approve_points_request",
+                endpoint=endpoint,
+                status=response.status_code,
+                error_body=self._extract_response_body(response),
+            )
+            raise
+
+        self._log_points_request_step(
+            step="approve_points_request",
+            endpoint=endpoint,
+            status=response.status_code,
+        )
+        return response.json()
 
     async def approve_reward(self, admin_slack_id: str, redemption_id: str) -> dict:
         """Approve a reward redemption request (admin only)."""
@@ -1275,6 +1512,28 @@ class MLAIBackendClient:
                 json=payload,
                 headers=self.admin_headers,
                 timeout=15.0
+            )
+            response.raise_for_status()
+            return response.json()
+
+    async def award_first_channel_post(
+        self,
+        slack_user_id: str,
+        channel_id: str,
+    ) -> dict:
+        """Award the one-time intro bonus for a user's first channel post."""
+        endpoint = f"{self.base_url}/api/v1/activity/first-post-award/"
+        payload = {
+            "slack_user_id": self._clean_slack_id(slack_user_id),
+            "channel_id": channel_id,
+        }
+
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                endpoint,
+                json=payload,
+                headers=self.admin_headers,
+                timeout=15.0,
             )
             response.raise_for_status()
             return response.json()

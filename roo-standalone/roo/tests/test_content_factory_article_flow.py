@@ -36,6 +36,8 @@ class FakeContentFactoryClient:
     saved_intents = []
     balance_by_user = {}
     user_profiles = {}
+    attached_progress_messages = []
+    still_working_calls = []
 
     def __init__(self, *args, **kwargs):
         self.trigger_calls = []
@@ -76,6 +78,7 @@ class FakeContentFactoryClient:
         context=None,
         slack_channel_id=None,
         slack_thread_ts=None,
+        progress_message_ts=None,
         client_request_id=None,
         request_source="roo_slackbot",
         user_email=None,
@@ -92,6 +95,7 @@ class FakeContentFactoryClient:
                 "context": context,
                 "slack_channel_id": slack_channel_id,
                 "slack_thread_ts": slack_thread_ts,
+                "progress_message_ts": progress_message_ts,
                 "client_request_id": client_request_id,
                 "request_source": request_source,
                 "user_email": user_email,
@@ -130,6 +134,18 @@ class FakeContentFactoryClient:
     async def confirm_article_topic(self, *args, **kwargs):
         self.confirm_calls.append({"args": args, "kwargs": kwargs})
         return {"job_id": "confirmed-job-123", "status": "confirmed"}
+
+    async def attach_content_progress_message(self, job_id, **kwargs):
+        FakeContentFactoryClient.attached_progress_messages.append(
+            {"job_id": job_id, **kwargs}
+        )
+        return {"status": "attached", "job_id": job_id}
+
+    async def maybe_send_content_still_working(self, job_id, **kwargs):
+        FakeContentFactoryClient.still_working_calls.append(
+            {"job_id": job_id, **kwargs}
+        )
+        return {"status": "noop", "job_id": job_id}
 
     async def check_generation_status(self, job_id):
         self.status_checks.append(job_id)
@@ -180,6 +196,8 @@ def _patch_content_factory(monkeypatch):
     FakeContentFactoryClient.auth_urls = {"default": "https://github.test/auth"}
     FakeContentFactoryClient.saved_intents = []
     FakeContentFactoryClient.balance_by_user = {}
+    FakeContentFactoryClient.attached_progress_messages = []
+    FakeContentFactoryClient.still_working_calls = []
     FakeContentFactoryClient.user_profiles = {
         "U05QPB483K9": {
             "id": "U05QPB483K9",
@@ -486,6 +504,48 @@ async def test_explicit_content_factory_scan_with_existing_scan_prompts_for_conf
 
 
 @pytest.mark.asyncio
+async def test_natural_language_content_factory_scan_phrase_prompts_for_confirmation(monkeypatch):
+    executor = SkillExecutor()
+    posted_messages = []
+    _patch_content_factory(monkeypatch)
+    FakeContentFactoryClient.domain_integrations["woofya.com.au"] = {
+        "github_repo": "Woofya/woofya-web",
+        "domain_github_repo": "Woofya/woofya-web",
+        "project_scanned": True,
+        "last_scanned_at": "2026-03-21T09:58:00Z",
+        "last_article": None,
+        "recommended_next_action": None,
+        "connected_domains": [
+            {
+                "domain": "woofya.com.au",
+                "github_repo": "Woofya/woofya-web",
+                "scanned": True,
+            }
+        ],
+    }
+    monkeypatch.setattr(
+        executor_module,
+        "post_message",
+        lambda *args, **kwargs: posted_messages.append({"args": args, "kwargs": kwargs}) or {"ts": "111.222"},
+    )
+
+    result = await executor._execute_content_factory(
+        skill=None,
+        text="scan the repo for the domain woofya.com.au",
+        params={"domain": "woofya.com.au"},
+        user_id="U05QPB483K9",
+        channel_id="C123",
+        thread_ts="111.222",
+    )
+
+    assert isinstance(result, dict)
+    assert "run another scan anyway" in result["message"].lower()
+    assert posted_messages == []
+    assert result["blocks"][1]["elements"][0]["action_id"] == "prerequisite_scan"
+    assert FakeContentFactoryClient.last_instance.repo_scan_calls == []
+
+
+@pytest.mark.asyncio
 async def test_explicit_github_scan_with_existing_scan_prompts_for_confirmation(monkeypatch):
     executor = SkillExecutor()
     posted_messages = []
@@ -538,7 +598,11 @@ async def test_explicit_research_request_starts_generation(monkeypatch):
         thread_ts="111.222",
     )
 
-    assert "started researching the best article for mlai.au" in result.lower()
+    assert isinstance(result, dict)
+    assert result["message"] == "Starting Content Factory for mlai.au. I'll keep this message updated as the run moves forward."
+    assert result["data"]["content_factory_progress_job_id"] == "job-123"
+    assert result["data"]["content_factory_watchdog"] is True
+    assert "Starting discovery to find the best article opportunity" in result["blocks"][0]["text"]["text"]
     assert created_tasks == []
     assert len(posted_messages) == 1
     trigger_call = FakeContentFactoryClient.last_instance.trigger_calls[0]
@@ -623,8 +687,9 @@ async def test_topic_led_article_request_mentions_seo_optimization(monkeypatch):
         thread_ts=None,
     )
 
-    assert "best chance to rank" in result
-    assert "keywords, title, and talking points" in result
+    assert isinstance(result, dict)
+    assert result["data"]["content_factory_progress_job_id"] == "job-123"
+    assert "Starting article generation for `AI for clinic workflows`" in result["blocks"][0]["text"]["text"]
     assert FakeContentFactoryClient.last_instance.trigger_calls[0]["topic"] == "AI for clinic workflows"
     assert len(created_tasks) == 0
 
@@ -657,8 +722,10 @@ async def test_topic_led_article_request_starts_monitor_when_threaded(monkeypatc
         thread_ts="111.222",
     )
 
-    assert "best chance to rank" in result
-    assert len(created_tasks) == 1
+    assert isinstance(result, dict)
+    assert result["data"]["content_factory_progress_job_id"] == "job-123"
+    assert "Starting article generation for `AI for clinic workflows`" in result["blocks"][0]["text"]["text"]
+    assert len(created_tasks) == 0
     assert len(posted_messages) == 1
     trigger_call = FakeContentFactoryClient.last_instance.trigger_calls[0]
     assert trigger_call["slack_user_id"] == "U05QPB483K9"
@@ -1019,6 +1086,7 @@ def test_generation_failed_callback_clears_pending_intent_for_failed_stage(monke
 def test_scan_complete_auto_write_clears_pending_when_scaffold_already_exists(monkeypatch):
     posted_messages = []
     trigger_calls = []
+    scheduled_job_ids = []
 
     main_module._remember_pending_intent(
         "U05QPB483K9",
@@ -1047,6 +1115,16 @@ def test_scan_complete_auto_write_clears_pending_when_scaffold_already_exists(mo
             trigger_calls.append(kwargs)
             return {"job_id": "article-job-123"}
 
+    async def fake_watchdog(job_id):
+        scheduled_job_ids.append(job_id)
+
+    def capture_task(coro):
+        try:
+            coro.send(None)
+        except StopIteration:
+            pass
+        return SimpleNamespace(cancel=lambda: None)
+
     monkeypatch.setattr(
         main_module,
         "get_settings",
@@ -1060,7 +1138,9 @@ def test_scan_complete_auto_write_clears_pending_when_scaffold_already_exists(mo
     monkeypatch.setattr(
         main_module,
         "post_message",
-        lambda *args, **kwargs: posted_messages.append((args, kwargs)),
+        lambda *args, **kwargs: (
+            posted_messages.append((args, kwargs)) or {"ts": "live-status-001"}
+        ),
     )
     monkeypatch.setattr(
         slack_client_module,
@@ -1072,6 +1152,8 @@ def test_scan_complete_auto_write_clears_pending_when_scaffold_already_exists(mo
             "image_192": "https://avatar.test/sam.png",
         },
     )
+    monkeypatch.setattr(main_module, "_watch_content_factory_quiet_run", fake_watchdog)
+    monkeypatch.setattr(asyncio, "create_task", capture_task)
 
     payload = {
         "event_type": "scan_complete",
@@ -1098,30 +1180,29 @@ def test_scan_complete_auto_write_clears_pending_when_scaffold_already_exists(mo
     assert trigger_calls[0]["domain"] == "mlai.au"
     assert trigger_calls[0]["topic"] == "AI for clinic workflows"
     assert trigger_calls[0]["target_keyword"] == "clinic ai"
+    assert trigger_calls[0]["progress_message_ts"] == "live-status-001"
     assert trigger_calls[0]["request_source"] == "roo_slackbot"
     assert trigger_calls[0]["user_email"] == "sam@example.com"
+    assert scheduled_job_ids == ["article-job-123"]
     assert main_module._pending_intents == {}
     assert posted_messages
 
 
 def test_confirm_content_factory_action_resumes_original_request(monkeypatch):
-    agent_calls = []
+    resumed_events = []
     posted_messages = []
 
     def capture_task(coro):
-        coro.close()
+        try:
+            coro.send(None)
+        except StopIteration:
+            pass
         return SimpleNamespace(cancel=lambda: None)
 
-    class FakeAgent:
-        def handle_mention(self, **kwargs):
-            agent_calls.append(kwargs)
+    async def fake_handle_mention(event):
+        resumed_events.append(event)
 
-            async def done():
-                return {}
-
-            return done()
-
-    monkeypatch.setattr(main_module, "get_agent", lambda: FakeAgent())
+    monkeypatch.setattr(main_module, "_handle_mention", fake_handle_mention)
     monkeypatch.setattr(main_module, "post_message", lambda *args, **kwargs: posted_messages.append((args, kwargs)))
     monkeypatch.setattr(asyncio, "create_task", capture_task)
 
@@ -1156,11 +1237,11 @@ def test_confirm_content_factory_action_resumes_original_request(monkeypatch):
 
     assert response.status_code == 200
     assert posted_messages == []
-    assert agent_calls == [
+    assert resumed_events == [
         {
+            "user": "U05QPB483K9",
             "text": "write an article for my website woofya.com.au",
-            "user_id": "U05QPB483K9",
-            "channel_id": "C123",
+            "channel": "C123",
             "thread_ts": "111.222",
             "param_overrides": {
                 "domain": "woofya.com.au",
@@ -1172,6 +1253,17 @@ def test_confirm_content_factory_action_resumes_original_request(monkeypatch):
 
 def test_confirm_topic_action_uses_roo_request_source_and_mentions_no_extra_charge(monkeypatch):
     confirm_calls = []
+    scheduled_job_ids = []
+
+    async def fake_watchdog(job_id):
+        scheduled_job_ids.append(job_id)
+
+    def capture_task(coro):
+        try:
+            coro.send(None)
+        except StopIteration:
+            pass
+        return SimpleNamespace(cancel=lambda: None)
 
     class FakeConfirmClient:
         def __init__(self, *args, **kwargs):
@@ -1191,6 +1283,8 @@ def test_confirm_topic_action_uses_roo_request_source_and_mentions_no_extra_char
         ),
     )
     monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeConfirmClient)
+    monkeypatch.setattr(main_module, "_watch_content_factory_quiet_run", fake_watchdog)
+    monkeypatch.setattr(asyncio, "create_task", capture_task)
 
     payload = {
         "user": {"id": "U05QPB483K9"},
@@ -1224,6 +1318,7 @@ def test_confirm_topic_action_uses_roo_request_source_and_mentions_no_extra_char
             "request_source": "roo_slackbot",
         }
     ]
+    assert scheduled_job_ids == ["job-123"]
     assert "No additional Roo points will be charged" in body["text"]
 
 

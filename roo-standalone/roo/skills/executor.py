@@ -16,14 +16,18 @@ from uuid import uuid4
 import httpx
 
 from .loader import Skill
+from ..content_factory_progress import (
+    CONTENT_FACTORY_ARTICLE_COST_POINTS,
+    CONTENT_FACTORY_REQUEST_SOURCE,
+    build_live_status_blocks,
+)
+from ..content_intent import is_explicit_scan_request
 from ..llm import chat, embed, get_llm_client
 from ..slack_client import post_message
 from ..config import get_settings
 
 
 POINTS_SUPER_ADMIN_SLACK_ID = "U05QPB483K9"
-CONTENT_FACTORY_ARTICLE_COST_POINTS = 6
-CONTENT_FACTORY_REQUEST_SOURCE = "roo_slackbot"
 
 
 @dataclass
@@ -272,18 +276,7 @@ JSON:"""
 
     def _is_explicit_scan_request(self, text: str, params: dict) -> bool:
         """Return True when the user is explicitly asking Roo to scan a repo/codebase."""
-        action = str(params.get("action") or "").strip().lower()
-        if action == "scan":
-            return True
-
-        text_lower = text.lower().strip()
-        scan_patterns = (
-            r"^(?:please\s+)?(?:re-?scan|scan|analy[sz]e)\b",
-            r"\b(?:can|could)\s+you\s+(?:re-?scan|scan|analy[sz]e)\b",
-            r"\b(?:re-?scan|scan|analy[sz]e)\s+(?:my\s+)?(?:repo(?:sitory)?|codebase)\b",
-            r"\b(?:re-?scan|scan|analy[sz]e)\s+(?:https?://)?[a-z0-9][a-z0-9.-]+\.[a-z]{2,}\b",
-        )
-        return any(re.search(pattern, text_lower) for pattern in scan_patterns)
+        return is_explicit_scan_request(text, params.get("action"))
 
     def _build_existing_scan_confirmation(
         self,
@@ -944,12 +937,12 @@ Respond with ONLY valid JSON, no markdown:
                     from ..slack_client import get_bot_user_id
                     settings = get_settings()
 
-                    if settings.MLAI_BACKEND_URL and settings.MLAI_API_KEY:
+                    if settings.MLAI_BACKEND_URL and (settings.ROO_API_KEY or settings.MLAI_API_KEY):
                         from ..clients.mlai_backend import MLAIBackendClient
                         points_client = MLAIBackendClient(
                             base_url=settings.MLAI_BACKEND_URL,
-                            api_key=settings.MLAI_API_KEY,
-                            internal_api_key=settings.INTERNAL_API_KEY or settings.MLAI_API_KEY
+                            api_key=settings.ROO_API_KEY or settings.MLAI_API_KEY,
+                            internal_api_key=settings.INTERNAL_API_KEY or settings.ROO_API_KEY or settings.MLAI_API_KEY
                         )
                         bot_id = get_bot_user_id()
                         diagnosis_points = 12
@@ -1185,6 +1178,39 @@ Keep the response concise but informative."""
             )
 
         return None
+
+    def _build_content_factory_start_response(
+        self,
+        *,
+        domain: str,
+        job_id: str,
+        topic: Optional[str],
+        workflow: str,
+    ) -> dict:
+        is_discovery = workflow == "auto_discovery" or not topic
+        summary_text = (
+            "Starting discovery to find the best article opportunity. I'll keep this message updated."
+            if is_discovery
+            else f"Starting article generation for `{topic}`. I'll keep this message updated."
+        )
+
+        return {
+            "message": (
+                f"Starting Content Factory for {domain}. "
+                "I'll keep this message updated as the run moves forward."
+            ),
+            "blocks": build_live_status_blocks(
+                domain,
+                summary_text=summary_text,
+                include_decision_stage=is_discovery,
+                current_stage="preparing",
+            ),
+            "data": {
+                "content_factory_progress_job_id": job_id,
+                "content_factory_watchdog": True,
+                "content_factory_watchdog_mode": workflow,
+            },
+        }
 
     def _get_connected_domain_info(
         self,
@@ -2005,26 +2031,12 @@ Keep the response concise but informative."""
                 or ("auto_discovery" if not topic else "direct_generate")
             ).strip().lower()
 
-            # Launch background monitoring task
-            if channel_id and workflow != "auto_discovery":
-                asyncio.create_task(
-                    self._monitor_generation(api_client, job_id, channel_id, thread_ts, user_id)
-                )
-            
-            if topic:
-                return (
-                    f"You beauty! I've started writing the article '{topic}' for {domain}. (Job ID: {job_id})\n"
-                    f"I've kicked off the paid run now, so {CONTENT_FACTORY_ARTICLE_COST_POINTS} Roo points will be deducted at the start of research/generation.\n"
-                    "I'll still research the strongest keywords, title, and talking points so it has the best "
-                    "chance to rank.\n"
-                    "I'll keep you posted on the progress right here! 🚀"
-                )
-            else:
-                return (
-                    f"You beauty! I've started researching the best article for {domain}. (Job ID: {job_id})\n"
-                    f"I've kicked off the paid run now, so {CONTENT_FACTORY_ARTICLE_COST_POINTS} Roo points will be deducted at the start of research/generation.\n"
-                    "I'll keep you posted on the progress right here! 🕵️"
-                )
+            return self._build_content_factory_start_response(
+                domain=domain,
+                job_id=job_id,
+                topic=topic,
+                workflow=workflow,
+            )
             
         except httpx.HTTPStatusError as e:
             print(f"Content Generation HTTP Error: {e}")
@@ -2411,8 +2423,8 @@ Keep the response concise but informative."""
             
             client = ClientClass(
                 base_url=settings.MLAI_BACKEND_URL,
-                api_key=settings.MLAI_API_KEY,
-                internal_api_key=settings.INTERNAL_API_KEY or settings.MLAI_API_KEY
+                api_key=settings.ROO_API_KEY or settings.MLAI_API_KEY,
+                internal_api_key=settings.INTERNAL_API_KEY or settings.ROO_API_KEY or settings.MLAI_API_KEY
             )
 
             action = self._resolve_points_action(params, text)
@@ -2437,11 +2449,18 @@ Keep the response concise but informative."""
             if e.response.status_code == 403:
                 return "Sorry mate, you're not authorized to do that. Only Points Admins can perform that action. 🔒"
             elif e.response.status_code == 404:
+                if action == "request_points":
+                    error_detail = self._extract_http_error_detail(e)
+                    print(
+                        "❌ Points request queue failed after executor handoff: "
+                        f"status=404 error={error_detail or str(e)}"
+                    )
+                    return self._points_request_queue_error_message()
                 return "Hmm, couldn't find that. Double-check the ID or date and try again? 🤔"
             elif e.response.status_code == 400:
                 # Handle bad requests (e.g. insufficient funds)
                 try:
-                    error_detail = e.response.json().get("error", "")
+                    error_detail = self._extract_http_error_detail(e)
                     
                     # If it's a balance issue, fetch current balance to be helpful
                     if "balance" in error_detail.lower() or "insufficient" in error_detail.lower():
@@ -2456,11 +2475,7 @@ Keep the response concise but informative."""
                 except Exception:
                     return f"Ran into a snag with that request (400 Bad Request)."
             else:
-                error_detail = ""
-                try:
-                    error_detail = e.response.json().get("error", "")
-                except Exception:
-                    pass
+                error_detail = self._extract_http_error_detail(e)
                 return f"Ran into a snag: {error_detail or str(e)}"
         except Exception as e:
             print(f"Points skill error: {e}")
@@ -2474,14 +2489,12 @@ Keep the response concise but informative."""
         text_lower = text.lower()
         explicit_points_request = "request" in text_lower and "point" in text_lower and "reward" not in text_lower
 
-        if action in ["promote_points_admin", "set_points_admin_allowance"]:
-            return action
-
-        if self._is_points_admin_promotion_command(text):
-            return "promote_points_admin"
-
-        if self._is_points_allowance_change_command(text):
-            return "set_points_admin_allowance"
+        management_action = self._resolve_points_admin_management_action(
+            text,
+            explicit_action=action,
+        )
+        if management_action:
+            return management_action
 
         if explicit_points_request:
             return "request_points"
@@ -2531,6 +2544,31 @@ Keep the response concise but informative."""
             return "deduct_points"
         return action
 
+    def _resolve_points_admin_management_action(
+        self,
+        text: str,
+        *,
+        explicit_action: str = "",
+    ) -> str:
+        """Resolve privileged points-admin management intent from text or extracted action."""
+        if explicit_action in [
+            "promote_points_admin",
+            "revoke_points_admin",
+            "set_points_admin_allowance",
+        ]:
+            return explicit_action
+
+        if self._is_points_admin_promotion_command(text):
+            return "promote_points_admin"
+
+        if self._is_points_admin_revocation_command(text):
+            return "revoke_points_admin"
+
+        if self._is_points_allowance_change_command(text):
+            return "set_points_admin_allowance"
+
+        return ""
+
     def _is_points_super_admin(self, user_id: str) -> bool:
         """Return true when the requester can manage points admins and allowances."""
         return user_id == POINTS_SUPER_ADMIN_SLACK_ID
@@ -2546,16 +2584,30 @@ Keep the response concise but informative."""
         """Detect commands that promote a tagged user to Points Admin."""
         return bool(
             re.search(r"\b(?:promote|make)\b", text, re.IGNORECASE)
-            and re.search(r"<@[A-Z0-9]+>", text)
+            and re.search(r"\b(?:roo\s+)?points\s+admin\b", text, re.IGNORECASE)
+        )
+
+    def _is_points_admin_revocation_command(self, text: str) -> bool:
+        """Detect commands that revoke a user's Points Admin access."""
+        return bool(
+            re.search(r"\b(?:revoke|remove)\b", text, re.IGNORECASE)
             and re.search(r"\b(?:roo\s+)?points\s+admin\b", text, re.IGNORECASE)
         )
 
     def _is_points_allowance_change_command(self, text: str) -> bool:
         """Detect commands that change a tagged admin's weekly allowance."""
+        text_lower = text.lower()
+
         return bool(
-            re.search(r"\b(?:set|change)\b", text, re.IGNORECASE)
-            and re.search(r"<@[A-Z0-9]+>", text)
-            and re.search(r"\bweekly\s+(?:points\s+)?allowance\b", text, re.IGNORECASE)
+            re.search(r"\b(?:set|change|update|increase|decrease)\b", text_lower)
+            and (
+                re.search(r"\bweekly\s+(?:points\s+)?allowance\b", text_lower)
+                or re.search(
+                    r"\b(?:number\s+of\s+points|how\s+many\s+points|points)\b.*\bcan\s+give\s+out\s+weekly\b",
+                    text_lower,
+                )
+                or re.search(r"\bcan\s+give\s+out\s+weekly\b", text_lower)
+            )
         )
 
     def _extract_non_roo_mentions(self, text: str, bot_id: Optional[str] = None) -> list[str]:
@@ -2597,6 +2649,8 @@ Keep the response concise but informative."""
                 pass
 
         patterns = (
+            r"(?:number\s+of\s+points|how\s+many\s+points).*?\bcan\s+give\s+out\s+weekly\s+(?:to|of)\s+(-?\d+)\b",
+            r"\bcan\s+give\s+out\s+weekly\s+(?:to|of)\s+(-?\d+)\b",
             r"weekly\s+(?:points\s+)?allowance\s+(?:to|of)\s+(-?\d+)\b",
             r"allowance\s+(?:to|of)\s+(-?\d+)\b",
             r"(?<![A-Z0-9])(-?\d+)\b",
@@ -2645,6 +2699,31 @@ Keep the response concise but informative."""
             return int(match.group(1))
         except ValueError:
             return None
+
+    def _extract_http_error_detail(self, exc: httpx.HTTPStatusError) -> str:
+        """Extract a compact error string from a backend HTTP error."""
+        try:
+            payload = exc.response.json()
+        except ValueError:
+            return exc.response.text.strip()
+        except Exception:
+            return ""
+
+        if isinstance(payload, dict):
+            for key in ("error", "detail", "message"):
+                value = payload.get(key)
+                if value:
+                    return str(value)
+        if payload in (None, "", [], {}):
+            return ""
+        return str(payload)
+
+    def _points_request_queue_error_message(self) -> str:
+        """User-facing fallback when Roo cannot queue a points request for emoji approval."""
+        return (
+            "I couldn't queue that points request for admin approval just now. "
+            "Please try again in a tick or ask a Points Admin to use the existing manual award flow."
+        )
 
     def _is_self_directed_points_award(
         self,
@@ -2762,14 +2841,25 @@ Keep the response concise but informative."""
             if non_self_mentions:
                 return "For now, points requests are only for yourself. Ask an admin to use the manual award flow for someone else."
 
-            request_record = await client.create_points_request(
-                requester_slack_id=user_id,
-                target_slack_id=user_id,
-                points=points,
-                reason=reason,
-                slack_channel_id=channel_id,
-                slack_thread_ts=thread_ts,
-            )
+            try:
+                request_record = await client.create_points_request(
+                    requester_slack_id=user_id,
+                    target_slack_id=user_id,
+                    points=points,
+                    reason=reason,
+                    slack_channel_id=channel_id,
+                    slack_thread_ts=thread_ts,
+                )
+            except httpx.HTTPStatusError as exc:
+                error_detail = self._extract_http_error_detail(exc)
+                print(
+                    "❌ Points request queue failed: "
+                    f"status={exc.response.status_code} error={error_detail or str(exc)}"
+                )
+                return self._points_request_queue_error_message()
+            except Exception as exc:
+                print(f"❌ Points request queue failed: error={exc}")
+                return self._points_request_queue_error_message()
 
             request_id = request_record.get("id")
             summary_text = (
@@ -2792,7 +2882,12 @@ Keep the response concise but informative."""
                         slack_thread_ts=thread_ts,
                         slack_summary_message_ts=summary_ts,
                     )
-                except Exception:
+                except Exception as exc:
+                    print(
+                        "❌ Points request summary attach failed: "
+                        f"request_id={request_id} channel={channel_id} "
+                        f"thread_ts={thread_ts} error={exc}"
+                    )
                     return (
                         "I posted the points request, but I couldn't register emoji approval for it. "
                         "Please ask a Points Admin to use the existing manual award flow for now."
@@ -3035,6 +3130,41 @@ Keep the response concise but informative."""
 
             return f"✅ <@{promoted_target}> is now a Roo Points Admin."
 
+        elif action == "revoke_points_admin":
+            from ..slack_client import get_bot_user_id
+
+            if not self._is_points_super_admin(user_id):
+                return self._points_super_admin_denial()
+
+            try:
+                bot_id = get_bot_user_id()
+            except Exception:
+                bot_id = None
+
+            target_slack_id, target_error = self._extract_single_admin_target(
+                text,
+                bot_id=bot_id,
+                action_label="remove their Roo Points Admin access",
+            )
+            if target_error:
+                return target_error
+
+            result = await client.revoke_points_admin(user_id, target_slack_id)
+
+            error_message = str(result.get("error") or result.get("detail") or "").strip()
+            revoked_target = client._clean_slack_id(
+                result.get("target_slack_id") or target_slack_id
+            )
+
+            if result.get("already_revoked"):
+                return f"<@{revoked_target}> already doesn't have Roo Points Admin access."
+            if error_message:
+                if "not a points admin" in error_message.lower():
+                    return f"<@{revoked_target}> isn't a Points Admin right now."
+                return f"Couldn't revoke Roo Points Admin access for <@{revoked_target}>: {error_message}"
+
+            return f"✅ Removed Roo Points Admin access from <@{revoked_target}>."
+
         elif action == "set_points_admin_allowance":
             from ..slack_client import get_bot_user_id
 
@@ -3199,6 +3329,22 @@ Keep the response concise but informative."""
                 bot_id = get_bot_user_id()
             except Exception:
                 bot_id = None
+
+            management_action = self._resolve_points_admin_management_action(
+                text,
+                explicit_action=str(params.get("action", "") or "").lower().strip(),
+            )
+            if management_action:
+                return await self._handle_points_action(
+                    client=client,
+                    action=management_action,
+                    params=params,
+                    text=text,
+                    user_id=user_id,
+                    channel_id=channel_id,
+                    thread_ts=thread_ts,
+                    skill=skill,
+                )
 
             if self._is_self_directed_points_award(text, params, user_id, bot_id=bot_id):
                 return await self._handle_points_action(
@@ -3397,8 +3543,8 @@ Keep the response concise but informative."""
         from roo.clients.mlai_backend import MLAIBackendClient
         api_client = MLAIBackendClient(
             base_url=settings.MLAI_BACKEND_URL,
-            api_key=settings.MLAI_API_KEY,
-            internal_api_key=settings.INTERNAL_API_KEY or settings.MLAI_API_KEY
+            api_key=settings.ROO_API_KEY or settings.MLAI_API_KEY,
+            internal_api_key=settings.INTERNAL_API_KEY or settings.ROO_API_KEY or settings.MLAI_API_KEY
         )
         
         # 1. Check for valid integration & handle errors

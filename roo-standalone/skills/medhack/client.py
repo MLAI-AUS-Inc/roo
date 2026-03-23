@@ -87,11 +87,15 @@ class MedHackClient:
                 from roo.config import get_settings
                 from roo.clients.mlai_backend import MLAIBackendClient
                 settings = get_settings()
-                if settings.MLAI_BACKEND_URL and settings.MLAI_API_KEY:
+                if settings.MLAI_BACKEND_URL and (settings.ROO_API_KEY or settings.MLAI_API_KEY):
                     self._backend = MLAIBackendClient(
                         base_url=settings.MLAI_BACKEND_URL,
-                        api_key=settings.MLAI_API_KEY,
-                        internal_api_key=getattr(settings, 'INTERNAL_API_KEY', None) or settings.MLAI_API_KEY
+                        api_key=settings.ROO_API_KEY or settings.MLAI_API_KEY,
+                        internal_api_key=(
+                            getattr(settings, "INTERNAL_API_KEY", None)
+                            or settings.ROO_API_KEY
+                            or settings.MLAI_API_KEY
+                        )
                     )
             except Exception as e:
                 print(f"⚠️ MedHack backend client init failed: {e}")

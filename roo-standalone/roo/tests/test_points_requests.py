@@ -1,3 +1,4 @@
+import asyncio
 import importlib
 import sys
 from pathlib import Path
@@ -57,9 +58,58 @@ class FakePointsClient:
         return {"ok": True}
 
 
+class FailingCreatePointsClient(FakePointsClient):
+    async def create_points_request(
+        self,
+        requester_slack_id,
+        target_slack_id,
+        points,
+        reason,
+        slack_channel_id=None,
+        slack_thread_ts=None,
+    ):
+        request = httpx.Request(
+            "POST",
+            "https://backend.test/api/v1/points/requests/",
+        )
+        response = httpx.Response(
+            404,
+            request=request,
+            json={"detail": "Not Found"},
+        )
+        raise httpx.HTTPStatusError("not found", request=request, response=response)
+
+
+class FailingAttachPointsClient(FakePointsClient):
+    async def attach_points_request_slack_summary(
+        self,
+        request_id,
+        slack_channel_id,
+        slack_thread_ts,
+        slack_summary_message_ts,
+    ):
+        self.attached = {
+            "request_id": request_id,
+            "slack_channel_id": slack_channel_id,
+            "slack_thread_ts": slack_thread_ts,
+            "slack_summary_message_ts": slack_summary_message_ts,
+        }
+        request = httpx.Request(
+            "PATCH",
+            f"https://backend.test/api/v1/points/requests/{request_id}/slack-summary/",
+        )
+        response = httpx.Response(
+            404,
+            request=request,
+            json={"detail": "Not Found"},
+        )
+        raise httpx.HTTPStatusError("not found", request=request, response=response)
+
+
 class FakePointsAdminClient:
     def __init__(self):
         self.promote_args = None
+        self.revoke_args = None
         self.allowance_args = None
 
     def _clean_slack_id(self, user_id):
@@ -81,6 +131,10 @@ class FakePointsAdminClient:
             "weekly_allowance": weekly_allowance,
         }
 
+    async def revoke_points_admin(self, requester_slack_id, target_slack_id):
+        self.revoke_args = (requester_slack_id, target_slack_id)
+        return {"target_slack_id": target_slack_id, "revoked": True}
+
 
 class FakeAlreadyAdminClient(FakePointsAdminClient):
     async def promote_points_admin(self, requester_slack_id, target_slack_id):
@@ -97,6 +151,27 @@ class FakeMissingPointsAdminClient(FakePointsAdminClient):
     ):
         self.allowance_args = (requester_slack_id, target_slack_id, weekly_allowance)
         return {"error": "Not a points admin"}
+
+
+class FakeAlreadyRevokedClient(FakePointsAdminClient):
+    async def revoke_points_admin(self, requester_slack_id, target_slack_id):
+        self.revoke_args = (requester_slack_id, target_slack_id)
+        return {"target_slack_id": target_slack_id, "already_revoked": True}
+
+
+class FakeAwardGuardClient(FakePointsAdminClient):
+    def __init__(self):
+        super().__init__()
+        self.allowance_lookup_called = False
+        self.award_called = False
+
+    async def get_admin_allowance(self, requester_slack_id):
+        self.allowance_lookup_called = True
+        return {"remaining": 100, "allowance": 100}
+
+    async def award_points(self, requester_slack_id, target_slack_id, points, reason):
+        self.award_called = True
+        return {"points_awarded": points, "new_balance": 999}
 
 
 def test_resolve_points_action_prefers_request_points():
@@ -161,6 +236,28 @@ def test_resolve_points_action_maps_points_allowance_change():
     )
 
     assert action == "set_points_admin_allowance"
+
+
+def test_resolve_points_action_maps_natural_language_points_allowance_change():
+    executor = SkillExecutor()
+
+    action = executor._resolve_points_action(
+        {"action": "award_points"},
+        "please increase the number of points <@U123ABC> can give out weekly to 48",
+    )
+
+    assert action == "set_points_admin_allowance"
+
+
+def test_resolve_points_action_maps_revoke_points_admin():
+    executor = SkillExecutor()
+
+    action = executor._resolve_points_action(
+        {},
+        "remove <@U123ABC> as roo points admin",
+    )
+
+    assert action == "revoke_points_admin"
 
 
 @pytest.mark.asyncio
@@ -238,6 +335,54 @@ async def test_request_points_handles_im_requesting_phrase(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_request_points_404_returns_integration_error(monkeypatch):
+    executor = SkillExecutor()
+
+    monkeypatch.setattr(slack_client_module, "get_bot_user_id", lambda: "UBOT")
+
+    result = await executor._handle_points_action(
+        client=FailingCreatePointsClient(),
+        action="request_points",
+        params={"points": 12, "reason": "running the 21st x MLAI event"},
+        text="I'm requesting 12 points for running the 21st x MLAI event",
+        user_id="U123",
+        channel_id="C123",
+        thread_ts="111.222",
+        skill=None,
+    )
+
+    assert "queue that points request for admin approval" in result
+    assert "Double-check the ID or date" not in result
+
+
+@pytest.mark.asyncio
+async def test_request_points_attach_failure_returns_manual_fallback(monkeypatch):
+    executor = SkillExecutor()
+    posted_messages = []
+
+    monkeypatch.setattr(
+        executor_module,
+        "post_message",
+        lambda **kwargs: posted_messages.append(kwargs) or {"ts": "222.333"},
+    )
+    monkeypatch.setattr(slack_client_module, "get_bot_user_id", lambda: "UBOT")
+
+    result = await executor._handle_points_action(
+        client=FailingAttachPointsClient(),
+        action="request_points",
+        params={"points": 5, "reason": "helping at the event"},
+        text="request 5 points for helping at the event",
+        user_id="U123",
+        channel_id="C123",
+        thread_ts="111.222",
+        skill=None,
+    )
+
+    assert "couldn't register emoji approval" in result
+    assert posted_messages[0]["thread_ts"] == "111.222"
+
+
+@pytest.mark.asyncio
 async def test_award_me_phrase_is_converted_into_points_request(monkeypatch):
     executor = SkillExecutor()
     client = FakePointsClient()
@@ -283,6 +428,62 @@ async def test_request_points_rejected_in_dm():
     )
 
     assert "shared channel or thread" in result
+
+
+@pytest.mark.asyncio
+async def test_execute_mlai_points_prefers_roo_api_key(monkeypatch):
+    executor = SkillExecutor()
+    captured = {}
+
+    async def fake_handle_points_action(
+        self,
+        client,
+        action,
+        params,
+        text,
+        user_id,
+        channel_id,
+        thread_ts,
+        skill,
+    ):
+        captured["client"] = client
+        captured["action"] = action
+        return {"ok": True}
+
+    monkeypatch.setattr(
+        executor_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            MLAI_BACKEND_URL="https://backend.test",
+            MLAI_API_KEY="mlai-api-key",
+            ROO_API_KEY="roo-api-key",
+            INTERNAL_API_KEY="internal-key",
+        ),
+    )
+    monkeypatch.setattr(backend_module, "MLAIBackendClient", InitCapturingBackendClient)
+    monkeypatch.setattr(
+        SkillExecutor,
+        "_handle_points_action",
+        fake_handle_points_action,
+    )
+
+    result = await executor._execute_mlai_points(
+        skill=SimpleNamespace(name="mlai-points"),
+        text="request 5 points for helping at the event",
+        params={"action": "request_points", "points": 5, "reason": "helping at the event"},
+        user_id="U123",
+        channel_id="C123",
+        thread_ts="111.222",
+    )
+
+    assert result == {"ok": True}
+    assert captured["action"] == "request_points"
+    assert isinstance(captured["client"], InitCapturingBackendClient)
+    assert InitCapturingBackendClient.last_init["kwargs"] == {
+        "base_url": "https://backend.test",
+        "api_key": "roo-api-key",
+        "internal_api_key": "internal-key",
+    }
 
 
 @pytest.mark.asyncio
@@ -406,6 +607,78 @@ async def test_promote_points_admin_handles_already_admin_idempotently(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_revoke_points_admin_authorized(monkeypatch):
+    executor = SkillExecutor()
+    client = FakePointsAdminClient()
+
+    monkeypatch.setattr(slack_client_module, "get_bot_user_id", lambda: "UBOT")
+
+    result = await executor._handle_points_action(
+        client=client,
+        action="revoke_points_admin",
+        params={},
+        text="remove <@UTARGET> as roo points admin",
+        user_id=executor_module.POINTS_SUPER_ADMIN_SLACK_ID,
+        channel_id="C123",
+        thread_ts="111.222",
+        skill=None,
+    )
+
+    assert client.revoke_args == (
+        executor_module.POINTS_SUPER_ADMIN_SLACK_ID,
+        "UTARGET",
+    )
+    assert "✅ Removed Roo Points Admin access from <@UTARGET>." == result
+
+
+@pytest.mark.asyncio
+async def test_revoke_points_admin_denies_unauthorized_user(monkeypatch):
+    executor = SkillExecutor()
+    client = FakePointsAdminClient()
+
+    monkeypatch.setattr(slack_client_module, "get_bot_user_id", lambda: "UBOT")
+
+    result = await executor._handle_points_action(
+        client=client,
+        action="revoke_points_admin",
+        params={},
+        text="revoke <@UTARGET> as roo points admin",
+        user_id="UNAUTHORIZED",
+        channel_id="C123",
+        thread_ts="111.222",
+        skill=None,
+    )
+
+    assert "only <@U05QPB483K9> can manage Points Admin access and weekly allowances" in result
+    assert client.revoke_args is None
+
+
+@pytest.mark.asyncio
+async def test_revoke_points_admin_handles_already_revoked_idempotently(monkeypatch):
+    executor = SkillExecutor()
+    client = FakeAlreadyRevokedClient()
+
+    monkeypatch.setattr(slack_client_module, "get_bot_user_id", lambda: "UBOT")
+
+    result = await executor._handle_points_action(
+        client=client,
+        action="revoke_points_admin",
+        params={},
+        text="revoke <@UTARGET> as roo points admin",
+        user_id=executor_module.POINTS_SUPER_ADMIN_SLACK_ID,
+        channel_id="C123",
+        thread_ts="111.222",
+        skill=None,
+    )
+
+    assert client.revoke_args == (
+        executor_module.POINTS_SUPER_ADMIN_SLACK_ID,
+        "UTARGET",
+    )
+    assert "<@UTARGET> already doesn't have Roo Points Admin access." == result
+
+
+@pytest.mark.asyncio
 async def test_set_points_admin_allowance_authorized(monkeypatch):
     executor = SkillExecutor()
     client = FakePointsAdminClient()
@@ -511,6 +784,58 @@ async def test_set_points_admin_allowance_surfaces_target_not_admin(monkeypatch)
     assert "<@UTARGET> isn't a Points Admin yet, so I can't update their allowance." == result
 
 
+@pytest.mark.asyncio
+async def test_award_flow_reroutes_management_phrase_to_allowance_update(monkeypatch):
+    executor = SkillExecutor()
+    client = FakeAwardGuardClient()
+
+    monkeypatch.setattr(slack_client_module, "get_bot_user_id", lambda: "UBOT")
+
+    result = await executor._handle_points_action(
+        client=client,
+        action="award_points",
+        params={"action": "award_points"},
+        text="please increase the number of points <@UTARGET> can give out weekly to 48",
+        user_id=executor_module.POINTS_SUPER_ADMIN_SLACK_ID,
+        channel_id="C123",
+        thread_ts="111.222",
+        skill=None,
+    )
+
+    assert client.allowance_args == (
+        executor_module.POINTS_SUPER_ADMIN_SLACK_ID,
+        "UTARGET",
+        48,
+    )
+    assert client.allowance_lookup_called is False
+    assert client.award_called is False
+    assert "✅ Set <@UTARGET>'s weekly points allowance to 48 points." == result
+
+
+@pytest.mark.asyncio
+async def test_award_flow_reroutes_missing_tag_management_phrase_to_clarification(monkeypatch):
+    executor = SkillExecutor()
+    client = FakeAwardGuardClient()
+
+    monkeypatch.setattr(slack_client_module, "get_bot_user_id", lambda: "UBOT")
+
+    result = await executor._handle_points_action(
+        client=client,
+        action="award_points",
+        params={"action": "award_points"},
+        text="please increase the number of points sam can give out weekly to 48",
+        user_id=executor_module.POINTS_SUPER_ADMIN_SLACK_ID,
+        channel_id="C123",
+        thread_ts="111.222",
+        skill=None,
+    )
+
+    assert client.allowance_args is None
+    assert client.allowance_lookup_called is False
+    assert client.award_called is False
+    assert "Tag exactly one user to change their weekly points allowance." == result
+
+
 class FakeApprovalClient:
     last_instance = None
 
@@ -543,6 +868,69 @@ class FailingApprovalClient(FakeApprovalClient):
         raise httpx.HTTPStatusError("forbidden", request=request, response=response)
 
 
+class InitCapturingBackendClient:
+    last_init = None
+
+    def __init__(self, *args, **kwargs):
+        InitCapturingBackendClient.last_init = {
+            "args": args,
+            "kwargs": kwargs,
+        }
+
+
+class RecordingAsyncClient:
+    def __init__(self, *, status_code=200, json_data=None):
+        self.status_code = status_code
+        self.json_data = {} if json_data is None else json_data
+        self.calls = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    def _response(self, method, url, *, json=None, params=None, headers=None, timeout=None):
+        self.calls.append(
+            {
+                "method": method,
+                "url": url,
+                "json": json,
+                "params": params,
+                "headers": headers,
+                "timeout": timeout,
+            }
+        )
+        return httpx.Response(
+            self.status_code,
+            request=httpx.Request(method, url),
+            json=self.json_data,
+        )
+
+    async def post(self, url, *, json=None, headers=None, timeout=None):
+        return self._response("POST", url, json=json, headers=headers, timeout=timeout)
+
+    async def patch(self, url, *, json=None, headers=None, timeout=None):
+        return self._response("PATCH", url, json=json, headers=headers, timeout=timeout)
+
+    async def get(self, url, *, params=None, headers=None, timeout=None):
+        return self._response("GET", url, params=params, headers=headers, timeout=timeout)
+
+
+class FakeStartHereAwardClient:
+    last_instance = None
+    response = {"awarded": True, "new_balance": 2}
+
+    def __init__(self, *args, **kwargs):
+        self.init_kwargs = kwargs
+        self.award_args = None
+        FakeStartHereAwardClient.last_instance = self
+
+    async def award_first_channel_post(self, slack_user_id, channel_id):
+        self.award_args = (slack_user_id, channel_id)
+        return dict(self.response)
+
+
 @pytest.mark.asyncio
 async def test_reaction_approval_posts_confirmation(monkeypatch):
     posted_messages = []
@@ -555,6 +943,7 @@ async def test_reaction_approval_posts_confirmation(monkeypatch):
             MLAI_BACKEND_URL="https://backend.test",
             MLAI_API_KEY="api-key",
             INTERNAL_API_KEY="internal-key",
+            ROO_API_KEY="roo-api-key",
         ),
     )
     monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeApprovalClient)
@@ -597,6 +986,7 @@ async def test_reaction_approval_failure_dms_reactor(monkeypatch):
             MLAI_BACKEND_URL="https://backend.test",
             MLAI_API_KEY="api-key",
             INTERNAL_API_KEY="internal-key",
+            ROO_API_KEY="roo-api-key",
         ),
     )
     monkeypatch.setattr(backend_module, "MLAIBackendClient", FailingApprovalClient)
@@ -652,3 +1042,425 @@ async def test_reaction_approval_ignores_other_emoji(monkeypatch):
 
     assert posted_messages == []
     assert direct_messages == []
+
+
+@pytest.mark.asyncio
+async def test_slack_events_start_here_message_triggers_intro_handler(monkeypatch):
+    handled_events = []
+    scheduled_tasks = []
+    real_create_task = asyncio.create_task
+
+    async def fake_handle_start_here_intro(event):
+        handled_events.append(event)
+
+    def fake_create_task(coro):
+        task = real_create_task(coro)
+        scheduled_tasks.append(task)
+        return task
+
+    monkeypatch.setattr(slack_client_module, "get_channel_id", lambda name: "CSTART")
+    monkeypatch.setattr(main_module, "_handle_start_here_intro", fake_handle_start_here_intro)
+    monkeypatch.setattr(main_module.asyncio, "create_task", fake_create_task)
+
+    payload = {
+        "event": {
+            "type": "message",
+            "user": "UINTRO",
+            "channel": "CSTART",
+            "ts": "111.222",
+        }
+    }
+
+    class FakeRequest:
+        async def json(self):
+            return payload
+
+    response = await main_module.slack_events(FakeRequest())
+
+    assert response.status_code == 200
+    await asyncio.gather(*scheduled_tasks)
+    assert handled_events == [payload["event"]]
+
+
+@pytest.mark.asyncio
+async def test_slack_events_ignores_start_here_thread_reply(monkeypatch):
+    scheduled = []
+
+    def fake_create_task(coro):
+        coro.close()
+        scheduled.append("called")
+        return None
+
+    monkeypatch.setattr(slack_client_module, "get_channel_id", lambda name: "CSTART")
+    monkeypatch.setattr(main_module.asyncio, "create_task", fake_create_task)
+
+    payload = {
+        "event": {
+            "type": "message",
+            "user": "UINTRO",
+            "channel": "CSTART",
+            "ts": "111.222",
+            "thread_ts": "111.222",
+        }
+    }
+
+    class FakeRequest:
+        async def json(self):
+            return payload
+
+    response = await main_module.slack_events(FakeRequest())
+
+    assert response.status_code == 200
+    assert scheduled == []
+
+
+@pytest.mark.asyncio
+async def test_slack_events_non_start_here_message_does_not_trigger_intro_handler(monkeypatch):
+    scheduled = []
+
+    def fake_create_task(coro):
+        coro.close()
+        scheduled.append("called")
+        return None
+
+    monkeypatch.setattr(slack_client_module, "get_channel_id", lambda name: "CSTART")
+    monkeypatch.setattr(main_module.asyncio, "create_task", fake_create_task)
+
+    payload = {
+        "event": {
+            "type": "message",
+            "user": "UOTHER",
+            "channel": "COTHER",
+            "ts": "111.222",
+        }
+    }
+
+    class FakeRequest:
+        async def json(self):
+            return payload
+
+    response = await main_module.slack_events(FakeRequest())
+
+    assert response.status_code == 200
+    assert scheduled == []
+
+
+@pytest.mark.asyncio
+async def test_slack_events_bot_message_does_not_trigger_intro_handler(monkeypatch):
+    scheduled = []
+
+    def fake_create_task(coro):
+        coro.close()
+        scheduled.append("called")
+        return None
+
+    monkeypatch.setattr(slack_client_module, "get_channel_id", lambda name: "CSTART")
+    monkeypatch.setattr(main_module.asyncio, "create_task", fake_create_task)
+
+    payload = {
+        "event": {
+            "type": "message",
+            "user": "UBOT",
+            "channel": "CSTART",
+            "ts": "111.222",
+            "bot_id": "B123",
+        }
+    }
+
+    class FakeRequest:
+        async def json(self):
+            return payload
+
+    response = await main_module.slack_events(FakeRequest())
+
+    assert response.status_code == 200
+    assert scheduled == []
+
+
+@pytest.mark.asyncio
+async def test_slack_events_message_subtype_does_not_trigger_intro_handler(monkeypatch):
+    scheduled = []
+
+    def fake_create_task(coro):
+        coro.close()
+        scheduled.append("called")
+        return None
+
+    monkeypatch.setattr(slack_client_module, "get_channel_id", lambda name: "CSTART")
+    monkeypatch.setattr(main_module.asyncio, "create_task", fake_create_task)
+
+    payload = {
+        "event": {
+            "type": "message",
+            "user": "UINTRO",
+            "channel": "CSTART",
+            "ts": "111.222",
+            "subtype": "message_changed",
+        }
+    }
+
+    class FakeRequest:
+        async def json(self):
+            return payload
+
+    response = await main_module.slack_events(FakeRequest())
+
+    assert response.status_code == 200
+    assert scheduled == []
+
+
+@pytest.mark.asyncio
+async def test_handle_start_here_intro_awards_and_posts_thread_reply(monkeypatch):
+    posted_messages = []
+    FakeStartHereAwardClient.response = {"awarded": True, "new_balance": 2}
+
+    monkeypatch.setattr(
+        main_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            MLAI_BACKEND_URL="https://backend.test",
+            MLAI_API_KEY="api-key",
+            ROO_API_KEY="roo-api-key",
+            INTERNAL_API_KEY="internal-key",
+        ),
+    )
+    monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeStartHereAwardClient)
+    monkeypatch.setattr(
+        main_module,
+        "post_message",
+        lambda **kwargs: posted_messages.append(kwargs),
+    )
+
+    await main_module._handle_start_here_intro(
+        {
+            "user": "UINTRO",
+            "channel": "CSTART",
+            "ts": "111.222",
+        }
+    )
+
+    assert FakeStartHereAwardClient.last_instance.award_args == ("UINTRO", "CSTART")
+    assert posted_messages == [
+        {
+            "channel": "CSTART",
+            "thread_ts": "111.222",
+            "text": "Welcome <@UINTRO>! You've earned 2 Roo points for introducing yourself here.",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_handle_start_here_intro_noops_when_award_already_exists(monkeypatch):
+    posted_messages = []
+    FakeStartHereAwardClient.response = {"awarded": False}
+
+    monkeypatch.setattr(
+        main_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            MLAI_BACKEND_URL="https://backend.test",
+            MLAI_API_KEY="api-key",
+            ROO_API_KEY="roo-api-key",
+            INTERNAL_API_KEY="internal-key",
+        ),
+    )
+    monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeStartHereAwardClient)
+    monkeypatch.setattr(
+        main_module,
+        "post_message",
+        lambda **kwargs: posted_messages.append(kwargs),
+    )
+
+    await main_module._handle_start_here_intro(
+        {
+            "user": "UINTRO",
+            "channel": "CSTART",
+            "ts": "111.222",
+        }
+    )
+
+    assert FakeStartHereAwardClient.last_instance.award_args == ("UINTRO", "CSTART")
+    assert posted_messages == []
+
+
+@pytest.mark.asyncio
+async def test_backend_client_create_points_request_uses_canonical_endpoint(monkeypatch):
+    recorder = RecordingAsyncClient(json_data={"id": 42})
+    monkeypatch.setattr(backend_module.httpx, "AsyncClient", lambda: recorder)
+
+    client = backend_module.MLAIBackendClient(
+        base_url="https://backend.test",
+        api_key="api-key",
+        internal_api_key="internal-key",
+    )
+
+    result = await client.create_points_request(
+        requester_slack_id="UREQUESTER",
+        target_slack_id="<@UTARGET>",
+        points=12,
+        reason="running the 21st x MLAI event",
+        slack_channel_id="C123",
+        slack_thread_ts="111.222",
+    )
+
+    assert result == {"id": 42}
+    assert recorder.calls == [
+        {
+            "method": "POST",
+            "url": "https://backend.test/api/v1/points/requests/",
+            "json": {
+                "requester_slack_id": "UREQUESTER",
+                "target_slack_id": "UTARGET",
+                "points": 12,
+                "reason": "running the 21st x MLAI event",
+                "slack_channel_id": "C123",
+                "slack_thread_ts": "111.222",
+            },
+            "params": None,
+            "headers": {
+                "Content-Type": "application/json",
+                "X-API-Key": "api-key",
+            },
+            "timeout": 10.0,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_backend_client_attach_points_request_summary_uses_canonical_endpoint(monkeypatch):
+    recorder = RecordingAsyncClient(json_data={"ok": True})
+    monkeypatch.setattr(backend_module.httpx, "AsyncClient", lambda: recorder)
+
+    client = backend_module.MLAIBackendClient(
+        base_url="https://backend.test",
+        api_key="api-key",
+        internal_api_key="internal-key",
+    )
+
+    result = await client.attach_points_request_slack_summary(
+        request_id=42,
+        slack_channel_id="C123",
+        slack_thread_ts="111.222",
+        slack_summary_message_ts="222.333",
+    )
+
+    assert result == {"ok": True}
+    assert recorder.calls == [
+        {
+            "method": "PATCH",
+            "url": "https://backend.test/api/v1/points/requests/42/slack-summary/",
+            "json": {
+                "slack_channel_id": "C123",
+                "slack_summary_message_ts": "222.333",
+                "slack_thread_ts": "111.222",
+            },
+            "params": None,
+            "headers": {
+                "Content-Type": "application/json",
+                "X-API-Key": "internal-key",
+            },
+            "timeout": 10.0,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_backend_client_lookup_points_request_by_slack_message_uses_canonical_endpoint(monkeypatch):
+    recorder = RecordingAsyncClient(json_data={"id": 42, "status": "pending"})
+    monkeypatch.setattr(backend_module.httpx, "AsyncClient", lambda: recorder)
+
+    client = backend_module.MLAIBackendClient(
+        base_url="https://backend.test",
+        api_key="api-key",
+        internal_api_key="internal-key",
+    )
+
+    result = await client.get_points_request_by_slack_message(
+        slack_channel_id="C123",
+        slack_message_ts="222.333",
+    )
+
+    assert result == {"id": 42, "status": "pending"}
+    assert recorder.calls == [
+        {
+            "method": "GET",
+            "url": "https://backend.test/api/v1/points/requests/by-slack-message/",
+            "json": None,
+            "params": {
+                "slack_channel_id": "C123",
+                "slack_message_ts": "222.333",
+            },
+            "headers": {
+                "Content-Type": "application/json",
+                "X-API-Key": "internal-key",
+            },
+            "timeout": 10.0,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_backend_client_approve_points_request_uses_canonical_endpoint(monkeypatch):
+    recorder = RecordingAsyncClient(json_data={"points_awarded": 12, "new_balance": 17})
+    monkeypatch.setattr(backend_module.httpx, "AsyncClient", lambda: recorder)
+
+    client = backend_module.MLAIBackendClient(
+        base_url="https://backend.test",
+        api_key="api-key",
+        internal_api_key="internal-key",
+    )
+
+    result = await client.approve_points_request(
+        request_id=42,
+        admin_slack_id="UADMIN",
+    )
+
+    assert result == {"points_awarded": 12, "new_balance": 17}
+    assert recorder.calls == [
+        {
+            "method": "POST",
+            "url": "https://backend.test/api/v1/points/requests/42/approve/",
+            "json": {"admin_slack_id": "UADMIN"},
+            "params": None,
+            "headers": {
+                "Content-Type": "application/json",
+                "X-API-Key": "internal-key",
+            },
+            "timeout": 15.0,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_backend_client_award_first_channel_post_uses_canonical_endpoint(monkeypatch):
+    recorder = RecordingAsyncClient(json_data={"awarded": True, "new_balance": 2})
+    monkeypatch.setattr(backend_module.httpx, "AsyncClient", lambda: recorder)
+
+    client = backend_module.MLAIBackendClient(
+        base_url="https://backend.test",
+        api_key="api-key",
+        internal_api_key="internal-key",
+    )
+
+    result = await client.award_first_channel_post(
+        slack_user_id="<@UINTRO>",
+        channel_id="CSTART",
+    )
+
+    assert result == {"awarded": True, "new_balance": 2}
+    assert recorder.calls == [
+        {
+            "method": "POST",
+            "url": "https://backend.test/api/v1/activity/first-post-award/",
+            "json": {
+                "slack_user_id": "UINTRO",
+                "channel_id": "CSTART",
+            },
+            "params": None,
+            "headers": {
+                "Content-Type": "application/json",
+                "X-API-Key": "internal-key",
+            },
+            "timeout": 15.0,
+        }
+    ]
