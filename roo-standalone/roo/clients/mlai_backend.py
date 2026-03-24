@@ -264,6 +264,8 @@ class MLAIBackendClient:
         topic: Optional[str] = None,
         target_keyword: Optional[str] = None,
         context: Optional[str] = None,
+        delivery_mode: Optional[str] = None,
+        delivery_mode_confirmed: Optional[bool] = None,
         slack_channel_id: Optional[str] = None,
         slack_thread_ts: Optional[str] = None,
         progress_message_ts: Optional[str] = None,
@@ -304,6 +306,9 @@ class MLAIBackendClient:
             payload["topic"] = topic
         if target_keyword:
             payload["target_keyword"] = target_keyword
+        if delivery_mode is not None:
+            payload["delivery_mode"] = delivery_mode
+            payload["delivery_mode_confirmed"] = bool(delivery_mode_confirmed)
         if slack_channel_id:
             payload["slack_channel_id"] = slack_channel_id
         if slack_thread_ts:
@@ -392,6 +397,8 @@ class MLAIBackendClient:
         confirmed_keyword: Optional[str] = None,
         custom_title: Optional[str] = None,
         option_index: int = 0,
+        delivery_mode: Optional[str] = None,
+        delivery_mode_confirmed: Optional[bool] = None,
         request_source: str = CONTENT_FACTORY_REQUEST_SOURCE,
     ) -> dict:
         """
@@ -425,6 +432,9 @@ class MLAIBackendClient:
             payload["domain"] = domain
         if custom_title:
             payload["custom_title"] = custom_title
+        if delivery_mode is not None:
+            payload["delivery_mode"] = delivery_mode
+            payload["delivery_mode_confirmed"] = bool(delivery_mode_confirmed)
             
         async with httpx.AsyncClient() as client:
             response = await client.post(
@@ -436,7 +446,7 @@ class MLAIBackendClient:
             response.raise_for_status()
             return response.json()
 
-    async def get_content_org_config(self, slack_user_id: str) -> Optional[dict]:
+    async def get_content_org_config(self, slack_user_id: str, domain: Optional[str] = None) -> Optional[dict]:
         """
         Check if content factory org config exists for a user.
         
@@ -452,6 +462,8 @@ class MLAIBackendClient:
         # Clean ID here just in case caller didn't
         clean_id = self._clean_slack_id(slack_user_id)
         params = {"slack_user_id": clean_id}
+        if domain:
+            params["domain"] = domain
         
         async with httpx.AsyncClient() as client:
             try:
@@ -468,6 +480,29 @@ class MLAIBackendClient:
             except Exception as e:
                 print(f"Failed to check org config: {e}")
                 return None
+
+    async def set_article_delivery_mode(
+        self,
+        job_id: str,
+        delivery_mode: str,
+        *,
+        request_source: str = CONTENT_FACTORY_REQUEST_SOURCE,
+    ) -> dict:
+        if not self.base_url:
+            raise ValueError("MLAI_BACKEND_URL not configured")
+
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{self.base_url}/api/v1/content/jobs/{job_id}/delivery-mode",
+                json={
+                    "delivery_mode": delivery_mode,
+                    "request_source": request_source,
+                },
+                headers=self.headers,
+                timeout=30.0,
+            )
+            response.raise_for_status()
+            return response.json()
 
     async def discover_opportunities(
         self,
