@@ -32,6 +32,7 @@ class FakeContentFactoryClient:
     last_instance = None
     generic_integration = None
     domain_integrations = {}
+    org_configs = {}
     auth_urls = {}
     saved_intents = []
     balance_by_user = {}
@@ -39,6 +40,8 @@ class FakeContentFactoryClient:
     attached_progress_messages = []
     still_working_calls = []
     integration_requests = []
+    delivery_mode_calls = []
+    trigger_article_generation_result = None
 
     def __init__(self, *args, **kwargs):
         self.trigger_calls = []
@@ -80,6 +83,8 @@ class FakeContentFactoryClient:
         topic=None,
         target_keyword="",
         context=None,
+        delivery_mode=None,
+        delivery_mode_confirmed=None,
         slack_channel_id=None,
         slack_thread_ts=None,
         progress_message_ts=None,
@@ -97,6 +102,8 @@ class FakeContentFactoryClient:
                 "topic": topic,
                 "target_keyword": target_keyword,
                 "context": context,
+                "delivery_mode": delivery_mode,
+                "delivery_mode_confirmed": delivery_mode_confirmed,
                 "slack_channel_id": slack_channel_id,
                 "slack_thread_ts": slack_thread_ts,
                 "progress_message_ts": progress_message_ts,
@@ -108,7 +115,7 @@ class FakeContentFactoryClient:
                 "user_avatar_url": user_avatar_url,
             }
         )
-        return {
+        return FakeContentFactoryClient.trigger_article_generation_result or {
             "job_id": "job-123",
             "workflow": "auto_discovery" if not topic else "direct_generate",
         }
@@ -139,6 +146,16 @@ class FakeContentFactoryClient:
         self.confirm_calls.append({"args": args, "kwargs": kwargs})
         return {"job_id": "confirmed-job-123", "status": "confirmed"}
 
+    async def set_article_delivery_mode(self, job_id, delivery_mode, **kwargs):
+        FakeContentFactoryClient.delivery_mode_calls.append(
+            {"job_id": job_id, "delivery_mode": delivery_mode, **kwargs}
+        )
+        return {
+            "job_id": job_id,
+            "status": "queued",
+            "delivery_mode": delivery_mode,
+        }
+
     async def attach_content_progress_message(self, job_id, **kwargs):
         FakeContentFactoryClient.attached_progress_messages.append(
             {"job_id": job_id, **kwargs}
@@ -160,6 +177,13 @@ class FakeContentFactoryClient:
             "preview_url": "https://preview.test/article",
             "pr_url": "https://github.test/pr/123",
         }
+
+    async def get_content_org_config(self, slack_user_id, domain=None):
+        if domain is not None:
+            return FakeContentFactoryClient.org_configs.get(domain)
+        if len(FakeContentFactoryClient.org_configs) == 1:
+            return next(iter(FakeContentFactoryClient.org_configs.values()))
+        return None
 
     async def trigger_repo_scan(
         self,
@@ -210,6 +234,7 @@ def _patch_content_factory(monkeypatch):
         },
     }
     FakeContentFactoryClient.auth_urls = {"default": "https://github.test/auth"}
+    FakeContentFactoryClient.org_configs = {}
     FakeContentFactoryClient.saved_intents = []
     FakeContentFactoryClient.balance_by_user = {}
     FakeContentFactoryClient.attached_progress_messages = []
@@ -230,6 +255,8 @@ def _patch_content_factory(monkeypatch):
     }
     FakeContentFactoryClient.last_instance = None
     FakeContentFactoryClient.integration_requests = []
+    FakeContentFactoryClient.delivery_mode_calls = []
+    FakeContentFactoryClient.trigger_article_generation_result = None
 
     monkeypatch.setattr(
         executor_module,
@@ -369,22 +396,15 @@ async def test_new_domain_requests_domain_github_auth_without_falling_back_to_ge
         thread_ts="111.222",
     )
 
-    assert "GitHub isn't connected for woofya.com.au" in result
+    assert isinstance(result, dict)
+    assert "choose whether you want me to research" in result["message"].lower()
     assert len(posted_messages) == 1
-    assert posted_messages[0]["args"][1] == "GitHub not connected for woofya.com.au"
-    assert "woofya.com.au" in posted_messages[0]["kwargs"]["blocks"][0]["text"]["text"]
-    assert "Status Report" not in json.dumps(posted_messages)
+    assert "Status Report" in posted_messages[0]["args"][1]
+    assert "woofya.com.au" in posted_messages[0]["args"][1]
+    assert "GitHub not connected" not in json.dumps(posted_messages)
     assert "borderline-main" not in json.dumps(posted_messages)
     assert FakeContentFactoryClient.last_instance.trigger_calls == []
-    assert len(FakeContentFactoryClient.saved_intents) == 1
-    saved_intent = FakeContentFactoryClient.saved_intents[0]
-    assert saved_intent["slack_user_id"] == "U05QPB483K9"
-    assert saved_intent["intent_data"]["skill"] == "content-factory"
-    assert saved_intent["intent_data"]["params"]["domain"] == "woofya.com.au"
-    assert saved_intent["intent_data"]["params"]["client_request_id"].startswith("content-factory-")
-    assert saved_intent["intent_data"]["text"] == "write an article for my website woofya.com.au"
-    assert saved_intent["intent_data"]["channel"] == "C123"
-    assert saved_intent["intent_data"]["ts"] == "111.222"
+    assert FakeContentFactoryClient.saved_intents == []
 
 
 @pytest.mark.asyncio
@@ -461,6 +481,95 @@ async def test_requested_domain_bypasses_generic_multi_domain_error(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_explicit_content_only_request_without_repo_starts_generation(monkeypatch):
+    executor = SkillExecutor()
+    posted_messages = []
+    _patch_content_factory(monkeypatch)
+    FakeContentFactoryClient.generic_integration = None
+    FakeContentFactoryClient.domain_integrations = {}
+    FakeContentFactoryClient.org_configs["livestockmerchant.com.au"] = {
+        "domain": "livestockmerchant.com.au",
+        "github_repo": None,
+        "article_delivery_mode": None,
+        "scan_summary": None,
+        "article_system": {},
+    }
+    monkeypatch.setattr(
+        executor_module,
+        "post_message",
+        lambda *args, **kwargs: posted_messages.append({"args": args, "kwargs": kwargs}) or {"ts": "111.222"},
+    )
+
+    result = await executor._execute_content_factory(
+        skill=None,
+        text="write a content-only article for livestockmerchant.com.au about cattle export trends",
+        params={
+            "domain": "livestockmerchant.com.au",
+            "topic": "cattle export trends",
+            "confirmed": True,
+        },
+        user_id="U05QPB483K9",
+        channel_id="C123",
+        thread_ts="111.222",
+    )
+
+    assert isinstance(result, dict)
+    assert result["data"]["content_factory_progress_job_id"] == "job-123"
+    trigger_call = FakeContentFactoryClient.last_instance.trigger_calls[0]
+    assert trigger_call["domain"] == "livestockmerchant.com.au"
+    assert trigger_call["delivery_mode"] == "content_only"
+    assert trigger_call["delivery_mode_confirmed"] is True
+    assert "GitHub not connected" not in json.dumps(posted_messages)
+
+
+@pytest.mark.asyncio
+async def test_repo_less_request_awaits_delivery_mode_instead_of_showing_github_cta(monkeypatch):
+    executor = SkillExecutor()
+    posted_messages = []
+    _patch_content_factory(monkeypatch)
+    FakeContentFactoryClient.generic_integration = None
+    FakeContentFactoryClient.domain_integrations = {}
+    FakeContentFactoryClient.org_configs["livestockmerchant.com.au"] = {
+        "domain": "livestockmerchant.com.au",
+        "github_repo": None,
+        "article_delivery_mode": None,
+        "scan_summary": None,
+        "article_system": {},
+    }
+    FakeContentFactoryClient.trigger_article_generation_result = {
+        "job_id": "job-awaiting-mode-1",
+        "status": "awaiting_delivery_mode",
+        "workflow": "direct_generate",
+        "recommended_delivery_mode": "content_only",
+    }
+    monkeypatch.setattr(
+        executor_module,
+        "post_message",
+        lambda *args, **kwargs: posted_messages.append({"args": args, "kwargs": kwargs}) or {"ts": "111.222"},
+    )
+
+    result = await executor._execute_content_factory(
+        skill=None,
+        text="write an article for livestockmerchant.com.au about cattle export trends",
+        params={
+            "domain": "livestockmerchant.com.au",
+            "topic": "cattle export trends",
+            "confirmed": True,
+        },
+        user_id="U05QPB483K9",
+        channel_id="C123",
+        thread_ts="111.222",
+    )
+
+    assert isinstance(result, dict)
+    assert "choose the delivery mode" in result["message"].lower()
+    assert result["data"]["content_factory_progress_job_id"] == "job-awaiting-mode-1"
+    action_ids = [element["action_id"] for element in result["blocks"][1]["elements"]]
+    assert action_ids == ["select_article_delivery_mode", "select_article_delivery_mode"]
+    assert "GitHub not connected" not in json.dumps(posted_messages)
+
+
+@pytest.mark.asyncio
 async def test_new_domain_requires_repo_selection_without_falling_back_to_generic_repo(monkeypatch):
     executor = SkillExecutor()
     posted_messages = []
@@ -508,22 +617,15 @@ async def test_new_domain_requires_repo_selection_without_falling_back_to_generi
         thread_ts="111.222",
     )
 
-    assert result == "Please choose a repository to use with the Content Factory. 🔌"
+    assert isinstance(result, dict)
+    assert "choose whether you want me to research" in result["message"].lower()
     assert len(posted_messages) == 1
-    assert posted_messages[0]["args"][1] == "Please select a repository"
-    assert "woofya.com.au" in posted_messages[0]["kwargs"]["blocks"][0]["text"]["text"]
-    assert "Status Report" not in json.dumps(posted_messages)
+    assert "Status Report" in posted_messages[0]["args"][1]
+    assert "woofya.com.au" in posted_messages[0]["args"][1]
+    assert "Please select a repository" not in json.dumps(posted_messages)
     assert "borderline-main" not in json.dumps(posted_messages)
     assert FakeContentFactoryClient.last_instance.trigger_calls == []
-    assert len(FakeContentFactoryClient.saved_intents) == 1
-    saved_intent = FakeContentFactoryClient.saved_intents[0]
-    assert saved_intent["slack_user_id"] == "U05QPB483K9"
-    assert saved_intent["intent_data"]["skill"] == "content-factory"
-    assert saved_intent["intent_data"]["params"]["domain"] == "woofya.com.au"
-    assert saved_intent["intent_data"]["params"]["client_request_id"].startswith("content-factory-")
-    assert saved_intent["intent_data"]["text"] == "write an article for my website woofya.com.au"
-    assert saved_intent["intent_data"]["channel"] == "C123"
-    assert saved_intent["intent_data"]["ts"] == "111.222"
+    assert FakeContentFactoryClient.saved_intents == []
 
 
 @pytest.mark.asyncio
@@ -1049,6 +1151,8 @@ def test_article_research_best_action_triggers_backend_with_client_request_id(mo
         {
             "slack_user_id": "U05QPB483K9",
             "domain": "mlai.au",
+            "delivery_mode": None,
+            "delivery_mode_confirmed": None,
             "slack_channel_id": "C123",
             "slack_thread_ts": "111.222",
             "progress_message_ts": "111.222",
@@ -1061,6 +1165,171 @@ def test_article_research_best_action_triggers_backend_with_client_request_id(mo
         }
     ]
     assert scheduled_job_ids == ["job-123"]
+
+
+def test_article_research_best_action_preserves_explicit_delivery_mode(monkeypatch):
+    trigger_calls = []
+    updated_messages = []
+
+    class FakeTriggerClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def trigger_article_generation(self, **kwargs):
+            trigger_calls.append(kwargs)
+            return {"job_id": "job-123"}
+
+    def capture_task(coro):
+        coro.close()
+        return SimpleNamespace(cancel=lambda: None)
+
+    monkeypatch.setattr(
+        main_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            MLAI_BACKEND_URL="https://backend.test",
+            MLAI_API_KEY="api-key",
+            ROO_API_KEY="roo-api-key",
+        ),
+    )
+    monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeTriggerClient)
+    monkeypatch.setattr(
+        slack_client_module,
+        "get_slack_client",
+        lambda: SimpleNamespace(chat_update=lambda **kwargs: updated_messages.append(kwargs)),
+    )
+    monkeypatch.setattr(
+        slack_client_module,
+        "get_user_info",
+        lambda user_id: {
+            "id": user_id,
+            "email": "sam@example.com",
+            "real_name": "Sam Donegan",
+            "image_192": "https://avatar.test/sam.png",
+        },
+    )
+    monkeypatch.setattr(main_module, "_remember_content_thread_context", lambda *args, **kwargs: None)
+    monkeypatch.setattr(main_module, "_watch_content_factory_quiet_run", lambda job_id: None)
+    monkeypatch.setattr(main_module, "post_message", lambda *args, **kwargs: None)
+    monkeypatch.setattr(asyncio, "create_task", capture_task)
+
+    payload = {
+        "user": {"id": "U05QPB483K9"},
+        "channel": {"id": "C123"},
+        "message": {
+            "ts": "111.222",
+            "thread_ts": "111.222",
+            "text": "Choose article direction",
+            "blocks": [
+                {"type": "section", "text": {"type": "mrkdwn", "text": "Before I start..."}},
+                {"type": "actions", "elements": []},
+            ],
+        },
+        "actions": [
+            {
+                "action_id": "article_research_best",
+                "value": json.dumps(
+                    {
+                        "domain": "mlai.au",
+                        "slack_user_id": "U05QPB483K9",
+                        "channel_id": "C123",
+                        "thread_ts": "111.222",
+                        "client_request_id": "content-factory-request-123",
+                        "delivery_mode": "content_only",
+                        "delivery_mode_confirmed": True,
+                    }
+                ),
+            }
+        ],
+    }
+
+    class FakeRequest:
+        async def form(self):
+            return {"payload": json.dumps(payload)}
+
+    response = asyncio.run(main_module.slack_actions(FakeRequest()))
+
+    assert response.status_code == 200
+    assert trigger_calls[0]["delivery_mode"] == "content_only"
+    assert trigger_calls[0]["delivery_mode_confirmed"] is True
+
+
+def test_select_article_delivery_mode_action_queues_run(monkeypatch):
+    delivery_mode_calls = []
+    scheduled_job_ids = []
+
+    class FakeTriggerClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def set_article_delivery_mode(self, job_id, delivery_mode, **kwargs):
+            delivery_mode_calls.append(
+                {"job_id": job_id, "delivery_mode": delivery_mode, **kwargs}
+            )
+            return {"job_id": job_id, "status": "queued", "delivery_mode": delivery_mode}
+
+    async def fake_watchdog(job_id):
+        scheduled_job_ids.append(job_id)
+
+    def capture_task(coro):
+        try:
+            coro.send(None)
+        except StopIteration:
+            pass
+        return SimpleNamespace(cancel=lambda: None)
+
+    monkeypatch.setattr(
+        main_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            MLAI_BACKEND_URL="https://backend.test",
+            MLAI_API_KEY="api-key",
+            ROO_API_KEY="roo-api-key",
+        ),
+    )
+    monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeTriggerClient)
+    monkeypatch.setattr(main_module, "_watch_content_factory_quiet_run", fake_watchdog)
+    monkeypatch.setattr(asyncio, "create_task", capture_task)
+
+    payload = {
+        "user": {"id": "U05QPB483K9"},
+        "channel": {"id": "C123"},
+        "message": {
+            "ts": "111.222",
+            "thread_ts": "111.222",
+            "text": "Choose delivery mode",
+        },
+        "actions": [
+            {
+                "action_id": "select_article_delivery_mode",
+                "value": json.dumps(
+                    {
+                        "job_id": "job-awaiting-mode-1",
+                        "domain": "mlai.au",
+                        "delivery_mode": "content_only",
+                    }
+                ),
+            }
+        ],
+    }
+
+    class FakeRequest:
+        async def form(self):
+            return {"payload": json.dumps(payload)}
+
+    response = asyncio.run(main_module.slack_actions(FakeRequest()))
+
+    assert response.status_code == 200
+    body = json.loads(response.body.decode())
+    assert body["replace_original"] is True
+    assert delivery_mode_calls == [
+        {
+            "job_id": "job-awaiting-mode-1",
+            "delivery_mode": "content_only",
+            "request_source": "roo_slackbot",
+        }
+    ]
+    assert scheduled_job_ids == ["job-awaiting-mode-1"]
 
 
 def test_write_first_article_action_generates_client_request_id_when_missing(monkeypatch):

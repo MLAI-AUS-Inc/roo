@@ -13,6 +13,7 @@ import time
 from contextlib import asynccontextmanager
 from typing import Any, Optional
 from uuid import uuid4
+import httpx
 
 from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.responses import JSONResponse
@@ -352,6 +353,61 @@ def _remember_content_thread_context(
         )
     except Exception as e:
         print(f"⚠️ Failed to persist content thread context: {e}")
+
+
+def _build_article_delivery_mode_blocks(
+    *,
+    domain: str,
+    job_id: str,
+    topic: Optional[str] = None,
+    recommended_delivery_mode: Optional[str] = None,
+) -> list[dict]:
+    topic_line = f"*Topic:* {topic}\n" if topic else ""
+    recommended_line = ""
+    if recommended_delivery_mode == "content_only":
+        recommended_line = "\n_Recommended right now: content-only._"
+    elif recommended_delivery_mode == "publish_code":
+        recommended_line = "\n_Recommended right now: publish via code._"
+
+    buttons = [
+        {
+            "type": "button",
+            "text": {"type": "plain_text", "text": "Content Only", "emoji": True},
+            "value": json.dumps({"job_id": job_id, "domain": domain, "delivery_mode": "content_only"}),
+            "action_id": "select_article_delivery_mode",
+        },
+        {
+            "type": "button",
+            "text": {"type": "plain_text", "text": "Publish Via Code", "emoji": True},
+            "value": json.dumps({"job_id": job_id, "domain": domain, "delivery_mode": "publish_code"}),
+            "action_id": "select_article_delivery_mode",
+        },
+    ]
+    if recommended_delivery_mode == "publish_code":
+        buttons[1]["style"] = "primary"
+    else:
+        buttons[0]["style"] = "primary"
+
+    return [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": (
+                    f"Choose how you want me to deliver the article for *{domain}*.\n\n"
+                    f"{topic_line}"
+                    "• *Content-only*: research and write the article for manual upload.\n"
+                    "• *Publish via code*: continue through the repo/PR flow."
+                    f"{recommended_line}"
+                ),
+            },
+        },
+        {
+            "type": "actions",
+            "block_id": "article_delivery_mode_actions",
+            "elements": buttons,
+        },
+    ]
 
 
 async def _medhack_daily_case_loop():
@@ -1901,7 +1957,25 @@ async def slack_actions(request: Request):
                 confirmed_keyword=keyword,
                 request_source=CONTENT_FACTORY_REQUEST_SOURCE,
             )
-            if result.get("job_id") or result.get("run_id"):
+            cf_response = result.get("cf_response") or {}
+            awaiting_delivery_mode = (
+                str(result.get("status") or "").strip().lower() == "awaiting_delivery_mode"
+                or str(cf_response.get("status") or "").strip().lower() == "awaiting_delivery_mode"
+            )
+            active_job_id = result.get("job_id") or result.get("run_id")
+            if awaiting_delivery_mode and active_job_id:
+                return JSONResponse(status_code=200, content={
+                    "response_type": "ephemeral",
+                    "replace_original": True,
+                    "text": f"Choose delivery mode for {keyword}",
+                    "blocks": _build_article_delivery_mode_blocks(
+                        domain=result.get("domain") or cf_response.get("domain") or "this domain",
+                        job_id=active_job_id,
+                        topic=keyword,
+                        recommended_delivery_mode=cf_response.get("recommended_delivery_mode"),
+                    ),
+                })
+            if active_job_id:
                 asyncio.create_task(_watch_content_factory_quiet_run(result.get("job_id") or result.get("run_id")))
 
             return JSONResponse(status_code=200, content={
@@ -1958,7 +2032,25 @@ async def slack_actions(request: Request):
                 confirmed_keyword=keyword,
                 request_source=CONTENT_FACTORY_REQUEST_SOURCE,
             )
-            if result.get("job_id") or result.get("run_id"):
+            cf_response = result.get("cf_response") or {}
+            awaiting_delivery_mode = (
+                str(result.get("status") or "").strip().lower() == "awaiting_delivery_mode"
+                or str(cf_response.get("status") or "").strip().lower() == "awaiting_delivery_mode"
+            )
+            active_job_id = result.get("job_id") or result.get("run_id")
+            if awaiting_delivery_mode and active_job_id:
+                return JSONResponse(status_code=200, content={
+                    "response_type": "ephemeral",
+                    "replace_original": True,
+                    "text": f"Choose delivery mode for {keyword}",
+                    "blocks": _build_article_delivery_mode_blocks(
+                        domain=result.get("domain") or cf_response.get("domain") or "this domain",
+                        job_id=active_job_id,
+                        topic=keyword,
+                        recommended_delivery_mode=cf_response.get("recommended_delivery_mode"),
+                    ),
+                })
+            if active_job_id:
                 asyncio.create_task(_watch_content_factory_quiet_run(result.get("job_id") or result.get("run_id")))
 
             return JSONResponse(status_code=200, content={
@@ -2033,6 +2125,7 @@ async def slack_actions(request: Request):
         original_user_id = value_data.get("slack_user_id")
         value_channel_id = value_data.get("channel_id")
         value_thread_ts = value_data.get("thread_ts")
+        delivery_mode = value_data.get("delivery_mode")
 
         # Get message context for button removal
         msg_channel = payload.get("channel", {}).get("id")
@@ -2192,6 +2285,8 @@ async def slack_actions(request: Request):
         value_channel_id = value_data.get("channel_id")
         value_thread_ts = value_data.get("thread_ts")
         client_request_id = _content_factory_client_request_id(value_data.get("client_request_id"))
+        delivery_mode = value_data.get("delivery_mode")
+        delivery_mode_confirmed = bool(value_data.get("delivery_mode_confirmed")) if delivery_mode is not None else None
 
         msg_channel = payload.get("channel", {}).get("id")
         msg_ts = payload.get("message", {}).get("ts")
@@ -2242,6 +2337,8 @@ async def slack_actions(request: Request):
             result = await backend_client.trigger_article_generation(
                 slack_user_id=user_id,
                 domain=domain,
+                delivery_mode=delivery_mode,
+                delivery_mode_confirmed=delivery_mode_confirmed,
                 slack_channel_id=reply_channel,
                 slack_thread_ts=reply_thread_ts,
                 progress_message_ts=msg_ts,
@@ -2318,6 +2415,8 @@ async def slack_actions(request: Request):
         value_channel_id = value_data.get("channel_id")
         value_thread_ts = value_data.get("thread_ts")
         client_request_id = _content_factory_client_request_id(value_data.get("client_request_id"))
+        delivery_mode = value_data.get("delivery_mode")
+        delivery_mode_confirmed = bool(value_data.get("delivery_mode_confirmed")) if delivery_mode is not None else None
 
         msg_channel = payload.get("channel", {}).get("id")
         msg_ts = payload.get("message", {}).get("ts")
@@ -2366,6 +2465,8 @@ async def slack_actions(request: Request):
             result = await backend_client.trigger_article_generation(
                 slack_user_id=user_id,
                 domain=domain,
+                delivery_mode=delivery_mode,
+                delivery_mode_confirmed=delivery_mode_confirmed,
                 slack_channel_id=reply_channel,
                 slack_thread_ts=reply_thread_ts,
                 progress_message_ts=msg_ts,
@@ -2377,7 +2478,22 @@ async def slack_actions(request: Request):
                 user_avatar_url=str(slack_info.get("image_192") or "").strip() or None,
             )
             print(f"✅ Article discovery triggered for {domain}: {result}")
-            if result.get("job_id") or result.get("run_id"):
+            if str(result.get("status") or "").strip().lower() == "awaiting_delivery_mode":
+                try:
+                    from .slack_client import get_slack_client
+                    get_slack_client().chat_update(
+                        channel=msg_channel,
+                        ts=msg_ts,
+                        text=f"Choose delivery mode for {domain}",
+                        blocks=_build_article_delivery_mode_blocks(
+                            domain=domain,
+                            job_id=result.get("job_id") or result.get("run_id"),
+                            recommended_delivery_mode=result.get("recommended_delivery_mode"),
+                        ),
+                    )
+                except Exception as update_error:
+                    print(f"⚠️ Failed to update delivery-mode prompt: {update_error}")
+            elif result.get("job_id") or result.get("run_id"):
                 asyncio.create_task(_watch_content_factory_quiet_run(result.get("job_id") or result.get("run_id")))
         except Exception as e:
             print(f"❌ Failed to trigger article discovery: {e}")
@@ -2401,6 +2517,7 @@ async def slack_actions(request: Request):
         original_user_id = value_data.get("slack_user_id")
         value_channel_id = value_data.get("channel_id")
         value_thread_ts = value_data.get("thread_ts")
+        delivery_mode = value_data.get("delivery_mode")
 
         msg_channel = payload.get("channel", {}).get("id")
         msg_ts = payload.get("message", {}).get("ts")
@@ -2430,6 +2547,10 @@ async def slack_actions(request: Request):
             "I'll still research the best keywords, title, and talking points so it has the best chance to rank. "
             f"{cost_guidance}"
         )
+        if delivery_mode == "content_only":
+            guidance_text += " I'll keep this in content-only mode unless you tell me otherwise."
+        elif delivery_mode == "publish_code":
+            guidance_text += " I'll keep this in publish-via-code mode unless you tell me otherwise."
 
         print(f"📝 User {user_id} will provide the article topic for {domain}")
         _remember_content_thread_context(reply_channel, reply_thread_ts, domain, "write")
@@ -2453,6 +2574,105 @@ async def slack_actions(request: Request):
             print(f"⚠️ Failed to update message: {e}")
 
         return JSONResponse(status_code=200, content={})
+
+    if action_id == "select_article_delivery_mode":
+        value = actions[0].get("value", "")
+        try:
+            value_data = json.loads(value)
+        except json.JSONDecodeError:
+            return JSONResponse(status_code=400, content={"error": "Invalid JSON value format"})
+
+        job_id = value_data.get("job_id")
+        domain = value_data.get("domain")
+        delivery_mode = value_data.get("delivery_mode")
+
+        if not job_id or delivery_mode not in {"content_only", "publish_code"}:
+            return JSONResponse(status_code=400, content={"error": "job_id and delivery_mode are required"})
+
+        from .clients.mlai_backend import MLAIBackendClient
+
+        settings = get_settings()
+        client = MLAIBackendClient(
+            base_url=settings.MLAI_BACKEND_URL,
+            api_key=settings.ROO_API_KEY or settings.MLAI_API_KEY,
+        )
+
+        try:
+            result = await client.set_article_delivery_mode(
+                job_id,
+                delivery_mode,
+                request_source=CONTENT_FACTORY_REQUEST_SOURCE,
+            )
+            if result.get("job_id") or result.get("run_id"):
+                asyncio.create_task(_watch_content_factory_quiet_run(result.get("job_id") or result.get("run_id")))
+
+            selected_label = "content-only" if delivery_mode == "content_only" else "publish-via-code"
+            return JSONResponse(status_code=200, content={
+                "response_type": "ephemeral",
+                "replace_original": True,
+                "text": f"⏳ {selected_label} selected. Roo is continuing the article run now.",
+                "blocks": [
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": f"⏳ *{selected_label}* selected for *{domain or 'this domain'}*.\nRoo is continuing the article run now.",
+                        },
+                    }
+                ],
+            })
+        except httpx.HTTPStatusError as exc:
+            error_data = {}
+            try:
+                error_data = exc.response.json()
+            except Exception:
+                error_data = {"error": str(exc)}
+
+            if exc.response.status_code == 412 and error_data.get("error_code") == "PUBLISH_TARGET_ACTION_REQUIRED":
+                auth_url = None
+                if domain:
+                    auth_response = await client.get_github_auth_url(user_id, domain=domain)
+                    auth_url = auth_response.get("auth_url")
+
+                blocks = [
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": (
+                                f"Publish mode isn't ready for *{domain or 'this domain'}* yet.\n\n"
+                                "I need a connected GitHub repo before I can open the PR flow. "
+                                "You can connect GitHub now or switch back to content-only."
+                            ),
+                        },
+                    },
+                ]
+                if auth_url:
+                    blocks.append(
+                        {
+                            "type": "actions",
+                            "elements": [
+                                {
+                                    "type": "button",
+                                    "text": {"type": "plain_text", "text": f"Connect GitHub for {domain or 'this domain'}", "emoji": True},
+                                    "url": auth_url,
+                                    "action_id": "connect_github",
+                                    "style": "primary",
+                                }
+                            ],
+                        }
+                    )
+                return JSONResponse(status_code=200, content={
+                    "response_type": "ephemeral",
+                    "replace_original": True,
+                    "text": error_data.get("error") or error_data.get("message") or "Publish mode needs GitHub first.",
+                    "blocks": blocks,
+                })
+
+            return JSONResponse(status_code=200, content={
+                "response_type": "ephemeral",
+                "text": f"❌ Error selecting delivery mode: {error_data.get('error', str(exc))}",
+            })
 
     # Handler for article_system_* decisions
     if action_id in {"article_system_use_detected", "article_system_rescan", "article_system_scaffold"}:

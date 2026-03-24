@@ -222,6 +222,8 @@ JSON:"""
         channel_id: Optional[str],
         thread_ts: Optional[str],
         client_request_id: str,
+        delivery_mode: Optional[str] = None,
+        delivery_mode_confirmed: bool = False,
     ) -> list[dict]:
         """Build the preflight prompt for generic article requests."""
         normalized_domain = normalize_content_factory_domain(domain) or domain
@@ -231,15 +233,17 @@ JSON:"""
             if cost_points == 0
             else f"*Cost:* Starting the article run deducts {cost_points} Roo points."
         )
-        button_value = json.dumps(
-            {
-                "domain": domain,
-                "slack_user_id": user_id,
-                "channel_id": channel_id,
-                "thread_ts": thread_ts,
-                "client_request_id": client_request_id,
-            }
-        )
+        button_payload = {
+            "domain": domain,
+            "slack_user_id": user_id,
+            "channel_id": channel_id,
+            "thread_ts": thread_ts,
+            "client_request_id": client_request_id,
+        }
+        if delivery_mode is not None:
+            button_payload["delivery_mode"] = delivery_mode
+            button_payload["delivery_mode_confirmed"] = delivery_mode_confirmed
+        button_value = json.dumps(button_payload)
 
         return [
             {
@@ -283,6 +287,107 @@ JSON:"""
                 ],
             },
         ]
+
+    def _resolve_requested_article_delivery_mode(
+        self,
+        text: str,
+        params: dict,
+    ) -> tuple[Optional[str], bool]:
+        raw_mode = str(params.get("delivery_mode") or "").strip().lower()
+        if raw_mode in {"content_only", "publish_code"}:
+            confirmed = params.get("delivery_mode_confirmed")
+            return raw_mode, bool(True if confirmed is None else confirmed)
+
+        lowered = text.lower()
+        content_only_phrases = (
+            "content-only",
+            "content only",
+            "just the copy",
+            "manual upload",
+            "copy only",
+            "text only",
+        )
+        if any(phrase in lowered for phrase in content_only_phrases):
+            return "content_only", True
+
+        publish_phrases = (
+            "publish code",
+            "publish-mode",
+            "publish mode",
+            "open a pr",
+            "create a pr",
+            "draft pr",
+            "push it to the repo",
+            "push this to the repo",
+        )
+        if any(phrase in lowered for phrase in publish_phrases):
+            return "publish_code", True
+
+        return None, False
+
+    def _build_article_delivery_mode_prompt(
+        self,
+        *,
+        domain: str,
+        job_id: str,
+        topic: Optional[str],
+        recommended_delivery_mode: Optional[str],
+    ) -> dict:
+        topic_line = f"*Topic:* {topic}\n" if topic else ""
+        recommended_line = ""
+        if recommended_delivery_mode == "content_only":
+            recommended_line = "\n_Recommended for this domain right now: content-only._"
+        elif recommended_delivery_mode == "publish_code":
+            recommended_line = "\n_Recommended for this domain right now: publish via code._"
+
+        blocks = [
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": (
+                        f"Choose how you want me to deliver the article for *{domain}*.\n\n"
+                        f"{topic_line}"
+                        "• *Content-only*: research and write the article package for manual upload.\n"
+                        "• *Publish via code*: create the draft through the connected repo flow."
+                        f"{recommended_line}"
+                    ),
+                },
+            },
+            {
+                "type": "actions",
+                "block_id": "article_delivery_mode_actions",
+                "elements": [
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "Content Only", "emoji": True},
+                        "style": "primary" if recommended_delivery_mode != "publish_code" else None,
+                        "value": json.dumps({"job_id": job_id, "domain": domain, "delivery_mode": "content_only"}),
+                        "action_id": "select_article_delivery_mode",
+                    },
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "Publish Via Code", "emoji": True},
+                        "style": "primary" if recommended_delivery_mode == "publish_code" else None,
+                        "value": json.dumps({"job_id": job_id, "domain": domain, "delivery_mode": "publish_code"}),
+                        "action_id": "select_article_delivery_mode",
+                    },
+                ],
+            },
+        ]
+        for element in blocks[1]["elements"]:
+            if element.get("style") is None:
+                element.pop("style", None)
+
+        return {
+            "message": f"Choose the delivery mode for {domain} before I continue.",
+            "blocks": blocks,
+            "data": {
+                "content_factory_progress_job_id": job_id,
+                "content_factory_watchdog": False,
+                "content_factory_watchdog_mode": "awaiting_delivery_mode",
+            },
+        }
 
     def _is_explicit_scan_request(self, text: str, params: dict) -> bool:
         """Return True when the user is explicitly asking Roo to scan a repo/codebase."""
@@ -1289,6 +1394,13 @@ Keep the response concise but informative."""
         )
         domain = params.get("domain")
         org_config_cached = None
+        action = params.get("action")
+        is_scan_request = self._is_explicit_scan_request(text, params)
+        is_article_flow = action != "scaffold" and not is_scan_request
+        requested_delivery_mode, requested_delivery_mode_confirmed = self._resolve_requested_article_delivery_mode(
+            text,
+            params,
+        )
 
         # Check status of the requested GitHub integration.
         # When a domain is explicitly provided, querying the generic user-level
@@ -1342,13 +1454,14 @@ Keep the response concise but informative."""
                         "type": "mrkdwn",
                         "text": (
                             "Before we start, a quick heads-up! This skill works best with **Next.js & Tailwind CSS** projects "
-                            "and requires a connected **GitHub repository**.\n\n"
+                            "when you want a PR-based publish flow. If there's no repo connected, I can still do "
+                            "**content-only** article research and writing for manual upload.\n\n"
                             f"{disclaimer_cost_text}"
                             "*How it works:*\n"
-                            "1. 🏗️ **Scans** your repo for blog structure (creates it if missing)\n"
-                            "2. 🧩 **Checks** for reusable components (Hero, CTAs) or creates them\n"
-                            "3. 🎨 **Creates** a design guide to match your site's style\n"
-                            "4. 🚀 **Publishes** a Pull Request for your review"
+                            "1. 🔎 **Researches** your domain, competitors, and keywords\n"
+                            "2. ✍️ **Writes** the article draft\n"
+                            "3. 🧩 **Uses** repo context when you want code/publish delivery\n"
+                            "4. 🚀 **Either** hands back content-only copy or prepares the PR flow"
                         )
                     }
                 },
@@ -1428,57 +1541,74 @@ Keep the response concise but informative."""
             return f"GitHub connection issue ({error_msg}). Please re-connect here: {auth_url}"
 
         if not integration:
-             # Get Auth URL from Backend
-            auth_response = await api_client.get_github_auth_url(user_id, domain=domain)
-            auth_url = auth_response.get("auth_url")
-            
-            if not auth_url:
-                return "Sorry mate, I couldn't get the authorization URL from the backend. Try again strictly?"
-            
-            blocks = [
-                {
-                    "type": "section",
-                    "text": {
-                        "type": "mrkdwn",
-                        "text": "I need permission to access your GitHub to publish articles. Click the button below to connect your account."
+            if is_article_flow:
+                org_config_cached = await api_client.get_content_org_config(user_id, domain=domain)
+                if org_config_cached:
+                    domain = domain or org_config_cached.get("domain")
+                    repo_hint = org_config_cached.get("github_repo")
+                    integration = {
+                        "connected_domains": (
+                            [{"domain": domain, "github_repo": repo_hint, "scanned": bool(org_config_cached.get("scan_summary"))}]
+                            if domain
+                            else []
+                        ),
+                        "recommended_next_action": None,
+                        "last_article": None,
+                        "project_scanned": bool(org_config_cached.get("scan_summary")),
+                        "content_research_ready": bool(org_config_cached.get("scan_summary")),
+                        "article_system": org_config_cached.get("article_system") or {},
+                        "article_delivery_mode": org_config_cached.get("article_delivery_mode"),
                     }
-                },
-                {
-                    "type": "actions",
-                    "elements": [
-                        {
-                            "type": "button",
-                            "text": {
-                                "type": "plain_text",
-                                "text": "Connect GitHub Account",
-                                "emoji": True
-                            },
-                            "url": auth_url,
-                            "action_id": "connect_github",
-                            "style": "primary"
+
+            if not integration:
+                auth_response = await api_client.get_github_auth_url(user_id, domain=domain)
+                auth_url = auth_response.get("auth_url")
+
+                if not auth_url:
+                    return "Sorry mate, I couldn't get the authorization URL from the backend. Try again strictly?"
+
+                blocks = [
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": "I need permission to access your GitHub to publish articles. Click the button below to connect your account."
                         }
-                    ]
-                }
-            ]
-            
-            # Save pending intent before asking for auth
-            # Critically: Do NOT overwrite the intent if we are just confirming requirements (which has no domain/topic)
-            await self._save_content_factory_pending_intent(
-                api_client,
-                user_id,
-                params,
-                text,
-                channel_id,
-                thread_ts,
-            )
-            
-            if channel_id:
-                post_message(channel_id, "Please connect GitHub", thread_ts=thread_ts, blocks=blocks)
-                return "I've sent a button to connect your GitHub account. 🔌"
-            return f"Please connect your GitHub account here: {auth_url}"
+                    },
+                    {
+                        "type": "actions",
+                        "elements": [
+                            {
+                                "type": "button",
+                                "text": {
+                                    "type": "plain_text",
+                                    "text": "Connect GitHub Account",
+                                    "emoji": True
+                                },
+                                "url": auth_url,
+                                "action_id": "connect_github",
+                                "style": "primary"
+                            }
+                        ]
+                    }
+                ]
+
+                await self._save_content_factory_pending_intent(
+                    api_client,
+                    user_id,
+                    params,
+                    text,
+                    channel_id,
+                    thread_ts,
+                )
+
+                if channel_id:
+                    post_message(channel_id, "Please connect GitHub", thread_ts=thread_ts, blocks=blocks)
+                    return "I've sent a button to connect your GitHub account. 🔌"
+                return f"Please connect your GitHub account here: {auth_url}"
 
         # 2. Resolve domain from connected_domains
-        connected_domains = integration.get("connected_domains", [])
+        connected_domains = integration.get("connected_domains", []) if integration else []
 
         if not domain:
             if len(connected_domains) == 0:
@@ -1511,14 +1641,16 @@ Keep the response concise but informative."""
             if domain_integration:
                 integration = domain_integration
                 connected_domains = integration.get("connected_domains", connected_domains)
+            elif is_article_flow and org_config_cached is None:
+                org_config_cached = await api_client.get_content_org_config(user_id, domain=domain)
 
         repo_name, domain_info = self._resolve_content_factory_repo_name(
-            integration,
+            integration or {},
             connected_domains,
             domain,
         )
 
-        if domain and integration.get("needs_github_auth"):
+        if domain and integration and integration.get("needs_github_auth") and not is_article_flow:
             auth_url = integration.get("oauth_url")
             if not auth_url:
                 auth_response = await api_client.get_github_auth_url(user_id, domain=domain)
@@ -1568,7 +1700,7 @@ Keep the response concise but informative."""
             return f"GitHub isn't connected for {domain}. Connect here: {auth_url}"
 
         # No repo at all — prompt to connect
-        if not repo_name:
+        if not repo_name and not is_article_flow:
             auth_response = await api_client.get_github_auth_url(user_id, domain=domain)
             auth_url = auth_response.get("auth_url")
 
@@ -1621,7 +1753,6 @@ Keep the response concise but informative."""
             return f"Please select a repository here: {auth_url}"
 
         # 3. Handle explicit scaffold action
-        action = params.get("action")
         if action == "scaffold":
             if not domain:
                 return "I need a domain to scaffold the articles directory. Try: `@Roo scaffold articles for <domain>`"
@@ -1745,37 +1876,39 @@ Keep the response concise but informative."""
         # 4. Check scan status
         needs_scan = False
         scan_reason = ""
-        recommended_next_action = integration.get("recommended_next_action")
+        recommended_next_action = integration.get("recommended_next_action") if integration else None
         scan_completed = bool(
-            integration.get("scan_completed")
-            or integration.get("content_research_ready")
+            (integration.get("scan_completed") if integration else False)
+            or (integration.get("content_research_ready") if integration else False)
             or (domain_info and domain_info.get("scanned"))
         )
 
-        # Trust the backend's domain-aware contract first.
-        if recommended_next_action == "scan":
-            needs_scan = True
-            scan_reason = "Initial scan required"
-        elif domain_info:
-            if not domain_info.get("scanned"):
+        if not is_article_flow or repo_name:
+            if recommended_next_action == "scan":
                 needs_scan = True
                 scan_reason = "Initial scan required"
-        elif not integration.get("project_scanned"):
-            needs_scan = True
-            scan_reason = "Initial scan required"
+            elif domain_info:
+                if not domain_info.get("scanned"):
+                    needs_scan = True
+                    scan_reason = "Initial scan required"
+            elif integration and not integration.get("project_scanned"):
+                needs_scan = True
+                scan_reason = "Initial scan required"
 
         # Only use legacy has_updates as a fallback when the backend has not
         # already told us that a usable scan exists for this domain.
         if (
             not scan_completed
             and recommended_next_action in (None, "scan")
+            and integration
             and integration.get("has_updates")
+            and (not is_article_flow or repo_name)
         ):
             needs_scan = True
             scan_reason = "🔄 Updates detected in repository"
 
         # Explicit scan requests should confirm before re-scanning an already scanned repo.
-        last_scanned = integration.get("last_scanned_at", "Never")
+        last_scanned = integration.get("last_scanned_at", "Never") if integration else "Never"
         if self._is_explicit_scan_request(text, params) and scan_completed and not needs_scan:
             return self._build_existing_scan_confirmation(
                 domain=domain,
@@ -1787,14 +1920,16 @@ Keep the response concise but informative."""
             )
 
         # Compile Status Report
-        last_scanned = integration.get("last_scanned_at", "Never")
-        last_article = (integration.get("last_article") or {}).get("title", "None")
+        last_scanned = integration.get("last_scanned_at", "Never") if integration else "Never"
+        last_article = ((integration or {}).get("last_article") or {}).get("title", "None")
 
         if channel_id:
-            if domain:
+            if repo_name and domain:
                 connected_msg = f"👋 G'day! Connected to `{repo_name}` for *{domain}*.\n\n"
-            else:
+            elif repo_name:
                 connected_msg = f"👋 G'day! I see you're connected to `{repo_name}`.\n\n"
+            else:
+                connected_msg = f"👋 G'day! Working on *{domain}* in content-only mode unless you choose publish later.\n\n"
             status_msg = (
                 connected_msg +
                 f"📊 **Status Report:**\n"
@@ -1803,8 +1938,10 @@ Keep the response concise but informative."""
             )
             if needs_scan:
                 status_msg += f"\n{scan_reason}. Scanning updates now... 🕵️"
-            else:
+            elif repo_name:
                 status_msg += "• Repository: ✅ Up to date"
+            else:
+                status_msg += "• Repository: not connected (content-only is still available)"
 
             post_message(channel_id, status_msg, thread_ts)
 
@@ -1937,10 +2074,12 @@ Keep the response concise but informative."""
                     channel_id,
                     thread_ts,
                     params["client_request_id"],
+                    requested_delivery_mode,
+                    requested_delivery_mode_confirmed,
                 ),
             }
 
-        article_system = integration.get("article_system") or {}
+        article_system = (integration or {}).get("article_system") or {}
         if not article_system and domain_info:
             article_system = domain_info.get("article_system") or {}
 
@@ -2044,6 +2183,8 @@ Keep the response concise but informative."""
                 topic=topic,
                 target_keyword=target_keyword,
                 context=full_context,
+                delivery_mode=requested_delivery_mode,
+                delivery_mode_confirmed=requested_delivery_mode_confirmed,
                 slack_channel_id=channel_id,
                 slack_thread_ts=thread_ts,
                 client_request_id=params["client_request_id"],
@@ -2057,6 +2198,14 @@ Keep the response concise but informative."""
             job_id = response.get("job_id")
             if not job_id:
                 return "Failed to start generation: No job ID returned from backend."
+
+            if str(response.get("status") or "").strip().lower() == "awaiting_delivery_mode":
+                return self._build_article_delivery_mode_prompt(
+                    domain=domain,
+                    job_id=job_id,
+                    topic=topic,
+                    recommended_delivery_mode=response.get("recommended_delivery_mode"),
+                )
 
             workflow = str(
                 response.get("workflow")
@@ -2078,6 +2227,52 @@ Keep the response concise but informative."""
                 except Exception:
                     error_data = {}
                 error_code = error_data.get("error_code", "")
+                if error_code == "PUBLISH_TARGET_ACTION_REQUIRED":
+                    auth_url = None
+                    if domain:
+                        auth_response = await api_client.get_github_auth_url(user_id, domain=domain)
+                        auth_url = auth_response.get("auth_url")
+
+                    if channel_id and auth_url:
+                        blocks = [
+                            {
+                                "type": "section",
+                                "text": {
+                                    "type": "mrkdwn",
+                                    "text": (
+                                        f"Publish mode isn't ready for *{domain}* yet.\n\n"
+                                        "I need a connected GitHub repo before I can open the PR flow. "
+                                        "If you want, connect GitHub now, or ask me to do this as content-only instead."
+                                    ),
+                                },
+                            },
+                            {
+                                "type": "actions",
+                                "elements": [
+                                    {
+                                        "type": "button",
+                                        "text": {"type": "plain_text", "text": f"Connect GitHub for {domain}", "emoji": True},
+                                        "url": auth_url,
+                                        "action_id": "connect_github",
+                                        "style": "primary",
+                                    }
+                                ],
+                            },
+                        ]
+                        post_message(channel_id, f"Publish mode needs GitHub for {domain}", thread_ts=thread_ts, blocks=blocks)
+                        return (
+                            f"Publish mode needs GitHub for {domain}. Use the button above to connect it, "
+                            "or ask me for content-only delivery."
+                        )
+                    if auth_url:
+                        return (
+                            f"Publish mode needs GitHub for {domain}. Connect it here: {auth_url}\n\n"
+                            "Or ask me for content-only delivery."
+                        )
+                    return (
+                        f"Publish mode isn't ready for {domain} yet because no GitHub repo is connected. "
+                        "Ask me for content-only delivery instead, or connect GitHub and try again."
+                    )
                 if error_code == "ARTICLE_SYSTEM_ACTION_REQUIRED":
                     recommended_action = error_data.get("recommended_action", "scaffold")
                     article_system = error_data.get("article_system") or {}
