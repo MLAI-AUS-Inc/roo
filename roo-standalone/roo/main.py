@@ -36,6 +36,9 @@ PENDING_INTENT_TTL_SECONDS = 30 * 60
 CONTENT_FACTORY_WATCHDOG_POLL_SECONDS = 120
 CONTENT_FACTORY_WATCHDOG_STOP_STATUSES = {
     "awaiting_confirmation",
+    "awaiting_delivery_mode",
+    "awaiting_approval",
+    "approval_required",
     "completed",
     "failed",
     "error",
@@ -408,6 +411,79 @@ def _build_article_delivery_mode_blocks(
             "elements": buttons,
         },
     ]
+
+
+def _build_confirm_topic_follow_up(
+    result: Any,
+    *,
+    default_domain: Optional[str] = None,
+) -> dict[str, Any]:
+    if not isinstance(result, dict):
+        result = {}
+
+    cf_response = result.get("cf_response")
+    if not isinstance(cf_response, dict):
+        cf_response = {}
+
+    top_level_status = str(result.get("status") or "").strip().lower()
+    callback_status = str(cf_response.get("status") or "").strip().lower()
+    requires_delivery_mode = "awaiting_delivery_mode" in {top_level_status, callback_status}
+    status_value = "awaiting_delivery_mode" if requires_delivery_mode else (top_level_status or callback_status)
+    active_job_id = _extract_job_id(result) or _extract_job_id(cf_response)
+    domain = str(result.get("domain") or cf_response.get("domain") or default_domain or "this domain").strip() or "this domain"
+
+    return {
+        "status": status_value,
+        "active_job_id": active_job_id,
+        "domain": domain,
+        "recommended_delivery_mode": (
+            result.get("recommended_delivery_mode")
+            or cf_response.get("recommended_delivery_mode")
+        ),
+        "requires_delivery_mode": bool(active_job_id and requires_delivery_mode),
+    }
+
+
+def _maybe_schedule_content_factory_watchdog(active_job_id: Optional[str], status_value: str) -> None:
+    if not active_job_id:
+        return
+    if status_value and status_value in CONTENT_FACTORY_WATCHDOG_STOP_STATUSES:
+        return
+    asyncio.create_task(_watch_content_factory_quiet_run(active_job_id))
+
+
+def _confirm_topic_json_response(keyword: str, follow_up: dict[str, Any]) -> JSONResponse:
+    if follow_up.get("requires_delivery_mode"):
+        return JSONResponse(status_code=200, content={
+            "response_type": "ephemeral",
+            "replace_original": True,
+            "text": f"Choose delivery mode for {keyword}",
+            "blocks": _build_article_delivery_mode_blocks(
+                domain=follow_up["domain"],
+                job_id=follow_up["active_job_id"],
+                topic=keyword,
+                recommended_delivery_mode=follow_up.get("recommended_delivery_mode"),
+            ),
+        })
+
+    _maybe_schedule_content_factory_watchdog(
+        follow_up.get("active_job_id"),
+        str(follow_up.get("status") or ""),
+    )
+    return JSONResponse(status_code=200, content={
+        "response_type": "ephemeral",
+        "replace_original": True,
+        "text": f"⏳ Queued generation for `{keyword}`. No additional Roo points will be charged for this confirmation.",
+        "blocks": [
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"⏳ Queued generation for `{keyword}`.\n_No additional Roo points will be charged for topic confirmation._"
+                }
+            }
+        ]
+    })
 
 
 async def _medhack_daily_case_loop():
@@ -1957,41 +2033,8 @@ async def slack_actions(request: Request):
                 confirmed_keyword=keyword,
                 request_source=CONTENT_FACTORY_REQUEST_SOURCE,
             )
-            cf_response = result.get("cf_response") or {}
-            awaiting_delivery_mode = (
-                str(result.get("status") or "").strip().lower() == "awaiting_delivery_mode"
-                or str(cf_response.get("status") or "").strip().lower() == "awaiting_delivery_mode"
-            )
-            active_job_id = result.get("job_id") or result.get("run_id")
-            if awaiting_delivery_mode and active_job_id:
-                return JSONResponse(status_code=200, content={
-                    "response_type": "ephemeral",
-                    "replace_original": True,
-                    "text": f"Choose delivery mode for {keyword}",
-                    "blocks": _build_article_delivery_mode_blocks(
-                        domain=result.get("domain") or cf_response.get("domain") or "this domain",
-                        job_id=active_job_id,
-                        topic=keyword,
-                        recommended_delivery_mode=cf_response.get("recommended_delivery_mode"),
-                    ),
-                })
-            if active_job_id:
-                asyncio.create_task(_watch_content_factory_quiet_run(result.get("job_id") or result.get("run_id")))
-
-            return JSONResponse(status_code=200, content={
-                "response_type": "ephemeral",
-                "replace_original": True,
-                "text": f"⏳ Queued generation for `{keyword}`. No additional Roo points will be charged for this confirmation.",
-                "blocks": [
-                    {
-                        "type": "section",
-                        "text": {
-                            "type": "mrkdwn",
-                            "text": f"⏳ Queued generation for `{keyword}`.\n_No additional Roo points will be charged for topic confirmation._"
-                        }
-                    }
-                ]
-            })
+            follow_up = _build_confirm_topic_follow_up(result)
+            return _confirm_topic_json_response(keyword, follow_up)
         except Exception as e:
             print(f"❌ Failed to confirm topic: {e}")
             import traceback
@@ -2032,41 +2075,8 @@ async def slack_actions(request: Request):
                 confirmed_keyword=keyword,
                 request_source=CONTENT_FACTORY_REQUEST_SOURCE,
             )
-            cf_response = result.get("cf_response") or {}
-            awaiting_delivery_mode = (
-                str(result.get("status") or "").strip().lower() == "awaiting_delivery_mode"
-                or str(cf_response.get("status") or "").strip().lower() == "awaiting_delivery_mode"
-            )
-            active_job_id = result.get("job_id") or result.get("run_id")
-            if awaiting_delivery_mode and active_job_id:
-                return JSONResponse(status_code=200, content={
-                    "response_type": "ephemeral",
-                    "replace_original": True,
-                    "text": f"Choose delivery mode for {keyword}",
-                    "blocks": _build_article_delivery_mode_blocks(
-                        domain=result.get("domain") or cf_response.get("domain") or "this domain",
-                        job_id=active_job_id,
-                        topic=keyword,
-                        recommended_delivery_mode=cf_response.get("recommended_delivery_mode"),
-                    ),
-                })
-            if active_job_id:
-                asyncio.create_task(_watch_content_factory_quiet_run(result.get("job_id") or result.get("run_id")))
-
-            return JSONResponse(status_code=200, content={
-                "response_type": "ephemeral",
-                "replace_original": True,
-                "text": f"⏳ Queued generation for `{keyword}`. No additional Roo points will be charged for this confirmation.",
-                "blocks": [
-                    {
-                        "type": "section",
-                        "text": {
-                            "type": "mrkdwn",
-                            "text": f"⏳ Queued generation for `{keyword}`.\n_No additional Roo points will be charged for topic confirmation._"
-                        }
-                    }
-                ]
-            })
+            follow_up = _build_confirm_topic_follow_up(result)
+            return _confirm_topic_json_response(keyword, follow_up)
         except Exception as e:
             print(f"❌ Failed to confirm alternative topic: {e}")
             import traceback
@@ -3142,25 +3152,6 @@ async def slack_actions(request: Request):
         msg_channel = payload.get("channel", {}).get("id")
         msg_ts = payload.get("message", {}).get("ts")
 
-        # Remove buttons and show status via context block
-        try:
-            from .slack_client import get_slack_client
-            slack_client = get_slack_client()
-            original_blocks = payload.get("message", {}).get("blocks", [])
-            updated_blocks = [b for b in original_blocks if b.get("type") != "actions"]
-            updated_blocks.append({
-                "type": "context",
-                "elements": [{"type": "mrkdwn", "text": "✅ Generating article. No additional Roo points will be charged for this confirmation."}]
-            })
-            slack_client.chat_update(
-                channel=msg_channel,
-                ts=msg_ts,
-                text=payload.get("message", {}).get("text", ""),
-                blocks=updated_blocks
-            )
-        except Exception as e:
-            print(f"⚠️ Failed to update message: {e}")
-
         # Call confirm endpoint
         from .clients.mlai_backend import MLAIBackendClient
         settings = get_settings()
@@ -3177,8 +3168,40 @@ async def slack_actions(request: Request):
                 request_source=CONTENT_FACTORY_REQUEST_SOURCE,
             )
             print(f"✅ Topic confirmed for job {job_id}")
-            if result.get("job_id") or result.get("run_id"):
-                asyncio.create_task(_watch_content_factory_quiet_run(result.get("job_id") or result.get("run_id")))
+            follow_up = _build_confirm_topic_follow_up(result)
+
+            try:
+                from .slack_client import get_slack_client
+
+                slack_client = get_slack_client()
+                if follow_up.get("requires_delivery_mode"):
+                    updated_blocks = _build_article_delivery_mode_blocks(
+                        domain=follow_up["domain"],
+                        job_id=follow_up["active_job_id"],
+                        recommended_delivery_mode=follow_up.get("recommended_delivery_mode"),
+                    )
+                    updated_text = f"Choose delivery mode for {follow_up['domain']}"
+                else:
+                    original_blocks = payload.get("message", {}).get("blocks", [])
+                    updated_blocks = [b for b in original_blocks if b.get("type") != "actions"]
+                    updated_blocks.append({
+                        "type": "context",
+                        "elements": [{"type": "mrkdwn", "text": "✅ Generating article. No additional Roo points will be charged for this confirmation."}]
+                    })
+                    updated_text = payload.get("message", {}).get("text", "")
+                    _maybe_schedule_content_factory_watchdog(
+                        follow_up.get("active_job_id"),
+                        str(follow_up.get("status") or ""),
+                    )
+
+                slack_client.chat_update(
+                    channel=msg_channel,
+                    ts=msg_ts,
+                    text=updated_text,
+                    blocks=updated_blocks
+                )
+            except Exception as e:
+                print(f"⚠️ Failed to update message: {e}")
         except Exception as e:
             print(f"❌ Failed to confirm topic: {e}")
             import traceback
