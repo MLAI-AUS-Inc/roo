@@ -38,6 +38,7 @@ class FakeContentFactoryClient:
     user_profiles = {}
     attached_progress_messages = []
     still_working_calls = []
+    integration_requests = []
 
     def __init__(self, *args, **kwargs):
         self.trigger_calls = []
@@ -49,6 +50,9 @@ class FakeContentFactoryClient:
         FakeContentFactoryClient.last_instance = self
 
     async def get_integration(self, user_id, domain=None):
+        FakeContentFactoryClient.integration_requests.append(
+            {"user_id": user_id, "domain": domain}
+        )
         if domain is not None:
             return FakeContentFactoryClient.domain_integrations.get(domain)
         return FakeContentFactoryClient.generic_integration
@@ -225,6 +229,7 @@ def _patch_content_factory(monkeypatch):
         },
     }
     FakeContentFactoryClient.last_instance = None
+    FakeContentFactoryClient.integration_requests = []
 
     monkeypatch.setattr(
         executor_module,
@@ -288,6 +293,7 @@ async def test_requirements_prompt_serializes_original_request_for_resume(monkey
     posted_messages = []
     _patch_content_factory(monkeypatch)
     FakeContentFactoryClient.generic_integration = None
+    FakeContentFactoryClient.domain_integrations["woofya.com.au"] = None
     monkeypatch.setattr(
         executor_module,
         "post_message",
@@ -379,6 +385,79 @@ async def test_new_domain_requests_domain_github_auth_without_falling_back_to_ge
     assert saved_intent["intent_data"]["text"] == "write an article for my website woofya.com.au"
     assert saved_intent["intent_data"]["channel"] == "C123"
     assert saved_intent["intent_data"]["ts"] == "111.222"
+
+
+@pytest.mark.asyncio
+async def test_requested_domain_bypasses_generic_multi_domain_error(monkeypatch):
+    executor = SkillExecutor()
+    posted_messages = []
+    _patch_content_factory(monkeypatch)
+    FakeContentFactoryClient.generic_integration = {
+        "error": "Multiple domains connected. Please specify which domain to use.",
+        "requires_domain_selection": True,
+        "recommended_next_action": "select_domain",
+        "connected_domains": [
+            {
+                "domain": "mlai.au",
+                "github_repo": "MLAI-AUS-Inc/mlai-au",
+                "scanned": True,
+            },
+            {
+                "domain": "woofya.com.au",
+                "github_repo": "Woofya/woofya-web",
+                "scanned": True,
+            },
+        ],
+    }
+    FakeContentFactoryClient.domain_integrations["woofya.com.au"] = {
+        "github_repo": "Woofya/woofya-web",
+        "domain_github_repo": "Woofya/woofya-web",
+        "project_scanned": True,
+        "scan_completed": True,
+        "content_research_ready": True,
+        "last_scanned_at": "2026-03-21T09:58:00Z",
+        "last_article": None,
+        "recommended_next_action": None,
+        "connected_domains": [
+            {
+                "domain": "mlai.au",
+                "github_repo": "MLAI-AUS-Inc/mlai-au",
+                "scanned": True,
+            },
+            {
+                "domain": "woofya.com.au",
+                "github_repo": "Woofya/woofya-web",
+                "scanned": True,
+            },
+        ],
+        "selected_domain": "woofya.com.au",
+    }
+    monkeypatch.setattr(
+        executor_module,
+        "post_message",
+        lambda *args, **kwargs: posted_messages.append({"args": args, "kwargs": kwargs}) or {"ts": "111.222"},
+    )
+
+    result = await executor._execute_content_factory(
+        skill=None,
+        text="write an article for woofya.com.au",
+        params={"domain": "woofya.com.au", "topic": "dog grooming tips"},
+        user_id="U05QPB483K9",
+        channel_id="C123",
+        thread_ts="111.222",
+    )
+
+    assert "re-connect your GitHub account" not in result
+    assert FakeContentFactoryClient.integration_requests[0] == {
+        "user_id": "U05QPB483K9",
+        "domain": "woofya.com.au",
+    }
+    assert FakeContentFactoryClient.last_instance.trigger_calls
+    trigger_call = FakeContentFactoryClient.last_instance.trigger_calls[0]
+    assert trigger_call["domain"] == "woofya.com.au"
+    assert trigger_call["topic"] == "dog grooming tips"
+    assert posted_messages
+    assert "Status Report" in posted_messages[0]["args"][1]
 
 
 @pytest.mark.asyncio
