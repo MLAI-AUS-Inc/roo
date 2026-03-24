@@ -1290,8 +1290,11 @@ Keep the response concise but informative."""
         domain = params.get("domain")
         org_config_cached = None
 
-        # Check Status of GitHub Integration
-        integration = await api_client.get_integration(user_id)
+        # Check status of the requested GitHub integration.
+        # When a domain is explicitly provided, querying the generic user-level
+        # integration can return a multi-domain selection error before we ever
+        # reach the domain-specific flow.
+        integration = await api_client.get_integration(user_id, domain=domain)
         
         # 1. New User Disclaimer & Education
         # If user has no integration AND hasn't confirmed the disclaimer yet
