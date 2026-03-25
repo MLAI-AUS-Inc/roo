@@ -36,6 +36,9 @@ PENDING_INTENT_TTL_SECONDS = 30 * 60
 CONTENT_FACTORY_WATCHDOG_POLL_SECONDS = 120
 CONTENT_FACTORY_WATCHDOG_STOP_STATUSES = {
     "awaiting_confirmation",
+    "awaiting_delivery_mode",
+    "awaiting_approval",
+    "approval_required",
     "completed",
     "failed",
     "error",
@@ -408,6 +411,79 @@ def _build_article_delivery_mode_blocks(
             "elements": buttons,
         },
     ]
+
+
+def _build_confirm_topic_follow_up(
+    result: Any,
+    *,
+    default_domain: Optional[str] = None,
+) -> dict[str, Any]:
+    if not isinstance(result, dict):
+        result = {}
+
+    cf_response = result.get("cf_response")
+    if not isinstance(cf_response, dict):
+        cf_response = {}
+
+    top_level_status = str(result.get("status") or "").strip().lower()
+    callback_status = str(cf_response.get("status") or "").strip().lower()
+    requires_delivery_mode = "awaiting_delivery_mode" in {top_level_status, callback_status}
+    status_value = "awaiting_delivery_mode" if requires_delivery_mode else (top_level_status or callback_status)
+    active_job_id = _extract_job_id(result) or _extract_job_id(cf_response)
+    domain = str(result.get("domain") or cf_response.get("domain") or default_domain or "this domain").strip() or "this domain"
+
+    return {
+        "status": status_value,
+        "active_job_id": active_job_id,
+        "domain": domain,
+        "recommended_delivery_mode": (
+            result.get("recommended_delivery_mode")
+            or cf_response.get("recommended_delivery_mode")
+        ),
+        "requires_delivery_mode": bool(active_job_id and requires_delivery_mode),
+    }
+
+
+def _maybe_schedule_content_factory_watchdog(active_job_id: Optional[str], status_value: str) -> None:
+    if not active_job_id:
+        return
+    if status_value and status_value in CONTENT_FACTORY_WATCHDOG_STOP_STATUSES:
+        return
+    asyncio.create_task(_watch_content_factory_quiet_run(active_job_id))
+
+
+def _confirm_topic_json_response(keyword: str, follow_up: dict[str, Any]) -> JSONResponse:
+    if follow_up.get("requires_delivery_mode"):
+        return JSONResponse(status_code=200, content={
+            "response_type": "ephemeral",
+            "replace_original": True,
+            "text": f"Choose delivery mode for {keyword}",
+            "blocks": _build_article_delivery_mode_blocks(
+                domain=follow_up["domain"],
+                job_id=follow_up["active_job_id"],
+                topic=keyword,
+                recommended_delivery_mode=follow_up.get("recommended_delivery_mode"),
+            ),
+        })
+
+    _maybe_schedule_content_factory_watchdog(
+        follow_up.get("active_job_id"),
+        str(follow_up.get("status") or ""),
+    )
+    return JSONResponse(status_code=200, content={
+        "response_type": "ephemeral",
+        "replace_original": True,
+        "text": f"⏳ Queued generation for `{keyword}`. No additional Roo points will be charged for this confirmation.",
+        "blocks": [
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"⏳ Queued generation for `{keyword}`.\n_No additional Roo points will be charged for topic confirmation._"
+                }
+            }
+        ]
+    })
 
 
 async def _medhack_daily_case_loop():
@@ -1325,6 +1401,7 @@ async def content_factory_callback(request: Request):
 
         elif event_type == "scan_complete":
             job_id = payload.get("job_id")
+            run_id = payload.get("run_id") or job_id
             domain = payload.get("domain")
             channel_id = payload.get("channel_id")
             thread_ts = payload.get("thread_ts")
@@ -1332,6 +1409,12 @@ async def content_factory_callback(request: Request):
             component_names = payload.get("component_names", [])
             pillar_count = payload.get("pillar_count")
             pillar_names = payload.get("pillar_names")
+            requested_action = str(payload.get("requested_action") or "").strip()
+            scaffold_status = str(payload.get("scaffold_status") or "").strip()
+            approval_required = (
+                requested_action == "scaffold_publish_route"
+                and scaffold_status == "approval_required"
+            )
 
             print(f"📦 Scan complete for {domain}: {components_count} components, {pillar_count} pillars")
             _remember_content_thread_context(channel_id, thread_ts, domain, "scan")
@@ -1352,55 +1435,113 @@ async def content_factory_callback(request: Request):
                 elif pillar_count:
                     summary += f"\n• *{pillar_count} content pillars*"
 
-                blocks = [
-                    {
-                        "type": "section",
-                        "text": {
-                            "type": "mrkdwn",
-                            "text": f"✅ *Scan complete for {domain}*\n\n{summary}"
-                        }
-                    },
-                    {
-                        "type": "section",
-                        "text": {
-                            "type": "mrkdwn",
-                            "text": "Ready to create your articles directory? This will open a PR with:\n- An articles listing page\n- All {0} reusable components\n- A demo article showcasing how they look".format(components_count)
-                        }
-                    },
-                    {
-                        "type": "actions",
-                        "block_id": "scaffold_actions",
-                        "elements": [
-                            {
-                                "type": "button",
-                                "text": {
-                                    "type": "plain_text",
-                                    "text": "Create Articles Directory",
-                                    "emoji": True
-                                },
-                                "style": "primary",
-                                "value": json.dumps({
-                                    "domain": domain,
-                                    "slack_user_id": slack_user_id,
-                                    "channel_id": channel_id,
-                                    "thread_ts": thread_ts,
-                                    "client_request_id": f"content-factory-{uuid4().hex}",
-                                }),
-                                "action_id": "scaffold_confirm"
-                            },
-                            {
-                                "type": "button",
-                                "text": {
-                                    "type": "plain_text",
-                                    "text": "Not Now",
-                                    "emoji": True
-                                },
-                                "value": json.dumps({"domain": domain}),
-                                "action_id": "scaffold_skip"
+                if approval_required:
+                    blocks = [
+                        {
+                            "type": "section",
+                            "text": {
+                                "type": "mrkdwn",
+                                "text": f"✅ *Scan complete for {domain}*\n\n{summary}"
                             }
-                        ]
-                    }
-                ]
+                        },
+                        {
+                            "type": "section",
+                            "text": {
+                                "type": "mrkdwn",
+                                "text": "Ready to create your articles directory? This will open a PR with:\n- An articles listing page\n- All {0} reusable components\n- A demo article showcasing how they look".format(components_count)
+                            }
+                        },
+                        {
+                            "type": "actions",
+                            "block_id": "scaffold_actions",
+                            "elements": [
+                                {
+                                    "type": "button",
+                                    "text": {
+                                        "type": "plain_text",
+                                        "text": "Create Articles Directory",
+                                        "emoji": True
+                                    },
+                                    "style": "primary",
+                                    "value": json.dumps({
+                                        "domain": domain,
+                                        "slack_user_id": slack_user_id,
+                                        "channel_id": channel_id,
+                                        "thread_ts": thread_ts,
+                                        "scan_run_id": run_id,
+                                        "client_request_id": f"content-factory-{uuid4().hex}",
+                                    }),
+                                    "action_id": "scaffold_confirm"
+                                },
+                                {
+                                    "type": "button",
+                                    "text": {
+                                        "type": "plain_text",
+                                        "text": "Not Now",
+                                        "emoji": True
+                                    },
+                                    "value": json.dumps({
+                                        "domain": domain,
+                                        "slack_user_id": slack_user_id,
+                                        "channel_id": channel_id,
+                                        "thread_ts": thread_ts,
+                                        "scan_run_id": run_id,
+                                    }),
+                                    "action_id": "scaffold_skip"
+                                }
+                            ]
+                        }
+                    ]
+                else:
+                    blocks = [
+                        {
+                            "type": "section",
+                            "text": {
+                                "type": "mrkdwn",
+                                "text": f"✅ *Scan complete for {domain}*\n\n{summary}"
+                            }
+                        },
+                        {
+                            "type": "section",
+                            "text": {
+                                "type": "mrkdwn",
+                                "text": "Ready to create your articles directory? This will open a PR with:\n- An articles listing page\n- All {0} reusable components\n- A demo article showcasing how they look".format(components_count)
+                            }
+                        },
+                        {
+                            "type": "actions",
+                            "block_id": "scaffold_actions",
+                            "elements": [
+                                {
+                                    "type": "button",
+                                    "text": {
+                                        "type": "plain_text",
+                                        "text": "Create Articles Directory",
+                                        "emoji": True
+                                    },
+                                    "style": "primary",
+                                    "value": json.dumps({
+                                        "domain": domain,
+                                        "slack_user_id": slack_user_id,
+                                        "channel_id": channel_id,
+                                        "thread_ts": thread_ts,
+                                        "client_request_id": f"content-factory-{uuid4().hex}",
+                                    }),
+                                    "action_id": "scaffold_confirm"
+                                },
+                                {
+                                    "type": "button",
+                                    "text": {
+                                        "type": "plain_text",
+                                        "text": "Not Now",
+                                        "emoji": True
+                                    },
+                                    "value": json.dumps({"domain": domain}),
+                                    "action_id": "scaffold_skip"
+                                }
+                            ]
+                        }
+                    ]
             else:
                 blocks = [
                     {
@@ -1454,7 +1595,9 @@ async def content_factory_callback(request: Request):
                 intent_channel = pending.get("channel_id") or channel_id
                 intent_thread = pending.get("thread_ts") or thread_ts
 
-                if pending_action in ("scaffold", "write"):
+                if approval_required and pending_action in ("scaffold", "write"):
+                    print(f"⏸️ Waiting for scaffold approval before continuing {pending_action} for {domain}")
+                elif pending_action in ("scaffold", "write"):
                     # Auto-trigger scaffold (keep intent for write auto-continue)
                     print(f"🔄 Auto-continuing: triggering scaffold for {domain} (pending intent: {pending_action})")
                     from .clients.mlai_backend import MLAIBackendClient
@@ -1957,41 +2100,8 @@ async def slack_actions(request: Request):
                 confirmed_keyword=keyword,
                 request_source=CONTENT_FACTORY_REQUEST_SOURCE,
             )
-            cf_response = result.get("cf_response") or {}
-            awaiting_delivery_mode = (
-                str(result.get("status") or "").strip().lower() == "awaiting_delivery_mode"
-                or str(cf_response.get("status") or "").strip().lower() == "awaiting_delivery_mode"
-            )
-            active_job_id = result.get("job_id") or result.get("run_id")
-            if awaiting_delivery_mode and active_job_id:
-                return JSONResponse(status_code=200, content={
-                    "response_type": "ephemeral",
-                    "replace_original": True,
-                    "text": f"Choose delivery mode for {keyword}",
-                    "blocks": _build_article_delivery_mode_blocks(
-                        domain=result.get("domain") or cf_response.get("domain") or "this domain",
-                        job_id=active_job_id,
-                        topic=keyword,
-                        recommended_delivery_mode=cf_response.get("recommended_delivery_mode"),
-                    ),
-                })
-            if active_job_id:
-                asyncio.create_task(_watch_content_factory_quiet_run(result.get("job_id") or result.get("run_id")))
-
-            return JSONResponse(status_code=200, content={
-                "response_type": "ephemeral",
-                "replace_original": True,
-                "text": f"⏳ Queued generation for `{keyword}`. No additional Roo points will be charged for this confirmation.",
-                "blocks": [
-                    {
-                        "type": "section",
-                        "text": {
-                            "type": "mrkdwn",
-                            "text": f"⏳ Queued generation for `{keyword}`.\n_No additional Roo points will be charged for topic confirmation._"
-                        }
-                    }
-                ]
-            })
+            follow_up = _build_confirm_topic_follow_up(result)
+            return _confirm_topic_json_response(keyword, follow_up)
         except Exception as e:
             print(f"❌ Failed to confirm topic: {e}")
             import traceback
@@ -2032,41 +2142,8 @@ async def slack_actions(request: Request):
                 confirmed_keyword=keyword,
                 request_source=CONTENT_FACTORY_REQUEST_SOURCE,
             )
-            cf_response = result.get("cf_response") or {}
-            awaiting_delivery_mode = (
-                str(result.get("status") or "").strip().lower() == "awaiting_delivery_mode"
-                or str(cf_response.get("status") or "").strip().lower() == "awaiting_delivery_mode"
-            )
-            active_job_id = result.get("job_id") or result.get("run_id")
-            if awaiting_delivery_mode and active_job_id:
-                return JSONResponse(status_code=200, content={
-                    "response_type": "ephemeral",
-                    "replace_original": True,
-                    "text": f"Choose delivery mode for {keyword}",
-                    "blocks": _build_article_delivery_mode_blocks(
-                        domain=result.get("domain") or cf_response.get("domain") or "this domain",
-                        job_id=active_job_id,
-                        topic=keyword,
-                        recommended_delivery_mode=cf_response.get("recommended_delivery_mode"),
-                    ),
-                })
-            if active_job_id:
-                asyncio.create_task(_watch_content_factory_quiet_run(result.get("job_id") or result.get("run_id")))
-
-            return JSONResponse(status_code=200, content={
-                "response_type": "ephemeral",
-                "replace_original": True,
-                "text": f"⏳ Queued generation for `{keyword}`. No additional Roo points will be charged for this confirmation.",
-                "blocks": [
-                    {
-                        "type": "section",
-                        "text": {
-                            "type": "mrkdwn",
-                            "text": f"⏳ Queued generation for `{keyword}`.\n_No additional Roo points will be charged for topic confirmation._"
-                        }
-                    }
-                ]
-            })
+            follow_up = _build_confirm_topic_follow_up(result)
+            return _confirm_topic_json_response(keyword, follow_up)
         except Exception as e:
             print(f"❌ Failed to confirm alternative topic: {e}")
             import traceback
@@ -2126,6 +2203,7 @@ async def slack_actions(request: Request):
         value_channel_id = value_data.get("channel_id")
         value_thread_ts = value_data.get("thread_ts")
         delivery_mode = value_data.get("delivery_mode")
+        scan_run_id = str(value_data.get("scan_run_id") or "").strip()
 
         # Get message context for button removal
         msg_channel = payload.get("channel", {}).get("id")
@@ -2172,17 +2250,47 @@ async def slack_actions(request: Request):
         )
 
         try:
-            result = await backend_client.scaffold_articles(
-                domain=domain,
-                slack_user_id=user_id,
-                slack_channel_id=reply_channel,
-                slack_thread_ts=reply_thread_ts
-            )
+            if scan_run_id:
+                result = await backend_client.decide_scaffold(
+                    scan_run_id=scan_run_id,
+                    decision="approve",
+                    domain=domain,
+                    slack_user_id=user_id,
+                    slack_channel_id=reply_channel,
+                    slack_thread_ts=reply_thread_ts,
+                )
+            else:
+                result = await backend_client.scaffold_articles(
+                    domain=domain,
+                    slack_user_id=user_id,
+                    slack_channel_id=reply_channel,
+                    slack_thread_ts=reply_thread_ts
+                )
 
             status_code = result.get("status_code")
             data = result.get("data", {})
 
-            if status_code == 200:
+            if scan_run_id and status_code in {200, 202}:
+                scaffold_job_id = data.get("scaffold_job_id")
+                pending = _get_pending_intent(
+                    user_id,
+                    domain,
+                    wait_for="scan_complete",
+                    consume=True,
+                )
+                if pending and pending.get("action") == "write" and scaffold_job_id:
+                    _remember_pending_intent(
+                        user_id,
+                        domain,
+                        intent_data=pending,
+                        channel_id=reply_channel,
+                        thread_ts=reply_thread_ts,
+                        wait_for="scaffold_complete",
+                        job_id=scaffold_job_id,
+                        clear_job_id=True,
+                    )
+                print(f"✅ Scaffold initiated for {domain}")
+            elif status_code == 200:
                 # Already scaffolded
                 pr_url = data.get("pr_url", "")
                 pr_text = f" PR: {pr_url}" if pr_url else ""
@@ -2207,14 +2315,20 @@ async def slack_actions(request: Request):
                         text=f"❌ Could not start scaffolding: {error}"
                     )
             elif status_code == 404:
+                    post_message(
+                        channel=reply_channel,
+                        thread_ts=reply_thread_ts,
+                        text=f"❌ No configuration found for *{domain}*."
+                    )
+            elif status_code == 202:
+                print(f"✅ Scaffold initiated for {domain}")
+            elif status_code == 409:
+                error = data.get("detail") or data.get("error") or "This scaffold request is no longer awaiting approval."
                 post_message(
                     channel=reply_channel,
                     thread_ts=reply_thread_ts,
-                    text=f"❌ No configuration found for *{domain}*."
+                    text=f"⚠️ Could not create articles directory for *{domain}*: {error}"
                 )
-            elif status_code == 202:
-                # Scaffold initiated - backend sends Slack updates directly
-                print(f"✅ Scaffold initiated for {domain}")
             else:
                 post_message(
                     channel=reply_channel,
@@ -2244,9 +2358,19 @@ async def slack_actions(request: Request):
             return JSONResponse(status_code=400, content={"error": "Invalid JSON value format"})
 
         domain = value_data.get("domain", "your site")
+        original_user_id = value_data.get("slack_user_id")
+        value_channel_id = value_data.get("channel_id")
+        value_thread_ts = value_data.get("thread_ts")
+        scan_run_id = str(value_data.get("scan_run_id") or "").strip()
 
         msg_channel = payload.get("channel", {}).get("id")
         msg_ts = payload.get("message", {}).get("ts")
+
+        if original_user_id and user_id != original_user_id:
+            return JSONResponse(status_code=200, content={
+                "response_type": "ephemeral",
+                "text": "⚠️ Only the user who initiated the scan can confirm this action."
+            })
 
         print(f"⏭️ User {user_id} skipped scaffold for {domain}")
 
@@ -2268,6 +2392,39 @@ async def slack_actions(request: Request):
             )
         except Exception as e:
             print(f"⚠️ Failed to update message: {e}")
+
+        if scan_run_id:
+            reply_channel = value_channel_id or msg_channel
+            reply_thread_ts = value_thread_ts or payload.get("message", {}).get("thread_ts") or msg_ts
+            from .clients.mlai_backend import MLAIBackendClient
+            settings = get_settings()
+            backend_client = MLAIBackendClient(
+                base_url=settings.MLAI_BACKEND_URL,
+                api_key=settings.ROO_API_KEY or settings.MLAI_API_KEY
+            )
+            try:
+                result = await backend_client.decide_scaffold(
+                    scan_run_id=scan_run_id,
+                    decision="deny",
+                    domain=domain,
+                    slack_user_id=user_id,
+                    slack_channel_id=reply_channel,
+                    slack_thread_ts=reply_thread_ts,
+                )
+                if result.get("status_code") not in {200, 202, 409}:
+                    post_message(
+                        channel=reply_channel,
+                        thread_ts=reply_thread_ts,
+                        text=f"⚠️ Could not record scaffold skip for *{domain}*."
+                    )
+                _get_pending_intent(
+                    user_id,
+                    domain,
+                    wait_for="scan_complete",
+                    consume=True,
+                )
+            except Exception as e:
+                print(f"⚠️ Failed to deny scaffold approval: {e}")
 
         return JSONResponse(status_code=200, content={})
 
@@ -3142,25 +3299,6 @@ async def slack_actions(request: Request):
         msg_channel = payload.get("channel", {}).get("id")
         msg_ts = payload.get("message", {}).get("ts")
 
-        # Remove buttons and show status via context block
-        try:
-            from .slack_client import get_slack_client
-            slack_client = get_slack_client()
-            original_blocks = payload.get("message", {}).get("blocks", [])
-            updated_blocks = [b for b in original_blocks if b.get("type") != "actions"]
-            updated_blocks.append({
-                "type": "context",
-                "elements": [{"type": "mrkdwn", "text": "✅ Generating article. No additional Roo points will be charged for this confirmation."}]
-            })
-            slack_client.chat_update(
-                channel=msg_channel,
-                ts=msg_ts,
-                text=payload.get("message", {}).get("text", ""),
-                blocks=updated_blocks
-            )
-        except Exception as e:
-            print(f"⚠️ Failed to update message: {e}")
-
         # Call confirm endpoint
         from .clients.mlai_backend import MLAIBackendClient
         settings = get_settings()
@@ -3177,8 +3315,40 @@ async def slack_actions(request: Request):
                 request_source=CONTENT_FACTORY_REQUEST_SOURCE,
             )
             print(f"✅ Topic confirmed for job {job_id}")
-            if result.get("job_id") or result.get("run_id"):
-                asyncio.create_task(_watch_content_factory_quiet_run(result.get("job_id") or result.get("run_id")))
+            follow_up = _build_confirm_topic_follow_up(result)
+
+            try:
+                from .slack_client import get_slack_client
+
+                slack_client = get_slack_client()
+                if follow_up.get("requires_delivery_mode"):
+                    updated_blocks = _build_article_delivery_mode_blocks(
+                        domain=follow_up["domain"],
+                        job_id=follow_up["active_job_id"],
+                        recommended_delivery_mode=follow_up.get("recommended_delivery_mode"),
+                    )
+                    updated_text = f"Choose delivery mode for {follow_up['domain']}"
+                else:
+                    original_blocks = payload.get("message", {}).get("blocks", [])
+                    updated_blocks = [b for b in original_blocks if b.get("type") != "actions"]
+                    updated_blocks.append({
+                        "type": "context",
+                        "elements": [{"type": "mrkdwn", "text": "✅ Generating article. No additional Roo points will be charged for this confirmation."}]
+                    })
+                    updated_text = payload.get("message", {}).get("text", "")
+                    _maybe_schedule_content_factory_watchdog(
+                        follow_up.get("active_job_id"),
+                        str(follow_up.get("status") or ""),
+                    )
+
+                slack_client.chat_update(
+                    channel=msg_channel,
+                    ts=msg_ts,
+                    text=updated_text,
+                    blocks=updated_blocks
+                )
+            except Exception as e:
+                print(f"⚠️ Failed to update message: {e}")
         except Exception as e:
             print(f"❌ Failed to confirm topic: {e}")
             import traceback
