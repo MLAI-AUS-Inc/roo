@@ -766,6 +766,44 @@ async def test_explicit_github_scan_with_existing_scan_prompts_for_confirmation(
 
 
 @pytest.mark.asyncio
+async def test_explicit_scaffold_returns_existing_pr_and_preview(monkeypatch):
+    executor = SkillExecutor()
+    posted_messages = []
+    _patch_content_factory(monkeypatch)
+
+    async def fake_scaffold_articles(self, **kwargs):
+        return {
+            "status_code": 200,
+            "data": {
+                "status": "already_scaffolded",
+                "pr_url": "https://github.test/pr/123",
+                "preview_url": "https://preview.test/articles",
+            },
+        }
+
+    monkeypatch.setattr(FakeContentFactoryClient, "scaffold_articles", fake_scaffold_articles, raising=False)
+    monkeypatch.setattr(
+        executor_module,
+        "post_message",
+        lambda *args, **kwargs: posted_messages.append({"args": args, "kwargs": kwargs}) or {"ts": "111.222"},
+    )
+
+    result = await executor._execute_content_factory(
+        skill=None,
+        text="please scaffold an articles directory for mlai.au",
+        params={"domain": "mlai.au", "action": "scaffold", "confirmed": True},
+        user_id="U05QPB483K9",
+        channel_id="C123",
+        thread_ts="111.222",
+    )
+
+    assert "Articles directory already exists" in result
+    assert "<https://github.test/pr/123|View PR>" in result
+    assert "<https://preview.test/articles|View Preview>" in result
+    assert posted_messages[0]["args"][1] == "📁 Creating articles directory for *mlai.au*..."
+
+
+@pytest.mark.asyncio
 async def test_explicit_research_request_starts_generation(monkeypatch):
     executor = SkillExecutor()
     _patch_content_factory(monkeypatch)
@@ -2046,6 +2084,46 @@ def test_scan_complete_does_not_auto_scaffold_without_approval_metadata(monkeypa
     assert main_module._pending_intents_by_job == {}
     assert len(posted_messages) >= 1
     assert "fresh scan result" in posted_messages[-1][1]["text"]
+
+
+def test_scaffold_complete_callback_reused_pr_shows_build_and_preview(monkeypatch):
+    posted_messages = []
+
+    monkeypatch.setattr(
+        main_module,
+        "post_message",
+        lambda *args, **kwargs: posted_messages.append((args, kwargs)),
+    )
+    monkeypatch.setattr(main_module, "_remember_content_thread_context", lambda *args, **kwargs: None)
+
+    payload = {
+        "event_type": "scaffold_complete",
+        "slack_user_id": "U05QPB483K9",
+        "job_id": "scaffold-job-123",
+        "domain": "mlai.au",
+        "channel_id": "C123",
+        "thread_ts": "111.222",
+        "pr_url": "https://github.test/pr/456",
+        "preview_url": "https://preview.test/articles",
+        "files_created": 0,
+        "pillar_count": 4,
+        "component_count": 18,
+        "build_verified": True,
+    }
+
+    class FakeRequest:
+        async def json(self):
+            return payload
+
+    response = asyncio.run(main_module.content_factory_callback(FakeRequest()))
+
+    assert response == {"status": "ok"}
+    assert len(posted_messages) == 1
+    blocks = posted_messages[0][1]["blocks"]
+    text = blocks[0]["text"]["text"]
+    assert "Reused the existing scaffold branch/PR" in text
+    assert "Build: Passed" in text
+    assert "https://preview.test/articles" in text
 
 
 def test_confirm_content_factory_action_resumes_original_request(monkeypatch):

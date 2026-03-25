@@ -1664,29 +1664,39 @@ async def content_factory_callback(request: Request):
             _remember_content_thread_context(channel_id, thread_ts, domain, "scaffold")
 
             if already_exists:
+                detail_lines = []
+                if pr_url:
+                    detail_lines.append(f"• PR: <{pr_url}|View pull request>")
+                if preview_url:
+                    detail_lines.append(f"• Preview: <{preview_url}|View live preview> :eyes:")
+                details = f"\n\n" + "\n".join(detail_lines) if detail_lines else ""
                 blocks = [
                     {
                         "type": "section",
                         "text": {
                             "type": "mrkdwn",
-                            "text": "ℹ️ Articles directory already exists - no changes needed."
+                            "text": f"ℹ️ Articles directory already exists - no changes needed.{details}"
                         }
                     }
                 ]
             elif pr_url:
-                details = f"• {files_created} files created ({component_count} components, {pillar_count} content pillars)"
+                details = (
+                    f"• {files_created} files created ({component_count} components, {pillar_count} content pillars)"
+                    if files_created
+                    else f"• Reused the existing scaffold branch/PR ({component_count} components, {pillar_count} content pillars)"
+                )
                 details += f"\n• PR: <{pr_url}|View pull request>"
+                details += (
+                    "\n• Build: Passed :white_check_mark:"
+                    if build_verified
+                    else "\n• Build: Not verified"
+                )
 
                 if preview_url:
                     preview_label = "View live preview"
                     if "stackblitz.com" in preview_url:
                         preview_label += " (may take a moment to load)"
                     details += f"\n• Preview: <{preview_url}|{preview_label}> :eyes:"
-
-                    if build_verified:
-                        details += "\n• Build: Passed :white_check_mark:"
-                    else:
-                        details += "\n• Build: Not verified"
 
                 extra_sections = []
                 if preview_url:
@@ -2277,11 +2287,17 @@ async def slack_actions(request: Request):
             elif status_code == 200:
                 # Already scaffolded
                 pr_url = data.get("pr_url", "")
-                pr_text = f" PR: {pr_url}" if pr_url else ""
+                preview_url = data.get("preview_url", "")
+                details = []
+                if pr_url:
+                    details.append(f"PR: {pr_url}")
+                if preview_url:
+                    details.append(f"Preview: {preview_url}")
+                detail_text = f" {' | '.join(details)}" if details else ""
                 post_message(
                     channel=reply_channel,
                     thread_ts=reply_thread_ts,
-                    text=f"📁 Articles directory already exists for *{domain}*.{pr_text}"
+                    text=f"📁 Articles directory already exists for *{domain}*.{detail_text}"
                 )
             elif status_code == 400:
                 error = data.get("error", "Unknown error")
@@ -3156,7 +3172,6 @@ async def slack_actions(request: Request):
 
             if status_code == 200:
                 pr_url = data.get("pr_url", "")
-                pr_text = f" PR: {pr_url}" if pr_url else ""
                 if original_intent and original_intent.get("action") == "write":
                     await _trigger_article_generation_from_pending(
                         {
@@ -3170,10 +3185,17 @@ async def slack_actions(request: Request):
                         fallback_thread_ts=reply_thread_ts,
                     )
                 else:
+                    preview_url = data.get("preview_url", "")
+                    details = []
+                    if pr_url:
+                        details.append(f"PR: {pr_url}")
+                    if preview_url:
+                        details.append(f"Preview: {preview_url}")
+                    detail_text = f" {' | '.join(details)}" if details else ""
                     post_message(
                         channel=reply_channel,
                         thread_ts=reply_thread_ts,
-                        text=f"📁 Articles directory already exists for *{domain}*.{pr_text}"
+                        text=f"📁 Articles directory already exists for *{domain}*.{detail_text}"
                     )
             elif status_code == 400:
                 error = data.get("error", "Unknown error")
