@@ -1411,6 +1411,8 @@ async def content_factory_callback(request: Request):
             pillar_names = payload.get("pillar_names")
             requested_action = str(payload.get("requested_action") or "").strip()
             scaffold_status = str(payload.get("scaffold_status") or "").strip()
+            scaffold_queued = bool(payload.get("scaffold_queued"))
+            scaffold_job_id = str(payload.get("scaffold_job_id") or "").strip()
             approval_required = (
                 requested_action == "scaffold_publish_route"
                 and scaffold_status == "approval_required"
@@ -1505,41 +1507,8 @@ async def content_factory_callback(request: Request):
                             "type": "section",
                             "text": {
                                 "type": "mrkdwn",
-                                "text": "Ready to create your articles directory? This will open a PR with:\n- An articles listing page\n- All {0} reusable components\n- A demo article showcasing how they look".format(components_count)
+                                "text": "Scan completed successfully. If you need an articles directory scaffold, run a fresh scan so Roo can request approval-first scaffolding."
                             }
-                        },
-                        {
-                            "type": "actions",
-                            "block_id": "scaffold_actions",
-                            "elements": [
-                                {
-                                    "type": "button",
-                                    "text": {
-                                        "type": "plain_text",
-                                        "text": "Create Articles Directory",
-                                        "emoji": True
-                                    },
-                                    "style": "primary",
-                                    "value": json.dumps({
-                                        "domain": domain,
-                                        "slack_user_id": slack_user_id,
-                                        "channel_id": channel_id,
-                                        "thread_ts": thread_ts,
-                                        "client_request_id": f"content-factory-{uuid4().hex}",
-                                    }),
-                                    "action_id": "scaffold_confirm"
-                                },
-                                {
-                                    "type": "button",
-                                    "text": {
-                                        "type": "plain_text",
-                                        "text": "Not Now",
-                                        "emoji": True
-                                    },
-                                    "value": json.dumps({"domain": domain}),
-                                    "action_id": "scaffold_skip"
-                                }
-                            ]
                         }
                     ]
             else:
@@ -1598,66 +1567,24 @@ async def content_factory_callback(request: Request):
                 if approval_required and pending_action in ("scaffold", "write"):
                     print(f"⏸️ Waiting for scaffold approval before continuing {pending_action} for {domain}")
                 elif pending_action in ("scaffold", "write"):
-                    # Auto-trigger scaffold (keep intent for write auto-continue)
-                    print(f"🔄 Auto-continuing: triggering scaffold for {domain} (pending intent: {pending_action})")
-                    from .clients.mlai_backend import MLAIBackendClient
-                    settings = get_settings()
-                    backend_client = MLAIBackendClient(
-                        base_url=settings.MLAI_BACKEND_URL,
-                        api_key=settings.ROO_API_KEY or settings.MLAI_API_KEY
-                    )
-                    try:
-                        result = await backend_client.scaffold_articles(
-                            domain=domain,
-                            slack_user_id=slack_user_id,
-                            slack_channel_id=intent_channel or "",
-                            slack_thread_ts=intent_thread or ""
-                        )
-                        status_code = result.get("status_code")
-                        if status_code == 202:
-                            if pending_action == "write":
-                                _remember_pending_intent(
-                                    slack_user_id,
-                                    domain,
-                                    wait_for="scaffold_complete",
-                                    job_id=_extract_job_id(result),
-                                    clear_job_id=True,
-                                )
-                            else:
-                                _get_pending_intent(
-                                    slack_user_id,
-                                    domain,
-                                    job_id=job_id,
-                                    wait_for="scan_complete",
-                                    consume=True,
-                                )
+                    if scaffold_queued:
+                        print(f"⏳ Scan already queued scaffold for {domain}; waiting for scaffold completion")
+                        if pending_action == "write":
+                            _remember_pending_intent(
+                                slack_user_id,
+                                domain,
+                                intent_data=pending,
+                                channel_id=intent_channel,
+                                thread_ts=intent_thread,
+                                wait_for="scaffold_complete",
+                                job_id=scaffold_job_id or None,
+                                clear_job_id=True,
+                            )
                             if intent_channel:
                                 post_message(
                                     channel=intent_channel,
                                     thread_ts=intent_thread,
-                                    text=f"📁 Scan complete! Now creating articles directory for *{domain}*..."
-                                )
-                        elif status_code == 200:
-                            consumed = _get_pending_intent(
-                                slack_user_id,
-                                domain,
-                                job_id=job_id,
-                                wait_for="scan_complete",
-                                consume=True,
-                            ) or pending
-                            if pending_action == "write":
-                                await _trigger_article_generation_from_pending(
-                                    consumed,
-                                    slack_user_id=slack_user_id,
-                                    domain=domain,
-                                    fallback_channel_id=channel_id,
-                                    fallback_thread_ts=thread_ts,
-                                )
-                            elif intent_channel:
-                                post_message(
-                                    channel=intent_channel,
-                                    thread_ts=intent_thread,
-                                    text=f"📁 Articles directory already exists for *{domain}*."
+                                    text=f"📁 Scan complete! I’m waiting for the articles directory PR for *{domain}* before continuing your article request."
                                 )
                         else:
                             _get_pending_intent(
@@ -1667,7 +1594,35 @@ async def content_factory_callback(request: Request):
                                 wait_for="scan_complete",
                                 consume=True,
                             )
-                    except Exception as e:
+                            if intent_channel:
+                                post_message(
+                                    channel=intent_channel,
+                                    thread_ts=intent_thread,
+                                    text=f"📁 Scan complete! The articles directory setup is already queued for *{domain}*."
+                                )
+                    elif scaffold_status == "not_needed":
+                        consumed = _get_pending_intent(
+                            slack_user_id,
+                            domain,
+                            job_id=job_id,
+                            wait_for="scan_complete",
+                            consume=True,
+                        ) or pending
+                        if pending_action == "write":
+                            await _trigger_article_generation_from_pending(
+                                consumed,
+                                slack_user_id=slack_user_id,
+                                domain=domain,
+                                fallback_channel_id=channel_id,
+                                fallback_thread_ts=thread_ts,
+                            )
+                        elif intent_channel:
+                            post_message(
+                                channel=intent_channel,
+                                thread_ts=intent_thread,
+                                text=f"✅ Scan complete! Your repo already has the publish route Roo needs for *{domain}*."
+                            )
+                    else:
                         _get_pending_intent(
                             slack_user_id,
                             domain,
@@ -1675,7 +1630,19 @@ async def content_factory_callback(request: Request):
                             wait_for="scan_complete",
                             consume=True,
                         )
-                        print(f"❌ Auto-scaffold failed: {e}")
+                        print(
+                            f"⚠️ Scan for {domain} did not provide approval-ready scaffold metadata "
+                            f"(scaffold_status={scaffold_status or 'unknown'}); not auto-triggering scaffold"
+                        )
+                        if intent_channel:
+                            post_message(
+                                channel=intent_channel,
+                                thread_ts=intent_thread,
+                                text=(
+                                    f"⚠️ I need a fresh scan result with scaffold approval metadata before I can continue for *{domain}*. "
+                                    f"Please run the scan again."
+                                ),
+                            )
 
             return {"status": "ok"}
 
@@ -2222,6 +2189,31 @@ async def slack_actions(request: Request):
         reply_channel = value_channel_id or msg_channel
         reply_thread_ts = value_thread_ts or payload.get("message", {}).get("thread_ts") or msg_ts
 
+        if not scan_run_id:
+            try:
+                from .slack_client import get_slack_client
+                slack_client = get_slack_client()
+                original_blocks = payload.get("message", {}).get("blocks", [])
+                updated_blocks = [b for b in original_blocks if b.get("type") != "actions"]
+                updated_blocks.append({
+                    "type": "context",
+                    "elements": [{"type": "mrkdwn", "text": "⚠️ This scaffold button is from an older scan. Run a fresh scan and try again."}]
+                })
+                slack_client.chat_update(
+                    channel=msg_channel,
+                    ts=msg_ts,
+                    text=payload.get("message", {}).get("text", ""),
+                    blocks=updated_blocks
+                )
+            except Exception as e:
+                print(f"⚠️ Failed to update stale scaffold message: {e}")
+            post_message(
+                channel=reply_channel,
+                thread_ts=reply_thread_ts,
+                text=f"⚠️ I need a fresh scan result before I can create the articles directory for *{domain}*. Please run the scan again."
+            )
+            return JSONResponse(status_code=200, content={})
+
         # 1. Remove buttons and show status via context block
         try:
             from .slack_client import get_slack_client
@@ -2250,22 +2242,14 @@ async def slack_actions(request: Request):
         )
 
         try:
-            if scan_run_id:
-                result = await backend_client.decide_scaffold(
-                    scan_run_id=scan_run_id,
-                    decision="approve",
-                    domain=domain,
-                    slack_user_id=user_id,
-                    slack_channel_id=reply_channel,
-                    slack_thread_ts=reply_thread_ts,
-                )
-            else:
-                result = await backend_client.scaffold_articles(
-                    domain=domain,
-                    slack_user_id=user_id,
-                    slack_channel_id=reply_channel,
-                    slack_thread_ts=reply_thread_ts
-                )
+            result = await backend_client.decide_scaffold(
+                scan_run_id=scan_run_id,
+                decision="approve",
+                domain=domain,
+                slack_user_id=user_id,
+                slack_channel_id=reply_channel,
+                slack_thread_ts=reply_thread_ts,
+            )
 
             status_code = result.get("status_code")
             data = result.get("data", {})

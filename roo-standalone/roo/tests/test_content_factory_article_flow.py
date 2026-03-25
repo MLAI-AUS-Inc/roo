@@ -1606,6 +1606,58 @@ def test_scaffold_skip_action_denies_scan_run_and_clears_pending(monkeypatch):
     assert main_module._get_pending_intent("U05QPB483K9", "mlai.au", wait_for="scan_complete") is None
 
 
+def test_scaffold_confirm_action_requires_scan_run_id(monkeypatch):
+    updated_messages = []
+    posted_messages = []
+
+    monkeypatch.setattr(
+        slack_client_module,
+        "get_slack_client",
+        lambda: SimpleNamespace(chat_update=lambda **kwargs: updated_messages.append(kwargs)),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "post_message",
+        lambda *args, **kwargs: posted_messages.append((args, kwargs)),
+    )
+
+    payload = {
+        "user": {"id": "U05QPB483K9"},
+        "channel": {"id": "C123"},
+        "message": {
+            "ts": "111.222",
+            "thread_ts": "111.222",
+            "text": "Ready to create articles directory?",
+            "blocks": [{"type": "actions", "elements": []}],
+        },
+        "actions": [
+            {
+                "action_id": "scaffold_confirm",
+                "value": json.dumps(
+                    {
+                        "domain": "mlai.au",
+                        "slack_user_id": "U05QPB483K9",
+                        "channel_id": "C123",
+                        "thread_ts": "111.222",
+                    }
+                ),
+            }
+        ],
+    }
+
+    class FakeRequest:
+        async def form(self):
+            return {"payload": json.dumps(payload)}
+
+    response = asyncio.run(main_module.slack_actions(FakeRequest()))
+
+    assert response.status_code == 200
+    assert len(updated_messages) == 1
+    assert "older scan" in updated_messages[0]["blocks"][-1]["elements"][0]["text"]
+    assert len(posted_messages) == 1
+    assert "fresh scan result" in posted_messages[0][1]["text"]
+
+
 def test_prerequisite_scan_action_triggers_backend_from_repeat_scan_prompt(monkeypatch):
     trigger_calls = []
     updated_messages = []
@@ -1835,7 +1887,7 @@ def test_generation_failed_callback_clears_pending_intent_for_failed_stage(monke
     assert posted_messages
 
 
-def test_scan_complete_auto_write_clears_pending_when_scaffold_already_exists(monkeypatch):
+def test_scan_complete_auto_write_resumes_when_scaffold_not_needed(monkeypatch):
     posted_messages = []
     trigger_calls = []
     scheduled_job_ids = []
@@ -1856,12 +1908,6 @@ def test_scan_complete_auto_write_clears_pending_when_scaffold_already_exists(mo
     class FakeAutoContinueClient:
         def __init__(self, *args, **kwargs):
             pass
-
-        async def scaffold_articles(self, **kwargs):
-            return {
-                "status_code": 200,
-                "data": {"pr_url": "https://github.test/pr/123"},
-            }
 
         async def trigger_article_generation(self, **kwargs):
             trigger_calls.append(kwargs)
@@ -1914,6 +1960,7 @@ def test_scan_complete_auto_write_clears_pending_when_scaffold_already_exists(mo
         "domain": "mlai.au",
         "channel_id": "C123",
         "thread_ts": "111.222",
+        "scaffold_status": "not_needed",
         "components_count": 3,
         "component_names": ["ArticleHero", "ArticleCard", "ArticleFAQ"],
         "pillar_count": 1,
@@ -1938,6 +1985,67 @@ def test_scan_complete_auto_write_clears_pending_when_scaffold_already_exists(mo
     assert scheduled_job_ids == ["article-job-123"]
     assert main_module._pending_intents == {}
     assert posted_messages
+
+
+def test_scan_complete_does_not_auto_scaffold_without_approval_metadata(monkeypatch):
+    posted_messages = []
+
+    main_module._remember_pending_intent(
+        "U05QPB483K9",
+        "mlai.au",
+        intent_data={"action": "write", "topic": "AI for clinic workflows"},
+        channel_id="C123",
+        thread_ts="111.222",
+        wait_for="scan_complete",
+    )
+
+    class FakeAutoContinueClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def trigger_article_generation(self, **kwargs):
+            raise AssertionError("trigger_article_generation should not run without explicit scaffold_status")
+
+    monkeypatch.setattr(
+        main_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            MLAI_BACKEND_URL="https://backend.test",
+            MLAI_API_KEY="api-key",
+            ROO_API_KEY="roo-api-key",
+        ),
+    )
+    monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeAutoContinueClient)
+    monkeypatch.setattr(
+        main_module,
+        "post_message",
+        lambda *args, **kwargs: posted_messages.append((args, kwargs)),
+    )
+
+    payload = {
+        "event_type": "scan_complete",
+        "slack_user_id": "U05QPB483K9",
+        "job_id": "scan-job-123",
+        "domain": "mlai.au",
+        "channel_id": "C123",
+        "thread_ts": "111.222",
+        "components_count": 3,
+        "component_names": ["ArticleHero", "ArticleCard", "ArticleFAQ"],
+        "pillar_count": 1,
+        "pillar_names": ["SEO"],
+    }
+
+    class FakeRequest:
+        async def json(self):
+            return payload
+
+    response = asyncio.run(main_module.content_factory_callback(FakeRequest()))
+
+    assert response == {"status": "ok"}
+    assert main_module._pending_intents == {}
+    assert main_module._pending_intents_by_job == {}
+    assert len(posted_messages) >= 1
+    assert "fresh scan result" in posted_messages[-1][1]["text"]
 
 
 def test_confirm_content_factory_action_resumes_original_request(monkeypatch):
