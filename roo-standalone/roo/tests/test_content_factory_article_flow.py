@@ -1425,6 +1425,187 @@ def test_write_first_article_action_generates_client_request_id_when_missing(mon
     assert scheduled_job_ids == ["job-123"]
 
 
+def test_scaffold_confirm_action_approves_scan_run_and_requeues_pending_write(monkeypatch):
+    updated_messages = []
+    decision_calls = []
+
+    main_module._remember_pending_intent(
+        "U05QPB483K9",
+        "mlai.au",
+        intent_data={
+            "action": "write",
+            "topic": "AI for clinic workflows",
+            "target_keyword": "clinic ai",
+        },
+        channel_id="C123",
+        thread_ts="111.222",
+        wait_for="scan_complete",
+    )
+
+    class FakeDecisionClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def decide_scaffold(self, **kwargs):
+            decision_calls.append(kwargs)
+            return {
+                "status_code": 200,
+                "data": {"scaffold_job_id": "scaffold-job-123"},
+            }
+
+    monkeypatch.setattr(
+        main_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            MLAI_BACKEND_URL="https://backend.test",
+            MLAI_API_KEY="api-key",
+            ROO_API_KEY="roo-api-key",
+        ),
+    )
+    monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeDecisionClient)
+    monkeypatch.setattr(
+        slack_client_module,
+        "get_slack_client",
+        lambda: SimpleNamespace(chat_update=lambda **kwargs: updated_messages.append(kwargs)),
+    )
+    monkeypatch.setattr(main_module, "post_message", lambda *args, **kwargs: None)
+
+    payload = {
+        "user": {"id": "U05QPB483K9"},
+        "channel": {"id": "C123"},
+        "message": {
+            "ts": "111.222",
+            "thread_ts": "111.222",
+            "text": "Ready to create articles directory?",
+            "blocks": [{"type": "actions", "elements": []}],
+        },
+        "actions": [
+            {
+                "action_id": "scaffold_confirm",
+                "value": json.dumps(
+                    {
+                        "domain": "mlai.au",
+                        "slack_user_id": "U05QPB483K9",
+                        "channel_id": "C123",
+                        "thread_ts": "111.222",
+                        "scan_run_id": "scan-run-123",
+                    }
+                ),
+            }
+        ],
+    }
+
+    class FakeRequest:
+        async def form(self):
+            return {"payload": json.dumps(payload)}
+
+    response = asyncio.run(main_module.slack_actions(FakeRequest()))
+
+    assert response.status_code == 200
+    assert len(updated_messages) == 1
+    assert decision_calls == [
+        {
+            "scan_run_id": "scan-run-123",
+            "decision": "approve",
+            "domain": "mlai.au",
+            "slack_user_id": "U05QPB483K9",
+            "slack_channel_id": "C123",
+            "slack_thread_ts": "111.222",
+        }
+    ]
+    pending = main_module._get_pending_intent(
+        "U05QPB483K9",
+        "mlai.au",
+        wait_for="scaffold_complete",
+    )
+    assert pending is not None
+    assert pending["action"] == "write"
+    assert pending["job_id"] == "scaffold-job-123"
+
+
+def test_scaffold_skip_action_denies_scan_run_and_clears_pending(monkeypatch):
+    updated_messages = []
+    decision_calls = []
+
+    main_module._remember_pending_intent(
+        "U05QPB483K9",
+        "mlai.au",
+        intent_data={"action": "write"},
+        channel_id="C123",
+        thread_ts="111.222",
+        wait_for="scan_complete",
+    )
+
+    class FakeDecisionClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def decide_scaffold(self, **kwargs):
+            decision_calls.append(kwargs)
+            return {"status_code": 200, "data": {"status": "denied"}}
+
+    monkeypatch.setattr(
+        main_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            MLAI_BACKEND_URL="https://backend.test",
+            MLAI_API_KEY="api-key",
+            ROO_API_KEY="roo-api-key",
+        ),
+    )
+    monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeDecisionClient)
+    monkeypatch.setattr(
+        slack_client_module,
+        "get_slack_client",
+        lambda: SimpleNamespace(chat_update=lambda **kwargs: updated_messages.append(kwargs)),
+    )
+
+    payload = {
+        "user": {"id": "U05QPB483K9"},
+        "channel": {"id": "C123"},
+        "message": {
+            "ts": "111.222",
+            "thread_ts": "111.222",
+            "text": "Ready to create articles directory?",
+            "blocks": [{"type": "actions", "elements": []}],
+        },
+        "actions": [
+            {
+                "action_id": "scaffold_skip",
+                "value": json.dumps(
+                    {
+                        "domain": "mlai.au",
+                        "slack_user_id": "U05QPB483K9",
+                        "channel_id": "C123",
+                        "thread_ts": "111.222",
+                        "scan_run_id": "scan-run-123",
+                    }
+                ),
+            }
+        ],
+    }
+
+    class FakeRequest:
+        async def form(self):
+            return {"payload": json.dumps(payload)}
+
+    response = asyncio.run(main_module.slack_actions(FakeRequest()))
+
+    assert response.status_code == 200
+    assert len(updated_messages) == 1
+    assert decision_calls == [
+        {
+            "scan_run_id": "scan-run-123",
+            "decision": "deny",
+            "domain": "mlai.au",
+            "slack_user_id": "U05QPB483K9",
+            "slack_channel_id": "C123",
+            "slack_thread_ts": "111.222",
+        }
+    ]
+    assert main_module._get_pending_intent("U05QPB483K9", "mlai.au", wait_for="scan_complete") is None
+
+
 def test_prerequisite_scan_action_triggers_backend_from_repeat_scan_prompt(monkeypatch):
     trigger_calls = []
     updated_messages = []

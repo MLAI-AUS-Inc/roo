@@ -861,6 +861,42 @@ class MLAIBackendClient:
                 "data": response.json() if response.status_code < 500 else {}
             }
 
+    async def decide_scaffold(
+        self,
+        *,
+        scan_run_id: str,
+        decision: str,
+        domain: str,
+        slack_user_id: str,
+        slack_channel_id: str,
+        slack_thread_ts: str,
+    ) -> dict:
+        """Approve or deny scaffold creation for a scan run."""
+        if not self.base_url:
+            raise ValueError("MLAI_BACKEND_URL not configured")
+
+        clean_id = self._clean_slack_id(slack_user_id)
+        payload = {
+            "scan_run_id": scan_run_id,
+            "decision": decision,
+            "domain": domain,
+            "slack_user_id": clean_id,
+            "slack_channel_id": slack_channel_id,
+            "slack_thread_ts": slack_thread_ts,
+        }
+
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{self.base_url}/api/v1/integrations/github/scaffold/decision",
+                json=payload,
+                headers=self.headers,
+                timeout=60.0,
+            )
+            return {
+                "status_code": response.status_code,
+                "data": response.json() if response.status_code < 500 else {},
+            }
+
     async def decide_article_system(
         self,
         *,
