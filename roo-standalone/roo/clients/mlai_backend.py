@@ -945,6 +945,23 @@ class MLAIBackendClient:
             response.raise_for_status()
             return response.json()
 
+    async def publish_article_as_pr(self, job_id: str, slack_user_id: str) -> dict:
+        """Promote a completed content-only article into a draft-PR publish run."""
+        if not self.base_url:
+            raise ValueError("MLAI_BACKEND_URL not configured")
+
+        clean_id = self._clean_slack_id(slack_user_id)
+
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{self.base_url}/api/v1/content/jobs/{job_id}/publish-pr",
+                json={"slack_user_id": clean_id},
+                headers=self.headers,
+                timeout=60.0,
+            )
+            response.raise_for_status()
+            return response.json()
+
     # =========================================================================
     # Missing Admin / Points Methods
     # =========================================================================

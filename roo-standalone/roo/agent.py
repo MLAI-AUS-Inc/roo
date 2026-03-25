@@ -146,16 +146,21 @@ class RooAgent:
         *,
         domain: Optional[str] = None,
         workflow: Optional[str] = None,
+        active_job_id: Optional[str] = None,
     ) -> None:
         """Persist recent thread routing context so follow-ups stay on the right skill."""
         thread_key = self._thread_key(channel_id, thread_ts)
         if not thread_key or not skill_name:
             return
 
+        existing = self._thread_skill_context.get(thread_key, {})
         self._thread_skill_context[thread_key] = {
-            "skill_name": skill_name,
-            "domain": domain,
-            "workflow": workflow,
+            "skill_name": skill_name or existing.get("skill_name"),
+            "domain": domain if domain is not None else existing.get("domain"),
+            "workflow": workflow if workflow is not None else existing.get("workflow"),
+            "active_job_id": (
+                active_job_id if active_job_id is not None else existing.get("active_job_id")
+            ),
             "updated_at": datetime.now(timezone.utc),
         }
 
@@ -227,6 +232,7 @@ class RooAgent:
             text,
             thread_skill_name=(thread_context or {}).get("skill_name"),
             thread_domain=(thread_context or {}).get("domain"),
+            thread_job_id=(thread_context or {}).get("active_job_id"),
         )
         if not route:
             return None

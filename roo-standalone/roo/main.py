@@ -228,6 +228,13 @@ async def _maybe_attach_content_factory_progress(
     if not message_ts:
         return
 
+    workflow = str(
+        result_data.get("content_factory_workflow")
+        or result_data.get("content_factory_watchdog_mode")
+        or ""
+    ).strip() or None
+    domain = str(result_data.get("content_factory_domain") or "").strip() or None
+
     from .clients.mlai_backend import MLAIBackendClient
 
     settings = get_settings()
@@ -247,6 +254,14 @@ async def _maybe_attach_content_factory_progress(
     except Exception as exc:
         print(f"⚠️ Failed to attach progress message {message_ts} to job {job_id}: {exc}")
         return
+
+    _remember_content_thread_context(
+        channel_id,
+        thread_ts,
+        domain,
+        workflow or "write",
+        active_job_id=job_id,
+    )
 
     if result_data.get("content_factory_watchdog"):
         asyncio.create_task(_watch_content_factory_quiet_run(job_id))
@@ -323,6 +338,13 @@ async def _trigger_article_generation_from_pending(
         )
         print(f"✅ Auto-generation triggered for {domain}")
         if result.get("job_id") or result.get("run_id"):
+            _remember_content_thread_context(
+                intent_channel,
+                intent_thread,
+                domain,
+                "research" if include_decision_stage else "write",
+                active_job_id=result.get("job_id") or result.get("run_id"),
+            )
             asyncio.create_task(_watch_content_factory_quiet_run(result.get("job_id") or result.get("run_id")))
         return True
     except Exception as e:
@@ -341,6 +363,8 @@ def _remember_content_thread_context(
     thread_ts: str | None,
     domain: str | None,
     workflow: str,
+    *,
+    active_job_id: str | None = None,
 ) -> None:
     """Keep content-factory as the active skill for follow-ups in this thread."""
     if not channel_id or not thread_ts:
@@ -353,6 +377,7 @@ def _remember_content_thread_context(
             thread_ts,
             domain=domain,
             workflow=workflow,
+            active_job_id=active_job_id,
         )
     except Exception as e:
         print(f"⚠️ Failed to persist content thread context: {e}")
@@ -2508,6 +2533,13 @@ async def slack_actions(request: Request):
             )
             print(f"✅ Article generation triggered for {domain}: {result}")
             if result.get("job_id") or result.get("run_id"):
+                _remember_content_thread_context(
+                    reply_channel,
+                    reply_thread_ts,
+                    domain,
+                    "write",
+                    active_job_id=result.get("job_id") or result.get("run_id"),
+                )
                 asyncio.create_task(_watch_content_factory_quiet_run(result.get("job_id") or result.get("run_id")))
         except Exception as e:
             print(f"❌ Failed to trigger article generation: {e}")
@@ -2636,6 +2668,13 @@ async def slack_actions(request: Request):
             )
             print(f"✅ Article discovery triggered for {domain}: {result}")
             if str(result.get("status") or "").strip().lower() == "awaiting_delivery_mode":
+                _remember_content_thread_context(
+                    reply_channel,
+                    reply_thread_ts,
+                    domain,
+                    "awaiting_delivery_mode",
+                    active_job_id=result.get("job_id") or result.get("run_id"),
+                )
                 try:
                     from .slack_client import get_slack_client
                     get_slack_client().chat_update(
@@ -2651,6 +2690,13 @@ async def slack_actions(request: Request):
                 except Exception as update_error:
                     print(f"⚠️ Failed to update delivery-mode prompt: {update_error}")
             elif result.get("job_id") or result.get("run_id"):
+                _remember_content_thread_context(
+                    reply_channel,
+                    reply_thread_ts,
+                    domain,
+                    "research",
+                    active_job_id=result.get("job_id") or result.get("run_id"),
+                )
                 asyncio.create_task(_watch_content_factory_quiet_run(result.get("job_id") or result.get("run_id")))
         except Exception as e:
             print(f"❌ Failed to trigger article discovery: {e}")
@@ -2761,6 +2807,13 @@ async def slack_actions(request: Request):
                 request_source=CONTENT_FACTORY_REQUEST_SOURCE,
             )
             if result.get("job_id") or result.get("run_id"):
+                _remember_content_thread_context(
+                    payload.get("channel", {}).get("id"),
+                    payload.get("message", {}).get("thread_ts") or payload.get("message", {}).get("ts"),
+                    domain,
+                    "awaiting_delivery_mode",
+                    active_job_id=result.get("job_id") or result.get("run_id"),
+                )
                 asyncio.create_task(_watch_content_factory_quiet_run(result.get("job_id") or result.get("run_id")))
 
             selected_label = "content-only" if delivery_mode == "content_only" else "publish-via-code"
@@ -3322,6 +3375,13 @@ async def slack_actions(request: Request):
             )
             print(f"✅ Topic confirmed for job {job_id}")
             follow_up = _build_confirm_topic_follow_up(result)
+            _remember_content_thread_context(
+                payload.get("channel", {}).get("id"),
+                payload.get("message", {}).get("thread_ts") or payload.get("message", {}).get("ts"),
+                follow_up.get("domain"),
+                "awaiting_delivery_mode" if follow_up.get("requires_delivery_mode") else "write",
+                active_job_id=follow_up.get("active_job_id"),
+            )
 
             try:
                 from .slack_client import get_slack_client

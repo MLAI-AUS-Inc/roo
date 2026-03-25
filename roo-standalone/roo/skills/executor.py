@@ -386,6 +386,8 @@ JSON:"""
                 "content_factory_progress_job_id": job_id,
                 "content_factory_watchdog": False,
                 "content_factory_watchdog_mode": "awaiting_delivery_mode",
+                "content_factory_domain": domain,
+                "content_factory_workflow": "awaiting_delivery_mode",
             },
         }
 
@@ -1335,6 +1337,38 @@ Keep the response concise but informative."""
                 "content_factory_progress_job_id": job_id,
                 "content_factory_watchdog": True,
                 "content_factory_watchdog_mode": workflow,
+                "content_factory_domain": domain,
+                "content_factory_workflow": workflow,
+            },
+        }
+
+    def _build_publish_pr_start_response(
+        self,
+        *,
+        domain: Optional[str],
+        job_id: str,
+    ) -> dict:
+        display_domain = normalize_content_factory_domain(domain) or domain or "this domain"
+        return {
+            "message": (
+                f"Publishing the completed article bundle for {display_domain} as a draft PR. "
+                "I'll keep this message updated as the run moves forward."
+            ),
+            "blocks": build_live_status_blocks(
+                display_domain,
+                summary_text=(
+                    "Promoting the completed article bundle into the repo and preview flow. "
+                    "I'll keep this message updated."
+                ),
+                include_decision_stage=False,
+                current_stage="preparing",
+            ),
+            "data": {
+                "content_factory_progress_job_id": job_id,
+                "content_factory_watchdog": True,
+                "content_factory_watchdog_mode": "publish_pr",
+                "content_factory_domain": display_domain,
+                "content_factory_workflow": "publish_pr",
             },
         }
 
@@ -1350,6 +1384,56 @@ Keep the response concise but informative."""
         return next(
             (domain_info for domain_info in connected_domains if domain_info.get("domain") == domain),
             None,
+        )
+
+    async def _publish_content_bundle_as_pr(
+        self,
+        api_client,
+        *,
+        job_id: str,
+        domain: Optional[str],
+        slack_user_id: str,
+    ) -> Any:
+        if not job_id:
+            return (
+                "I couldn't tell which article bundle to publish as a PR in this thread. "
+                "Please ask from the original article thread after the content-ready message."
+            )
+
+        try:
+            response = await api_client.publish_article_as_pr(job_id, slack_user_id)
+        except httpx.HTTPStatusError as exc:
+            error_message = str(exc)
+            try:
+                error_data = exc.response.json()
+            except Exception:
+                error_data = {}
+            if isinstance(error_data, dict):
+                error_message = (
+                    error_data.get("error")
+                    or error_data.get("message")
+                    or error_message
+                )
+            return f"❌ I couldn't publish that article bundle as a PR: {error_message}"
+        except Exception as exc:
+            return f"❌ I couldn't publish that article bundle as a PR: {exc}"
+
+        child_job_id = str(response.get("job_id") or response.get("run_id") or "").strip()
+        if not child_job_id:
+            return (
+                "I asked Content Factory to publish that article bundle as a PR, "
+                "but it didn't return a run ID."
+            )
+
+        resolved_domain = (
+            normalize_content_factory_domain(domain)
+            or normalize_content_factory_domain(response.get("domain"))
+            or domain
+            or response.get("domain")
+        )
+        return self._build_publish_pr_start_response(
+            domain=resolved_domain,
+            job_id=child_job_id,
         )
 
     def _resolve_content_factory_repo_name(
@@ -1395,6 +1479,13 @@ Keep the response concise but informative."""
         domain = params.get("domain")
         org_config_cached = None
         action = params.get("action")
+        if action == "publish_pr":
+            return await self._publish_content_bundle_as_pr(
+                api_client,
+                job_id=str(params.get("job_id") or "").strip(),
+                domain=domain,
+                slack_user_id=user_id,
+            )
         is_scan_request = self._is_explicit_scan_request(text, params)
         is_article_flow = action != "scaffold" and not is_scan_request
         requested_delivery_mode, requested_delivery_mode_confirmed = self._resolve_requested_article_delivery_mode(
