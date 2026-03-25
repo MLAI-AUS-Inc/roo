@@ -1817,8 +1817,14 @@ Keep the response concise but informative."""
 
                 if status_code == 200:
                     pr_url = data.get("pr_url", "")
-                    pr_text = f" <{pr_url}|View PR>" if pr_url else ""
-                    return f"📁 Articles directory already exists for *{domain}*.{pr_text}"
+                    preview_url = data.get("preview_url", "")
+                    detail_parts = []
+                    if pr_url:
+                        detail_parts.append(f"<{pr_url}|View PR>")
+                    if preview_url:
+                        detail_parts.append(f"<{preview_url}|View Preview>")
+                    detail_text = f" {' | '.join(detail_parts)}" if detail_parts else ""
+                    return f"📁 Articles directory already exists for *{domain}*.{detail_text}"
                 elif status_code == 202:
                     return "Scaffolding is underway! I'll reply here when it's done. 🏗️"
                 elif status_code == 412:
