@@ -5,6 +5,7 @@ import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -42,6 +43,8 @@ class FakeContentFactoryClient:
     integration_requests = []
     delivery_mode_calls = []
     publish_article_as_pr_calls = []
+    resolve_content_thread_calls = []
+    resolve_content_thread_result = None
     trigger_article_generation_result = None
 
     def __init__(self, *args, **kwargs):
@@ -188,6 +191,30 @@ class FakeContentFactoryClient:
             "status": "queued",
         }
 
+    async def resolve_content_thread(
+        self,
+        *,
+        slack_user_id,
+        slack_channel_id,
+        slack_thread_ts,
+        requested_action,
+        domain=None,
+    ):
+        FakeContentFactoryClient.resolve_content_thread_calls.append(
+            {
+                "slack_user_id": slack_user_id,
+                "slack_channel_id": slack_channel_id,
+                "slack_thread_ts": slack_thread_ts,
+                "requested_action": requested_action,
+                "domain": domain,
+            }
+        )
+        if isinstance(FakeContentFactoryClient.resolve_content_thread_result, Exception):
+            raise FakeContentFactoryClient.resolve_content_thread_result
+        if FakeContentFactoryClient.resolve_content_thread_result is not None:
+            return FakeContentFactoryClient.resolve_content_thread_result
+        raise AssertionError("resolve_content_thread_result was not configured")
+
     async def get_content_org_config(self, slack_user_id, domain=None):
         if domain is not None:
             return FakeContentFactoryClient.org_configs.get(domain)
@@ -267,6 +294,8 @@ def _patch_content_factory(monkeypatch):
     FakeContentFactoryClient.integration_requests = []
     FakeContentFactoryClient.delivery_mode_calls = []
     FakeContentFactoryClient.publish_article_as_pr_calls = []
+    FakeContentFactoryClient.resolve_content_thread_calls = []
+    FakeContentFactoryClient.resolve_content_thread_result = None
     FakeContentFactoryClient.trigger_article_generation_result = None
 
     monkeypatch.setattr(
@@ -612,6 +641,11 @@ async def test_publish_pr_follow_up_promotes_existing_bundle(monkeypatch):
 async def test_publish_pr_follow_up_without_job_id_returns_helpful_error(monkeypatch):
     executor = SkillExecutor()
     _patch_content_factory(monkeypatch)
+    FakeContentFactoryClient.resolve_content_thread_result = httpx.HTTPStatusError(
+        "not found",
+        request=httpx.Request("POST", "https://backend.test/api/v1/content/jobs/resolve-thread"),
+        response=httpx.Response(404, json={"error": "not found"}),
+    )
 
     result = await executor._execute_content_factory(
         skill=None,
@@ -625,7 +659,77 @@ async def test_publish_pr_follow_up_without_job_id_returns_helpful_error(monkeyp
         thread_ts="111.222",
     )
 
-    assert "couldn't tell which article bundle" in result.lower()
+    assert "couldn't identify a completed article bundle" in result.lower()
+    assert FakeContentFactoryClient.publish_article_as_pr_calls == []
+
+
+@pytest.mark.asyncio
+async def test_publish_pr_follow_up_without_job_id_resolves_thread_and_promotes_existing_bundle(monkeypatch):
+    executor = SkillExecutor()
+    _patch_content_factory(monkeypatch)
+    FakeContentFactoryClient.resolve_content_thread_result = {
+        "resolution": "ready",
+        "job_id": "job-content-123",
+        "domain": "birdpsychology.com.au",
+        "publish_stage": "content_ready",
+    }
+
+    result = await executor._execute_content_factory(
+        skill=None,
+        text="publish this article as a PR",
+        params={
+            "action": "write",
+            "domain": "birdpsychology.com.au",
+            "topic": "Understanding Internal Family Systems Therapy: Healing Your Inner Parts",
+        },
+        user_id="U05QPB483K9",
+        channel_id="C123",
+        thread_ts="111.222",
+    )
+
+    assert isinstance(result, dict)
+    assert "draft PR" in result["message"]
+    assert FakeContentFactoryClient.resolve_content_thread_calls == [
+        {
+            "slack_user_id": "U05QPB483K9",
+            "slack_channel_id": "C123",
+            "slack_thread_ts": "111.222",
+            "requested_action": "publish_pr",
+            "domain": "birdpsychology.com.au",
+        }
+    ]
+    assert FakeContentFactoryClient.publish_article_as_pr_calls == [
+        {"job_id": "job-content-123", "slack_user_id": "U05QPB483K9"}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_publish_pr_follow_up_without_job_id_reuses_existing_publish_run(monkeypatch):
+    executor = SkillExecutor()
+    _patch_content_factory(monkeypatch)
+    FakeContentFactoryClient.resolve_content_thread_result = {
+        "resolution": "in_progress",
+        "job_id": "job-content-123",
+        "domain": "birdpsychology.com.au",
+        "publish_stage": "awaiting_preview",
+        "promoted_publish_job_id": "publish-job-456",
+    }
+
+    result = await executor._execute_content_factory(
+        skill=None,
+        text="publish this article as a PR",
+        params={
+            "action": "write",
+            "domain": "birdpsychology.com.au",
+        },
+        user_id="U05QPB483K9",
+        channel_id="C123",
+        thread_ts="111.222",
+    )
+
+    assert isinstance(result, dict)
+    assert "draft PR" in result["message"]
+    assert result["data"]["content_factory_progress_job_id"] == "publish-job-456"
     assert FakeContentFactoryClient.publish_article_as_pr_calls == []
 
 
@@ -2318,6 +2422,118 @@ def test_confirm_content_factory_action_resumes_original_request(monkeypatch):
             },
         }
     ]
+
+
+def test_publish_content_pr_action_updates_message_and_resumes_publish_flow(monkeypatch):
+    resumed_events = []
+    remembered_context = []
+    updated_messages = []
+
+    def capture_task(coro):
+        try:
+            coro.send(None)
+        except StopIteration:
+            pass
+        return SimpleNamespace(cancel=lambda: None)
+
+    async def fake_handle_mention(event):
+        resumed_events.append(event)
+
+    monkeypatch.setattr(main_module, "_handle_mention", fake_handle_mention)
+    monkeypatch.setattr(asyncio, "create_task", capture_task)
+    monkeypatch.setattr(
+        main_module,
+        "_remember_content_thread_context",
+        lambda channel_id, thread_ts, domain, workflow, **kwargs: remembered_context.append(
+            (channel_id, thread_ts, domain, workflow, kwargs.get("active_job_id"))
+        ),
+    )
+    monkeypatch.setattr(
+        slack_client_module,
+        "get_slack_client",
+        lambda: SimpleNamespace(chat_update=lambda **kwargs: updated_messages.append(kwargs)),
+    )
+
+    payload = {
+        "user": {"id": "U05QPB483K9"},
+        "channel": {"id": "C123"},
+        "message": {
+            "ts": "111.222",
+            "thread_ts": "111.222",
+            "text": "Article ready",
+            "blocks": [
+                {"type": "section", "text": {"type": "mrkdwn", "text": "✅ *Article content ready*"}},
+                {
+                    "type": "actions",
+                    "block_id": "content_ready_publish_actions",
+                    "elements": [
+                        {
+                            "type": "button",
+                            "action_id": "publish_content_pr",
+                            "text": {"type": "plain_text", "text": "Publish as Draft PR"},
+                        }
+                    ],
+                },
+                {
+                    "type": "actions",
+                    "elements": [
+                        {
+                            "type": "button",
+                            "action_id": "open_preview",
+                            "text": {"type": "plain_text", "text": "Open Preview"},
+                        }
+                    ],
+                },
+            ],
+        },
+        "actions": [
+            {
+                "action_id": "publish_content_pr",
+                "value": json.dumps(
+                    {
+                        "job_id": "job-content-123",
+                        "domain": "birdpsychology.com.au",
+                        "slack_user_id": "U05QPB483K9",
+                        "channel_id": "C123",
+                        "thread_ts": "111.222",
+                    }
+                ),
+            }
+        ],
+    }
+
+    class FakeRequest:
+        async def form(self):
+            return {"payload": json.dumps(payload)}
+
+    response = asyncio.run(main_module.slack_actions(FakeRequest()))
+
+    assert response.status_code == 200
+    assert remembered_context == [
+        ("C123", "111.222", "birdpsychology.com.au", "publish_pr", "job-content-123")
+    ]
+    assert resumed_events == [
+        {
+            "user": "U05QPB483K9",
+            "text": "publish this article as a PR",
+            "channel": "C123",
+            "thread_ts": "111.222",
+            "param_overrides": {
+                "action": "publish_pr",
+                "job_id": "job-content-123",
+                "domain": "birdpsychology.com.au",
+            },
+        }
+    ]
+    assert len(updated_messages) == 1
+    updated_blocks = updated_messages[0]["blocks"]
+    assert all(block.get("block_id") != "content_ready_publish_actions" for block in updated_blocks)
+    assert any(
+        "Publishing this article as a draft PR" in element["text"]
+        for block in updated_blocks
+        if block.get("type") == "context"
+        for element in block.get("elements", [])
+    )
 
 
 def test_confirm_topic_action_uses_roo_request_source_and_mentions_no_extra_charge(monkeypatch):

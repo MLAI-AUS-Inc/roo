@@ -962,6 +962,38 @@ class MLAIBackendClient:
             response.raise_for_status()
             return response.json()
 
+    async def resolve_content_thread(
+        self,
+        *,
+        slack_user_id: str,
+        slack_channel_id: str,
+        slack_thread_ts: str,
+        requested_action: str,
+        domain: Optional[str] = None,
+    ) -> dict:
+        """Resolve the active content-factory job for a Slack thread."""
+        if not self.base_url:
+            raise ValueError("MLAI_BACKEND_URL not configured")
+
+        payload = {
+            "slack_user_id": self._clean_slack_id(slack_user_id),
+            "slack_channel_id": slack_channel_id,
+            "slack_thread_ts": slack_thread_ts,
+            "requested_action": requested_action,
+        }
+        if domain:
+            payload["domain"] = domain
+
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{self.base_url}/api/v1/content/jobs/resolve-thread",
+                json=payload,
+                headers=self.headers,
+                timeout=30.0,
+            )
+            response.raise_for_status()
+            return response.json()
+
     # =========================================================================
     # Missing Admin / Points Methods
     # =========================================================================

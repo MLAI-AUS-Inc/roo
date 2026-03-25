@@ -17,7 +17,7 @@ from .skills.executor import SkillExecutor
 from .slack_client import get_thread_messages
 
 
-THREAD_CONTEXT_TTL = timedelta(minutes=20)
+THREAD_CONTEXT_TTL = timedelta(hours=2)
 
 
 class RooAgent:
