@@ -41,6 +41,7 @@ class FakeContentFactoryClient:
     still_working_calls = []
     integration_requests = []
     delivery_mode_calls = []
+    publish_article_as_pr_calls = []
     trigger_article_generation_result = None
 
     def __init__(self, *args, **kwargs):
@@ -178,6 +179,15 @@ class FakeContentFactoryClient:
             "pr_url": "https://github.test/pr/123",
         }
 
+    async def publish_article_as_pr(self, job_id, slack_user_id):
+        FakeContentFactoryClient.publish_article_as_pr_calls.append(
+            {"job_id": job_id, "slack_user_id": slack_user_id}
+        )
+        return {
+            "job_id": "publish-job-456",
+            "status": "queued",
+        }
+
     async def get_content_org_config(self, slack_user_id, domain=None):
         if domain is not None:
             return FakeContentFactoryClient.org_configs.get(domain)
@@ -256,6 +266,7 @@ def _patch_content_factory(monkeypatch):
     FakeContentFactoryClient.last_instance = None
     FakeContentFactoryClient.integration_requests = []
     FakeContentFactoryClient.delivery_mode_calls = []
+    FakeContentFactoryClient.publish_article_as_pr_calls = []
     FakeContentFactoryClient.trigger_article_generation_result = None
 
     monkeypatch.setattr(
@@ -567,6 +578,55 @@ async def test_repo_less_request_awaits_delivery_mode_instead_of_showing_github_
     action_ids = [element["action_id"] for element in result["blocks"][1]["elements"]]
     assert action_ids == ["select_article_delivery_mode", "select_article_delivery_mode"]
     assert "GitHub not connected" not in json.dumps(posted_messages)
+
+
+@pytest.mark.asyncio
+async def test_publish_pr_follow_up_promotes_existing_bundle(monkeypatch):
+    executor = SkillExecutor()
+    _patch_content_factory(monkeypatch)
+
+    result = await executor._execute_content_factory(
+        skill=None,
+        text="publish this article as a PR",
+        params={
+            "action": "publish_pr",
+            "domain": "birdpsychology.com.au",
+            "job_id": "job-content-123",
+        },
+        user_id="U05QPB483K9",
+        channel_id="C123",
+        thread_ts="111.222",
+    )
+
+    assert isinstance(result, dict)
+    assert "draft PR" in result["message"]
+    assert result["data"]["content_factory_progress_job_id"] == "publish-job-456"
+    assert result["data"]["content_factory_watchdog"] is True
+    assert result["data"]["content_factory_domain"] == "birdpsychology.com.au"
+    assert FakeContentFactoryClient.publish_article_as_pr_calls == [
+        {"job_id": "job-content-123", "slack_user_id": "U05QPB483K9"}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_publish_pr_follow_up_without_job_id_returns_helpful_error(monkeypatch):
+    executor = SkillExecutor()
+    _patch_content_factory(monkeypatch)
+
+    result = await executor._execute_content_factory(
+        skill=None,
+        text="publish this article as a PR",
+        params={
+            "action": "publish_pr",
+            "domain": "birdpsychology.com.au",
+        },
+        user_id="U05QPB483K9",
+        channel_id="C123",
+        thread_ts="111.222",
+    )
+
+    assert "couldn't tell which article bundle" in result.lower()
+    assert FakeContentFactoryClient.publish_article_as_pr_calls == []
 
 
 @pytest.mark.asyncio
@@ -1039,8 +1099,8 @@ def test_article_provide_topic_action_updates_message(monkeypatch):
     monkeypatch.setattr(
         main_module,
         "_remember_content_thread_context",
-        lambda channel_id, thread_ts, domain, workflow: remembered_context.append(
-            (channel_id, thread_ts, domain, workflow)
+        lambda channel_id, thread_ts, domain, workflow, **kwargs: remembered_context.append(
+            (channel_id, thread_ts, domain, workflow, kwargs.get("active_job_id"))
         ),
     )
 
@@ -1078,7 +1138,7 @@ def test_article_provide_topic_action_updates_message(monkeypatch):
     response = asyncio.run(main_module.slack_actions(FakeRequest()))
 
     assert response.status_code == 200
-    assert remembered_context == [("C123", "111.222", "mlai.au", "write")]
+    assert remembered_context == [("C123", "111.222", "mlai.au", "write", None)]
     assert len(updated_messages) == 1
     updated_blocks = updated_messages[0]["blocks"]
     assert all(block.get("type") != "actions" for block in updated_blocks)
@@ -1139,8 +1199,8 @@ def test_article_research_best_action_triggers_backend_with_client_request_id(mo
     monkeypatch.setattr(
         main_module,
         "_remember_content_thread_context",
-        lambda channel_id, thread_ts, domain, workflow: remembered_context.append(
-            (channel_id, thread_ts, domain, workflow)
+        lambda channel_id, thread_ts, domain, workflow, **kwargs: remembered_context.append(
+            (channel_id, thread_ts, domain, workflow, kwargs.get("active_job_id"))
         ),
     )
     monkeypatch.setattr(main_module, "_watch_content_factory_quiet_run", fake_watchdog)
@@ -1182,7 +1242,10 @@ def test_article_research_best_action_triggers_backend_with_client_request_id(mo
     response = asyncio.run(main_module.slack_actions(FakeRequest()))
 
     assert response.status_code == 200
-    assert remembered_context == [("C123", "111.222", "mlai.au", "research")]
+    assert remembered_context == [
+        ("C123", "111.222", "mlai.au", "research", None),
+        ("C123", "111.222", "mlai.au", "research", "job-123"),
+    ]
     assert len(updated_messages) == 1
     assert posted_messages == []
     assert trigger_calls == [
@@ -1326,6 +1389,7 @@ def test_select_article_delivery_mode_action_queues_run(monkeypatch):
         ),
     )
     monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeTriggerClient)
+    monkeypatch.setattr(main_module, "_remember_content_thread_context", lambda *args, **kwargs: None)
     monkeypatch.setattr(main_module, "_watch_content_factory_quiet_run", fake_watchdog)
     monkeypatch.setattr(asyncio, "create_task", capture_task)
 
@@ -1370,6 +1434,72 @@ def test_select_article_delivery_mode_action_queues_run(monkeypatch):
     assert scheduled_job_ids == ["job-awaiting-mode-1"]
 
 
+@pytest.mark.asyncio
+async def test_maybe_attach_content_factory_progress_remembers_active_job_id(monkeypatch):
+    attach_calls = []
+    remembered_context = []
+
+    class FakeAttachClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def attach_content_progress_message(self, job_id, **kwargs):
+            attach_calls.append({"job_id": job_id, **kwargs})
+            return {"status": "attached", "job_id": job_id}
+
+    monkeypatch.setattr(
+        main_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            MLAI_BACKEND_URL="https://backend.test",
+            MLAI_API_KEY="api-key",
+            ROO_API_KEY="roo-api-key",
+        ),
+    )
+    monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeAttachClient)
+    monkeypatch.setattr(
+        main_module,
+        "get_agent",
+        lambda: SimpleNamespace(
+            remember_thread_context=lambda *args, **kwargs: remembered_context.append(
+                {"args": args, "kwargs": kwargs}
+            )
+        ),
+    )
+
+    await main_module._maybe_attach_content_factory_progress(
+        {
+            "content_factory_progress_job_id": "job-123",
+            "content_factory_domain": "birdpsychology.com.au",
+            "content_factory_workflow": "write",
+        },
+        {"ts": "222.333"},
+        channel_id="C123",
+        thread_ts="111.222",
+    )
+
+    assert attach_calls == [
+        {
+            "job_id": "job-123",
+            "progress_message_ts": "222.333",
+            "slack_channel_id": "C123",
+            "slack_thread_ts": "111.222",
+            "slack_root_message_ts": "111.222",
+            "request_source": "roo_slackbot",
+        }
+    ]
+    assert remembered_context == [
+        {
+            "args": ("content-factory", "C123", "111.222"),
+            "kwargs": {
+                "domain": "birdpsychology.com.au",
+                "workflow": "write",
+                "active_job_id": "job-123",
+            },
+        }
+    ]
+
+
 def test_write_first_article_action_generates_client_request_id_when_missing(monkeypatch):
     trigger_calls = []
     updated_messages = []
@@ -1404,6 +1534,7 @@ def test_write_first_article_action_generates_client_request_id_when_missing(mon
         ),
     )
     monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeTriggerClient)
+    monkeypatch.setattr(main_module, "_remember_content_thread_context", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         slack_client_module,
         "get_slack_client",
@@ -2221,6 +2352,7 @@ def test_confirm_topic_action_uses_roo_request_source_and_mentions_no_extra_char
         ),
     )
     monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeConfirmClient)
+    monkeypatch.setattr(main_module, "_remember_content_thread_context", lambda *args, **kwargs: None)
     monkeypatch.setattr(main_module, "_watch_content_factory_quiet_run", fake_watchdog)
     monkeypatch.setattr(asyncio, "create_task", capture_task)
 
@@ -2293,6 +2425,7 @@ def test_confirm_topic_btn_action_queues_generation_and_updates_message(monkeypa
         ),
     )
     monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeConfirmClient)
+    monkeypatch.setattr(main_module, "_remember_content_thread_context", lambda *args, **kwargs: None)
     monkeypatch.setattr(main_module, "_watch_content_factory_quiet_run", fake_watchdog)
     monkeypatch.setattr(asyncio, "create_task", capture_task)
     monkeypatch.setattr(
@@ -2384,6 +2517,7 @@ def test_confirm_topic_btn_action_surfaces_delivery_mode_prompt(monkeypatch):
         ),
     )
     monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeConfirmClient)
+    monkeypatch.setattr(main_module, "_remember_content_thread_context", lambda *args, **kwargs: None)
     monkeypatch.setattr(main_module, "_watch_content_factory_quiet_run", fake_watchdog)
     monkeypatch.setattr(asyncio, "create_task", capture_task)
     monkeypatch.setattr(

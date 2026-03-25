@@ -32,6 +32,12 @@ RESEARCH_PATTERNS = (
     r"\bwhat\s+should\s+i\s+write\b",
     r"\b(?:recommend|suggest)\s+(?:a\s+)?(?:topic|article|keyword)\b",
 )
+PUBLISH_PR_PATTERNS = (
+    r"\bpublish\b.*\b(?:article|bundle|draft|post)\b.*\bas\s+a\s+p\.?r\.?\b",
+    r"\bpublish\b.*\bas\s+a\s+pull\s+request\b",
+    r"\bturn\b.*\b(?:article|bundle|draft|post)\b.*\binto\s+a\s+p\.?r\.?\b",
+    r"\bopen\b.*\b(?:a\s+)?(?:draft\s+)?p\.?r\.?\b",
+)
 WRITE_PATTERNS = (
     r"\bwrite\b.*\b(article|blog(?:\s+post)?|content)\b",
     r"\bgenerate\b.*\b(article|blog(?:\s+post)?|content)\b",
@@ -89,6 +95,8 @@ def detect_content_action(text: str) -> Optional[str]:
         return "scaffold"
     if any(re.search(pattern, text_lower) for pattern in RESEARCH_PATTERNS):
         return "research"
+    if any(re.search(pattern, text_lower) for pattern in PUBLISH_PR_PATTERNS):
+        return "publish_pr"
     if any(re.search(pattern, text_lower) for pattern in WRITE_PATTERNS):
         return "write"
     return None
@@ -108,6 +116,7 @@ def parse_routing_intent(
     *,
     thread_skill_name: Optional[str] = None,
     thread_domain: Optional[str] = None,
+    thread_job_id: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Return a deterministic routing decision for common content flows."""
     normalized = normalize_slack_text(text)
@@ -146,6 +155,18 @@ def parse_routing_intent(
 
     if action == "research":
         params = {}
+        if domain:
+            params["domain"] = domain
+        return {"skill_name": "content-factory", "params": params}
+
+    if (
+        action == "publish_pr"
+        and thread_skill_name == "content-factory"
+        and (thread_job_id or thread_domain)
+    ):
+        params = {"action": "publish_pr"}
+        if thread_job_id:
+            params["job_id"] = thread_job_id
         if domain:
             params["domain"] = domain
         return {"skill_name": "content-factory", "params": params}
