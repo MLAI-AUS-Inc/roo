@@ -2072,6 +2072,93 @@ async def slack_actions(request: Request):
         ))
         return JSONResponse(status_code=200, content={})
 
+    if action_id == "publish_content_pr":
+        value = actions[0].get("value", "")
+        try:
+            value_data = json.loads(value) if value else {}
+        except json.JSONDecodeError:
+            value_data = {}
+
+        job_id = str(value_data.get("job_id") or "").strip()
+        domain = value_data.get("domain")
+        original_user_id = value_data.get("slack_user_id")
+        value_channel_id = value_data.get("channel_id")
+        value_thread_ts = value_data.get("thread_ts")
+
+        msg_channel = payload.get("channel", {}).get("id")
+        msg_ts = payload.get("message", {}).get("ts")
+        reply_channel = value_channel_id or channel_id or msg_channel
+        reply_thread_ts = value_thread_ts or payload.get("message", {}).get("thread_ts") or msg_ts
+
+        if user_id != original_user_id:
+            return JSONResponse(status_code=200, content={
+                "response_type": "ephemeral",
+                "text": "⚠️ Only the user who requested this article can publish it as a PR."
+            })
+
+        if not job_id:
+            if reply_channel:
+                post_message(
+                    channel=reply_channel,
+                    thread_ts=reply_thread_ts,
+                    text="⚠️ I couldn't determine which completed article bundle to publish from this button. Please use the original content-ready thread."
+                )
+            return JSONResponse(status_code=200, content={})
+
+        _remember_content_thread_context(
+            reply_channel,
+            reply_thread_ts,
+            domain,
+            "publish_pr",
+            active_job_id=job_id,
+        )
+
+        try:
+            from .slack_client import get_slack_client
+            slack_client = get_slack_client()
+            original_blocks = payload.get("message", {}).get("blocks", [])
+            updated_blocks = []
+            for block in original_blocks:
+                if block.get("block_id") == "content_ready_publish_actions":
+                    continue
+                if block.get("type") == "actions":
+                    elements = [
+                        element for element in block.get("elements", [])
+                        if element.get("action_id") != "publish_content_pr"
+                    ]
+                    if not elements:
+                        continue
+                    updated_blocks.append({**block, "elements": elements})
+                    continue
+                updated_blocks.append(block)
+            updated_blocks.append({
+                "type": "context",
+                "elements": [{"type": "mrkdwn", "text": "⏳ Publishing this article as a draft PR..."}]
+            })
+            slack_client.chat_update(
+                channel=msg_channel,
+                ts=msg_ts,
+                text=payload.get("message", {}).get("text", ""),
+                blocks=updated_blocks
+            )
+        except Exception as e:
+            print(f"⚠️ Failed to update publish-content-pr message: {e}")
+
+        asyncio.create_task(_handle_mention(
+            {
+                "user": user_id,
+                "text": "publish this article as a PR",
+                "channel": reply_channel,
+                "thread_ts": reply_thread_ts,
+                "param_overrides": {
+                    "action": "publish_pr",
+                    "job_id": job_id,
+                    "domain": domain,
+                },
+            }
+        ))
+        return JSONResponse(status_code=200, content={})
+
     # Handler for confirm_topic (new format)
     # Value format: "confirm:{keyword}:{job_id}"
     if action_id == "confirm_topic":

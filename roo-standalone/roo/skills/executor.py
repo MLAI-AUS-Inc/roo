@@ -24,7 +24,7 @@ from ..content_factory_progress import (
     is_free_content_factory_domain,
     normalize_content_factory_domain,
 )
-from ..content_intent import is_explicit_scan_request
+from ..content_intent import detect_content_action, is_explicit_scan_request
 from ..llm import chat, embed, get_llm_client
 from ..slack_client import post_message
 from ..config import get_settings
@@ -1372,6 +1372,76 @@ Keep the response concise but informative."""
             },
         }
 
+    async def _resolve_publish_pr_follow_up(
+        self,
+        api_client,
+        *,
+        text: str,
+        params: dict,
+        user_id: str,
+        channel_id: Optional[str],
+        thread_ts: Optional[str],
+    ) -> tuple[dict, Optional[Any]]:
+        requested_action = detect_content_action(text)
+        if requested_action != "publish_pr":
+            return params, None
+
+        existing_job_id = str(params.get("job_id") or "").strip()
+        if existing_job_id:
+            params["action"] = "publish_pr"
+            return params, None
+
+        if not channel_id or not thread_ts:
+            return params, (
+                "I couldn't identify a completed article bundle for this publish request because the Slack thread context was missing."
+            )
+
+        try:
+            resolution = await api_client.resolve_content_thread(
+                slack_user_id=user_id,
+                slack_channel_id=channel_id,
+                slack_thread_ts=thread_ts,
+                requested_action="publish_pr",
+                domain=params.get("domain"),
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                return params, (
+                    "I couldn't identify a completed article bundle to publish from this thread. "
+                    "Please use the original content-ready thread for the article you want to publish."
+                )
+            return params, f"❌ I couldn't resolve which completed article to publish from this thread: {exc}"
+        except Exception as exc:
+            return params, f"❌ I couldn't resolve which completed article to publish from this thread: {exc}"
+
+        resolution_type = str(resolution.get("resolution") or "").strip()
+        resolved_domain = (
+            normalize_content_factory_domain(resolution.get("domain"))
+            or params.get("domain")
+            or resolution.get("domain")
+        )
+        if resolution_type == "ready":
+            params["action"] = "publish_pr"
+            params["job_id"] = str(resolution.get("job_id") or "").strip()
+            if resolved_domain:
+                params["domain"] = resolved_domain
+            return params, None
+
+        if resolution_type == "in_progress":
+            publish_job_id = str(resolution.get("promoted_publish_job_id") or "").strip()
+            if not publish_job_id:
+                return params, (
+                    "I found an article in this thread that is already being promoted, but I couldn't determine the active publish run."
+                )
+            return params, self._build_publish_pr_start_response(
+                domain=resolved_domain,
+                job_id=publish_job_id,
+            )
+
+        return params, (
+            "I couldn't identify a completed article bundle to publish from this thread."
+        )
+
     def _get_connected_domain_info(
         self,
         connected_domains: List[dict],
@@ -1479,6 +1549,18 @@ Keep the response concise but informative."""
         domain = params.get("domain")
         org_config_cached = None
         action = params.get("action")
+        params, publish_resolution = await self._resolve_publish_pr_follow_up(
+            api_client,
+            text=text,
+            params=params,
+            user_id=user_id,
+            channel_id=channel_id,
+            thread_ts=thread_ts,
+        )
+        if publish_resolution is not None:
+            return publish_resolution
+        action = params.get("action")
+        domain = params.get("domain")
         if action == "publish_pr":
             return await self._publish_content_bundle_as_pr(
                 api_client,
