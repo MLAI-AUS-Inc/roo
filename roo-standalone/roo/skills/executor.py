@@ -465,6 +465,124 @@ JSON:"""
                 },
             ],
         }
+
+    def _build_github_reconnect_blocks(
+        self,
+        message: str,
+        auth_url: str,
+        *,
+        button_label: str,
+        include_resume: bool = False,
+        resume_action: str = "resume_scan",
+        resume_value: Optional[dict] = None,
+    ) -> list[dict]:
+        elements = [
+            {
+                "type": "button",
+                "text": {
+                    "type": "plain_text",
+                    "text": button_label,
+                    "emoji": True,
+                },
+                "url": auth_url,
+                "action_id": "connect_github",
+                "style": "primary",
+            }
+        ]
+        if include_resume:
+            elements.append(
+                {
+                    "type": "button",
+                    "text": {
+                        "type": "plain_text",
+                        "text": "I've Connected - Retry",
+                        "emoji": True,
+                    },
+                    "action_id": resume_action,
+                    "value": json.dumps(resume_value or {}),
+                    "style": "primary",
+                }
+            )
+        return [
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": message,
+                },
+            },
+            {
+                "type": "actions",
+                "elements": elements,
+            },
+        ]
+
+    async def _request_github_reconnect(
+        self,
+        api_client,
+        *,
+        user_id: str,
+        domain: Optional[str],
+        github_repo: Optional[str],
+        trigger: str,
+        pending_action: Optional[str],
+        channel_id: Optional[str],
+        thread_ts: Optional[str],
+        button_label: str,
+        text: Optional[str] = None,
+        params: Optional[dict] = None,
+        save_pending: bool = False,
+        include_resume: bool = False,
+        resume_action: str = "resume_scan",
+        resume_value: Optional[dict] = None,
+    ) -> Optional[Any]:
+        reconnect = await api_client.reconnect_content_factory_github(
+            slack_user_id=user_id,
+            domain=domain,
+            github_repo=github_repo,
+            trigger=trigger,
+            pending_action=pending_action,
+        )
+        if reconnect.get("status") == "already_connected":
+            return None
+
+        if reconnect.get("status") != "auth_started":
+            return None
+
+        if save_pending and text is not None and params is not None:
+            await self._save_content_factory_pending_intent(
+                api_client,
+                user_id,
+                params,
+                text,
+                channel_id,
+                thread_ts,
+            )
+
+        auth_url = reconnect.get("auth_url")
+        message = reconnect.get("message") or "Reconnect GitHub before I continue."
+        if not auth_url:
+            return message
+
+        blocks = self._build_github_reconnect_blocks(
+            message,
+            auth_url,
+            button_label=button_label,
+            include_resume=include_resume,
+            resume_action=resume_action,
+            resume_value=resume_value,
+        )
+        short_message = (
+            f"{message} Use the button above to continue."
+            if channel_id
+            else f"{message}\n\n{auth_url}"
+        )
+        if channel_id:
+            post_message(channel_id, message, thread_ts=thread_ts, blocks=blocks)
+        return {
+            "message": short_message,
+            "blocks": blocks,
+        }
     
     async def _execute_tone_of_voice(
         self,
@@ -1223,9 +1341,6 @@ Keep the response concise but informative."""
         thread_ts: Optional[str],
     ) -> None:
         """Persist the original content request so GitHub auth/repo selection can resume it."""
-        if params.get("confirmed"):
-            return
-
         intent_data = json.dumps({
             "skill": "content-factory",
             "params": params,
@@ -1463,12 +1578,33 @@ Keep the response concise but informative."""
         job_id: str,
         domain: Optional[str],
         slack_user_id: str,
+        channel_id: Optional[str],
+        thread_ts: Optional[str],
+        text: str,
+        params: dict,
     ) -> Any:
         if not job_id:
             return (
                 "I couldn't tell which article bundle to publish as a PR in this thread. "
                 "Please ask from the original article thread after the content-ready message."
             )
+
+        reconnect_result = await self._request_github_reconnect(
+            api_client,
+            user_id=slack_user_id,
+            domain=domain,
+            github_repo=None,
+            trigger="preflight",
+            pending_action="publish_pr",
+            channel_id=channel_id,
+            thread_ts=thread_ts,
+            button_label=f"Reconnect GitHub for {domain or 'this domain'}",
+            text=text,
+            params=params,
+            save_pending=True,
+        )
+        if reconnect_result is not None:
+            return reconnect_result
 
         try:
             response = await api_client.publish_article_as_pr(job_id, slack_user_id)
@@ -1479,6 +1615,43 @@ Keep the response concise but informative."""
             except Exception:
                 error_data = {}
             if isinstance(error_data, dict):
+                if error_data.get("error_code") == "AUTH_REQUIRED":
+                    if not error_data.get("pending_intent_stored"):
+                        await self._save_content_factory_pending_intent(
+                            api_client,
+                            slack_user_id,
+                            params,
+                            text,
+                            channel_id,
+                            thread_ts,
+                        )
+                    auth_url = error_data.get("auth_url")
+                    if not auth_url:
+                        reconnect = await api_client.reconnect_content_factory_github(
+                            slack_user_id=slack_user_id,
+                            domain=domain,
+                            github_repo=None,
+                            trigger="fallback_412",
+                            pending_action="publish_pr",
+                        )
+                        auth_url = reconnect.get("auth_url")
+                    message = error_data.get("message") or "Reconnect GitHub before I can publish that bundle as a PR."
+                    if auth_url:
+                        blocks = self._build_github_reconnect_blocks(
+                            message,
+                            auth_url,
+                            button_label=f"Reconnect GitHub for {domain or 'this domain'}",
+                        )
+                        if channel_id:
+                            post_message(channel_id, message, thread_ts=thread_ts, blocks=blocks)
+                        return {
+                            "message": (
+                                f"{message} Use the button above to continue."
+                                if channel_id
+                                else f"{message}\n\n{auth_url}"
+                            ),
+                            "blocks": blocks,
+                        }
                 error_message = (
                     error_data.get("error")
                     or error_data.get("message")
@@ -1567,6 +1740,10 @@ Keep the response concise but informative."""
                 job_id=str(params.get("job_id") or "").strip(),
                 domain=domain,
                 slack_user_id=user_id,
+                channel_id=channel_id,
+                thread_ts=thread_ts,
+                text=text,
+                params=params,
             )
         is_scan_request = self._is_explicit_scan_request(text, params)
         is_article_flow = action != "scaffold" and not is_scan_request
@@ -1824,111 +2001,63 @@ Keep the response concise but informative."""
         )
 
         if domain and integration and integration.get("needs_github_auth") and not is_article_flow:
-            auth_url = integration.get("oauth_url")
-            if not auth_url:
-                auth_response = await api_client.get_github_auth_url(user_id, domain=domain)
-                auth_url = auth_response.get("auth_url")
-
-            if not auth_url:
-                return "Sorry mate, I couldn't get the authorization URL. Try again?"
-
-            await self._save_content_factory_pending_intent(
+            reconnect_result = await self._request_github_reconnect(
                 api_client,
-                user_id,
-                params,
-                text,
-                channel_id,
-                thread_ts,
+                user_id=user_id,
+                domain=domain,
+                github_repo=repo_name,
+                trigger="manual",
+                pending_action=action or ("scan" if is_scan_request else "repo_action"),
+                channel_id=channel_id,
+                thread_ts=thread_ts,
+                button_label=f"Reconnect GitHub for {domain}",
+                text=text,
+                params=params,
+                save_pending=True,
             )
-
-            blocks = [
-                {
-                    "type": "section",
-                    "text": {
-                        "type": "mrkdwn",
-                        "text": f"⚠️ GitHub isn't connected for *{domain}*.\nClick below to connect your GitHub repo for this domain."
-                    }
-                },
-                {
-                    "type": "actions",
-                    "elements": [
-                        {
-                            "type": "button",
-                            "text": {
-                                "type": "plain_text",
-                                "text": "Connect GitHub for " + domain,
-                                "emoji": True
-                            },
-                            "url": auth_url,
-                            "action_id": "connect_github",
-                            "style": "primary"
-                        }
-                    ]
-                }
-            ]
-
-            if channel_id:
-                post_message(channel_id, f"GitHub not connected for {domain}", thread_ts=thread_ts, blocks=blocks)
-                return f"GitHub isn't connected for {domain}. Click the button above to connect, then try again! 🔌"
-            return f"GitHub isn't connected for {domain}. Connect here: {auth_url}"
+            if reconnect_result is not None:
+                return reconnect_result
 
         # No repo at all — prompt to connect
         if not repo_name and not is_article_flow:
-            auth_response = await api_client.get_github_auth_url(user_id, domain=domain)
-            auth_url = auth_response.get("auth_url")
-
-            if not auth_url:
-                return "Sorry mate, I couldn't get the authorization URL. Try again?"
-
-            await self._save_content_factory_pending_intent(
+            reconnect_result = await self._request_github_reconnect(
                 api_client,
-                user_id,
-                params,
-                text,
-                channel_id,
-                thread_ts,
+                user_id=user_id,
+                domain=domain,
+                github_repo=None,
+                trigger="manual",
+                pending_action=action or ("scan" if is_scan_request else "repo_action"),
+                channel_id=channel_id,
+                thread_ts=thread_ts,
+                button_label="Reconnect GitHub & Select Repo",
+                text=text,
+                params=params,
+                save_pending=True,
             )
-
-            blocks = [
-                {
-                    "type": "section",
-                    "text": {
-                        "type": "mrkdwn",
-                        "text": (
-                            f"I see you're connected for *{domain}*, but no repository is selected for that domain. "
-                            "Click below to choose one."
-                            if domain
-                            else "I see you're connected, but no repository is selected. Click below to choose one."
-                        )
-                    }
-                },
-                {
-                    "type": "actions",
-                    "elements": [
-                        {
-                            "type": "button",
-                            "text": {
-                                "type": "plain_text",
-                                "text": "Re-connect & Select Repo",
-                                "emoji": True
-                            },
-                            "url": auth_url,
-                            "action_id": "connect_github",
-                            "style": "primary"
-                        }
-                    ]
-                }
-            ]
-
-            if channel_id:
-                post_message(channel_id, "Please select a repository", thread_ts=thread_ts, blocks=blocks)
-                return "Please choose a repository to use with the Content Factory. 🔌"
-            return f"Please select a repository here: {auth_url}"
+            if reconnect_result is not None:
+                return reconnect_result
 
         # 3. Handle explicit scaffold action
         if action == "scaffold":
             if not domain:
                 return "I need a domain to scaffold the articles directory. Try: `@Roo scaffold articles for <domain>`"
+
+            reconnect_result = await self._request_github_reconnect(
+                api_client,
+                user_id=user_id,
+                domain=domain,
+                github_repo=repo_name,
+                trigger="preflight",
+                pending_action="scaffold",
+                channel_id=channel_id,
+                thread_ts=thread_ts,
+                button_label=f"Reconnect GitHub for {domain}",
+                text=text,
+                params=params,
+                save_pending=True,
+            )
+            if reconnect_result is not None:
+                return reconnect_result
 
             # Check scan prerequisite
             if domain_info and not domain_info.get("scanned"):
@@ -2125,6 +2254,23 @@ Keep the response concise but informative."""
             post_message(channel_id, status_msg, thread_ts)
 
         if needs_scan:
+            reconnect_result = await self._request_github_reconnect(
+                api_client,
+                user_id=user_id,
+                domain=domain,
+                github_repo=repo_name,
+                trigger="preflight",
+                pending_action="scan",
+                channel_id=channel_id,
+                thread_ts=thread_ts,
+                button_label=f"Reconnect GitHub for {domain or 'this domain'}",
+                text=text,
+                params=params,
+                save_pending=True,
+            )
+            if reconnect_result is not None:
+                return reconnect_result
+
             scan_result = await api_client.trigger_repo_scan(
                 user_id, 
                 slack_channel_id=channel_id,
@@ -2350,6 +2496,30 @@ Keep the response concise but informative."""
             if access_error:
                 return access_error
 
+            effective_article_delivery_mode = (
+                requested_delivery_mode
+                or str((integration or {}).get("article_delivery_mode") or "").strip().lower()
+                or str((org_config_cached or {}).get("article_delivery_mode") or "").strip().lower()
+                or None
+            )
+            if effective_article_delivery_mode == "publish_code":
+                reconnect_result = await self._request_github_reconnect(
+                    api_client,
+                    user_id=user_id,
+                    domain=domain,
+                    github_repo=repo_name,
+                    trigger="preflight",
+                    pending_action="write_article",
+                    channel_id=channel_id,
+                    thread_ts=thread_ts,
+                    button_label=f"Reconnect GitHub for {domain}",
+                    text=text,
+                    params=params,
+                    save_pending=True,
+                )
+                if reconnect_result is not None:
+                    return reconnect_result
+
             from ..slack_client import get_user_info
             slack_info = get_user_info(user_id)
             real_name = str(slack_info.get("real_name") or "").strip()
@@ -2406,6 +2576,41 @@ Keep the response concise but informative."""
                 except Exception:
                     error_data = {}
                 error_code = error_data.get("error_code", "")
+                if error_code == "AUTH_REQUIRED":
+                    if not error_data.get("pending_intent_stored"):
+                        await self._save_content_factory_pending_intent(
+                            api_client,
+                            user_id,
+                            params,
+                            text,
+                            channel_id,
+                            thread_ts,
+                        )
+                    auth_url = error_data.get("auth_url")
+                    if not auth_url:
+                        reconnect = await api_client.reconnect_content_factory_github(
+                            slack_user_id=user_id,
+                            domain=domain,
+                            github_repo=repo_name,
+                            trigger="fallback_412",
+                            pending_action="write_article",
+                        )
+                        auth_url = reconnect.get("auth_url")
+                    message = error_data.get("message") or f"Reconnect GitHub for {domain} before I continue."
+                    if auth_url:
+                        blocks = self._build_github_reconnect_blocks(
+                            message,
+                            auth_url,
+                            button_label=f"Reconnect GitHub for {domain}",
+                        )
+                        if channel_id:
+                            post_message(channel_id, message, thread_ts=thread_ts, blocks=blocks)
+                            return f"{message} Use the button above to continue."
+                        return {
+                            "message": f"{message}\n\n{auth_url}",
+                            "blocks": blocks,
+                        }
+                    return message
                 if error_code == "PUBLISH_TARGET_ACTION_REQUIRED":
                     auth_url = None
                     if domain:
@@ -3955,134 +4160,97 @@ Keep the response concise but informative."""
         
         # 1. Check for valid integration & handle errors
         domain = params.get("domain")
+        action = params.get("action")
         integration = await api_client.get_integration(user_id, domain=domain)
+
+        if action == "reconnect":
+            resolved_domain = domain
+            connected_domains = integration.get("connected_domains", []) if integration else []
+            if not resolved_domain:
+                if len(connected_domains) == 1:
+                    resolved_domain = connected_domains[0].get("domain")
+                elif len(connected_domains) > 1:
+                    domain_list = "\n".join(
+                        f"  • `{item['domain']}` → `{item.get('github_repo', 'unknown')}`"
+                        for item in connected_domains
+                    )
+                    return (
+                        "You have multiple connected codebases. Tell me which one to reconnect GitHub for:\n\n"
+                        f"{domain_list}\n\nTry: `@Roo reconnect to github for <domain>`"
+                    )
+
+            reconnect_result = await self._request_github_reconnect(
+                api_client,
+                user_id=user_id,
+                domain=resolved_domain,
+                github_repo=None,
+                trigger="manual",
+                pending_action="reconnect_github",
+                channel_id=channel_id,
+                thread_ts=thread_ts,
+                button_label=(
+                    f"Reconnect GitHub for {resolved_domain}"
+                    if resolved_domain
+                    else "Reconnect GitHub"
+                ),
+            )
+            if reconnect_result is not None:
+                return reconnect_result
+            if resolved_domain:
+                return f"GitHub is already connected for {resolved_domain}."
+            return "GitHub is already connected."
         
         # Check for Expired Token or Other Errors (Same as content-factory)
         if integration and integration.get("error"):
-            auth_url = integration.get("auth_url")
-            error_msg = integration.get("error")
-            
-            if not auth_url:
-                auth_url_resp = await api_client.get_github_auth_url(user_id, domain=domain)
-                auth_url = auth_url_resp.get("auth_url")
-
-            blocks = [
-                {
-                    "type": "section",
-                    "text": {
-                        "type": "mrkdwn",
-                        "text": f"⚠️ **Connection Issue**: {error_msg}\nI need you to re-connect your GitHub account to continue."
-                    }
-                },
-                {
-                    "type": "actions",
-                    "elements": [
-                        {
-                            "type": "button",
-                            "text": {
-                                "type": "plain_text",
-                                "text": "Re-connect GitHub",
-                                "emoji": True
-                            },
-                            "url": auth_url,
-                            "action_id": "connect_github",
-                            "style": "danger"
-                        },
-                        {
-                            "type": "button",
-                            "text": {
-                                "type": "plain_text",
-                                "text": "🚀 I've Connected - Resume",
-                                "emoji": True
-                            },
-                            "action_id": "resume_scan",
-                            "value": "resume_scan",
-                            "style": "primary"
-                        }
-                    ]
-                }
-            ]
-            
-            if channel_id:
-                post_message(channel_id, "Please re-connect GitHub", thread_ts=thread_ts, blocks=blocks)
-                return "Please re-connect your GitHub account using the button above. 🔌"
-            return f"GitHub connection issue ({error_msg}). Please re-connect here: {auth_url}"
+            reconnect_result = await self._request_github_reconnect(
+                api_client,
+                user_id=user_id,
+                domain=domain,
+                github_repo=None,
+                trigger="manual",
+                pending_action="scan",
+                channel_id=channel_id,
+                thread_ts=thread_ts,
+                button_label="Re-connect GitHub",
+                include_resume=True,
+                resume_action="resume_scan",
+                resume_value={"domain": domain} if domain else {},
+            )
+            if reconnect_result is not None:
+                return reconnect_result
+            return f"GitHub connection issue ({integration.get('error')})."
 
         if not integration:
-            # Send Auth Button
-            auth_response = await api_client.get_github_auth_url(user_id, domain=domain)
-            auth_url = auth_response.get("auth_url")
-            
-            if not auth_url:
-                return "Sorry mate, I couldn't communicate with the backend to get the auth URL."
-            
-            blocks = [
-                {
-                    "type": "section",
-                    "text": {
-                        "type": "mrkdwn",
-                        "text": "I need permission to access your GitHub repository first. Click the button below to connect your account."
-                    }
-                },
-                {
-                    "type": "actions",
-                    "elements": [
-                        {
-                            "type": "button",
-                            "text": {
-                                "type": "plain_text",
-                                "text": "Connect GitHub Account",
-                                "emoji": True
-                            },
-                            "url": auth_url,
-                            "action_id": "connect_github",
-                            "style": "primary"
-                        }
-                    ]
-                }
-            ]
-            
-            # Post interactive message
-            if channel_id:
-                post_message(channel_id, "Please connect GitHub", thread_ts=thread_ts, blocks=blocks)
-                return "I've sent a button to connect your GitHub account. 🔌"
-            return f"Please connect your GitHub account here: {auth_url}"
+            reconnect_result = await self._request_github_reconnect(
+                api_client,
+                user_id=user_id,
+                domain=domain,
+                github_repo=None,
+                trigger="manual",
+                pending_action="scan",
+                channel_id=channel_id,
+                thread_ts=thread_ts,
+                button_label="Connect GitHub Account",
+            )
+            if reconnect_result is not None:
+                return reconnect_result
+            return "GitHub is already connected."
 
         # If a specific domain was requested, require domain-level connectivity.
         if domain and integration.get("needs_github_auth"):
-            auth_url = integration.get("oauth_url")
-            if not auth_url:
-                auth_response = await api_client.get_github_auth_url(user_id, domain=domain)
-                auth_url = auth_response.get("auth_url")
-            if channel_id and auth_url:
-                blocks = [
-                    {
-                        "type": "section",
-                        "text": {
-                            "type": "mrkdwn",
-                            "text": f"I need GitHub access for *{domain}* before I can scan that codebase."
-                        }
-                    },
-                    {
-                        "type": "actions",
-                        "elements": [
-                            {
-                                "type": "button",
-                                "text": {
-                                    "type": "plain_text",
-                                    "text": "Connect GitHub for Domain",
-                                    "emoji": True
-                                },
-                                "url": auth_url,
-                                "action_id": "connect_github",
-                                "style": "primary"
-                            }
-                        ]
-                    }
-                ]
-                post_message(channel_id, f"Connect GitHub for {domain}", thread_ts=thread_ts, blocks=blocks)
-                return f"I need domain-level GitHub access for {domain} before I can scan it."
-            return f"I need domain-level GitHub access for {domain} before I can scan it: {auth_url or 'please reconnect GitHub.'}"
+            reconnect_result = await self._request_github_reconnect(
+                api_client,
+                user_id=user_id,
+                domain=domain,
+                github_repo=None,
+                trigger="manual",
+                pending_action="scan",
+                channel_id=channel_id,
+                thread_ts=thread_ts,
+                button_label=f"Connect GitHub for {domain}",
+            )
+            if reconnect_result is not None:
+                return reconnect_result
 
         # 2. Determine Repo Name
         # When the user names a domain explicitly, prefer the domain-resolved repo.
@@ -4094,14 +4262,20 @@ Keep the response concise but informative."""
         )
         
         if not repo_name:
-             # Logic C: Connected but no repo selected
-             auth_response = await api_client.get_github_auth_url(user_id, domain=domain)
-             auth_url = auth_response.get("auth_url")
-             if channel_id:
-                 # Reuse connection block but maybe change text logic if we wanted, for now simplistic
-                 post_message(channel_id, f"You are connected but I don't see a repository linked. Please select one: {auth_url}", thread_ts=thread_ts)
-                 return "Please select a repository to scan."
-             return f"Please select a repository here: {auth_url}"
+             reconnect_result = await self._request_github_reconnect(
+                 api_client,
+                 user_id=user_id,
+                 domain=domain,
+                 github_repo=None,
+                 trigger="manual",
+                 pending_action="scan",
+                 channel_id=channel_id,
+                 thread_ts=thread_ts,
+                 button_label="Reconnect GitHub & Select Repo",
+             )
+             if reconnect_result is not None:
+                 return reconnect_result
+             return "Please select a repository to scan."
 
         scan_completed = bool(
             integration.get("scan_completed")
@@ -4130,6 +4304,20 @@ Keep the response concise but informative."""
             post_message(channel_id, scan_msg, thread_ts=thread_ts)
 
         try:
+            reconnect_result = await self._request_github_reconnect(
+                api_client,
+                user_id=user_id,
+                domain=domain,
+                github_repo=repo_name,
+                trigger="preflight",
+                pending_action="scan",
+                channel_id=channel_id,
+                thread_ts=thread_ts,
+                button_label=f"Reconnect GitHub for {domain or 'this domain'}",
+            )
+            if reconnect_result is not None:
+                return reconnect_result
+
             # Trigger via Backend Client
             scan_result = await api_client.trigger_repo_scan(
                 user_id,

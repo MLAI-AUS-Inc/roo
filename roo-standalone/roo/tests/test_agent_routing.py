@@ -4,6 +4,8 @@ import types
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 sys.modules.setdefault("frontmatter", SimpleNamespace(load=lambda *args, **kwargs: None))
 fake_executor_module = types.ModuleType("roo.skills.executor")
@@ -12,6 +14,7 @@ fake_executor_module.SkillResult = type("SkillResult", (), {})
 sys.modules.setdefault("roo.skills.executor", fake_executor_module)
 
 from roo.agent import RooAgent
+from roo.content_intent import parse_routing_intent
 from roo.skills.loader import Skill
 
 
@@ -195,6 +198,38 @@ def test_scan_domain_phrase_routes_to_content_factory():
 
     assert skill is not None
     assert skill.name == "content-factory"
+
+
+def test_reconnect_to_github_for_domain_routes_to_github_integration():
+    routing = parse_routing_intent("reconnect to github for mlai.au")
+
+    assert routing == {
+        "skill_name": "github-integration",
+        "params": {
+            "domain": "mlai.au",
+            "action": "reconnect",
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "authenticate with github for mlai.au",
+        "authenticate github for mlai.au",
+        "connect github again for mlai.au",
+    ],
+)
+def test_github_reconnect_aliases_route_to_github_integration(text: str):
+    routing = parse_routing_intent(text)
+
+    assert routing == {
+        "skill_name": "github-integration",
+        "params": {
+            "domain": "mlai.au",
+            "action": "reconnect",
+        },
+    }
 
 
 def test_scan_repo_for_domain_phrase_routes_to_content_factory():

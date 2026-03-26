@@ -52,6 +52,8 @@ GITHUB_AUTH_PATTERNS = (
     r"\b(?:re-?connect|connect|authori[sz]e|link|install|fix)\b.*\bgithub\b",
     r"\bgithub\b.*\b(?:re-?connect|connect|authori[sz]e|link|install|fix)\b",
     r"\bgithub\s+(?:auth|authentication|access|permission)\b",
+    r"\bauthenticat(?:e|ion)\b.*\bgithub\b",
+    r"\bgithub\b.*\bauthenticat(?:e|ion)\b",
 )
 THREAD_DOMAIN_REFERENCE_PATTERN = re.compile(
     r"\b(?:it|this|that|my\s+(?:domain|site|website|repo|repository|codebase)|"
@@ -139,6 +141,8 @@ def parse_routing_intent(
             params["domain"] = domain
         if action == "scan":
             params["action"] = "scan"
+        else:
+            params["action"] = "reconnect"
         return {"skill_name": "github-integration", "params": params}
 
     if action == "scan" and (domain or CONTENT_TARGET_PATTERN.search(text_lower)):
