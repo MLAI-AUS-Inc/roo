@@ -101,6 +101,11 @@ Use the `generate_article` function from `client.py` to start the job.
 
 The function returns a `job_id` which is used to track progress.
 
+For repo-backed actions, treat GitHub auth as a preflight gate:
+- Run scan/scaffold work only after GitHub access is confirmed for the target domain.
+- If the user chooses `publish_code`, reconnect GitHub before queueing the article run when auth is missing or expired.
+- If the user chooses `content_only`, continue without GitHub auth.
+
 ### Step 4: Topic Confirmation (Auto Mode)
 When research is complete, the backend sends a `topic_confirmation_request` callback.
 Roo displays an interactive card with:
@@ -147,6 +152,11 @@ If generation fails:
 1. Apologize briefly
 2. Explain what went wrong (if known)
 3. Suggest trying again or reaching out for help
+
+If the failure is an auth blocker with `error_code: AUTH_REQUIRED`:
+1. Do not describe it as a generic pipeline failure
+2. Start the GitHub reconnect flow for the active domain
+3. Keep the pending action so the user can retry after reconnecting
 
 Example:
 ```

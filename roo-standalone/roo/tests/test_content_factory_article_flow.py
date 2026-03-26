@@ -46,6 +46,8 @@ class FakeContentFactoryClient:
     resolve_content_thread_calls = []
     resolve_content_thread_result = None
     trigger_article_generation_result = None
+    reconnect_calls = []
+    reconnect_results = {}
 
     def __init__(self, *args, **kwargs):
         self.trigger_calls = []
@@ -70,6 +72,39 @@ class FakeContentFactoryClient:
                 domain,
                 FakeContentFactoryClient.auth_urls.get("default", "https://github.test/auth"),
             )
+        }
+
+    async def reconnect_content_factory_github(
+        self,
+        slack_user_id,
+        domain=None,
+        github_repo=None,
+        trigger="manual",
+        pending_action=None,
+    ):
+        FakeContentFactoryClient.reconnect_calls.append(
+            {
+                "slack_user_id": slack_user_id,
+                "domain": domain,
+                "github_repo": github_repo,
+                "trigger": trigger,
+                "pending_action": pending_action,
+            }
+        )
+        if domain in FakeContentFactoryClient.reconnect_results:
+            return FakeContentFactoryClient.reconnect_results[domain]
+        if "__default__" in FakeContentFactoryClient.reconnect_results:
+            return FakeContentFactoryClient.reconnect_results["__default__"]
+        return {
+            "status": "already_connected",
+            "connection_state": "connected",
+            "domain": domain,
+            "github_repo": github_repo or "MLAI-AUS-Inc/mlai-au",
+            "message": (
+                f"GitHub is already connected for {domain}."
+                if domain
+                else "GitHub is already connected."
+            ),
         }
 
     async def save_pending_intent(self, slack_user_id, intent_data):
@@ -297,6 +332,8 @@ def _patch_content_factory(monkeypatch):
     FakeContentFactoryClient.resolve_content_thread_calls = []
     FakeContentFactoryClient.resolve_content_thread_result = None
     FakeContentFactoryClient.trigger_article_generation_result = None
+    FakeContentFactoryClient.reconnect_calls = []
+    FakeContentFactoryClient.reconnect_results = {}
 
     monkeypatch.setattr(
         executor_module,
@@ -927,6 +964,166 @@ async def test_explicit_github_scan_with_existing_scan_prompts_for_confirmation(
     assert posted_messages == []
     assert result["blocks"][1]["elements"][0]["action_id"] == "prerequisite_scan"
     assert FakeContentFactoryClient.last_instance.repo_scan_calls == []
+
+
+@pytest.mark.asyncio
+async def test_manual_github_reconnect_returns_already_connected_without_scanning(monkeypatch):
+    executor = SkillExecutor()
+    posted_messages = []
+    _patch_content_factory(monkeypatch)
+    monkeypatch.setattr(
+        executor_module,
+        "post_message",
+        lambda *args, **kwargs: posted_messages.append({"args": args, "kwargs": kwargs}) or {"ts": "111.222"},
+    )
+
+    result = await executor._execute_github_integration(
+        skill=None,
+        text="reconnect to github for mlai.au",
+        params={"domain": "mlai.au", "action": "reconnect"},
+        user_id="U05QPB483K9",
+        channel_id="C123",
+        thread_ts="111.222",
+    )
+
+    assert result == "GitHub is already connected for mlai.au."
+    assert FakeContentFactoryClient.reconnect_calls == [
+        {
+            "slack_user_id": "U05QPB483K9",
+            "domain": "mlai.au",
+            "github_repo": None,
+            "trigger": "manual",
+            "pending_action": "reconnect_github",
+        }
+    ]
+    assert FakeContentFactoryClient.last_instance.repo_scan_calls == []
+    assert posted_messages == []
+
+
+@pytest.mark.asyncio
+async def test_manual_github_reconnect_posts_auth_button_when_auth_started(monkeypatch):
+    executor = SkillExecutor()
+    posted_messages = []
+    _patch_content_factory(monkeypatch)
+    FakeContentFactoryClient.reconnect_results["mlai.au"] = {
+        "status": "auth_started",
+        "connection_state": "auth_required",
+        "domain": "mlai.au",
+        "github_repo": "MLAI-AUS-Inc/mlai-au",
+        "auth_url": "https://github.test/reconnect",
+        "message": "GitHub needs to be connected for mlai.au before Roo can continue.",
+    }
+    monkeypatch.setattr(
+        executor_module,
+        "post_message",
+        lambda *args, **kwargs: posted_messages.append({"args": args, "kwargs": kwargs}) or {"ts": "111.222"},
+    )
+
+    result = await executor._execute_github_integration(
+        skill=None,
+        text="reconnect to github for mlai.au",
+        params={"domain": "mlai.au", "action": "reconnect"},
+        user_id="U05QPB483K9",
+        channel_id="C123",
+        thread_ts="111.222",
+    )
+
+    assert isinstance(result, dict)
+    assert "Use the button above to continue." in result["message"]
+    assert posted_messages[0]["kwargs"]["blocks"][1]["elements"][0]["url"] == "https://github.test/reconnect"
+    assert FakeContentFactoryClient.last_instance.repo_scan_calls == []
+
+
+@pytest.mark.asyncio
+async def test_publish_code_article_preflights_github_reconnect_before_queueing(monkeypatch):
+    executor = SkillExecutor()
+    posted_messages = []
+    _patch_content_factory(monkeypatch)
+    FakeContentFactoryClient.reconnect_results["mlai.au"] = {
+        "status": "auth_started",
+        "connection_state": "auth_required",
+        "domain": "mlai.au",
+        "github_repo": "MLAI-AUS-Inc/mlai-au",
+        "auth_url": "https://github.test/reconnect",
+        "message": "GitHub needs to be connected for mlai.au before Roo can continue.",
+    }
+    monkeypatch.setattr(
+        executor_module,
+        "post_message",
+        lambda *args, **kwargs: posted_messages.append({"args": args, "kwargs": kwargs}) or {"ts": "111.222"},
+    )
+
+    result = await executor._execute_content_factory(
+        skill=None,
+        text="write an article about AI agents for mlai.au and publish it as code",
+        params={
+            "domain": "mlai.au",
+            "topic": "AI agents",
+            "action": "write",
+            "confirmed": True,
+            "delivery_mode": "publish_code",
+            "delivery_mode_confirmed": True,
+        },
+        user_id="U05QPB483K9",
+        channel_id="C123",
+        thread_ts="111.222",
+    )
+
+    assert isinstance(result, dict)
+    assert "Use the button above to continue." in result["message"]
+    assert FakeContentFactoryClient.last_instance.trigger_calls == []
+    assert FakeContentFactoryClient.saved_intents
+    assert FakeContentFactoryClient.reconnect_calls[-1]["pending_action"] == "write_article"
+
+
+@pytest.mark.asyncio
+async def test_scan_preflights_github_reconnect_before_queueing(monkeypatch):
+    executor = SkillExecutor()
+    posted_messages = []
+    _patch_content_factory(monkeypatch)
+    FakeContentFactoryClient.domain_integrations["mlai.au"] = {
+        "github_repo": "MLAI-AUS-Inc/mlai-au",
+        "domain_github_repo": "MLAI-AUS-Inc/mlai-au",
+        "project_scanned": False,
+        "last_scanned_at": "Never",
+        "last_article": None,
+        "recommended_next_action": "scan",
+        "connected_domains": [
+            {
+                "domain": "mlai.au",
+                "github_repo": "MLAI-AUS-Inc/mlai-au",
+                "scanned": False,
+            }
+        ],
+    }
+    FakeContentFactoryClient.reconnect_results["mlai.au"] = {
+        "status": "auth_started",
+        "connection_state": "auth_required",
+        "domain": "mlai.au",
+        "github_repo": "MLAI-AUS-Inc/mlai-au",
+        "auth_url": "https://github.test/reconnect",
+        "message": "GitHub needs to be connected for mlai.au before Roo can continue.",
+    }
+    monkeypatch.setattr(
+        executor_module,
+        "post_message",
+        lambda *args, **kwargs: posted_messages.append({"args": args, "kwargs": kwargs}) or {"ts": "111.222"},
+    )
+
+    result = await executor._execute_content_factory(
+        skill=None,
+        text="scan mlai.au",
+        params={"domain": "mlai.au", "action": "scan", "confirmed": True},
+        user_id="U05QPB483K9",
+        channel_id="C123",
+        thread_ts="111.222",
+    )
+
+    assert isinstance(result, dict)
+    assert "Use the button above to continue." in result["message"]
+    assert FakeContentFactoryClient.last_instance.repo_scan_calls == []
+    assert FakeContentFactoryClient.saved_intents
+    assert FakeContentFactoryClient.reconnect_calls[-1]["pending_action"] == "scan"
 
 
 @pytest.mark.asyncio

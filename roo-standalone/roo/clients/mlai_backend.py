@@ -713,6 +713,39 @@ class MLAIBackendClient:
             print(f"Failed to get GitHub auth URL: {e}")
             return {"error": str(e)}
 
+    async def reconnect_content_factory_github(
+        self,
+        slack_user_id: str,
+        domain: Optional[str] = None,
+        github_repo: Optional[str] = None,
+        trigger: str = "manual",
+        pending_action: Optional[str] = None,
+    ) -> dict:
+        """Start or confirm the Content Factory GitHub reconnect flow."""
+        if not self.base_url:
+            raise ValueError("MLAI_BACKEND_URL not configured")
+
+        payload = {
+            "slack_user_id": self._clean_slack_id(slack_user_id),
+            "trigger": trigger,
+        }
+        if domain:
+            payload["domain"] = domain
+        if github_repo:
+            payload["github_repo"] = github_repo
+        if pending_action:
+            payload["pending_action"] = pending_action
+
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{self.base_url}/api/content-factory/github/reconnect",
+                json=payload,
+                headers=self.headers,
+                timeout=20.0,
+            )
+            response.raise_for_status()
+            return response.json()
+
     async def get_integration(self, slack_user_id: str, domain: Optional[str] = None) -> Optional[dict]:
         """Check if user has a valid GitHub integration.
 
