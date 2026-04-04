@@ -191,6 +191,39 @@ def test_content_thread_context_keeps_publish_pr_follow_up_on_content(monkeypatc
     assert skill.name == "content-factory"
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "publish this article as a PR",
+        "publish this bundle as a PR",
+        "turn this bundle into a PR",
+        "open a draft PR for this bundle",
+        "push this bundle to PR",
+        "push this article to PR",
+    ],
+)
+def test_publish_pr_aliases_route_to_content_factory_thread_follow_up(monkeypatch, text: str):
+    agent = _make_agent()
+    agent.remember_thread_context(
+        "content-factory",
+        "C123",
+        "1772971600.288239",
+        domain="birdpsychology.com.au",
+        workflow="write",
+        active_job_id="job-content-123",
+    )
+
+    async def fail_chat(*args, **kwargs):
+        raise AssertionError("LLM router should not be needed for publish-pr follow-up")
+
+    monkeypatch.setattr("roo.agent.chat", fail_chat)
+
+    skill = asyncio.run(agent._select_skill(text, [], "C123", "1772971600.288239"))
+
+    assert skill is not None
+    assert skill.name == "content-factory"
+
+
 def test_scan_domain_phrase_routes_to_content_factory():
     agent = _make_agent()
 
@@ -329,6 +362,61 @@ def test_handle_mention_passes_publish_pr_job_from_thread_context(monkeypatch):
     result = asyncio.run(
         agent.handle_mention(
             text="<@U090FV0GTT4> publish this article as a PR",
+            user_id="U05QPB483K9",
+            channel_id="C123",
+            thread_ts="123.456",
+        )
+    )
+
+    assert result["skill_used"] == "content-factory"
+    assert captured["param_overrides"] == {
+        "action": "publish_pr",
+        "domain": "birdpsychology.com.au",
+        "job_id": "job-content-123",
+    }
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "<@U090FV0GTT4> publish this article as a PR",
+        "<@U090FV0GTT4> push this bundle to PR",
+    ],
+)
+def test_handle_mention_passes_publish_pr_job_from_thread_context_aliases(monkeypatch, text: str):
+    agent = _make_agent()
+    agent.remember_thread_context(
+        "content-factory",
+        "C123",
+        "123.456",
+        domain="birdpsychology.com.au",
+        workflow="write",
+        active_job_id="job-content-123",
+    )
+    captured = {}
+
+    class FakeExecutor:
+        async def execute(self, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(
+                message="ok",
+                data=kwargs.get("param_overrides"),
+                blocks=None,
+                suppress_post=False,
+            )
+
+    agent.skill_executor = FakeExecutor()
+
+    async def fail_chat(*args, **kwargs):
+        raise AssertionError("LLM router should not be needed for publish-pr follow-up")
+
+    monkeypatch.setattr("roo.agent.chat", fail_chat)
+    monkeypatch.setattr("roo.agent.get_thread_messages", lambda channel, thread_ts: [])
+    monkeypatch.setattr("roo.slack_client.get_bot_user_id", lambda: "U090FV0GTT4")
+
+    result = asyncio.run(
+        agent.handle_mention(
+            text=text,
             user_id="U05QPB483K9",
             channel_id="C123",
             thread_ts="123.456",

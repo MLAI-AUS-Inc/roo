@@ -127,6 +127,32 @@ def get_thread_messages(channel: str, thread_ts: str) -> list[dict]:
         return []
 
 
+def get_message(channel: str, message_ts: str) -> Optional[Dict[str, Any]]:
+    """Retrieve a single Slack message by timestamp."""
+    client = get_slack_client()
+
+    try:
+        response = client.conversations_history(
+            channel=channel,
+            latest=message_ts,
+            oldest=message_ts,
+            inclusive=True,
+            limit=1,
+            include_all_metadata=True,
+        )
+
+        if response.get("ok"):
+            messages = response.get("messages", [])
+            if messages:
+                return messages[0]
+
+        return None
+
+    except Exception as e:
+        print(f"❌ Slack message lookup error for {channel}:{message_ts}: {e}")
+        return None
+
+
 @lru_cache(maxsize=100)
 def get_user_info(user_id: str) -> Dict[str, Any]:
     """
@@ -240,4 +266,3 @@ def get_channel_id(channel_name: str) -> Optional[str]:
     except Exception as e:
         print(f"❌ Failed to lookup channel {channel_name}: {e}")
         return None
-

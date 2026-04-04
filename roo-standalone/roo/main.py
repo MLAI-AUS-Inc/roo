@@ -26,7 +26,14 @@ from .content_factory_progress import (
     get_content_factory_article_cost_points,
     normalize_content_factory_domain,
 )
-from .slack_client import post_message, send_dm
+from .points_request_approval import (
+    APPROVAL_REACTION_NAMES,
+    forget_points_request_summary,
+    get_points_request_record_from_message,
+    get_remembered_points_request_summary,
+    remember_points_request_summary,
+)
+from .slack_client import get_message, post_message, send_dm
 
 # Pending intents for auto-continue after prerequisite steps complete.
 # Key: "{slack_user_id}:{domain}" → {"action": "write", "topic": "...", "channel_id": "...", "thread_ts": "..."}
@@ -902,6 +909,40 @@ def _extract_backend_error_message(exc: Exception) -> str:
     return str(exc)
 
 
+async def _resolve_points_request_for_reaction(
+    client: Any,
+    *,
+    channel_id: str,
+    message_ts: str,
+) -> Optional[dict[str, Any]]:
+    """Resolve a pending points request from backend, cache, or Slack metadata."""
+    try:
+        request_record = await client.get_points_request_by_slack_message(channel_id, message_ts)
+    except Exception as exc:
+        print(
+            "⚠️ Points request lookup by summary message failed; checking fallback sources: "
+            f"channel={channel_id} message_ts={message_ts} error={exc!r}"
+        )
+        request_record = None
+
+    if request_record:
+        return request_record
+
+    remembered_request = get_remembered_points_request_summary(channel_id, message_ts)
+    if remembered_request:
+        print(f"🧾 Using cached points request mapping for {channel_id}:{message_ts}")
+        return remembered_request
+
+    message = get_message(channel_id, message_ts)
+    metadata_request = get_points_request_record_from_message(message)
+    if metadata_request:
+        remember_points_request_summary(channel_id, message_ts, metadata_request)
+        print(f"🧾 Using Slack message metadata for points request {channel_id}:{message_ts}")
+        return metadata_request
+
+    return None
+
+
 async def _handle_reaction_added(event: dict):
     """Handle Slack emoji approvals for pending points requests."""
     reactor_user_id = event.get("user")
@@ -910,7 +951,7 @@ async def _handle_reaction_added(event: dict):
     channel_id = item.get("channel")
     message_ts = item.get("ts")
 
-    if reaction != "white_check_mark":
+    if reaction not in APPROVAL_REACTION_NAMES:
         return
     if not reactor_user_id or item.get("type") != "message" or not channel_id or not message_ts:
         return
@@ -928,11 +969,16 @@ async def _handle_reaction_added(event: dict):
             internal_api_key=settings.INTERNAL_API_KEY or settings.ROO_API_KEY or settings.MLAI_API_KEY,
         )
 
-        request_record = await client.get_points_request_by_slack_message(channel_id, message_ts)
+        request_record = await _resolve_points_request_for_reaction(
+            client,
+            channel_id=channel_id,
+            message_ts=message_ts,
+        )
         if not request_record:
             return
 
         if request_record.get("status") not in (None, "", "pending"):
+            forget_points_request_summary(channel_id, message_ts)
             return
 
         request_id = request_record.get("id")
@@ -943,6 +989,7 @@ async def _handle_reaction_added(event: dict):
             result = await client.approve_points_request(int(request_id), reactor_user_id)
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code in (404, 409):
+                forget_points_request_summary(channel_id, message_ts)
                 return
             send_dm(
                 reactor_user_id,
@@ -978,6 +1025,7 @@ async def _handle_reaction_added(event: dict):
             ),
             thread_ts=thread_ts,
         )
+        forget_points_request_summary(channel_id, message_ts)
 
     except Exception as exc:
         print(f"❌ Error handling reaction approval: {exc}")

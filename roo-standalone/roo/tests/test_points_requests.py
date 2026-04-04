@@ -13,9 +13,17 @@ sys.modules.pop("roo.skills.executor", None)
 
 backend_module = importlib.import_module("roo.clients.mlai_backend")
 main_module = importlib.import_module("roo.main")
+approval_module = importlib.import_module("roo.points_request_approval")
 slack_client_module = importlib.import_module("roo.slack_client")
 executor_module = importlib.import_module("roo.skills.executor")
 SkillExecutor = executor_module.SkillExecutor
+
+
+@pytest.fixture(autouse=True)
+def clear_points_request_summary_cache():
+    approval_module.clear_points_request_summaries()
+    yield
+    approval_module.clear_points_request_summaries()
 
 
 class FakePointsClient:
@@ -301,7 +309,18 @@ async def test_request_points_creates_request_and_suppresses_auto_post(monkeypat
         "slack_summary_message_ts": "222.333",
     }
     assert posted_messages[0]["thread_ts"] == "111.222"
-    assert "Points Admins can approve this by reacting with ✅" in posted_messages[0]["text"]
+    assert "Points Admins can approve this by reacting with a green tick" in posted_messages[0]["text"]
+    assert posted_messages[0]["metadata"] == {
+        "event_type": "roo_points_request",
+        "event_payload": {
+            "request_id": 42,
+            "requester_slack_id": "U123",
+            "target_slack_id": "U123",
+            "points": 5,
+            "reason": "helping at the event",
+            "slack_thread_ts": "111.222",
+        },
+    }
 
 
 @pytest.mark.asyncio
@@ -356,7 +375,7 @@ async def test_request_points_404_returns_integration_error(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_request_points_attach_failure_returns_manual_fallback(monkeypatch):
+async def test_request_points_attach_failure_keeps_slack_approval_active(monkeypatch):
     executor = SkillExecutor()
     posted_messages = []
 
@@ -378,8 +397,13 @@ async def test_request_points_attach_failure_returns_manual_fallback(monkeypatch
         skill=None,
     )
 
-    assert "couldn't register emoji approval" in result
+    assert result["suppress_post"] is True
+    assert result["data"]["request_id"] == 42
     assert posted_messages[0]["thread_ts"] == "111.222"
+    assert posted_messages[0]["metadata"]["event_payload"]["request_id"] == 42
+    assert (
+        approval_module.get_remembered_points_request_summary("C123", "222.333")["id"] == 42
+    )
 
 
 @pytest.mark.asyncio
@@ -868,6 +892,12 @@ class FailingApprovalClient(FakeApprovalClient):
         raise httpx.HTTPStatusError("forbidden", request=request, response=response)
 
 
+class LookupMissApprovalClient(FakeApprovalClient):
+    async def get_points_request_by_slack_message(self, slack_channel_id, slack_message_ts):
+        self.lookup_args = (slack_channel_id, slack_message_ts)
+        return None
+
+
 class InitCapturingBackendClient:
     last_init = None
 
@@ -1013,6 +1043,122 @@ async def test_reaction_approval_failure_dms_reactor(monkeypatch):
     assert direct_messages
     assert direct_messages[0][0] == "UNOTADMIN"
     assert "Not a points admin" in direct_messages[0][1]
+
+
+@pytest.mark.asyncio
+async def test_reaction_approval_uses_cached_summary_mapping_when_backend_lookup_misses(monkeypatch):
+    posted_messages = []
+    direct_messages = []
+
+    approval_module.remember_points_request_summary(
+        "C123",
+        "222.333",
+        {
+            "id": 9,
+            "status": "pending",
+            "requester_slack_id": "UREQUESTER",
+            "target_slack_id": "UREQUESTER",
+            "points": 18,
+            "reason": "helping out at the openclaw event last night",
+            "slack_thread_ts": "111.222",
+        },
+    )
+
+    monkeypatch.setattr(
+        main_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            MLAI_BACKEND_URL="https://backend.test",
+            MLAI_API_KEY="api-key",
+            INTERNAL_API_KEY="internal-key",
+            ROO_API_KEY="roo-api-key",
+        ),
+    )
+    monkeypatch.setattr(backend_module, "MLAIBackendClient", LookupMissApprovalClient)
+    monkeypatch.setattr(
+        main_module,
+        "post_message",
+        lambda **kwargs: posted_messages.append(kwargs) or {"ts": "333.444"},
+    )
+    monkeypatch.setattr(
+        main_module,
+        "send_dm",
+        lambda user_id, text, **kwargs: direct_messages.append((user_id, text)),
+    )
+
+    await main_module._handle_reaction_added(
+        {
+            "user": "UADMIN",
+            "reaction": "white_check_mark",
+            "item": {"type": "message", "channel": "C123", "ts": "222.333"},
+        }
+    )
+
+    assert LookupMissApprovalClient.last_instance.lookup_args == ("C123", "222.333")
+    assert LookupMissApprovalClient.last_instance.approve_args == (9, "UADMIN")
+    assert posted_messages[0]["thread_ts"] == "111.222"
+    assert "<@UREQUESTER> received 5 points" in posted_messages[0]["text"]
+    assert approval_module.get_remembered_points_request_summary("C123", "222.333") is None
+    assert direct_messages == []
+
+
+@pytest.mark.asyncio
+async def test_reaction_approval_uses_message_metadata_for_heavy_check_mark(monkeypatch):
+    posted_messages = []
+    direct_messages = []
+
+    monkeypatch.setattr(
+        main_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            MLAI_BACKEND_URL="https://backend.test",
+            MLAI_API_KEY="api-key",
+            INTERNAL_API_KEY="internal-key",
+            ROO_API_KEY="roo-api-key",
+        ),
+    )
+    monkeypatch.setattr(backend_module, "MLAIBackendClient", LookupMissApprovalClient)
+    monkeypatch.setattr(
+        main_module,
+        "get_message",
+        lambda channel, message_ts: {
+            "metadata": {
+                "event_type": "roo_points_request",
+                "event_payload": {
+                    "request_id": 12,
+                    "requester_slack_id": "UREQUESTER",
+                    "target_slack_id": "UREQUESTER",
+                    "points": 18,
+                    "reason": "helping out at the openclaw event last night",
+                    "slack_thread_ts": "111.222",
+                },
+            }
+        },
+    )
+    monkeypatch.setattr(
+        main_module,
+        "post_message",
+        lambda **kwargs: posted_messages.append(kwargs) or {"ts": "333.444"},
+    )
+    monkeypatch.setattr(
+        main_module,
+        "send_dm",
+        lambda user_id, text, **kwargs: direct_messages.append((user_id, text)),
+    )
+
+    await main_module._handle_reaction_added(
+        {
+            "user": "UADMIN",
+            "reaction": "heavy_check_mark",
+            "item": {"type": "message", "channel": "C123", "ts": "222.333"},
+        }
+    )
+
+    assert LookupMissApprovalClient.last_instance.lookup_args == ("C123", "222.333")
+    assert LookupMissApprovalClient.last_instance.approve_args == (12, "UADMIN")
+    assert posted_messages[0]["thread_ts"] == "111.222"
+    assert "<@UREQUESTER> received 5 points" in posted_messages[0]["text"]
+    assert direct_messages == []
 
 
 @pytest.mark.asyncio
