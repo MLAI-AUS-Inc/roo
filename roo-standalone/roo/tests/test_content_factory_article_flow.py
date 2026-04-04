@@ -675,6 +675,34 @@ async def test_publish_pr_follow_up_promotes_existing_bundle(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_push_bundle_to_pr_follow_up_promotes_existing_bundle(monkeypatch):
+    executor = SkillExecutor()
+    _patch_content_factory(monkeypatch)
+
+    result = await executor._execute_content_factory(
+        skill=None,
+        text="push this bundle to PR",
+        params={
+            "action": "publish_pr",
+            "domain": "birdpsychology.com.au",
+            "job_id": "job-content-123",
+        },
+        user_id="U05QPB483K9",
+        channel_id="C123",
+        thread_ts="111.222",
+    )
+
+    assert isinstance(result, dict)
+    assert "draft PR" in result["message"]
+    assert result["data"]["content_factory_progress_job_id"] == "publish-job-456"
+    assert result["data"]["content_factory_watchdog"] is True
+    assert result["data"]["content_factory_domain"] == "birdpsychology.com.au"
+    assert FakeContentFactoryClient.publish_article_as_pr_calls == [
+        {"job_id": "job-content-123", "slack_user_id": "U05QPB483K9"}
+    ]
+
+
+@pytest.mark.asyncio
 async def test_publish_pr_follow_up_without_job_id_returns_helpful_error(monkeypatch):
     executor = SkillExecutor()
     _patch_content_factory(monkeypatch)

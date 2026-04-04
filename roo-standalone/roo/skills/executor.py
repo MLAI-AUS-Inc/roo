@@ -26,6 +26,11 @@ from ..content_factory_progress import (
 )
 from ..content_intent import detect_content_action, is_explicit_scan_request
 from ..llm import chat, embed, get_llm_client
+from ..points_request_approval import (
+    build_points_request_metadata,
+    build_points_request_record,
+    remember_points_request_summary,
+)
 from ..slack_client import post_message
 from ..config import get_settings
 
@@ -3476,16 +3481,33 @@ Keep the response concise but informative."""
             summary_text = (
                 f"📝 *Points request pending*\n\n"
                 f"<@{user_id}> requested *{points} points* for: {reason}\n\n"
-                f"Points Admins can approve this by reacting with ✅ to this message."
+                f"Points Admins can approve this by reacting with a green tick (✅ or ✔️) to this message."
             )
-            summary_response = post_message(
-                channel=channel_id,
-                text=summary_text,
-                thread_ts=thread_ts,
-            )
+            pending_request_record = None
+            post_kwargs = {
+                "channel": channel_id,
+                "text": summary_text,
+                "thread_ts": thread_ts,
+            }
+            if request_id:
+                pending_request_record = build_points_request_record(
+                    request_id=int(request_id),
+                    requester_slack_id=user_id,
+                    target_slack_id=user_id,
+                    points=points,
+                    reason=reason,
+                    slack_thread_ts=thread_ts,
+                )
+                post_kwargs["metadata"] = build_points_request_metadata(pending_request_record)
+            summary_response = post_message(**post_kwargs)
             summary_ts = summary_response.get("ts")
 
-            if request_id and summary_ts:
+            if request_id and summary_ts and pending_request_record:
+                remember_points_request_summary(
+                    channel_id=channel_id,
+                    summary_message_ts=summary_ts,
+                    record=pending_request_record,
+                )
                 try:
                     await client.attach_points_request_slack_summary(
                         request_id=request_id,
@@ -3495,13 +3517,9 @@ Keep the response concise but informative."""
                     )
                 except Exception as exc:
                     print(
-                        "❌ Points request summary attach failed: "
+                        "⚠️ Points request summary attach failed; continuing with Slack-side fallback: "
                         f"request_id={request_id} channel={channel_id} "
-                        f"thread_ts={thread_ts} error={exc}"
-                    )
-                    return (
-                        "I posted the points request, but I couldn't register emoji approval for it. "
-                        "Please ask a Points Admin to use the existing manual award flow for now."
+                        f"thread_ts={thread_ts} error={exc!r}"
                     )
 
                 return {

@@ -35,6 +35,8 @@ RESEARCH_PATTERNS = (
 PUBLISH_PR_PATTERNS = (
     r"\bpublish\b.*\b(?:article|bundle|draft|post)\b.*\bas\s+a\s+p\.?r\.?\b",
     r"\bpublish\b.*\bas\s+a\s+pull\s+request\b",
+    r"\bpush\b.*\b(?:article|bundle|draft|post)\b.*\bto\s+(?:a\s+)?p\.?r\.?\b",
+    r"\bpush\b.*\b(?:article|bundle|draft|post)\b.*\bto\s+(?:a\s+)?pull\s+request\b",
     r"\bturn\b.*\b(?:article|bundle|draft|post)\b.*\binto\s+a\s+p\.?r\.?\b",
     r"\bopen\b.*\b(?:a\s+)?(?:draft\s+)?p\.?r\.?\b",
 )

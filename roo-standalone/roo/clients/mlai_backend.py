@@ -16,14 +16,21 @@ class MLAIBackendClient:
     """Client for mlai-backend API."""
     
     def __init__(self, base_url: Optional[str] = None, api_key: Optional[str] = None, internal_api_key: Optional[str] = None):
-        settings = get_settings()
-        self.base_url = base_url or settings.MLAI_BACKEND_URL
-        self.api_key = api_key or settings.ROO_API_KEY or settings.MLAI_API_KEY
+        settings = None
+        if base_url is None or api_key is None or internal_api_key is None:
+            settings = get_settings()
+
+        self.base_url = base_url or (settings.MLAI_BACKEND_URL if settings else None)
+        self.api_key = api_key or (
+            settings.ROO_API_KEY if settings else None
+        ) or (
+            settings.MLAI_API_KEY if settings else None
+        )
         self.internal_api_key = (
             internal_api_key
-            or settings.INTERNAL_API_KEY
-            or settings.ROO_API_KEY
-            or settings.MLAI_API_KEY
+            or (settings.INTERNAL_API_KEY if settings else None)
+            or (settings.ROO_API_KEY if settings else None)
+            or (settings.MLAI_API_KEY if settings else None)
         )
         self.base_url = self.base_url.rstrip('/') if self.base_url else ""
         self._points_base = f"{self.base_url}/api/v1/points"
@@ -95,9 +102,10 @@ class MLAIBackendClient:
         exc: Exception,
     ) -> None:
         """Log network/transport failures for points-request API calls."""
+        error_body = f"{type(exc).__name__}: {exc!r}"
         print(
             f"🧾 Points request step={step} endpoint={endpoint} "
-            f"status=transport_error error_body={exc}"
+            f"status=transport_error error_body={error_body}"
         )
     
     async def save_article_generation(
