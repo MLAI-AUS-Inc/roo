@@ -79,6 +79,11 @@ class MLAIBackendClient:
             return ""
         return repr(payload)
 
+    @staticmethod
+    def _describe_exception(exc: Exception) -> str:
+        detail = str(exc).strip()
+        return detail or exc.__class__.__name__
+
     def _log_points_request_step(
         self,
         *,
@@ -763,34 +768,47 @@ class MLAIBackendClient:
                     When provided, response includes domain_connected, domain_github_repo,
                     needs_github_auth, and oauth_url fields.
         """
-        try:
-            clean_id = self._clean_slack_id(slack_user_id)
-            params = {}
-            if domain:
-                params["domain"] = domain
-            async with httpx.AsyncClient() as client:
-                response = await client.get(
-                    f"{self.base_url}/api/v1/integrations/github/{clean_id}/",
-                    headers=self.headers,
-                    params=params,
-                    timeout=10.0
-                )
-                if response.status_code == 404:
-                    return None
-                response.raise_for_status()
-                return response.json()
-        except Exception as e:
-            print(f"Failed to check integration status: {e}")
-            return None
+        clean_id = self._clean_slack_id(slack_user_id)
+        params = {}
+        if domain:
+            params["domain"] = domain
 
-    async def save_pending_intent(self, slack_user_id: str, intent_data: str) -> None:
+        for attempt in range(2):
+            try:
+                async with httpx.AsyncClient() as client:
+                    response = await client.get(
+                        f"{self.base_url}/api/v1/integrations/github/{clean_id}/",
+                        headers=self.headers,
+                        params=params,
+                        timeout=15.0
+                    )
+                    if response.status_code == 404:
+                        return None
+                    response.raise_for_status()
+                    return response.json()
+            except httpx.TimeoutException as exc:
+                if attempt == 0:
+                    print(
+                        f"Integration status check timed out for {clean_id}"
+                        f"{f'/{domain}' if domain else ''}; retrying once..."
+                    )
+                    continue
+                print(f"Failed to check integration status: {self._describe_exception(exc)}")
+                return None
+            except Exception as exc:
+                print(f"Failed to check integration status: {self._describe_exception(exc)}")
+                return None
+
+        return None
+
+    async def save_pending_intent(self, slack_user_id: str, intent: Any) -> None:
         """Save a pending intent to resume after auth."""
         async with httpx.AsyncClient() as client:
             response = await client.post(
                 f"{self.base_url}/api/v1/integrations/pending-intent/",
-                json={"slack_user_id": slack_user_id, "intent_data": intent_data},
+                json={"slack_user_id": slack_user_id, "intent": intent},
                 headers=self.headers,
-                timeout=10.0
+                timeout=15.0
             )
             response.raise_for_status()
 

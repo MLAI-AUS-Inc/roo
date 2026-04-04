@@ -36,6 +36,7 @@ class FakeContentFactoryClient:
     org_configs = {}
     auth_urls = {}
     saved_intents = []
+    save_pending_intent_exception = None
     balance_by_user = {}
     user_profiles = {}
     attached_progress_messages = []
@@ -108,10 +109,12 @@ class FakeContentFactoryClient:
         }
 
     async def save_pending_intent(self, slack_user_id, intent_data):
+        if FakeContentFactoryClient.save_pending_intent_exception is not None:
+            raise FakeContentFactoryClient.save_pending_intent_exception
         FakeContentFactoryClient.saved_intents.append(
             {
                 "slack_user_id": slack_user_id,
-                "intent_data": json.loads(intent_data),
+                "intent_data": json.loads(intent_data) if isinstance(intent_data, str) else intent_data,
             }
         )
 
@@ -308,6 +311,7 @@ def _patch_content_factory(monkeypatch):
     FakeContentFactoryClient.auth_urls = {"default": "https://github.test/auth"}
     FakeContentFactoryClient.org_configs = {}
     FakeContentFactoryClient.saved_intents = []
+    FakeContentFactoryClient.save_pending_intent_exception = None
     FakeContentFactoryClient.balance_by_user = {}
     FakeContentFactoryClient.attached_progress_messages = []
     FakeContentFactoryClient.still_working_calls = []
@@ -1101,7 +1105,20 @@ async def test_publish_code_article_preflights_github_reconnect_before_queueing(
     assert "Use the button above to continue." in result["message"]
     assert FakeContentFactoryClient.last_instance.trigger_calls == []
     assert FakeContentFactoryClient.saved_intents
+    assert FakeContentFactoryClient.saved_intents[0]["intent_data"]["type"] == "write_article"
+    assert (
+        FakeContentFactoryClient.saved_intents[0]["intent_data"]["article_request"]["request_source"]
+        == "roo_slackbot"
+    )
     assert FakeContentFactoryClient.reconnect_calls[-1]["pending_action"] == "write_article"
+    pending = main_module._get_pending_intent(
+        "U05QPB483K9",
+        "mlai.au",
+        wait_for="scan_complete",
+    )
+    assert pending is not None
+    assert pending["action"] == "write"
+    assert pending["delivery_mode"] == "publish_code"
 
 
 @pytest.mark.asyncio
@@ -1152,6 +1169,49 @@ async def test_scan_preflights_github_reconnect_before_queueing(monkeypatch):
     assert FakeContentFactoryClient.last_instance.repo_scan_calls == []
     assert FakeContentFactoryClient.saved_intents
     assert FakeContentFactoryClient.reconnect_calls[-1]["pending_action"] == "scan"
+
+
+@pytest.mark.asyncio
+async def test_write_request_survives_pending_intent_timeout_with_local_fallback(monkeypatch):
+    executor = SkillExecutor()
+    posted_messages = []
+    _patch_content_factory(monkeypatch)
+    FakeContentFactoryClient.generic_integration = None
+    FakeContentFactoryClient.domain_integrations["mlai.au"] = None
+    FakeContentFactoryClient.save_pending_intent_exception = httpx.ReadTimeout("backend timed out")
+    monkeypatch.setattr(
+        executor_module,
+        "post_message",
+        lambda *args, **kwargs: posted_messages.append({"args": args, "kwargs": kwargs}) or {"ts": "111.222"},
+    )
+
+    result = await executor._execute_content_factory(
+        skill=None,
+        text="write an article for mlai.au about go to market for startups",
+        params={
+            "domain": "mlai.au",
+            "topic": "go to market for startups",
+            "action": "write",
+            "confirmed": True,
+        },
+        user_id="U05QPB483K9",
+        channel_id="C123",
+        thread_ts="111.222",
+    )
+
+    assert result == "I've sent a button to connect your GitHub account. 🔌"
+    assert len(posted_messages) == 1
+    assert posted_messages[0]["kwargs"]["blocks"][1]["elements"][0]["text"]["text"] == "Connect GitHub Account"
+    assert FakeContentFactoryClient.saved_intents == []
+    pending = main_module._get_pending_intent(
+        "U05QPB483K9",
+        "mlai.au",
+        wait_for="scan_complete",
+    )
+    assert pending is not None
+    assert pending["action"] == "write"
+    assert pending["topic"] == "go to market for startups"
+    assert pending["client_request_id"].startswith("content-factory-")
 
 
 @pytest.mark.asyncio
