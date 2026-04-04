@@ -1346,14 +1346,77 @@ Keep the response concise but informative."""
         thread_ts: Optional[str],
     ) -> None:
         """Persist the original content request so GitHub auth/repo selection can resume it."""
-        intent_data = json.dumps({
+        params = dict(params or {})
+        client_request_id = self._get_content_factory_client_request_id(params)
+        params["client_request_id"] = client_request_id
+        domain = normalize_content_factory_domain(params.get("domain"))
+        action = str(params.get("action") or "").strip().lower()
+
+        backend_intent: dict[str, Any] = {
+            "type": "roo_content_factory",
             "skill": "content-factory",
+            "action": action or None,
             "params": params,
             "text": text,
             "channel": channel_id,
             "ts": thread_ts,
-        })
-        await api_client.save_pending_intent(user_id, intent_data)
+        }
+        if action == "write" and domain:
+            backend_intent = {
+                "type": "write_article",
+                "article_request": {
+                    "domain": domain,
+                    "topic": params.get("topic"),
+                    "target_keyword": params.get("target_keyword"),
+                    "context": params.get("context"),
+                    "delivery_mode": params.get("delivery_mode"),
+                    "delivery_mode_confirmed": params.get("delivery_mode_confirmed"),
+                    "slack_channel_id": channel_id,
+                    "slack_thread_ts": thread_ts,
+                    "slack_root_message_ts": thread_ts,
+                    "request_source": CONTENT_FACTORY_REQUEST_SOURCE,
+                    "client_request_id": client_request_id,
+                },
+                "resume_context": {
+                    "text": text,
+                    "params": params,
+                    "channel": channel_id,
+                    "ts": thread_ts,
+                },
+            }
+
+        if action == "write" and domain:
+            from .. import main as main_module
+
+            main_module._remember_pending_intent(
+                user_id,
+                domain,
+                intent_data={
+                    "action": "write",
+                    "topic": params.get("topic"),
+                    "target_keyword": params.get("target_keyword"),
+                    "context": params.get("context"),
+                    "delivery_mode": params.get("delivery_mode"),
+                    "delivery_mode_confirmed": params.get("delivery_mode_confirmed"),
+                    "client_request_id": client_request_id,
+                    "request_source": CONTENT_FACTORY_REQUEST_SOURCE,
+                    "text": text,
+                    "params": params,
+                },
+                channel_id=channel_id,
+                thread_ts=thread_ts,
+                wait_for="scan_complete",
+                clear_job_id=True,
+            )
+
+        try:
+            await api_client.save_pending_intent(user_id, backend_intent)
+        except (httpx.TimeoutException, httpx.TransportError, httpx.HTTPError) as exc:
+            detail = str(exc).strip() or exc.__class__.__name__
+            print(
+                "⚠️ Failed to persist content-factory pending intent to mlai-backend: "
+                f"{detail}"
+            )
 
     @staticmethod
     def _get_content_factory_client_request_id(params: dict) -> str:
