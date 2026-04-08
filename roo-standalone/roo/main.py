@@ -640,6 +640,7 @@ async def _medhack_daily_case_loop():
 async def lifespan(app: FastAPI):
     """Application lifespan handler for startup/shutdown."""
     settings = get_settings()
+    app.state.startup_complete = False
     print(f"🦘 Roo Standalone starting...")
     print(f"   LLM Provider: {settings.default_llm_provider}")
     print(f"   Skills Dir: {settings.SKILLS_DIR}")
@@ -647,6 +648,7 @@ async def lifespan(app: FastAPI):
     # Initialize agent on startup
     agent = get_agent()
     print(f"   Loaded {len(agent.skills)} skills")
+    app.state.startup_complete = True
 
     # MedHack daily case scheduler (currently disabled)
     # import asyncio
@@ -694,6 +696,23 @@ async def health_check():
         "status": "ok",
         "service": "roo",
         "message": "G'day! Roo is awake and ready 🦘"
+    }
+
+
+@app.get("/healthz/ready")
+async def readiness_check():
+    if not getattr(app.state, "startup_complete", False):
+        return JSONResponse(
+            {
+                "status": "not_ready",
+                "service": "roo",
+            },
+            status_code=503,
+        )
+    return {
+        "status": "ok",
+        "service": "roo",
+        "message": "Roo startup complete",
     }
 
 
