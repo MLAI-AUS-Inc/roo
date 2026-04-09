@@ -937,6 +937,16 @@ class RecordingAsyncClient:
             json=self.json_data,
         )
 
+    async def request(self, method, url, **kwargs):
+        return self._response(
+            method,
+            url,
+            json=kwargs.get("json"),
+            params=kwargs.get("params"),
+            headers=kwargs.get("headers"),
+            timeout=kwargs.get("timeout"),
+        )
+
     async def post(self, url, *, json=None, headers=None, timeout=None):
         return self._response("POST", url, json=json, headers=headers, timeout=timeout)
 
@@ -1450,26 +1460,22 @@ async def test_backend_client_create_points_request_uses_canonical_endpoint(monk
     )
 
     assert result == {"id": 42}
-    assert recorder.calls == [
-        {
-            "method": "POST",
-            "url": "https://backend.test/api/v1/points/requests/",
-            "json": {
-                "requester_slack_id": "UREQUESTER",
-                "target_slack_id": "UTARGET",
-                "points": 12,
-                "reason": "running the 21st x MLAI event",
-                "slack_channel_id": "C123",
-                "slack_thread_ts": "111.222",
-            },
-            "params": None,
-            "headers": {
-                "Content-Type": "application/json",
-                "X-API-Key": "api-key",
-            },
-            "timeout": 10.0,
-        }
-    ]
+    assert len(recorder.calls) == 1
+    assert recorder.calls[0]["method"] == "POST"
+    assert recorder.calls[0]["url"] == "https://backend.test/api/v1/points/requests/"
+    assert recorder.calls[0]["json"] == {
+        "requester_slack_id": "UREQUESTER",
+        "target_slack_id": "UTARGET",
+        "points": 12,
+        "reason": "running the 21st x MLAI event",
+        "slack_channel_id": "C123",
+        "slack_thread_ts": "111.222",
+    }
+    assert recorder.calls[0]["params"] is None
+    assert recorder.calls[0]["headers"]["Content-Type"] == "application/json"
+    assert recorder.calls[0]["headers"]["X-API-Key"] == "api-key"
+    assert recorder.calls[0]["headers"]["X-Request-ID"].startswith("roo-")
+    assert recorder.calls[0]["timeout"] == 10.0
 
 
 @pytest.mark.asyncio
@@ -1491,23 +1497,19 @@ async def test_backend_client_attach_points_request_summary_uses_canonical_endpo
     )
 
     assert result == {"ok": True}
-    assert recorder.calls == [
-        {
-            "method": "PATCH",
-            "url": "https://backend.test/api/v1/points/requests/42/slack-summary/",
-            "json": {
-                "slack_channel_id": "C123",
-                "slack_summary_message_ts": "222.333",
-                "slack_thread_ts": "111.222",
-            },
-            "params": None,
-            "headers": {
-                "Content-Type": "application/json",
-                "X-API-Key": "internal-key",
-            },
-            "timeout": 10.0,
-        }
-    ]
+    assert len(recorder.calls) == 1
+    assert recorder.calls[0]["method"] == "PATCH"
+    assert recorder.calls[0]["url"] == "https://backend.test/api/v1/points/requests/42/slack-summary/"
+    assert recorder.calls[0]["json"] == {
+        "slack_channel_id": "C123",
+        "slack_summary_message_ts": "222.333",
+        "slack_thread_ts": "111.222",
+    }
+    assert recorder.calls[0]["params"] is None
+    assert recorder.calls[0]["headers"]["Content-Type"] == "application/json"
+    assert recorder.calls[0]["headers"]["X-API-Key"] == "internal-key"
+    assert recorder.calls[0]["headers"]["X-Request-ID"].startswith("roo-")
+    assert recorder.calls[0]["timeout"] == 10.0
 
 
 @pytest.mark.asyncio
@@ -1527,22 +1529,18 @@ async def test_backend_client_lookup_points_request_by_slack_message_uses_canoni
     )
 
     assert result == {"id": 42, "status": "pending"}
-    assert recorder.calls == [
-        {
-            "method": "GET",
-            "url": "https://backend.test/api/v1/points/requests/by-slack-message/",
-            "json": None,
-            "params": {
-                "slack_channel_id": "C123",
-                "slack_message_ts": "222.333",
-            },
-            "headers": {
-                "Content-Type": "application/json",
-                "X-API-Key": "internal-key",
-            },
-            "timeout": 10.0,
-        }
-    ]
+    assert len(recorder.calls) == 1
+    assert recorder.calls[0]["method"] == "GET"
+    assert recorder.calls[0]["url"] == "https://backend.test/api/v1/points/requests/by-slack-message/"
+    assert recorder.calls[0]["json"] is None
+    assert recorder.calls[0]["params"] == {
+        "slack_channel_id": "C123",
+        "slack_message_ts": "222.333",
+    }
+    assert recorder.calls[0]["headers"]["Content-Type"] == "application/json"
+    assert recorder.calls[0]["headers"]["X-API-Key"] == "internal-key"
+    assert recorder.calls[0]["headers"]["X-Request-ID"].startswith("roo-")
+    assert recorder.calls[0]["timeout"] == 10.0
 
 
 @pytest.mark.asyncio
@@ -1562,19 +1560,15 @@ async def test_backend_client_approve_points_request_uses_canonical_endpoint(mon
     )
 
     assert result == {"points_awarded": 12, "new_balance": 17}
-    assert recorder.calls == [
-        {
-            "method": "POST",
-            "url": "https://backend.test/api/v1/points/requests/42/approve/",
-            "json": {"admin_slack_id": "UADMIN"},
-            "params": None,
-            "headers": {
-                "Content-Type": "application/json",
-                "X-API-Key": "internal-key",
-            },
-            "timeout": 15.0,
-        }
-    ]
+    assert len(recorder.calls) == 1
+    assert recorder.calls[0]["method"] == "POST"
+    assert recorder.calls[0]["url"] == "https://backend.test/api/v1/points/requests/42/approve/"
+    assert recorder.calls[0]["json"] == {"admin_slack_id": "UADMIN"}
+    assert recorder.calls[0]["params"] is None
+    assert recorder.calls[0]["headers"]["Content-Type"] == "application/json"
+    assert recorder.calls[0]["headers"]["X-API-Key"] == "internal-key"
+    assert recorder.calls[0]["headers"]["X-Request-ID"].startswith("roo-")
+    assert recorder.calls[0]["timeout"] == 15.0
 
 
 @pytest.mark.asyncio
@@ -1594,19 +1588,116 @@ async def test_backend_client_award_first_channel_post_uses_canonical_endpoint(m
     )
 
     assert result == {"awarded": True, "new_balance": 2}
-    assert recorder.calls == [
-        {
-            "method": "POST",
-            "url": "https://backend.test/api/v1/activity/first-post-award/",
-            "json": {
-                "slack_user_id": "UINTRO",
-                "channel_id": "CSTART",
-            },
-            "params": None,
-            "headers": {
-                "Content-Type": "application/json",
-                "X-API-Key": "internal-key",
-            },
-            "timeout": 15.0,
-        }
-    ]
+    assert len(recorder.calls) == 1
+    assert recorder.calls[0]["method"] == "POST"
+    assert recorder.calls[0]["url"] == "https://backend.test/api/v1/activity/first-post-award/"
+    assert recorder.calls[0]["json"] == {
+        "slack_user_id": "UINTRO",
+        "channel_id": "CSTART",
+    }
+    assert recorder.calls[0]["params"] is None
+    assert recorder.calls[0]["headers"]["Content-Type"] == "application/json"
+    assert recorder.calls[0]["headers"]["X-API-Key"] == "internal-key"
+    assert recorder.calls[0]["headers"]["X-Request-ID"].startswith("roo-")
+    assert recorder.calls[0]["timeout"] == 15.0
+
+
+@pytest.mark.asyncio
+async def test_execute_mlai_points_returns_backend_unavailable_message(monkeypatch):
+    executor = SkillExecutor()
+    skill = SimpleNamespace(name="mlai-points")
+
+    async def fake_handle_points_action(**kwargs):
+        raise backend_module.MLAIBackendUnavailableError("backend unavailable")
+
+    monkeypatch.setattr(
+        executor,
+        "_handle_points_action",
+        fake_handle_points_action,
+    )
+    monkeypatch.setattr(
+        executor_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            MLAI_BACKEND_URL="https://backend.test",
+            MLAI_API_KEY="api-key",
+            ROO_API_KEY="roo-api-key",
+            INTERNAL_API_KEY="internal-key",
+        ),
+    )
+
+    result = await executor._execute_mlai_points(
+        skill=skill,
+        text="book coworking today",
+        params={"action": "book_coworking", "date": "today"},
+        user_id="U123",
+        channel_id="C123",
+        thread_ts="111.222",
+    )
+
+    assert "couldn't confirm whether your coworking booking went through" in result.lower()
+
+
+@pytest.mark.asyncio
+async def test_book_coworking_still_succeeds_when_balance_refresh_times_out():
+    monkeypatch = pytest.MonkeyPatch()
+
+    class FakeCoworkingClient:
+        async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None):
+            return {"points_cost": 4}
+
+        async def get_balance(self, slack_user_id):
+            raise backend_module.MLAIBackendUnavailableError("backend unavailable")
+
+    executor = SkillExecutor()
+    monkeypatch.setattr("roo.utils.get_current_date", lambda: __import__("datetime").date(2026, 4, 9))
+
+    try:
+        result = await executor._handle_points_action(
+            client=FakeCoworkingClient(),
+            action="book_coworking",
+            params={"date": "2026-04-09"},
+            text="book coworking today",
+            user_id="U123",
+            channel_id="C123",
+            thread_ts="111.222",
+            skill=SimpleNamespace(name="mlai-points"),
+        )
+    finally:
+        monkeypatch.undo()
+
+    assert "Booked you in for **2026-04-09**" in result
+    assert "Balance remaining" not in result
+
+
+@pytest.mark.asyncio
+async def test_dependency_health_check_reports_degraded_backend(monkeypatch):
+    class FakeBackendClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def get_backend_readiness(self):
+            return {"status": "ok"}
+
+        async def get_points_health(self):
+            raise backend_module.MLAIBackendUnavailableError("points probe failed")
+
+    monkeypatch.setattr(
+        main_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            MLAI_BACKEND_URL="https://backend.test",
+            MLAI_API_KEY="api-key",
+            ROO_API_KEY="roo-api-key",
+            INTERNAL_API_KEY="internal-key",
+        ),
+    )
+    monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeBackendClient)
+    main_module.app.state.startup_complete = True
+
+    result = await main_module.dependency_health_check()
+
+    assert result["status"] == "degraded"
+    assert result["dependencies"]["mlai_backend"]["status"] == "degraded"
+    assert result["dependencies"]["mlai_backend"]["readiness"]["status"] == "ok"
+    assert "points_error" in result["dependencies"]["mlai_backend"]

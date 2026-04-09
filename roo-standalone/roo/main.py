@@ -716,6 +716,59 @@ async def readiness_check():
     }
 
 
+@app.get("/healthz/dependencies")
+async def dependency_health_check():
+    if not getattr(app.state, "startup_complete", False):
+        return JSONResponse(
+            {
+                "status": "not_ready",
+                "service": "roo",
+                "dependencies": {},
+            },
+            status_code=503,
+        )
+
+    settings = get_settings()
+    backend_status: dict[str, Any] = {
+        "status": "unconfigured",
+    }
+
+    if settings.MLAI_BACKEND_URL:
+        from .clients.mlai_backend import MLAIBackendClient
+
+        backend_status = {
+            "status": "degraded",
+            "base_url": settings.MLAI_BACKEND_URL,
+        }
+        client = MLAIBackendClient(
+            base_url=settings.MLAI_BACKEND_URL,
+            api_key=settings.ROO_API_KEY or settings.MLAI_API_KEY,
+            internal_api_key=settings.INTERNAL_API_KEY or settings.ROO_API_KEY or settings.MLAI_API_KEY,
+        )
+
+        try:
+            backend_status["readiness"] = await client.get_backend_readiness()
+        except Exception as exc:
+            backend_status["readiness_error"] = f"{exc.__class__.__name__}: {exc}"
+
+        try:
+            backend_status["points"] = await client.get_points_health()
+        except Exception as exc:
+            backend_status["points_error"] = f"{exc.__class__.__name__}: {exc}"
+
+        if backend_status.get("readiness", {}).get("status") == "ok" and backend_status.get("points", {}).get("status") == "ok":
+            backend_status["status"] = "ok"
+
+    dependency_status = "ok" if backend_status.get("status") in {"ok", "unconfigured"} else "degraded"
+    return {
+        "status": dependency_status,
+        "service": "roo",
+        "dependencies": {
+            "mlai_backend": backend_status,
+        },
+    }
+
+
 @app.post("/slack/events")
 async def slack_events(request: Request):
     """

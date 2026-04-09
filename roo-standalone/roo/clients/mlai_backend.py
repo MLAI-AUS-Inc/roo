@@ -54,6 +54,11 @@ class MLAIBackendClient:
     def _new_request_id(self) -> str:
         return f"roo-{uuid4().hex}"
 
+    def _circuit_breaker_is_open(self) -> bool:
+        backend_key = self._backend_key()
+        failures = self._backend_transport_failures.get(backend_key, 0)
+        return failures >= self._transport_failure_threshold
+
     def _log_mlai_request(
         self,
         *,
@@ -63,11 +68,14 @@ class MLAIBackendClient:
         total_attempts: int,
         timeout: float,
         request_id: str,
+        circuit_open: bool,
+        circuit_breaker: bool,
     ) -> None:
         print(
             "🌐 MLAI request "
             f"method={method.upper()} endpoint={endpoint} "
-            f"attempt={attempt}/{total_attempts} timeout_bucket={timeout}s request_id={request_id}"
+            f"attempt={attempt}/{total_attempts} timeout_bucket={timeout}s request_id={request_id} "
+            f"circuit_breaker={circuit_breaker} circuit_open={circuit_open}"
         )
 
     def _log_mlai_transport_error(
@@ -80,12 +88,39 @@ class MLAIBackendClient:
         timeout: float,
         request_id: str,
         exc: Exception,
+        duration_ms: float,
+        circuit_open: bool,
+        circuit_breaker: bool,
     ) -> None:
         print(
             "🌐 MLAI request_failed "
             f"method={method.upper()} endpoint={endpoint} "
             f"attempt={attempt}/{total_attempts} timeout_bucket={timeout}s request_id={request_id} "
-            f"exc_type={exc.__class__.__name__} exc_repr={exc!r}"
+            f"duration_ms={duration_ms:.2f} "
+            f"exc_type={exc.__class__.__name__} exc_repr={exc!r} "
+            f"circuit_breaker={circuit_breaker} circuit_open={circuit_open}"
+        )
+
+    def _log_mlai_response(
+        self,
+        *,
+        method: str,
+        endpoint: str,
+        attempt: int,
+        total_attempts: int,
+        timeout: float,
+        request_id: str,
+        status_code: int,
+        duration_ms: float,
+        circuit_open: bool,
+        circuit_breaker: bool,
+    ) -> None:
+        print(
+            "🌐 MLAI response "
+            f"method={method.upper()} endpoint={endpoint} "
+            f"attempt={attempt}/{total_attempts} timeout_bucket={timeout}s request_id={request_id} "
+            f"status={status_code} duration_ms={duration_ms:.2f} "
+            f"circuit_breaker={circuit_breaker} circuit_open={circuit_open}"
         )
 
     @classmethod
@@ -209,6 +244,7 @@ class MLAIBackendClient:
         backend_key = self._backend_key()
 
         for attempt in range(1, total_attempts + 1):
+            circuit_open = self._circuit_breaker_is_open()
             self._log_mlai_request(
                 method=method,
                 endpoint=normalized_endpoint,
@@ -216,7 +252,10 @@ class MLAIBackendClient:
                 total_attempts=total_attempts,
                 timeout=timeout,
                 request_id=request_id,
+                circuit_open=circuit_open,
+                circuit_breaker=circuit_breaker,
             )
+            started_at = time.monotonic()
             try:
                 async with httpx.AsyncClient() as client:
                     response = await client.request(
@@ -228,6 +267,7 @@ class MLAIBackendClient:
                         timeout=timeout,
                     )
             except httpx.TransportError as exc:
+                duration_ms = (time.monotonic() - started_at) * 1000
                 failures = self._record_transport_failure(backend_key)
                 self._log_mlai_transport_error(
                     method=method,
@@ -237,6 +277,9 @@ class MLAIBackendClient:
                     timeout=timeout,
                     request_id=request_id,
                     exc=exc,
+                    duration_ms=duration_ms,
+                    circuit_open=circuit_open,
+                    circuit_breaker=circuit_breaker,
                 )
                 if attempt < total_attempts:
                     await asyncio.sleep(retry_backoff_seconds * (2 ** (attempt - 1)))
@@ -246,6 +289,19 @@ class MLAIBackendClient:
                 ) from exc
 
             self._record_transport_success(backend_key)
+            duration_ms = (time.monotonic() - started_at) * 1000
+            self._log_mlai_response(
+                method=method,
+                endpoint=normalized_endpoint,
+                attempt=attempt,
+                total_attempts=total_attempts,
+                timeout=timeout,
+                request_id=request_id,
+                status_code=response.status_code,
+                duration_ms=duration_ms,
+                circuit_open=circuit_open,
+                circuit_breaker=circuit_breaker,
+            )
             return response
 
         raise MLAIBackendUnavailableError(
@@ -835,6 +891,8 @@ class MLAIBackendClient:
             "GET",
             f"{self._points_base}/users/{slack_user_id}/balance/",
             timeout=10.0,
+            transport_retries=1,
+            retry_backoff_seconds=0.25,
             circuit_breaker=True,
         )
         response.raise_for_status()
@@ -849,6 +907,8 @@ class MLAIBackendClient:
             f"{self._points_base}/ledger/",
             params={"slack_user_id": slack_user_id},
             timeout=10.0,
+            transport_retries=1,
+            retry_backoff_seconds=0.25,
             circuit_breaker=True,
         )
         response.raise_for_status()
@@ -868,6 +928,8 @@ class MLAIBackendClient:
             f"{self._points_base}/tasks/",
             params=params,
             timeout=10.0,
+            transport_retries=1,
+            retry_backoff_seconds=0.25,
             circuit_breaker=True,
         )
         response.raise_for_status()
@@ -913,6 +975,8 @@ class MLAIBackendClient:
             f"{self._points_base}/coworking/availability/",
             params=params,
             timeout=10.0,
+            transport_retries=1,
+            retry_backoff_seconds=0.25,
             circuit_breaker=True,
         )
         response.raise_for_status()
@@ -937,6 +1001,8 @@ class MLAIBackendClient:
             f"{self._points_base}/coworking/book/",
             json=payload,
             timeout=15.0,
+            transport_retries=1,
+            retry_backoff_seconds=0.5,
             circuit_breaker=True,
         )
         response.raise_for_status()
@@ -963,6 +1029,18 @@ class MLAIBackendClient:
         response = await self._request(
             "GET",
             "/healthz/ready",
+            timeout=5.0,
+            transport_retries=1,
+            retry_backoff_seconds=0.25,
+            circuit_breaker=False,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def get_points_health(self) -> dict:
+        response = await self._request(
+            "GET",
+            "/healthz/points",
             timeout=5.0,
             transport_retries=1,
             retry_backoff_seconds=0.25,
@@ -1320,6 +1398,8 @@ class MLAIBackendClient:
             f"{self._points_base}/coworking/my-bookings/",
             params={"slack_user_id": slack_user_id},
             timeout=10.0,
+            transport_retries=1,
+            retry_backoff_seconds=0.25,
             circuit_breaker=True,
         )
         response.raise_for_status()
@@ -1355,12 +1435,16 @@ class MLAIBackendClient:
                 "GET",
                 f"{self._points_base}/rate-card/",
                 timeout=5.0,
+                transport_retries=1,
+                retry_backoff_seconds=0.25,
                 circuit_breaker=True,
             )
             if response.status_code == 404:
                 return []
             response.raise_for_status()
             return response.json()
+        except MLAIBackendUnavailableError:
+            raise
         except Exception as e:
             print(f"❌ Failed to fetch rate card: {e}")
             return []
@@ -1385,11 +1469,15 @@ class MLAIBackendClient:
                 "GET",
                 f"{self._points_base}/admins/{slack_user_id}/",
                 timeout=10.0,
+                transport_retries=1,
+                retry_backoff_seconds=0.25,
                 circuit_breaker=True,
             )
             if response.status_code == 200:
                 return response.json()
             return None
+        except MLAIBackendUnavailableError:
+            raise
         except Exception as e:
             print(f"Failed to fetch admin details: {e}")
             return None
@@ -1402,6 +1490,8 @@ class MLAIBackendClient:
                 f"{self._points_base}/admin/allowance/",
                 params={"slack_id": slack_user_id},
                 timeout=10.0,
+                transport_retries=1,
+                retry_backoff_seconds=0.25,
                 circuit_breaker=True,
                 use_admin_headers=True,
             )
@@ -1409,6 +1499,8 @@ class MLAIBackendClient:
                 return {'error': 'Not a points admin'}
             response.raise_for_status()
             return response.json()
+        except MLAIBackendUnavailableError:
+            raise
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 404:
                 return {'error': 'Not a points admin'}

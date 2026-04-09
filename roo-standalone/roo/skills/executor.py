@@ -529,6 +529,19 @@ JSON:"""
             "Please try again in a moment."
         )
 
+    @staticmethod
+    def _points_backend_unavailable_message(action: Optional[str] = None) -> str:
+        if action == "book_coworking":
+            return (
+                "I couldn't confirm whether your coworking booking went through because MLAI backend timed out. "
+                "Please retry the same booking in a moment. I won't double-book the same day."
+            )
+
+        return (
+            "I couldn't reach the MLAI points backend just now, so I couldn't confirm that action. "
+            "Please try again in a moment."
+        )
+
     async def _request_github_reconnect(
         self,
         api_client,
@@ -3158,6 +3171,7 @@ Keep the response concise but informative."""
     ) -> Any:
         """Execute the MLAI Points skill."""
         import httpx
+        from roo.clients.mlai_backend import MLAIBackendUnavailableError
         
         # Get client from skill's implementation module
         # ClientClass = skill.get_client_class("MLAIBackendClient")
@@ -3192,6 +3206,8 @@ Keep the response concise but informative."""
                 skill=skill
             )
             
+        except MLAIBackendUnavailableError:
+            return self._points_backend_unavailable_message(action)
         except PermissionError:
             return "Sorry mate, you're not authorized to do that. Only Points Admins can perform that action. 🔒"
         except ValueError as e:
@@ -3774,15 +3790,23 @@ Keep the response concise but informative."""
             
             result = await client.book_coworking(user_id, booking_date, channel_id)
             cost = result.get("points_cost", 1)
-            
-            # Get new balance
-            balance_data = await client.get_balance(user_id)
-            new_balance = balance_data.get("balance", 0)
-            
+            from roo.clients.mlai_backend import MLAIBackendUnavailableError
+
+            new_balance = None
+            try:
+                balance_data = await client.get_balance(user_id)
+                new_balance = balance_data.get("balance", 0)
+            except MLAIBackendUnavailableError:
+                pass
+
+            balance_line = ""
+            if new_balance is not None:
+                balance_line = f" (Balance remaining: {new_balance} points)"
+
             return (
                 f"You beauty! 🎉\n\n"
                 f"Booked you in for **{booking_date}** at the coworking space.\n"
-                f"Cost: {cost} point (Balance remaining: {new_balance} points)\n\n"
+                f"Cost: {cost} point{balance_line}\n\n"
                 f"See you there, legend!"
             )
         
