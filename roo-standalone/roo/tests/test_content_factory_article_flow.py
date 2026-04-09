@@ -49,6 +49,9 @@ class FakeContentFactoryClient:
     trigger_article_generation_result = None
     reconnect_calls = []
     reconnect_results = {}
+    integration_exception = None
+    auth_url_exception = None
+    ensure_slack_user_registered_exception = None
 
     def __init__(self, *args, **kwargs):
         self.trigger_calls = []
@@ -59,15 +62,23 @@ class FakeContentFactoryClient:
         self.confirm_calls = []
         FakeContentFactoryClient.last_instance = self
 
-    async def get_integration(self, user_id, domain=None):
+    async def get_integration(self, user_id, domain=None, include_repo_freshness=False):
         FakeContentFactoryClient.integration_requests.append(
-            {"user_id": user_id, "domain": domain}
+            {
+                "user_id": user_id,
+                "domain": domain,
+                "include_repo_freshness": include_repo_freshness,
+            }
         )
+        if FakeContentFactoryClient.integration_exception is not None:
+            raise FakeContentFactoryClient.integration_exception
         if domain is not None:
             return FakeContentFactoryClient.domain_integrations.get(domain)
         return FakeContentFactoryClient.generic_integration
 
     async def get_github_auth_url(self, user_id, domain=None):
+        if FakeContentFactoryClient.auth_url_exception is not None:
+            raise FakeContentFactoryClient.auth_url_exception
         return {
             "auth_url": FakeContentFactoryClient.auth_urls.get(
                 domain,
@@ -170,6 +181,8 @@ class FakeContentFactoryClient:
         last_name=None,
         avatar_url=None,
     ):
+        if FakeContentFactoryClient.ensure_slack_user_registered_exception is not None:
+            raise FakeContentFactoryClient.ensure_slack_user_registered_exception
         payload = {
             "slack_id": slack_id,
             "email": email,
@@ -338,6 +351,9 @@ def _patch_content_factory(monkeypatch):
     FakeContentFactoryClient.trigger_article_generation_result = None
     FakeContentFactoryClient.reconnect_calls = []
     FakeContentFactoryClient.reconnect_results = {}
+    FakeContentFactoryClient.integration_exception = None
+    FakeContentFactoryClient.auth_url_exception = None
+    FakeContentFactoryClient.ensure_slack_user_registered_exception = None
 
     monkeypatch.setattr(
         executor_module,
@@ -552,6 +568,7 @@ async def test_requested_domain_bypasses_generic_multi_domain_error(monkeypatch)
     assert FakeContentFactoryClient.integration_requests[0] == {
         "user_id": "U05QPB483K9",
         "domain": "woofya.com.au",
+        "include_repo_freshness": False,
     }
     assert FakeContentFactoryClient.last_instance.trigger_calls
     trigger_call = FakeContentFactoryClient.last_instance.trigger_calls[0]
@@ -1346,6 +1363,51 @@ async def test_content_factory_blocks_when_slack_email_missing(monkeypatch):
     assert "articles for mlai.au are free" in result.lower()
     assert FakeContentFactoryClient.last_instance.trigger_calls == []
     assert FakeContentFactoryClient.last_instance.user_registration_calls == []
+
+
+@pytest.mark.asyncio
+async def test_free_domain_article_request_survives_registration_timeout(monkeypatch):
+    executor = SkillExecutor()
+    _patch_content_factory(monkeypatch)
+    FakeContentFactoryClient.ensure_slack_user_registered_exception = (
+        backend_module.MLAIBackendUnavailableError("backend unavailable")
+    )
+
+    result = await executor._execute_content_factory(
+        skill=None,
+        text="write an article for mlai.au about AI for clinic workflows",
+        params={"domain": "mlai.au", "topic": "AI for clinic workflows"},
+        user_id="U05QPB483K9",
+        channel_id=None,
+        thread_ts=None,
+    )
+
+    assert isinstance(result, dict)
+    assert result["data"]["content_factory_progress_job_id"] == "job-123"
+    assert FakeContentFactoryClient.last_instance.trigger_calls
+    assert FakeContentFactoryClient.last_instance.user_registration_calls == []
+    assert FakeContentFactoryClient.last_instance.balance_checks == []
+
+
+@pytest.mark.asyncio
+async def test_content_factory_returns_backend_unavailable_when_integration_check_fails(monkeypatch):
+    executor = SkillExecutor()
+    _patch_content_factory(monkeypatch)
+    FakeContentFactoryClient.integration_exception = backend_module.MLAIBackendUnavailableError(
+        "backend unavailable"
+    )
+
+    result = await executor._execute_content_factory(
+        skill=None,
+        text="research the best article for mlai.au",
+        params={"domain": "mlai.au"},
+        user_id="U05QPB483K9",
+        channel_id="C123",
+        thread_ts="111.222",
+    )
+
+    assert "couldn't reach MLAI backend" in result
+    assert FakeContentFactoryClient.last_instance.trigger_calls == []
 
 
 @pytest.mark.asyncio

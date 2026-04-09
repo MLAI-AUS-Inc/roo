@@ -3,7 +3,10 @@ MLAI Backend Client
 
 HTTP client for communicating with the mlai-backend service.
 """
+import asyncio
+import time
 from typing import Optional, Dict, Any, List
+from uuid import uuid4
 
 import httpx
 
@@ -12,8 +15,17 @@ from ..config import get_settings
 CONTENT_FACTORY_REQUEST_SOURCE = "roo_slackbot"
 
 
+class MLAIBackendUnavailableError(RuntimeError):
+    """Raised when Roo cannot reach mlai-backend reliably."""
+
+
 class MLAIBackendClient:
     """Client for mlai-backend API."""
+
+    _backend_transport_failures: Dict[str, int] = {}
+    _slack_user_registration_cache: Dict[str, float] = {}
+    _transport_failure_threshold = 3
+    _slack_user_registration_ttl_seconds = 3600
     
     def __init__(self, base_url: Optional[str] = None, api_key: Optional[str] = None, internal_api_key: Optional[str] = None):
         settings = None
@@ -33,8 +45,268 @@ class MLAIBackendClient:
             or (settings.MLAI_API_KEY if settings else None)
         )
         self.base_url = self.base_url.rstrip('/') if self.base_url else ""
-        self._points_base = f"{self.base_url}/api/v1/points"
+        self._points_base = "/api/v1/points"
         self._admin_cache: Dict[str, bool] = {}
+
+    def _backend_key(self) -> str:
+        return self.base_url or "unconfigured"
+
+    def _new_request_id(self) -> str:
+        return f"roo-{uuid4().hex}"
+
+    def _circuit_breaker_is_open(self) -> bool:
+        backend_key = self._backend_key()
+        failures = self._backend_transport_failures.get(backend_key, 0)
+        return failures >= self._transport_failure_threshold
+
+    def _log_mlai_request(
+        self,
+        *,
+        method: str,
+        endpoint: str,
+        attempt: int,
+        total_attempts: int,
+        timeout: float,
+        request_id: str,
+        circuit_open: bool,
+        circuit_breaker: bool,
+    ) -> None:
+        print(
+            "🌐 MLAI request "
+            f"method={method.upper()} endpoint={endpoint} "
+            f"attempt={attempt}/{total_attempts} timeout_bucket={timeout}s request_id={request_id} "
+            f"circuit_breaker={circuit_breaker} circuit_open={circuit_open}"
+        )
+
+    def _log_mlai_transport_error(
+        self,
+        *,
+        method: str,
+        endpoint: str,
+        attempt: int,
+        total_attempts: int,
+        timeout: float,
+        request_id: str,
+        exc: Exception,
+        duration_ms: float,
+        circuit_open: bool,
+        circuit_breaker: bool,
+    ) -> None:
+        print(
+            "🌐 MLAI request_failed "
+            f"method={method.upper()} endpoint={endpoint} "
+            f"attempt={attempt}/{total_attempts} timeout_bucket={timeout}s request_id={request_id} "
+            f"duration_ms={duration_ms:.2f} "
+            f"exc_type={exc.__class__.__name__} exc_repr={exc!r} "
+            f"circuit_breaker={circuit_breaker} circuit_open={circuit_open}"
+        )
+
+    def _log_mlai_response(
+        self,
+        *,
+        method: str,
+        endpoint: str,
+        attempt: int,
+        total_attempts: int,
+        timeout: float,
+        request_id: str,
+        status_code: int,
+        duration_ms: float,
+        circuit_open: bool,
+        circuit_breaker: bool,
+    ) -> None:
+        print(
+            "🌐 MLAI response "
+            f"method={method.upper()} endpoint={endpoint} "
+            f"attempt={attempt}/{total_attempts} timeout_bucket={timeout}s request_id={request_id} "
+            f"status={status_code} duration_ms={duration_ms:.2f} "
+            f"circuit_breaker={circuit_breaker} circuit_open={circuit_open}"
+        )
+
+    @classmethod
+    def _registration_cache_key(cls, slack_id: str, email: str) -> str:
+        return f"{str(slack_id).strip()}::{str(email).strip().lower()}"
+
+    @classmethod
+    def _prune_registration_cache(cls) -> None:
+        now = time.monotonic()
+        ttl = cls._slack_user_registration_ttl_seconds
+        for cache_key, recorded_at in list(cls._slack_user_registration_cache.items()):
+            if now - recorded_at >= ttl:
+                cls._slack_user_registration_cache.pop(cache_key, None)
+
+    @classmethod
+    def _is_registration_cached(cls, slack_id: str, email: str) -> bool:
+        cls._prune_registration_cache()
+        cache_key = cls._registration_cache_key(slack_id, email)
+        recorded_at = cls._slack_user_registration_cache.get(cache_key)
+        if recorded_at is None:
+            return False
+        return (time.monotonic() - recorded_at) < cls._slack_user_registration_ttl_seconds
+
+    @classmethod
+    def _mark_registration_cached(cls, slack_id: str, email: str) -> None:
+        cls._prune_registration_cache()
+        cls._slack_user_registration_cache[cls._registration_cache_key(slack_id, email)] = time.monotonic()
+
+    @classmethod
+    def _record_transport_success(cls, backend_key: str) -> None:
+        cls._backend_transport_failures[backend_key] = 0
+
+    @classmethod
+    def _record_transport_failure(cls, backend_key: str) -> int:
+        failures = cls._backend_transport_failures.get(backend_key, 0) + 1
+        cls._backend_transport_failures[backend_key] = failures
+        return failures
+
+    async def _probe_backend_readiness(self) -> bool:
+        if not self.base_url:
+            return False
+
+        request_id = self._new_request_id()
+        backend_key = self._backend_key()
+        previous_failures = self._backend_transport_failures.get(backend_key, 0)
+        try:
+            response = await self._request(
+                "GET",
+                "/healthz/ready",
+                timeout=5.0,
+                request_id=request_id,
+                transport_retries=1,
+                retry_backoff_seconds=0.25,
+                circuit_breaker=False,
+                use_admin_headers=False,
+            )
+            response.raise_for_status()
+        except Exception as exc:
+            if previous_failures:
+                self._backend_transport_failures[backend_key] = previous_failures
+            print(
+                "🌐 MLAI readiness_probe_failed "
+                f"endpoint=/healthz/ready request_id={request_id} "
+                f"exc_type={exc.__class__.__name__} exc_repr={exc!r}"
+            )
+            return False
+
+        print(
+            "🌐 MLAI readiness_probe_ok "
+            f"endpoint=/healthz/ready request_id={request_id} status={response.status_code}"
+        )
+        return True
+
+    async def _guard_circuit_breaker(self, endpoint: str) -> None:
+        backend_key = self._backend_key()
+        failures = self._backend_transport_failures.get(backend_key, 0)
+        if failures < self._transport_failure_threshold:
+            return
+
+        print(
+            "🌐 MLAI circuit_breaker_open "
+            f"endpoint={endpoint} consecutive_failures={failures} base_url={self.base_url}"
+        )
+        if await self._probe_backend_readiness():
+            self._record_transport_success(backend_key)
+            return
+
+        raise MLAIBackendUnavailableError(
+            "MLAI backend is unavailable right now."
+        )
+
+    async def _request(
+        self,
+        method: str,
+        endpoint: str,
+        *,
+        params: Optional[dict] = None,
+        json: Optional[dict] = None,
+        headers: Optional[dict] = None,
+        timeout: float = 10.0,
+        request_id: Optional[str] = None,
+        transport_retries: int = 0,
+        retry_backoff_seconds: float = 0.25,
+        circuit_breaker: bool = False,
+        use_admin_headers: bool = False,
+    ) -> httpx.Response:
+        if not self.base_url:
+            raise ValueError("MLAI_BACKEND_URL not configured")
+
+        normalized_endpoint = endpoint if endpoint.startswith("/") else f"/{endpoint}"
+        if circuit_breaker and normalized_endpoint != "/healthz/ready":
+            await self._guard_circuit_breaker(normalized_endpoint)
+
+        request_id = request_id or self._new_request_id()
+        resolved_headers = dict(self.admin_headers if use_admin_headers else self.headers)
+        if headers:
+            resolved_headers.update(headers)
+        resolved_headers["X-Request-ID"] = request_id
+
+        total_attempts = max(1, int(transport_retries) + 1)
+        backend_key = self._backend_key()
+
+        for attempt in range(1, total_attempts + 1):
+            circuit_open = self._circuit_breaker_is_open()
+            self._log_mlai_request(
+                method=method,
+                endpoint=normalized_endpoint,
+                attempt=attempt,
+                total_attempts=total_attempts,
+                timeout=timeout,
+                request_id=request_id,
+                circuit_open=circuit_open,
+                circuit_breaker=circuit_breaker,
+            )
+            started_at = time.monotonic()
+            try:
+                async with httpx.AsyncClient() as client:
+                    response = await client.request(
+                        method.upper(),
+                        f"{self.base_url}{normalized_endpoint}",
+                        params=params,
+                        json=json,
+                        headers=resolved_headers,
+                        timeout=timeout,
+                    )
+            except httpx.TransportError as exc:
+                duration_ms = (time.monotonic() - started_at) * 1000
+                failures = self._record_transport_failure(backend_key)
+                self._log_mlai_transport_error(
+                    method=method,
+                    endpoint=normalized_endpoint,
+                    attempt=attempt,
+                    total_attempts=total_attempts,
+                    timeout=timeout,
+                    request_id=request_id,
+                    exc=exc,
+                    duration_ms=duration_ms,
+                    circuit_open=circuit_open,
+                    circuit_breaker=circuit_breaker,
+                )
+                if attempt < total_attempts:
+                    await asyncio.sleep(retry_backoff_seconds * (2 ** (attempt - 1)))
+                    continue
+                raise MLAIBackendUnavailableError(
+                    f"MLAI backend transport failure for {normalized_endpoint} after {failures} consecutive failures."
+                ) from exc
+
+            self._record_transport_success(backend_key)
+            duration_ms = (time.monotonic() - started_at) * 1000
+            self._log_mlai_response(
+                method=method,
+                endpoint=normalized_endpoint,
+                attempt=attempt,
+                total_attempts=total_attempts,
+                timeout=timeout,
+                request_id=request_id,
+                status_code=response.status_code,
+                duration_ms=duration_ms,
+                circuit_open=circuit_open,
+                circuit_breaker=circuit_breaker,
+            )
+            return response
+
+        raise MLAIBackendUnavailableError(
+            f"MLAI backend transport failure for {normalized_endpoint}."
+        )
 
     def _clean_slack_id(self, user_id: str) -> str:
         """Clean a Slack ID or mention string to extract the ID."""
@@ -153,15 +425,15 @@ class MLAIBackendClient:
                 "status": "completed"
             })
         
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{self.base_url}/api/roo/article-generations/",
-                json=payload,
-                headers=self.headers,
-                timeout=10.0
-            )
-            response.raise_for_status()
-            return response.json()
+        response = await self._request(
+            "POST",
+            "/api/roo/article-generations/",
+            json=payload,
+            timeout=10.0,
+            circuit_breaker=True,
+        )
+        response.raise_for_status()
+        return response.json()
     
     async def get_user_by_slack_id(self, slack_id: str) -> Optional[Dict[str, Any]]:
         """
@@ -176,20 +448,20 @@ class MLAIBackendClient:
         if not self.base_url:
             return None
         
-        async with httpx.AsyncClient() as client:
-            try:
-                response = await client.get(
-                    f"{self.base_url}/api/roo/users/slack/{slack_id}/",
-                    headers=self.headers,
-                    timeout=10.0
-                )
-                if response.status_code == 404:
-                    return None
-                response.raise_for_status()
-                return response.json()
-            except Exception as e:
-                print(f"❌ User lookup failed: {e}")
+        try:
+            response = await self._request(
+                "GET",
+                f"/api/roo/users/slack/{slack_id}/",
+                timeout=10.0,
+                circuit_breaker=True,
+            )
+            if response.status_code == 404:
                 return None
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            print(f"❌ User lookup failed: {e}")
+            return None
     
     async def create_user(
         self,
@@ -201,19 +473,19 @@ class MLAIBackendClient:
         if not self.base_url:
             return {}
 
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{self.base_url}/api/roo/users/",
-                json={
-                    "slack_id": slack_id,
-                    "name": name,
-                    "email": email
-                },
-                headers=self.headers,
-                timeout=10.0
-            )
-            response.raise_for_status()
-            return response.json()
+        response = await self._request(
+            "POST",
+            "/api/roo/users/",
+            json={
+                "slack_id": slack_id,
+                "name": name,
+                "email": email
+            },
+            timeout=10.0,
+            circuit_breaker=True,
+        )
+        response.raise_for_status()
+        return response.json()
 
     async def ensure_slack_user_registered(
         self,
@@ -248,9 +520,19 @@ class MLAIBackendClient:
         if not self.base_url:
             return {}
 
+        clean_slack_id = self._clean_slack_id(slack_id)
+        normalized_email = str(email or "").strip().lower()
+        if self._is_registration_cached(clean_slack_id, normalized_email):
+            return {
+                "slack_id": clean_slack_id,
+                "email": normalized_email,
+                "created": False,
+                "cached": True,
+            }
+
         payload = {
-            "slack_id": slack_id,
-            "email": email,
+            "slack_id": clean_slack_id,
+            "email": normalized_email,
         }
 
         if first_name:
@@ -260,15 +542,19 @@ class MLAIBackendClient:
         if avatar_url:
             payload["avatar_url"] = avatar_url
 
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{self.base_url}/api/v1/users/slack-user/",
-                json=payload,
-                headers=self.headers,
-                timeout=10.0
-            )
-            response.raise_for_status()
-            return response.json()
+        response = await self._request(
+            "POST",
+            "/api/v1/users/slack-user/",
+            json=payload,
+            timeout=10.0,
+            transport_retries=1,
+            retry_backoff_seconds=0.25,
+            circuit_breaker=True,
+        )
+        response.raise_for_status()
+        data = response.json()
+        self._mark_registration_cached(clean_slack_id, normalized_email)
+        return data
 
     async def trigger_article_generation(
         self,
@@ -339,15 +625,15 @@ class MLAIBackendClient:
         if user_avatar_url:
             payload["user_avatar_url"] = user_avatar_url
 
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{self.base_url}/api/v1/content/generate",
-                json=payload,
-                headers=self.headers,
-                timeout=30.0
-            )
-            response.raise_for_status()
-            return response.json()
+        response = await self._request(
+            "POST",
+            "/api/v1/content/generate",
+            json=payload,
+            timeout=30.0,
+            circuit_breaker=True,
+        )
+        response.raise_for_status()
+        return response.json()
 
     async def attach_content_progress_message(
         self,
@@ -373,15 +659,15 @@ class MLAIBackendClient:
         if slack_root_message_ts:
             payload["slack_root_message_ts"] = slack_root_message_ts
 
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{self.base_url}/api/v1/content/jobs/{job_id}/progress-message",
-                json=payload,
-                headers=self.headers,
-                timeout=15.0,
-            )
-            response.raise_for_status()
-            return response.json()
+        response = await self._request(
+            "POST",
+            f"/api/v1/content/jobs/{job_id}/progress-message",
+            json=payload,
+            timeout=15.0,
+            circuit_breaker=True,
+        )
+        response.raise_for_status()
+        return response.json()
 
     async def maybe_send_content_still_working(
         self,
@@ -392,15 +678,15 @@ class MLAIBackendClient:
         if not self.base_url:
             raise ValueError("MLAI_BACKEND_URL not configured")
 
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{self.base_url}/api/v1/content/jobs/{job_id}/still-working",
-                json={"request_source": request_source},
-                headers=self.headers,
-                timeout=15.0,
-            )
-            response.raise_for_status()
-            return response.json()
+        response = await self._request(
+            "POST",
+            f"/api/v1/content/jobs/{job_id}/still-working",
+            json={"request_source": request_source},
+            timeout=15.0,
+            circuit_breaker=True,
+        )
+        response.raise_for_status()
+        return response.json()
 
     async def confirm_article_topic(
         self,
@@ -449,15 +735,15 @@ class MLAIBackendClient:
             payload["delivery_mode"] = delivery_mode
             payload["delivery_mode_confirmed"] = bool(delivery_mode_confirmed)
             
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{self.base_url}/api/v1/content/jobs/{job_id}/confirm",
-                json=payload,
-                headers=self.headers,
-                timeout=30.0
-            )
-            response.raise_for_status()
-            return response.json()
+        response = await self._request(
+            "POST",
+            f"/api/v1/content/jobs/{job_id}/confirm",
+            json=payload,
+            timeout=30.0,
+            circuit_breaker=True,
+        )
+        response.raise_for_status()
+        return response.json()
 
     async def get_content_org_config(self, slack_user_id: str, domain: Optional[str] = None) -> Optional[dict]:
         """
@@ -478,21 +764,19 @@ class MLAIBackendClient:
         if domain:
             params["domain"] = domain
         
-        async with httpx.AsyncClient() as client:
-            try:
-                response = await client.get(
-                    f"{self.base_url}/api/content-factory/org/config",
-                    params=params,
-                    headers=self.headers,
-                    timeout=5.0
-                )
-                if response.status_code == 404:
-                    return None
-                response.raise_for_status()
-                return response.json()
-            except Exception as e:
-                print(f"Failed to check org config: {e}")
-                return None
+        response = await self._request(
+            "GET",
+            "/api/content-factory/org/config",
+            params=params,
+            timeout=5.0,
+            transport_retries=1,
+            retry_backoff_seconds=0.25,
+            circuit_breaker=True,
+        )
+        if response.status_code == 404:
+            return None
+        response.raise_for_status()
+        return response.json()
 
     async def set_article_delivery_mode(
         self,
@@ -504,18 +788,18 @@ class MLAIBackendClient:
         if not self.base_url:
             raise ValueError("MLAI_BACKEND_URL not configured")
 
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{self.base_url}/api/v1/content/jobs/{job_id}/delivery-mode",
-                json={
-                    "delivery_mode": delivery_mode,
-                    "request_source": request_source,
-                },
-                headers=self.headers,
-                timeout=30.0,
-            )
-            response.raise_for_status()
-            return response.json()
+        response = await self._request(
+            "POST",
+            f"/api/v1/content/jobs/{job_id}/delivery-mode",
+            json={
+                "delivery_mode": delivery_mode,
+                "request_source": request_source,
+            },
+            timeout=30.0,
+            circuit_breaker=True,
+        )
+        response.raise_for_status()
+        return response.json()
 
     async def discover_opportunities(
         self,
@@ -535,34 +819,34 @@ class MLAIBackendClient:
             "seed_keywords": seed_keywords
         }
         
-        async with httpx.AsyncClient() as client:
-            try:
-                response = await client.post(
-                    f"{self.base_url}/api/v1/content/discover",
-                    json=payload,
-                    headers=self.headers,
-                    timeout=60.0
-                )
-                response.raise_for_status()
-                data = response.json()
-                return data.get("opportunities", [])
-            except Exception as e:
-                print(f"Discovery failed: {e}")
-                raise
+        try:
+            response = await self._request(
+                "POST",
+                "/api/v1/content/discover",
+                json=payload,
+                timeout=60.0,
+                circuit_breaker=True,
+            )
+            response.raise_for_status()
+            data = response.json()
+            return data.get("opportunities", [])
+        except Exception as e:
+            print(f"Discovery failed: {e}")
+            raise
 
     async def check_generation_status(self, job_id: str) -> dict:
         """Check status of a generation job."""
         if not self.base_url:
             raise ValueError("MLAI_BACKEND_URL not configured")
 
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                f"{self.base_url}/api/v1/content/jobs/{job_id}",
-                headers=self.headers,
-                timeout=10.0
-            )
-            response.raise_for_status()
-            return response.json()
+        response = await self._request(
+            "GET",
+            f"/api/v1/content/jobs/{job_id}",
+            timeout=10.0,
+            circuit_breaker=True,
+        )
+        response.raise_for_status()
+        return response.json()
 
     async def cancel_job(self, job_id: str, slack_user_id: str) -> dict:
         """
@@ -583,18 +867,17 @@ class MLAIBackendClient:
             "slack_user_id": self._clean_slack_id(slack_user_id)
         }
 
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{self.base_url}/api/v1/content/jobs/{job_id}/cancel",
-                json=payload,
-                headers=self.headers,
-                timeout=10.0
-            )
-            # Don't raise on 404 - job may already be cancelled or completed
-            if response.status_code == 404:
-                return {"status": "not_found", "message": "Job not found or already completed"}
-            response.raise_for_status()
-            return response.json()
+        response = await self._request(
+            "POST",
+            f"/api/v1/content/jobs/{job_id}/cancel",
+            json=payload,
+            timeout=10.0,
+            circuit_breaker=True,
+        )
+        if response.status_code == 404:
+            return {"status": "not_found", "message": "Job not found or already completed"}
+        response.raise_for_status()
+        return response.json()
 
     # =========================================================================
     # Points / Member Endpoints (Merged from mlai_points/client.py)
@@ -602,56 +885,67 @@ class MLAIBackendClient:
     
     async def get_balance(self, slack_user_id: str) -> dict:
         """Get points balance for a user."""
-        if not self.base_url: return {}
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                f"{self._points_base}/users/{slack_user_id}/balance/",
-                headers=self.headers,
-                timeout=10.0
-            )
-            response.raise_for_status()
-            return response.json()
+        if not self.base_url:
+            return {}
+        response = await self._request(
+            "GET",
+            f"{self._points_base}/users/{slack_user_id}/balance/",
+            timeout=10.0,
+            transport_retries=1,
+            retry_backoff_seconds=0.25,
+            circuit_breaker=True,
+        )
+        response.raise_for_status()
+        return response.json()
     
     async def get_history(self, slack_user_id: str, limit: int = 10) -> List[dict]:
         """Get recent ledger entries for a user."""
-        if not self.base_url: return []
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                f"{self._points_base}/ledger/",
-                params={"slack_user_id": slack_user_id},
-                headers=self.headers,
-                timeout=10.0
-            )
-            response.raise_for_status()
-            return response.json()[:limit]
+        if not self.base_url:
+            return []
+        response = await self._request(
+            "GET",
+            f"{self._points_base}/ledger/",
+            params={"slack_user_id": slack_user_id},
+            timeout=10.0,
+            transport_retries=1,
+            retry_backoff_seconds=0.25,
+            circuit_breaker=True,
+        )
+        response.raise_for_status()
+        return response.json()[:limit]
     
     async def list_tasks(self, status: Optional[str] = "open", portfolio: Optional[str] = None) -> List[dict]:
         """List tasks, optionally filtered by status and portfolio."""
-        if not self.base_url: return []
+        if not self.base_url:
+            return []
         params = {}
-        if status: params["status"] = status
-        if portfolio: params["portfolio"] = portfolio
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                f"{self._points_base}/tasks/",
-                params=params,
-                headers=self.headers,
-                timeout=10.0
-            )
-            response.raise_for_status()
-            return response.json()
+        if status:
+            params["status"] = status
+        if portfolio:
+            params["portfolio"] = portfolio
+        response = await self._request(
+            "GET",
+            f"{self._points_base}/tasks/",
+            params=params,
+            timeout=10.0,
+            transport_retries=1,
+            retry_backoff_seconds=0.25,
+            circuit_breaker=True,
+        )
+        response.raise_for_status()
+        return response.json()
 
     async def claim_task(self, task_id: int, slack_user_id: str) -> dict:
         """Claim a task for completion."""
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{self._points_base}/tasks/{task_id}/claim/",
-                json={"slack_user_id": self._clean_slack_id(slack_user_id)},
-                headers=self.headers,
-                timeout=10.0
-            )
-            response.raise_for_status()
-            return response.json()
+        response = await self._request(
+            "POST",
+            f"{self._points_base}/tasks/{task_id}/claim/",
+            json={"slack_user_id": self._clean_slack_id(slack_user_id)},
+            timeout=10.0,
+            circuit_breaker=True,
+        )
+        response.raise_for_status()
+        return response.json()
 
     async def submit_task(self, task_id: int, slack_user_id: str, submission_text: str, submission_url: Optional[str] = None) -> dict:
         """Submit completed work for a task."""
@@ -659,30 +953,34 @@ class MLAIBackendClient:
             "slack_user_id": slack_user_id,
             "submission_text": submission_text,
         }
-        if submission_url: payload["submission_url"] = submission_url
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{self._points_base}/tasks/{task_id}/submit/",
-                json=payload,
-                headers=self.headers,
-                timeout=10.0
-            )
-            response.raise_for_status()
-            return response.json()
+        if submission_url:
+            payload["submission_url"] = submission_url
+        response = await self._request(
+            "POST",
+            f"{self._points_base}/tasks/{task_id}/submit/",
+            json=payload,
+            timeout=10.0,
+            circuit_breaker=True,
+        )
+        response.raise_for_status()
+        return response.json()
 
     async def check_coworking(self, check_date: Optional[str] = None, days: int = 7) -> List[dict]:
         """Check coworking availability."""
         params = {"days": days}
-        if check_date: params["date"] = check_date
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                f"{self._points_base}/coworking/availability/",
-                params=params,
-                headers=self.headers,
-                timeout=10.0
-            )
-            response.raise_for_status()
-            return response.json()
+        if check_date:
+            params["date"] = check_date
+        response = await self._request(
+            "GET",
+            f"{self._points_base}/coworking/availability/",
+            params=params,
+            timeout=10.0,
+            transport_retries=1,
+            retry_backoff_seconds=0.25,
+            circuit_breaker=True,
+        )
+        response.raise_for_status()
+        return response.json()
 
     async def book_coworking(self, slack_user_id: str, booking_date: str, slack_channel_id: Optional[str] = None) -> dict:
         """Book a coworking day."""
@@ -696,35 +994,60 @@ class MLAIBackendClient:
             "date": booking_date,
             "current_time": current_time,
         }
-        if slack_channel_id: payload["slack_channel_id"] = slack_channel_id
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{self._points_base}/coworking/book/",
-                json=payload,
-                headers=self.headers,
-                timeout=15.0
-            )
-            response.raise_for_status()
-            return response.json()
+        if slack_channel_id:
+            payload["slack_channel_id"] = slack_channel_id
+        response = await self._request(
+            "POST",
+            f"{self._points_base}/coworking/book/",
+            json=payload,
+            timeout=15.0,
+            transport_retries=1,
+            retry_backoff_seconds=0.5,
+            circuit_breaker=True,
+        )
+        response.raise_for_status()
+        return response.json()
     
     async def get_github_auth_url(self, slack_user_id: str, domain: Optional[str] = None) -> dict:
         """Get the GitHub OAuth URL for a user from the backend."""
-        try:
-            params = {"slack_user_id": slack_user_id}
-            if domain:
-                params["domain"] = domain
-            async with httpx.AsyncClient() as client:
-                response = await client.get(
-                    f"{self.base_url}/api/v1/integrations/github/auth-url",
-                    params=params,
-                    headers=self.headers,
-                    timeout=10.0
-                )
-                response.raise_for_status()
-                return response.json()
-        except Exception as e:
-            print(f"Failed to get GitHub auth URL: {e}")
-            return {"error": str(e)}
+        params = {"slack_user_id": slack_user_id}
+        if domain:
+            params["domain"] = domain
+        response = await self._request(
+            "GET",
+            "/api/v1/integrations/github/auth-url",
+            params=params,
+            timeout=10.0,
+            transport_retries=1,
+            retry_backoff_seconds=0.25,
+            circuit_breaker=True,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def get_backend_readiness(self) -> dict:
+        response = await self._request(
+            "GET",
+            "/healthz/ready",
+            timeout=5.0,
+            transport_retries=1,
+            retry_backoff_seconds=0.25,
+            circuit_breaker=False,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def get_points_health(self) -> dict:
+        response = await self._request(
+            "GET",
+            "/healthz/points",
+            timeout=5.0,
+            transport_retries=1,
+            retry_backoff_seconds=0.25,
+            circuit_breaker=False,
+        )
+        response.raise_for_status()
+        return response.json()
 
     async def reconnect_content_factory_github(
         self,
@@ -749,17 +1072,25 @@ class MLAIBackendClient:
         if pending_action:
             payload["pending_action"] = pending_action
 
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{self.base_url}/api/content-factory/github/reconnect",
-                json=payload,
-                headers=self.headers,
-                timeout=20.0,
-            )
-            response.raise_for_status()
-            return response.json()
+        response = await self._request(
+            "POST",
+            "/api/content-factory/github/reconnect",
+            json=payload,
+            timeout=20.0,
+            transport_retries=1,
+            retry_backoff_seconds=0.25,
+            circuit_breaker=True,
+        )
+        response.raise_for_status()
+        return response.json()
 
-    async def get_integration(self, slack_user_id: str, domain: Optional[str] = None) -> Optional[dict]:
+    async def get_integration(
+        self,
+        slack_user_id: str,
+        domain: Optional[str] = None,
+        *,
+        include_repo_freshness: bool = False,
+    ) -> Optional[dict]:
         """Check if user has a valid GitHub integration.
 
         Args:
@@ -767,50 +1098,40 @@ class MLAIBackendClient:
             domain: Optional domain to check domain-specific GitHub connection.
                     When provided, response includes domain_connected, domain_github_repo,
                     needs_github_auth, and oauth_url fields.
+            include_repo_freshness: When True, ask mlai-backend to perform live GitHub freshness checks.
         """
         clean_id = self._clean_slack_id(slack_user_id)
         params = {}
         if domain:
             params["domain"] = domain
+        params["include_repo_freshness"] = "1" if include_repo_freshness else "0"
 
-        for attempt in range(2):
-            try:
-                async with httpx.AsyncClient() as client:
-                    response = await client.get(
-                        f"{self.base_url}/api/v1/integrations/github/{clean_id}/",
-                        headers=self.headers,
-                        params=params,
-                        timeout=15.0
-                    )
-                    if response.status_code == 404:
-                        return None
-                    response.raise_for_status()
-                    return response.json()
-            except httpx.TimeoutException as exc:
-                if attempt == 0:
-                    print(
-                        f"Integration status check timed out for {clean_id}"
-                        f"{f'/{domain}' if domain else ''}; retrying once..."
-                    )
-                    continue
-                print(f"Failed to check integration status: {self._describe_exception(exc)}")
-                return None
-            except Exception as exc:
-                print(f"Failed to check integration status: {self._describe_exception(exc)}")
-                return None
-
-        return None
+        response = await self._request(
+            "GET",
+            f"/api/v1/integrations/github/{clean_id}/",
+            params=params,
+            timeout=15.0,
+            transport_retries=1,
+            retry_backoff_seconds=0.25,
+            circuit_breaker=True,
+        )
+        if response.status_code == 404:
+            return None
+        response.raise_for_status()
+        return response.json()
 
     async def save_pending_intent(self, slack_user_id: str, intent: Any) -> None:
         """Save a pending intent to resume after auth."""
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{self.base_url}/api/v1/integrations/pending-intent/",
-                json={"slack_user_id": slack_user_id, "intent": intent},
-                headers=self.headers,
-                timeout=15.0
-            )
-            response.raise_for_status()
+        response = await self._request(
+            "POST",
+            "/api/v1/integrations/pending-intent/",
+            json={"slack_user_id": slack_user_id, "intent": intent},
+            timeout=15.0,
+            transport_retries=1,
+            retry_backoff_seconds=0.25,
+            circuit_breaker=True,
+        )
+        response.raise_for_status()
 
     async def trigger_repo_scan(
         self,
@@ -835,45 +1156,47 @@ class MLAIBackendClient:
             if slack_thread_ts:
                 payload["slack_thread_ts"] = slack_thread_ts
             
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    f"{self.base_url}/api/v1/integrations/github/scan",
-                    json=payload,
-                    headers=self.headers,
-                    timeout=60.0
-                )
-                if response.status_code == 202:
-                    data = response.json()
+            response = await self._request(
+                "POST",
+                "/api/v1/integrations/github/scan",
+                json=payload,
+                timeout=60.0,
+                circuit_breaker=True,
+            )
+            if response.status_code == 202:
+                data = response.json()
+                return {
+                    "status": data.get("status", "accepted"),
+                    "message": data.get("message", "Scan queued successfully."),
+                    **data,
+                }
+            if response.status_code == 404:
+                return {"error": "no_integration", "message": "No GitHub integration found for this user."}
+            if response.status_code == 400:
+                try:
+                    error_data = response.json()
+                except Exception:
+                    error_data = {"error": response.text}
+                if error_data.get("available_domains"):
                     return {
-                        "status": data.get("status", "accepted"),
-                        "message": data.get("message", "Scan queued successfully."),
-                        **data,
+                        "error": "multiple_domains",
+                        "available_domains": error_data["available_domains"],
+                        "message": error_data.get("error", "Multiple domains available"),
+                        "hint": error_data.get("hint", "")
                     }
-                if response.status_code == 404:
-                    return {"error": "no_integration", "message": "No GitHub integration found for this user."}
-                if response.status_code == 400:
-                    try:
-                        error_data = response.json()
-                    except Exception:
-                        error_data = {"error": response.text}
-                    if error_data.get("available_domains"):
-                        return {
-                            "error": "multiple_domains",
-                            "available_domains": error_data["available_domains"],
-                            "message": error_data.get("error", "Multiple domains available"),
-                            "hint": error_data.get("hint", "")
-                        }
-                    if error_data.get("needs_github_auth"):
-                        return {
-                            "error": "needs_github_auth",
-                            "needs_github_auth": True,
-                            "oauth_url": error_data.get("oauth_url"),
-                            "domain": error_data.get("domain"),
-                            "message": error_data.get("error", "GitHub not connected for this domain")
-                        }
-                    return {"error": "bad_request", "message": error_data.get("error", "Bad request")}
-                response.raise_for_status()
-                return response.json()
+                if error_data.get("needs_github_auth"):
+                    return {
+                        "error": "needs_github_auth",
+                        "needs_github_auth": True,
+                        "oauth_url": error_data.get("oauth_url"),
+                        "domain": error_data.get("domain"),
+                        "message": error_data.get("error", "GitHub not connected for this domain")
+                    }
+                return {"error": "bad_request", "message": error_data.get("error", "Bad request")}
+            response.raise_for_status()
+            return response.json()
+        except MLAIBackendUnavailableError:
+            raise
         except Exception as e:
             print(f"Failed to trigger repo scan: {e}")
             return {"error": "scan_failed", "message": str(e)}
@@ -908,17 +1231,17 @@ class MLAIBackendClient:
             "slack_thread_ts": slack_thread_ts
         }
 
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{self.base_url}/api/v1/integrations/github/scaffold",
-                json=payload,
-                headers=self.headers,
-                timeout=60.0
-            )
-            return {
-                "status_code": response.status_code,
-                "data": response.json() if response.status_code < 500 else {}
-            }
+        response = await self._request(
+            "POST",
+            "/api/v1/integrations/github/scaffold",
+            json=payload,
+            timeout=60.0,
+            circuit_breaker=True,
+        )
+        return {
+            "status_code": response.status_code,
+            "data": response.json() if response.status_code < 500 else {}
+        }
 
     async def decide_scaffold(
         self,
@@ -944,17 +1267,17 @@ class MLAIBackendClient:
             "slack_thread_ts": slack_thread_ts,
         }
 
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{self.base_url}/api/v1/integrations/github/scaffold/decision",
-                json=payload,
-                headers=self.headers,
-                timeout=60.0,
-            )
-            return {
-                "status_code": response.status_code,
-                "data": response.json() if response.status_code < 500 else {},
-            }
+        response = await self._request(
+            "POST",
+            "/api/v1/integrations/github/scaffold/decision",
+            json=payload,
+            timeout=60.0,
+            circuit_breaker=True,
+        )
+        return {
+            "status_code": response.status_code,
+            "data": response.json() if response.status_code < 500 else {},
+        }
 
     async def decide_article_system(
         self,
@@ -974,17 +1297,17 @@ class MLAIBackendClient:
             "decision": decision,
         }
 
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{self.base_url}/api/v1/content/article-system/decision",
-                json=payload,
-                headers=self.headers,
-                timeout=60.0,
-            )
-            return {
-                "status_code": response.status_code,
-                "data": response.json() if response.status_code < 500 else {},
-            }
+        response = await self._request(
+            "POST",
+            "/api/v1/content/article-system/decision",
+            json=payload,
+            timeout=60.0,
+            circuit_breaker=True,
+        )
+        return {
+            "status_code": response.status_code,
+            "data": response.json() if response.status_code < 500 else {},
+        }
 
     async def publish_article(self, job_id: str, slack_user_id: str) -> dict:
         """Request publication of a completed article."""
@@ -994,15 +1317,15 @@ class MLAIBackendClient:
         # Ensure we have a clean ID
         clean_id = self._clean_slack_id(slack_user_id)
             
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{self.base_url}/api/v1/content/publish/{job_id}",
-                json={"slack_user_id": clean_id},
-                headers=self.headers,
-                timeout=60.0
-            )
-            response.raise_for_status()
-            return response.json()
+        response = await self._request(
+            "POST",
+            f"/api/v1/content/publish/{job_id}",
+            json={"slack_user_id": clean_id},
+            timeout=60.0,
+            circuit_breaker=True,
+        )
+        response.raise_for_status()
+        return response.json()
 
     async def publish_article_as_pr(self, job_id: str, slack_user_id: str) -> dict:
         """Promote a completed content-only article into a draft-PR publish run."""
@@ -1011,15 +1334,15 @@ class MLAIBackendClient:
 
         clean_id = self._clean_slack_id(slack_user_id)
 
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{self.base_url}/api/v1/content/jobs/{job_id}/publish-pr",
-                json={"slack_user_id": clean_id},
-                headers=self.headers,
-                timeout=60.0,
-            )
-            response.raise_for_status()
-            return response.json()
+        response = await self._request(
+            "POST",
+            f"/api/v1/content/jobs/{job_id}/publish-pr",
+            json={"slack_user_id": clean_id},
+            timeout=60.0,
+            circuit_breaker=True,
+        )
+        response.raise_for_status()
+        return response.json()
 
     async def resolve_content_thread(
         self,
@@ -1043,15 +1366,15 @@ class MLAIBackendClient:
         if domain:
             payload["domain"] = domain
 
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{self.base_url}/api/v1/content/jobs/resolve-thread",
-                json=payload,
-                headers=self.headers,
-                timeout=30.0,
-            )
-            response.raise_for_status()
-            return response.json()
+        response = await self._request(
+            "POST",
+            "/api/v1/content/jobs/resolve-thread",
+            json=payload,
+            timeout=30.0,
+            circuit_breaker=True,
+        )
+        response.raise_for_status()
+        return response.json()
 
     # =========================================================================
     # Missing Admin / Points Methods
@@ -1059,26 +1382,28 @@ class MLAIBackendClient:
 
     async def get_task(self, task_id: int) -> dict:
         """Get a specific task by ID."""
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                f"{self._points_base}/tasks/{task_id}/",
-                headers=self.headers,
-                timeout=10.0
-            )
-            response.raise_for_status()
-            return response.json()
+        response = await self._request(
+            "GET",
+            f"{self._points_base}/tasks/{task_id}/",
+            timeout=10.0,
+            circuit_breaker=True,
+        )
+        response.raise_for_status()
+        return response.json()
 
     async def get_my_bookings(self, slack_user_id: str) -> List[dict]:
         """Get user's coworking bookings."""
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                f"{self._points_base}/coworking/my-bookings/",
-                params={"slack_user_id": slack_user_id},
-                headers=self.headers,
-                timeout=10.0
-            )
-            response.raise_for_status()
-            return response.json()
+        response = await self._request(
+            "GET",
+            f"{self._points_base}/coworking/my-bookings/",
+            params={"slack_user_id": slack_user_id},
+            timeout=10.0,
+            transport_retries=1,
+            retry_backoff_seconds=0.25,
+            circuit_breaker=True,
+        )
+        response.raise_for_status()
+        return response.json()
             
     async def cancel_coworking(
         self,
@@ -1093,29 +1418,33 @@ class MLAIBackendClient:
         elif booking_date:
             payload["date"] = booking_date
             
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{self._points_base}/coworking/cancel/",
-                json=payload,
-                headers=self.headers,
-                timeout=10.0
-            )
-            response.raise_for_status()
-            return response.json()
+        response = await self._request(
+            "POST",
+            f"{self._points_base}/coworking/cancel/",
+            json=payload,
+            timeout=10.0,
+            circuit_breaker=True,
+        )
+        response.raise_for_status()
+        return response.json()
 
     async def get_rate_card(self) -> List[dict]:
         """Get the automated rate card for point awards."""
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.get(
-                    f"{self._points_base}/rate-card/",
-                    headers=self.headers,
-                    timeout=5.0
-                )
-                if response.status_code == 404:
-                    return []
-                response.raise_for_status()
-                return response.json()
+            response = await self._request(
+                "GET",
+                f"{self._points_base}/rate-card/",
+                timeout=5.0,
+                transport_retries=1,
+                retry_backoff_seconds=0.25,
+                circuit_breaker=True,
+            )
+            if response.status_code == 404:
+                return []
+            response.raise_for_status()
+            return response.json()
+        except MLAIBackendUnavailableError:
+            raise
         except Exception as e:
             print(f"❌ Failed to fetch rate card: {e}")
             return []
@@ -1136,15 +1465,19 @@ class MLAIBackendClient:
     async def get_admin_details(self, slack_user_id: str) -> Optional[dict]:
         """Get details for a Points Admin."""
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.get(
-                    f"{self._points_base}/admins/{slack_user_id}/",
-                    headers=self.headers,
-                    timeout=10.0
-                )
-                if response.status_code == 200:
-                    return response.json()
-                return None
+            response = await self._request(
+                "GET",
+                f"{self._points_base}/admins/{slack_user_id}/",
+                timeout=10.0,
+                transport_retries=1,
+                retry_backoff_seconds=0.25,
+                circuit_breaker=True,
+            )
+            if response.status_code == 200:
+                return response.json()
+            return None
+        except MLAIBackendUnavailableError:
+            raise
         except Exception as e:
             print(f"Failed to fetch admin details: {e}")
             return None
@@ -1152,17 +1485,22 @@ class MLAIBackendClient:
     async def get_admin_allowance(self, slack_user_id: str) -> dict:
         """Get the admin's weekly allowance status."""
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.get(
-                    f"{self._points_base}/admin/allowance/",
-                    params={"slack_id": slack_user_id},
-                    headers=self.admin_headers,
-                    timeout=10.0
-                )
-                if response.status_code == 404:
-                    return {'error': 'Not a points admin'}
-                response.raise_for_status()
-                return response.json()
+            response = await self._request(
+                "GET",
+                f"{self._points_base}/admin/allowance/",
+                params={"slack_id": slack_user_id},
+                timeout=10.0,
+                transport_retries=1,
+                retry_backoff_seconds=0.25,
+                circuit_breaker=True,
+                use_admin_headers=True,
+            )
+            if response.status_code == 404:
+                return {'error': 'Not a points admin'}
+            response.raise_for_status()
+            return response.json()
+        except MLAIBackendUnavailableError:
+            raise
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 404:
                 return {'error': 'Not a points admin'}
@@ -1183,21 +1521,21 @@ class MLAIBackendClient:
             "target_slack_id": cleaned_target,
         }
 
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{self._points_base}/admins/",
-                json=payload,
-                headers=self.admin_headers,
-                timeout=10.0,
-            )
+        response = await self._request(
+            "POST",
+            f"{self._points_base}/admins/",
+            json=payload,
+            timeout=10.0,
+            circuit_breaker=True,
+            use_admin_headers=True,
+        )
+        if response.status_code == 409:
+            return response.json()
 
-            if response.status_code == 409:
-                return response.json()
-
-            response.raise_for_status()
-            result = response.json()
-            self._admin_cache[cleaned_target] = True
-            return result
+        response.raise_for_status()
+        result = response.json()
+        self._admin_cache[cleaned_target] = True
+        return result
 
     async def set_points_admin_weekly_allowance(
         self,
@@ -1212,19 +1550,19 @@ class MLAIBackendClient:
             "weekly_allowance": weekly_allowance,
         }
 
-        async with httpx.AsyncClient() as client:
-            response = await client.patch(
-                f"{self._points_base}/admins/{cleaned_target}/",
-                json=payload,
-                headers=self.admin_headers,
-                timeout=10.0,
-            )
-
-            if response.status_code == 404:
-                return response.json()
-
-            response.raise_for_status()
+        response = await self._request(
+            "PATCH",
+            f"{self._points_base}/admins/{cleaned_target}/",
+            json=payload,
+            timeout=10.0,
+            circuit_breaker=True,
+            use_admin_headers=True,
+        )
+        if response.status_code == 404:
             return response.json()
+
+        response.raise_for_status()
+        return response.json()
 
     async def revoke_points_admin(
         self,
@@ -1235,22 +1573,21 @@ class MLAIBackendClient:
         cleaned_target = self._clean_slack_id(target_slack_id)
         payload = {"requester_slack_id": requester_slack_id}
 
-        async with httpx.AsyncClient() as client:
-            response = await client.request(
-                "DELETE",
-                f"{self._points_base}/admins/{cleaned_target}/",
-                json=payload,
-                headers=self.admin_headers,
-                timeout=10.0,
-            )
+        response = await self._request(
+            "DELETE",
+            f"{self._points_base}/admins/{cleaned_target}/",
+            json=payload,
+            timeout=10.0,
+            circuit_breaker=True,
+            use_admin_headers=True,
+        )
+        if response.status_code == 404:
+            return response.json()
 
-            if response.status_code == 404:
-                return response.json()
-
-            response.raise_for_status()
-            result = response.json()
-            self._admin_cache[cleaned_target] = False
-            return result
+        response.raise_for_status()
+        result = response.json()
+        self._admin_cache[cleaned_target] = False
+        return result
 
     async def create_task(
         self,
@@ -1283,19 +1620,19 @@ class MLAIBackendClient:
         if slack_thread_ts:
             payload["slack_thread_ts"] = slack_thread_ts
             
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{self._points_base}/tasks/",
-                json=payload,
-                headers=self.admin_headers,
-                timeout=10.0
-            )
-            # Handle 403 gracefully
-            if response.status_code == 403:
-                return {"error": "forbidden", "message": response.json().get("error")}
-                
-            response.raise_for_status()
-            return response.json()
+        response = await self._request(
+            "POST",
+            f"{self._points_base}/tasks/",
+            json=payload,
+            timeout=10.0,
+            circuit_breaker=True,
+            use_admin_headers=True,
+        )
+        if response.status_code == 403:
+            return {"error": "forbidden", "message": response.json().get("error")}
+
+        response.raise_for_status()
+        return response.json()
 
     async def approve_task(
         self,
@@ -1308,15 +1645,16 @@ class MLAIBackendClient:
         if submission_id:
             payload["submission_id"] = submission_id
             
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{self._points_base}/tasks/{task_id}/approve/",
-                json=payload,
-                headers=self.admin_headers,
-                timeout=15.0
-            )
-            response.raise_for_status()
-            return response.json()
+        response = await self._request(
+            "POST",
+            f"{self._points_base}/tasks/{task_id}/approve/",
+            json=payload,
+            timeout=15.0,
+            circuit_breaker=True,
+            use_admin_headers=True,
+        )
+        response.raise_for_status()
+        return response.json()
 
     async def reject_task(
         self,
@@ -1333,15 +1671,16 @@ class MLAIBackendClient:
         if submission_id:
             payload["submission_id"] = submission_id
             
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{self._points_base}/tasks/{task_id}/reject/",
-                json=payload,
-                headers=self.admin_headers,
-                timeout=10.0
-            )
-            response.raise_for_status()
-            return response.json()
+        response = await self._request(
+            "POST",
+            f"{self._points_base}/tasks/{task_id}/reject/",
+            json=payload,
+            timeout=10.0,
+            circuit_breaker=True,
+            use_admin_headers=True,
+        )
+        response.raise_for_status()
+        return response.json()
 
     async def award_task(self, task_id: int, admin_slack_id: str, target_slack_id: str) -> dict:
         """Direct award a task (claim + approve) to a user (admin only)."""
@@ -1349,15 +1688,16 @@ class MLAIBackendClient:
             "created_by_user_id": admin_slack_id,
             "assigned_to_user_id": self._clean_slack_id(target_slack_id),
         }
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{self._points_base}/tasks/{task_id}/award/",
-                json=payload,
-                headers=self.admin_headers,
-                timeout=15.0
-            )
-            response.raise_for_status()
-            return response.json()
+        response = await self._request(
+            "POST",
+            f"{self._points_base}/tasks/{task_id}/award/",
+            json=payload,
+            timeout=15.0,
+            circuit_breaker=True,
+            use_admin_headers=True,
+        )
+        response.raise_for_status()
+        return response.json()
 
     async def award_points(
         self,
@@ -1402,29 +1742,31 @@ class MLAIBackendClient:
             "points": points,
             "reason": reason,
         }
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{self._points_base}/admin/award/",
-                json=payload,
-                headers=self.admin_headers,
-                timeout=15.0
-            )
-            response.raise_for_status()
-            return response.json()
+        response = await self._request(
+            "POST",
+            f"{self._points_base}/admin/award/",
+            json=payload,
+            timeout=15.0,
+            circuit_breaker=True,
+            use_admin_headers=True,
+        )
+        response.raise_for_status()
+        return response.json()
 
     async def list_rewards(self, slack_user_id: Optional[str] = None) -> List[dict]:
         """List available rewards."""
         params = {}
-        if slack_user_id: params["slack_user_id"] = slack_user_id
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                f"{self._points_base}/rewards/",
-                params=params,
-                headers=self.headers,
-                timeout=10.0
-            )
-            response.raise_for_status()
-            return response.json()
+        if slack_user_id:
+            params["slack_user_id"] = slack_user_id
+        response = await self._request(
+            "GET",
+            f"{self._points_base}/rewards/",
+            params=params,
+            timeout=10.0,
+            circuit_breaker=True,
+        )
+        response.raise_for_status()
+        return response.json()
     
     async def request_reward(
         self,
@@ -1441,19 +1783,22 @@ class MLAIBackendClient:
             "reward_code": reward_code,
             "quantity": quantity,
         }
-        if notes: payload["notes"] = notes
-        if slack_channel_id: payload["slack_channel_id"] = slack_channel_id
-        if slack_thread_ts: payload["slack_thread_ts"] = slack_thread_ts
-            
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{self._points_base}/rewards/request/",
-                json=payload,
-                headers=self.headers,
-                timeout=10.0
-            )
-            response.raise_for_status()
-            return response.json()
+        if notes:
+            payload["notes"] = notes
+        if slack_channel_id:
+            payload["slack_channel_id"] = slack_channel_id
+        if slack_thread_ts:
+            payload["slack_thread_ts"] = slack_thread_ts
+
+        response = await self._request(
+            "POST",
+            f"{self._points_base}/rewards/request/",
+            json=payload,
+            timeout=10.0,
+            circuit_breaker=True,
+        )
+        response.raise_for_status()
+        return response.json()
 
     async def create_points_request(
         self,
@@ -1479,13 +1824,13 @@ class MLAIBackendClient:
         endpoint = f"{self._points_base}/requests/"
 
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    endpoint,
-                    json=payload,
-                    headers=self.headers,
-                    timeout=10.0,
-                )
+            response = await self._request(
+                "POST",
+                endpoint,
+                json=payload,
+                timeout=10.0,
+                circuit_breaker=True,
+            )
         except Exception as exc:
             self._log_points_request_transport_error(
                 step="create_points_request",
@@ -1530,13 +1875,14 @@ class MLAIBackendClient:
         endpoint = f"{self._points_base}/requests/{request_id}/slack-summary/"
 
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.patch(
-                    endpoint,
-                    json=payload,
-                    headers=self.admin_headers,
-                    timeout=10.0,
-                )
+            response = await self._request(
+                "PATCH",
+                endpoint,
+                json=payload,
+                timeout=10.0,
+                circuit_breaker=True,
+                use_admin_headers=True,
+            )
         except Exception as exc:
             self._log_points_request_transport_error(
                 step="attach_points_request_slack_summary",
@@ -1572,16 +1918,17 @@ class MLAIBackendClient:
         endpoint = f"{self._points_base}/requests/by-slack-message/"
 
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.get(
-                    endpoint,
-                    params={
-                        "slack_channel_id": slack_channel_id,
-                        "slack_message_ts": slack_message_ts,
-                    },
-                    headers=self.admin_headers,
-                    timeout=10.0,
-                )
+            response = await self._request(
+                "GET",
+                endpoint,
+                params={
+                    "slack_channel_id": slack_channel_id,
+                    "slack_message_ts": slack_message_ts,
+                },
+                timeout=10.0,
+                circuit_breaker=True,
+                use_admin_headers=True,
+            )
         except Exception as exc:
             self._log_points_request_transport_error(
                 step="get_points_request_by_slack_message",
@@ -1622,13 +1969,14 @@ class MLAIBackendClient:
         endpoint = f"{self._points_base}/requests/{request_id}/approve/"
 
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    endpoint,
-                    json={"admin_slack_id": admin_slack_id},
-                    headers=self.admin_headers,
-                    timeout=15.0,
-                )
+            response = await self._request(
+                "POST",
+                endpoint,
+                json={"admin_slack_id": admin_slack_id},
+                timeout=15.0,
+                circuit_breaker=True,
+                use_admin_headers=True,
+            )
         except Exception as exc:
             self._log_points_request_transport_error(
                 step="approve_points_request",
@@ -1661,15 +2009,16 @@ class MLAIBackendClient:
             "slack_user_id": admin_slack_id,
             "redemption_id": redemption_id,
         }
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{self._points_base}/rewards/approve/",
-                json=payload,
-                headers=self.admin_headers,
-                timeout=10.0
-            )
-            response.raise_for_status()
-            return response.json()
+        response = await self._request(
+            "POST",
+            f"{self._points_base}/rewards/approve/",
+            json=payload,
+            timeout=10.0,
+            circuit_breaker=True,
+            use_admin_headers=True,
+        )
+        response.raise_for_status()
+        return response.json()
 
     async def system_award_points(
         self,
@@ -1685,15 +2034,16 @@ class MLAIBackendClient:
             "points": points,
             "reason": reason,
         }
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{self._points_base}/admin/award/",
-                json=payload,
-                headers=self.admin_headers,
-                timeout=15.0
-            )
-            response.raise_for_status()
-            return response.json()
+        response = await self._request(
+            "POST",
+            f"{self._points_base}/admin/award/",
+            json=payload,
+            timeout=15.0,
+            circuit_breaker=True,
+            use_admin_headers=True,
+        )
+        response.raise_for_status()
+        return response.json()
 
     async def award_first_channel_post(
         self,
@@ -1701,36 +2051,38 @@ class MLAIBackendClient:
         channel_id: str,
     ) -> dict:
         """Award the one-time intro bonus for a user's first channel post."""
-        endpoint = f"{self.base_url}/api/v1/activity/first-post-award/"
+        endpoint = "/api/v1/activity/first-post-award/"
         payload = {
             "slack_user_id": self._clean_slack_id(slack_user_id),
             "channel_id": channel_id,
         }
 
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                endpoint,
-                json=payload,
-                headers=self.admin_headers,
-                timeout=15.0,
-            )
-            response.raise_for_status()
-            return response.json()
+        response = await self._request(
+            "POST",
+            endpoint,
+            json=payload,
+            timeout=15.0,
+            circuit_breaker=True,
+            use_admin_headers=True,
+        )
+        response.raise_for_status()
+        return response.json()
 
     async def link_slack_user(self, slack_id: str, email: str) -> Optional[int]:
         """Link a Slack ID to an existing user found by email."""
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    f"{self.base_url}/api/v1/users/link-slack/",
-                    json={"slack_id": slack_id, "email": email},
-                    headers=self.admin_headers,
-                    timeout=10.0
-                )
-                if response.status_code == 404:
-                    return None
-                response.raise_for_status()
-                return response.json().get("user_id")
+            response = await self._request(
+                "POST",
+                "/api/v1/users/link-slack/",
+                json={"slack_id": slack_id, "email": email},
+                timeout=10.0,
+                circuit_breaker=True,
+                use_admin_headers=True,
+            )
+            if response.status_code == 404:
+                return None
+            response.raise_for_status()
+            return response.json().get("user_id")
         except Exception as e:
             print(f"Failed to link Slack user: {e}")
             return None
@@ -1740,16 +2092,16 @@ class MLAIBackendClient:
     async def medhack_get_current_case(self) -> Optional[dict]:
         """Get the currently active MedHack case."""
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.get(
-                    f"{self.base_url}/api/v1/medhack/cases/current/",
-                    headers=self.headers,
-                    timeout=10.0
-                )
-                if response.status_code == 404:
-                    return None
-                response.raise_for_status()
-                return response.json()
+            response = await self._request(
+                "GET",
+                "/api/v1/medhack/cases/current/",
+                timeout=10.0,
+                circuit_breaker=True,
+            )
+            if response.status_code == 404:
+                return None
+            response.raise_for_status()
+            return response.json()
         except Exception as e:
             print(f"⚠️ MedHack get current case error: {e}")
             return None
@@ -1757,15 +2109,16 @@ class MLAIBackendClient:
     async def medhack_start_case(self, case_id: int, admin_slack_id: str) -> Optional[dict]:
         """Start a new MedHack case (admin only). Closes any active case."""
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    f"{self.base_url}/api/v1/medhack/cases/start/",
-                    json={"case_id": case_id, "admin_slack_id": admin_slack_id},
-                    headers=self.admin_headers,
-                    timeout=10.0
-                )
-                response.raise_for_status()
-                return response.json()
+            response = await self._request(
+                "POST",
+                "/api/v1/medhack/cases/start/",
+                json={"case_id": case_id, "admin_slack_id": admin_slack_id},
+                timeout=10.0,
+                circuit_breaker=True,
+                use_admin_headers=True,
+            )
+            response.raise_for_status()
+            return response.json()
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 403:
                 print(f"⚠️ MedHack start case: not authorized")
@@ -1778,16 +2131,16 @@ class MLAIBackendClient:
     async def medhack_get_user_status(self, slack_user_id: str) -> Optional[dict]:
         """Get a user's status for the active MedHack case."""
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.get(
-                    f"{self.base_url}/api/v1/medhack/cases/active/user/{slack_user_id}/",
-                    headers=self.headers,
-                    timeout=10.0
-                )
-                if response.status_code == 404:
-                    return None
-                response.raise_for_status()
-                return response.json()
+            response = await self._request(
+                "GET",
+                f"/api/v1/medhack/cases/active/user/{slack_user_id}/",
+                timeout=10.0,
+                circuit_breaker=True,
+            )
+            if response.status_code == 404:
+                return None
+            response.raise_for_status()
+            return response.json()
         except Exception as e:
             print(f"⚠️ MedHack get user status error: {e}")
             return None
@@ -1795,15 +2148,15 @@ class MLAIBackendClient:
     async def medhack_set_pending_guess(self, case_id: int, slack_user_id: str, guess: str) -> Optional[dict]:
         """Store a pending guess awaiting user confirmation."""
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    f"{self.base_url}/api/v1/medhack/guesses/pending/",
-                    json={"case_id": case_id, "slack_user_id": slack_user_id, "guess": guess},
-                    headers=self.headers,
-                    timeout=10.0
-                )
-                response.raise_for_status()
-                return response.json()
+            response = await self._request(
+                "POST",
+                "/api/v1/medhack/guesses/pending/",
+                json={"case_id": case_id, "slack_user_id": slack_user_id, "guess": guess},
+                timeout=10.0,
+                circuit_breaker=True,
+            )
+            response.raise_for_status()
+            return response.json()
         except Exception as e:
             print(f"⚠️ MedHack set pending guess error: {e}")
             return None
@@ -1811,15 +2164,14 @@ class MLAIBackendClient:
     async def medhack_clear_pending_guess(self, case_id: int, slack_user_id: str) -> bool:
         """Clear a user's pending guess."""
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.request(
-                    "DELETE",
-                    f"{self.base_url}/api/v1/medhack/guesses/pending/",
-                    json={"case_id": case_id, "slack_user_id": slack_user_id},
-                    headers=self.headers,
-                    timeout=10.0
-                )
-                return response.status_code == 204
+            response = await self._request(
+                "DELETE",
+                "/api/v1/medhack/guesses/pending/",
+                json={"case_id": case_id, "slack_user_id": slack_user_id},
+                timeout=10.0,
+                circuit_breaker=True,
+            )
+            return response.status_code == 204
         except Exception as e:
             print(f"⚠️ MedHack clear pending guess error: {e}")
             return False
@@ -1829,20 +2181,20 @@ class MLAIBackendClient:
     ) -> Optional[dict]:
         """Submit a confirmed guess."""
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    f"{self.base_url}/api/v1/medhack/guesses/submit/",
-                    json={
-                        "case_id": case_id,
-                        "slack_user_id": slack_user_id,
-                        "guess": guess,
-                        "correct": correct,
-                    },
-                    headers=self.headers,
-                    timeout=10.0
-                )
-                response.raise_for_status()
-                return response.json()
+            response = await self._request(
+                "POST",
+                "/api/v1/medhack/guesses/submit/",
+                json={
+                    "case_id": case_id,
+                    "slack_user_id": slack_user_id,
+                    "guess": guess,
+                    "correct": correct,
+                },
+                timeout=10.0,
+                circuit_breaker=True,
+            )
+            response.raise_for_status()
+            return response.json()
         except Exception as e:
             print(f"⚠️ MedHack submit guess error: {e}")
             return None
@@ -1852,15 +2204,15 @@ class MLAIBackendClient:
     ) -> Optional[dict]:
         """Record a winner for a MedHack case."""
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    f"{self.base_url}/api/v1/medhack/cases/{case_id}/winners/",
-                    json={"slack_user_id": slack_user_id, "is_first_solver": is_first_solver},
-                    headers=self.headers,
-                    timeout=10.0
-                )
-                response.raise_for_status()
-                return response.json()
+            response = await self._request(
+                "POST",
+                f"/api/v1/medhack/cases/{case_id}/winners/",
+                json={"slack_user_id": slack_user_id, "is_first_solver": is_first_solver},
+                timeout=10.0,
+                circuit_breaker=True,
+            )
+            response.raise_for_status()
+            return response.json()
         except Exception as e:
             print(f"⚠️ MedHack record winner error: {e}")
             return None
@@ -1868,14 +2220,14 @@ class MLAIBackendClient:
     async def medhack_get_case_history(self) -> list:
         """Get history of all played MedHack cases."""
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.get(
-                    f"{self.base_url}/api/v1/medhack/cases/history/",
-                    headers=self.headers,
-                    timeout=10.0
-                )
-                response.raise_for_status()
-                return response.json().get("cases", [])
+            response = await self._request(
+                "GET",
+                "/api/v1/medhack/cases/history/",
+                timeout=10.0,
+                circuit_breaker=True,
+            )
+            response.raise_for_status()
+            return response.json().get("cases", [])
         except Exception as e:
             print(f"⚠️ MedHack get case history error: {e}")
             return []
@@ -1892,21 +2244,20 @@ class MLAIBackendClient:
             Response dict on success (201), None on error
         """
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    f"{self.base_url}/api/v1/medhack/announcements/",
-                    json={
-                        "title": title,
-                        "body": body,
-                        "slack_user_id": slack_user_id,
-                    },
-                    headers=self.headers,
-                    timeout=10.0
-                )
-                if response.status_code == 201:
-                    return response.json()
-                # Return error info for non-201 responses
-                return {"status_code": response.status_code, "detail": response.text}
+            response = await self._request(
+                "POST",
+                "/api/v1/medhack/announcements/",
+                json={
+                    "title": title,
+                    "body": body,
+                    "slack_user_id": slack_user_id,
+                },
+                timeout=10.0,
+                circuit_breaker=True,
+            )
+            if response.status_code == 201:
+                return response.json()
+            return {"status_code": response.status_code, "detail": response.text}
         except Exception as e:
             print(f"⚠️ MedHack create announcement error: {e}")
             return None

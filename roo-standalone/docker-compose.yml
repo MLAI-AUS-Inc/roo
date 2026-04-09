@@ -6,12 +6,15 @@ services:
     env_file:
       - .env
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz/ready', timeout=5).read()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
     volumes:
       - ./skills:/app/skills:ro
       - roo-data:/app/data
-    dns:
-      - 8.8.8.8
-      - 8.8.4.4
 
 volumes:
   roo-data:

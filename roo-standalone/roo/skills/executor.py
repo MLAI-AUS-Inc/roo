@@ -522,6 +522,26 @@ JSON:"""
             },
         ]
 
+    @staticmethod
+    def _content_factory_backend_unavailable_message() -> str:
+        return (
+            "I couldn't reach MLAI backend just now, so I haven't started the Content Factory flow. "
+            "Please try again in a moment."
+        )
+
+    @staticmethod
+    def _points_backend_unavailable_message(action: Optional[str] = None) -> str:
+        if action == "book_coworking":
+            return (
+                "I couldn't confirm whether your coworking booking went through because MLAI backend timed out. "
+                "Please retry the same booking in a moment. I won't double-book the same day."
+            )
+
+        return (
+            "I couldn't reach the MLAI points backend just now, so I couldn't confirm that action. "
+            "Please try again in a moment."
+        )
+
     async def _request_github_reconnect(
         self,
         api_client,
@@ -541,13 +561,18 @@ JSON:"""
         resume_action: str = "resume_scan",
         resume_value: Optional[dict] = None,
     ) -> Optional[Any]:
-        reconnect = await api_client.reconnect_content_factory_github(
-            slack_user_id=user_id,
-            domain=domain,
-            github_repo=github_repo,
-            trigger=trigger,
-            pending_action=pending_action,
-        )
+        from ..clients.mlai_backend import MLAIBackendUnavailableError
+
+        try:
+            reconnect = await api_client.reconnect_content_factory_github(
+                slack_user_id=user_id,
+                domain=domain,
+                github_repo=github_repo,
+                trigger=trigger,
+                pending_action=pending_action,
+            )
+        except MLAIBackendUnavailableError:
+            return self._content_factory_backend_unavailable_message()
         if reconnect.get("status") == "already_connected":
             return None
 
@@ -1344,8 +1369,10 @@ Keep the response concise but informative."""
         text: str,
         channel_id: Optional[str],
         thread_ts: Optional[str],
-    ) -> None:
+        ) -> None:
         """Persist the original content request so GitHub auth/repo selection can resume it."""
+        from ..clients.mlai_backend import MLAIBackendUnavailableError
+
         params = dict(params or {})
         client_request_id = self._get_content_factory_client_request_id(params)
         params["client_request_id"] = client_request_id
@@ -1411,6 +1438,11 @@ Keep the response concise but informative."""
 
         try:
             await api_client.save_pending_intent(user_id, backend_intent)
+        except MLAIBackendUnavailableError as exc:
+            print(
+                "⚠️ Failed to persist content-factory pending intent to mlai-backend: "
+                f"{exc!r}"
+            )
         except (httpx.TimeoutException, httpx.TransportError, httpx.HTTPError) as exc:
             detail = str(exc).strip() or exc.__class__.__name__
             print(
@@ -1431,6 +1463,7 @@ Keep the response concise but informative."""
         user_id: str,
         domain: Optional[str],
     ) -> Optional[str]:
+        from ..clients.mlai_backend import MLAIBackendUnavailableError
         from ..slack_client import get_user_info
 
         normalized_domain = normalize_content_factory_domain(domain) or "this domain"
@@ -1462,8 +1495,15 @@ Keep the response concise but informative."""
                 last_name=last_name,
                 avatar_url=avatar_url,
             )
+        except MLAIBackendUnavailableError as exc:
+            print(f"⚠️ Failed to register content-factory user {user_id}: {exc!r}")
+            if cost_points == 0:
+                return None
+            return self._content_factory_backend_unavailable_message()
         except Exception as exc:
-            print(f"⚠️ Failed to register content-factory user {user_id}: {exc}")
+            print(f"⚠️ Failed to register content-factory user {user_id}: {exc!r}")
+            if cost_points == 0:
+                return None
             return (
                 "I couldn't link your Slack account to MLAI yet, so I haven't charged anything. "
                 "Please try again in a moment."
@@ -1474,8 +1514,11 @@ Keep the response concise but informative."""
 
         try:
             balance_data = await api_client.get_balance(user_id)
+        except MLAIBackendUnavailableError as exc:
+            print(f"⚠️ Failed to fetch Roo points balance for {user_id}: {exc!r}")
+            return self._content_factory_backend_unavailable_message()
         except Exception as exc:
-            print(f"⚠️ Failed to fetch Roo points balance for {user_id}: {exc}")
+            print(f"⚠️ Failed to fetch Roo points balance for {user_id}: {exc!r}")
             return (
                 "I couldn't check your Roo points balance just now, so I haven't started the article yet. "
                 "Please try again in a moment."
@@ -1565,6 +1608,8 @@ Keep the response concise but informative."""
         channel_id: Optional[str],
         thread_ts: Optional[str],
     ) -> tuple[dict, Optional[Any]]:
+        from ..clients.mlai_backend import MLAIBackendUnavailableError
+
         requested_action = detect_content_action(text)
         if requested_action != "publish_pr":
             return params, None
@@ -1594,6 +1639,8 @@ Keep the response concise but informative."""
                     "Please use the original content-ready thread for the article you want to publish."
                 )
             return params, f"❌ I couldn't resolve which completed article to publish from this thread: {exc}"
+        except MLAIBackendUnavailableError:
+            return params, self._content_factory_backend_unavailable_message()
         except Exception as exc:
             return params, f"❌ I couldn't resolve which completed article to publish from this thread: {exc}"
 
@@ -1651,6 +1698,8 @@ Keep the response concise but informative."""
         text: str,
         params: dict,
     ) -> Any:
+        from ..clients.mlai_backend import MLAIBackendUnavailableError
+
         if not job_id:
             return (
                 "I couldn't tell which article bundle to publish as a PR in this thread. "
@@ -1676,6 +1725,8 @@ Keep the response concise but informative."""
 
         try:
             response = await api_client.publish_article_as_pr(job_id, slack_user_id)
+        except MLAIBackendUnavailableError:
+            return self._content_factory_backend_unavailable_message()
         except httpx.HTTPStatusError as exc:
             error_message = str(exc)
             try:
@@ -1776,6 +1827,8 @@ Keep the response concise but informative."""
         thread_history: Optional[List[dict]] = None
     ) -> str:
         """Execute the content factory generation workflow."""
+        from ..clients.mlai_backend import MLAIBackendUnavailableError
+
         params = dict(params or {})
         params["client_request_id"] = self._get_content_factory_client_request_id(params)
         
@@ -1824,7 +1877,10 @@ Keep the response concise but informative."""
         # When a domain is explicitly provided, querying the generic user-level
         # integration can return a multi-domain selection error before we ever
         # reach the domain-specific flow.
-        integration = await api_client.get_integration(user_id, domain=domain)
+        try:
+            integration = await api_client.get_integration(user_id, domain=domain)
+        except MLAIBackendUnavailableError:
+            return self._content_factory_backend_unavailable_message()
         
         # 1. New User Disclaimer & Education
         # If user has no integration AND hasn't confirmed the disclaimer yet
@@ -1913,7 +1969,10 @@ Keep the response concise but informative."""
             
             if not auth_url:
                 # Fallback if auth_url missing in error response
-                auth_url_resp = await api_client.get_github_auth_url(user_id, domain=domain)
+                try:
+                    auth_url_resp = await api_client.get_github_auth_url(user_id, domain=domain)
+                except MLAIBackendUnavailableError:
+                    return self._content_factory_backend_unavailable_message()
                 auth_url = auth_url_resp.get("auth_url")
 
             blocks = [
@@ -1960,7 +2019,10 @@ Keep the response concise but informative."""
 
         if not integration:
             if is_article_flow:
-                org_config_cached = await api_client.get_content_org_config(user_id, domain=domain)
+                try:
+                    org_config_cached = await api_client.get_content_org_config(user_id, domain=domain)
+                except MLAIBackendUnavailableError:
+                    return self._content_factory_backend_unavailable_message()
                 if org_config_cached:
                     domain = domain or org_config_cached.get("domain")
                     repo_hint = org_config_cached.get("github_repo")
@@ -1979,7 +2041,10 @@ Keep the response concise but informative."""
                     }
 
             if not integration:
-                auth_response = await api_client.get_github_auth_url(user_id, domain=domain)
+                try:
+                    auth_response = await api_client.get_github_auth_url(user_id, domain=domain)
+                except MLAIBackendUnavailableError:
+                    return self._content_factory_backend_unavailable_message()
                 auth_url = auth_response.get("auth_url")
 
                 if not auth_url:
@@ -2031,9 +2096,12 @@ Keep the response concise but informative."""
         if not domain:
             if len(connected_domains) == 0:
                 # No domains connected — fall back to org config lookup
-                org_config_cached = await api_client.get_content_org_config(
-                    slack_user_id=user_id
-                )
+                try:
+                    org_config_cached = await api_client.get_content_org_config(
+                        slack_user_id=user_id
+                    )
+                except MLAIBackendUnavailableError:
+                    return self._content_factory_backend_unavailable_message()
                 if org_config_cached:
                     domain = org_config_cached.get("domain")
             elif len(connected_domains) == 1:
@@ -2055,12 +2123,18 @@ Keep the response concise but informative."""
         # while the domain-specific response can correctly say "research_article"
         # or "write_article" without forcing a re-scan.
         if domain:
-            domain_integration = await api_client.get_integration(user_id, domain=domain)
+            try:
+                domain_integration = await api_client.get_integration(user_id, domain=domain)
+            except MLAIBackendUnavailableError:
+                return self._content_factory_backend_unavailable_message()
             if domain_integration:
                 integration = domain_integration
                 connected_domains = integration.get("connected_domains", connected_domains)
             elif is_article_flow and org_config_cached is None:
-                org_config_cached = await api_client.get_content_org_config(user_id, domain=domain)
+                try:
+                    org_config_cached = await api_client.get_content_org_config(user_id, domain=domain)
+                except MLAIBackendUnavailableError:
+                    return self._content_factory_backend_unavailable_message()
 
         repo_name, domain_info = self._resolve_content_factory_repo_name(
             integration or {},
@@ -2403,7 +2477,10 @@ Keep the response concise but informative."""
                 # If error indicates auth failure or repo not found (404/403/401)
                 if any(code in str(error_msg) for code in ["404", "401", "403", "Not Found", "Bad credentials"]):
                     # Fetch Auth URL to allow reconnect
-                    auth_response = await api_client.get_github_auth_url(user_id, domain=domain)
+                    try:
+                        auth_response = await api_client.get_github_auth_url(user_id, domain=domain)
+                    except MLAIBackendUnavailableError:
+                        return self._content_factory_backend_unavailable_message()
                     auth_url = auth_response.get("auth_url")
                     
                     if auth_url:
@@ -2441,7 +2518,10 @@ Keep the response concise but informative."""
 
             # Legacy Sync Behavior (if backend returns 200 immediately)
             # Scan succeeded - refresh integration status
-            integration = await api_client.get_integration(user_id, domain=domain)
+            try:
+                integration = await api_client.get_integration(user_id, domain=domain)
+            except MLAIBackendUnavailableError:
+                return self._content_factory_backend_unavailable_message()
             if not integration or not integration.get("project_scanned"):
                 return "Scanning is taking a bit longer than expected. Please wait for the notification! 🦘"
             
@@ -2636,6 +2716,8 @@ Keep the response concise but informative."""
                 workflow=workflow,
             )
             
+        except MLAIBackendUnavailableError:
+            return self._content_factory_backend_unavailable_message()
         except httpx.HTTPStatusError as e:
             print(f"Content Generation HTTP Error: {e}")
             if e.response.status_code == 412:
@@ -2682,7 +2764,10 @@ Keep the response concise but informative."""
                 if error_code == "PUBLISH_TARGET_ACTION_REQUIRED":
                     auth_url = None
                     if domain:
-                        auth_response = await api_client.get_github_auth_url(user_id, domain=domain)
+                        try:
+                            auth_response = await api_client.get_github_auth_url(user_id, domain=domain)
+                        except MLAIBackendUnavailableError:
+                            return self._content_factory_backend_unavailable_message()
                         auth_url = auth_response.get("auth_url")
 
                     if channel_id and auth_url:
@@ -3086,6 +3171,7 @@ Keep the response concise but informative."""
     ) -> Any:
         """Execute the MLAI Points skill."""
         import httpx
+        from roo.clients.mlai_backend import MLAIBackendUnavailableError
         
         # Get client from skill's implementation module
         # ClientClass = skill.get_client_class("MLAIBackendClient")
@@ -3120,6 +3206,8 @@ Keep the response concise but informative."""
                 skill=skill
             )
             
+        except MLAIBackendUnavailableError:
+            return self._points_backend_unavailable_message(action)
         except PermissionError:
             return "Sorry mate, you're not authorized to do that. Only Points Admins can perform that action. 🔒"
         except ValueError as e:
@@ -3702,15 +3790,23 @@ Keep the response concise but informative."""
             
             result = await client.book_coworking(user_id, booking_date, channel_id)
             cost = result.get("points_cost", 1)
-            
-            # Get new balance
-            balance_data = await client.get_balance(user_id)
-            new_balance = balance_data.get("balance", 0)
-            
+            from roo.clients.mlai_backend import MLAIBackendUnavailableError
+
+            new_balance = None
+            try:
+                balance_data = await client.get_balance(user_id)
+                new_balance = balance_data.get("balance", 0)
+            except MLAIBackendUnavailableError:
+                pass
+
+            balance_line = ""
+            if new_balance is not None:
+                balance_line = f" (Balance remaining: {new_balance} points)"
+
             return (
                 f"You beauty! 🎉\n\n"
                 f"Booked you in for **{booking_date}** at the coworking space.\n"
-                f"Cost: {cost} point (Balance remaining: {new_balance} points)\n\n"
+                f"Cost: {cost} point{balance_line}\n\n"
                 f"See you there, legend!"
             )
         
@@ -4229,6 +4325,7 @@ Keep the response concise but informative."""
         thread_ts: Optional[str]
     ) -> str:
         """Execute the GitHub Integration skill."""
+        from roo.clients.mlai_backend import MLAIBackendUnavailableError
         
         # Get API client for GitHub token operations
         settings = get_settings()
@@ -4242,7 +4339,10 @@ Keep the response concise but informative."""
         # 1. Check for valid integration & handle errors
         domain = params.get("domain")
         action = params.get("action")
-        integration = await api_client.get_integration(user_id, domain=domain)
+        try:
+            integration = await api_client.get_integration(user_id, domain=domain)
+        except MLAIBackendUnavailableError:
+            return self._content_factory_backend_unavailable_message()
 
         if action == "reconnect":
             resolved_domain = domain
@@ -4416,6 +4516,8 @@ Keep the response concise but informative."""
                         try:
                             auth_resp = await api_client.get_github_auth_url(user_id, domain=domain)
                             oauth_url = auth_resp.get("auth_url")
+                        except MLAIBackendUnavailableError:
+                            return self._content_factory_backend_unavailable_message()
                         except Exception:
                             oauth_url = None
                     if oauth_url and channel_id:
