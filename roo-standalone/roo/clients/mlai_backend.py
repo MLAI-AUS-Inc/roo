@@ -1138,7 +1138,8 @@ class MLAIBackendClient:
         slack_user_id: str,
         slack_channel_id: Optional[str] = None,
         slack_thread_ts: Optional[str] = None,
-        domain: Optional[str] = None
+        domain: Optional[str] = None,
+        request_source: str = CONTENT_FACTORY_REQUEST_SOURCE,
     ) -> dict:
         """
         Trigger a repository scan for a user via the backend.
@@ -1148,7 +1149,10 @@ class MLAIBackendClient:
         """
         try:
             clean_id = self._clean_slack_id(slack_user_id)
-            payload = {"slack_user_id": clean_id}
+            payload = {
+                "slack_user_id": clean_id,
+                "request_source": request_source,
+            }
             if domain:
                 payload["domain"] = domain
             if slack_channel_id:
