@@ -1079,6 +1079,7 @@ async def test_manual_github_reconnect_posts_auth_button_when_auth_started(monke
 
     assert isinstance(result, dict)
     assert "Use the button above to continue." in result["message"]
+    assert result["suppress_post"] is True
     assert posted_messages[0]["kwargs"]["blocks"][1]["elements"][0]["url"] == "https://github.test/reconnect"
     assert FakeContentFactoryClient.last_instance.repo_scan_calls == []
 
@@ -1088,6 +1089,11 @@ async def test_publish_code_article_preflights_github_reconnect_before_queueing(
     executor = SkillExecutor()
     posted_messages = []
     _patch_content_factory(monkeypatch)
+    FakeContentFactoryClient.domain_integrations["mlai.au"] = {
+        **FakeContentFactoryClient.domain_integrations["mlai.au"],
+        "needs_github_auth": True,
+        "connection_state": "auth_required",
+    }
     FakeContentFactoryClient.reconnect_results["mlai.au"] = {
         "status": "auth_started",
         "connection_state": "auth_required",
@@ -1120,6 +1126,11 @@ async def test_publish_code_article_preflights_github_reconnect_before_queueing(
 
     assert isinstance(result, dict)
     assert "Use the button above to continue." in result["message"]
+    assert result["suppress_post"] is True
+    assert "Connected to" not in posted_messages[0]["args"][1]
+    assert "Repository: ✅ Up to date" not in posted_messages[0]["args"][1]
+    assert "Repository selected: `MLAI-AUS-Inc/mlai-au`" in posted_messages[0]["args"][1]
+    assert "reconnect GitHub to continue with repo-backed work" in posted_messages[0]["args"][1]
     assert FakeContentFactoryClient.last_instance.trigger_calls == []
     assert FakeContentFactoryClient.saved_intents
     assert FakeContentFactoryClient.saved_intents[0]["intent_data"]["type"] == "write_article"
@@ -1183,9 +1194,69 @@ async def test_scan_preflights_github_reconnect_before_queueing(monkeypatch):
 
     assert isinstance(result, dict)
     assert "Use the button above to continue." in result["message"]
+    assert result["suppress_post"] is True
     assert FakeContentFactoryClient.last_instance.repo_scan_calls == []
     assert FakeContentFactoryClient.saved_intents
     assert FakeContentFactoryClient.reconnect_calls[-1]["pending_action"] == "scan"
+
+
+@pytest.mark.asyncio
+async def test_article_auth_required_412_posts_single_reconnect_cta(monkeypatch):
+    executor = SkillExecutor()
+    posted_messages = []
+    _patch_content_factory(monkeypatch)
+
+    async def raise_auth_required(self, *args, **kwargs):
+        request = httpx.Request("POST", "https://backend.test/api/runs/article")
+        response = httpx.Response(
+            412,
+            json={
+                "error_code": "AUTH_REQUIRED",
+                "message": "Reconnect GitHub for mlai.au before I continue.",
+                "auth_url": "https://github.test/reconnect",
+            },
+            request=request,
+        )
+        raise httpx.HTTPStatusError("precondition failed", request=request, response=response)
+
+    monkeypatch.setattr(FakeContentFactoryClient, "trigger_article_generation", raise_auth_required)
+    monkeypatch.setattr(
+        executor_module,
+        "post_message",
+        lambda *args, **kwargs: posted_messages.append({"args": args, "kwargs": kwargs}) or {"ts": "111.222"},
+    )
+
+    result = await executor._execute_content_factory(
+        skill=None,
+        text="write an article about AI agents for mlai.au and publish it as code",
+        params={
+            "domain": "mlai.au",
+            "topic": "AI agents",
+            "action": "write",
+            "confirmed": True,
+            "delivery_mode": "publish_code",
+            "delivery_mode_confirmed": True,
+        },
+        user_id="U05QPB483K9",
+        channel_id="C123",
+        thread_ts="111.222",
+    )
+
+    assert isinstance(result, dict)
+    assert result["suppress_post"] is True
+    assert "Use the button above to continue." in result["message"]
+    reconnect_posts = [
+        post
+        for post in posted_messages
+        if post["kwargs"].get("blocks")
+        and any(
+            element.get("action_id") == "connect_github"
+            for block in post["kwargs"]["blocks"]
+            for element in block.get("elements", [])
+        )
+    ]
+    assert len(reconnect_posts) == 1
+    assert reconnect_posts[0]["kwargs"]["blocks"][1]["elements"][0]["url"] == "https://github.test/reconnect"
 
 
 @pytest.mark.asyncio

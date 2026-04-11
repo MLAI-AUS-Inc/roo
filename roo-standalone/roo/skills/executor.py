@@ -542,6 +542,16 @@ JSON:"""
             "Please try again in a moment."
         )
 
+    @staticmethod
+    def _already_posted_response(message: str, *, blocks: Optional[list] = None) -> dict:
+        response = {
+            "message": message,
+            "suppress_post": True,
+        }
+        if blocks is not None:
+            response["blocks"] = blocks
+        return response
+
     async def _request_github_reconnect(
         self,
         api_client,
@@ -609,6 +619,7 @@ JSON:"""
         )
         if channel_id:
             post_message(channel_id, message, thread_ts=thread_ts, blocks=blocks)
+            return self._already_posted_response(short_message, blocks=blocks)
         return {
             "message": short_message,
             "blocks": blocks,
@@ -1763,12 +1774,12 @@ Keep the response concise but informative."""
                         )
                         if channel_id:
                             post_message(channel_id, message, thread_ts=thread_ts, blocks=blocks)
+                            return self._already_posted_response(
+                                f"{message} Use the button above to continue.",
+                                blocks=blocks,
+                            )
                         return {
-                            "message": (
-                                f"{message} Use the button above to continue."
-                                if channel_id
-                                else f"{message}\n\n{auth_url}"
-                            ),
+                            "message": f"{message}\n\n{auth_url}",
                             "blocks": blocks,
                         }
                 error_message = (
@@ -2014,7 +2025,10 @@ Keep the response concise but informative."""
             
             if channel_id:
                 post_message(channel_id, "Please re-connect GitHub", thread_ts=thread_ts, blocks=blocks)
-                return "Please re-connect your GitHub account using the button above. 🔌"
+                return self._already_posted_response(
+                    "Please re-connect your GitHub account using the button above. 🔌",
+                    blocks=blocks,
+                )
             return f"GitHub connection issue ({error_msg}). Please re-connect here: {auth_url}"
 
         if not integration:
@@ -2087,7 +2101,10 @@ Keep the response concise but informative."""
 
                 if channel_id:
                     post_message(channel_id, "Please connect GitHub", thread_ts=thread_ts, blocks=blocks)
-                    return "I've sent a button to connect your GitHub account. 🔌"
+                    return self._already_posted_response(
+                        "I've sent a button to connect your GitHub account. 🔌",
+                        blocks=blocks,
+                    )
                 return f"Please connect your GitHub account here: {auth_url}"
 
         # 2. Resolve domain from connected_domains
@@ -2372,9 +2389,19 @@ Keep the response concise but informative."""
         # Compile Status Report
         last_scanned = integration.get("last_scanned_at", "Never") if integration else "Never"
         last_article = ((integration or {}).get("last_article") or {}).get("title", "None")
+        connection_state = str(
+            (domain_info or {}).get("connection_state")
+            or (integration or {}).get("connection_state")
+            or ""
+        ).strip().lower()
+        needs_github_auth = bool((integration or {}).get("needs_github_auth")) or connection_state == "auth_required"
 
         if channel_id:
-            if repo_name and domain:
+            if needs_github_auth and repo_name and domain:
+                connected_msg = f"👋 G'day! Repository selected: `{repo_name}` for *{domain}*.\n\n"
+            elif needs_github_auth and repo_name:
+                connected_msg = f"👋 G'day! Repository selected: `{repo_name}`.\n\n"
+            elif repo_name and domain:
                 connected_msg = f"👋 G'day! Connected to `{repo_name}` for *{domain}*.\n\n"
             elif repo_name:
                 connected_msg = f"👋 G'day! I see you're connected to `{repo_name}`.\n\n"
@@ -2388,6 +2415,8 @@ Keep the response concise but informative."""
             )
             if needs_scan:
                 status_msg += f"\n{scan_reason}. Scanning updates now... 🕵️"
+            elif needs_github_auth and repo_name:
+                status_msg += "• Repository: reconnect GitHub to continue with repo-backed work"
             elif repo_name:
                 status_msg += "• Repository: ✅ Up to date"
             else:
@@ -2471,7 +2500,10 @@ Keep the response concise but informative."""
                         ]
                         if channel_id:
                             post_message(channel_id, f"GitHub not connected for {domain_name}", thread_ts=thread_ts, blocks=blocks)
-                            return f"GitHub isn't connected for {domain_name}. Click the button above to connect, then try again! 🔌"
+                            return self._already_posted_response(
+                                f"GitHub isn't connected for {domain_name}. Click the button above to connect, then try again! 🔌",
+                                blocks=blocks,
+                            )
                     return f"GitHub isn't connected for {domain_name}. Please connect your GitHub account and try again."
 
                 # If error indicates auth failure or repo not found (404/403/401)
@@ -2511,7 +2543,10 @@ Keep the response concise but informative."""
                         ]
                         if channel_id:
                             post_message(channel_id, "Please re-connect GitHub", thread_ts=thread_ts, blocks=blocks)
-                            return "Please re-connect your GitHub App using the button above. 🔌"
+                            return self._already_posted_response(
+                                "Please re-connect your GitHub App using the button above. 🔌",
+                                blocks=blocks,
+                            )
                 
                 return f"Had some trouble scanning your repository: {error_msg}"
 
@@ -2755,7 +2790,10 @@ Keep the response concise but informative."""
                         )
                         if channel_id:
                             post_message(channel_id, message, thread_ts=thread_ts, blocks=blocks)
-                            return f"{message} Use the button above to continue."
+                            return self._already_posted_response(
+                                f"{message} Use the button above to continue.",
+                                blocks=blocks,
+                            )
                         return {
                             "message": f"{message}\n\n{auth_url}",
                             "blocks": blocks,

@@ -12,6 +12,7 @@ sys.modules.setdefault("frontmatter", SimpleNamespace(load=lambda *args, **kwarg
 backend_module = importlib.import_module("roo.clients.mlai_backend")
 MLAIBackendClient = backend_module.MLAIBackendClient
 MLAIBackendUnavailableError = backend_module.MLAIBackendUnavailableError
+CONTENT_FACTORY_REQUEST_SOURCE = backend_module.CONTENT_FACTORY_REQUEST_SOURCE
 
 
 @pytest.fixture(autouse=True)
@@ -94,3 +95,42 @@ async def test_circuit_breaker_probes_readiness_before_main_request(monkeypatch)
         await client.get_integration("U123", domain="mlai.au")
 
     assert calls == ["/healthz/ready"]
+
+
+@pytest.mark.asyncio
+async def test_trigger_repo_scan_sends_request_source(monkeypatch):
+    captured = {}
+
+    async def fake_request(method, endpoint, **kwargs):
+        captured["method"] = method
+        captured["endpoint"] = endpoint
+        captured["json"] = kwargs["json"]
+        request = httpx.Request(method, f"https://backend.test{endpoint}")
+        return httpx.Response(
+            202,
+            request=request,
+            json={"status": "scan_initiated", "message": "Scan queued successfully."},
+        )
+
+    client = MLAIBackendClient(
+        base_url="https://backend.test",
+        api_key="roo-api-key",
+        internal_api_key="roo-api-key",
+    )
+    monkeypatch.setattr(client, "_request", fake_request)
+
+    result = await client.trigger_repo_scan(
+        "U123",
+        slack_channel_id="C123",
+        slack_thread_ts="111.222",
+        domain="mlai.au",
+    )
+
+    assert captured["method"] == "POST"
+    assert captured["endpoint"] == "/api/v1/integrations/github/scan"
+    assert captured["json"]["slack_user_id"] == "U123"
+    assert captured["json"]["domain"] == "mlai.au"
+    assert captured["json"]["slack_channel_id"] == "C123"
+    assert captured["json"]["slack_thread_ts"] == "111.222"
+    assert captured["json"]["request_source"] == CONTENT_FACTORY_REQUEST_SOURCE
+    assert result["status"] == "scan_initiated"
