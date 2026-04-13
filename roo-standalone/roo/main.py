@@ -204,6 +204,14 @@ async def _watch_content_factory_quiet_run(job_id: str) -> None:
             status_data = await client.check_generation_status(job_id)
             consecutive_failures = 0
             status_value = str(status_data.get("status") or "").strip().lower()
+            if status_value in {"blocked", "blocked_verification"}:
+                print(
+                    "⏸️ Quiet-run watchdog stopping "
+                    f"job_id={job_id} status={status_value} "
+                    f"step={status_data.get('current_step') or status_data.get('blocked_step') or ''} "
+                    f"error_code={status_data.get('error_code') or ''}"
+                )
+                return
             if not status_value or status_value in CONTENT_FACTORY_WATCHDOG_STOP_STATUSES:
                 return
             await client.maybe_send_content_still_working(
