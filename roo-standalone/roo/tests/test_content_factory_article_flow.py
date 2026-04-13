@@ -3241,6 +3241,54 @@ async def test_quiet_run_watchdog_stops_for_awaiting_delivery_mode(monkeypatch):
     assert still_working_calls == []
 
 
+@pytest.mark.asyncio
+async def test_quiet_run_watchdog_logs_blocked_status_and_stops(monkeypatch):
+    status_checks = []
+    still_working_calls = []
+    printed_lines = []
+
+    class FakeWatchdogClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def check_generation_status(self, job_id):
+            status_checks.append(job_id)
+            return {
+                "status": "blocked",
+                "current_step": "validate_render_dependencies",
+                "error_code": "article_dependency_strategy_unresolved",
+            }
+
+        async def maybe_send_content_still_working(self, job_id, **kwargs):
+            still_working_calls.append({"job_id": job_id, **kwargs})
+            return {"status": "noop", "job_id": job_id}
+
+    async def fake_sleep(_seconds):
+        return None
+
+    monkeypatch.setattr(
+        main_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            MLAI_BACKEND_URL="https://backend.test",
+            MLAI_API_KEY="api-key",
+            ROO_API_KEY="roo-api-key",
+        ),
+    )
+    monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeWatchdogClient)
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr("builtins.print", lambda *args, **kwargs: printed_lines.append(" ".join(str(arg) for arg in args)))
+
+    await main_module._watch_content_factory_quiet_run("job-blocked-1")
+
+    assert status_checks == ["job-blocked-1"]
+    assert still_working_calls == []
+    assert any(
+        "status=blocked" in line and "article_dependency_strategy_unresolved" in line
+        for line in printed_lines
+    )
+
+
 def test_confirm_content_factory_action_without_context_prompts_to_resend(monkeypatch):
     agent_calls = []
     posted_messages = []
