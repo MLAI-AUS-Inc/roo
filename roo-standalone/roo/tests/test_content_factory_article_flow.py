@@ -250,16 +250,18 @@ class FakeContentFactoryClient:
         slack_thread_ts,
         requested_action,
         domain=None,
+        job_id=None,
     ):
-        FakeContentFactoryClient.resolve_content_thread_calls.append(
-            {
-                "slack_user_id": slack_user_id,
-                "slack_channel_id": slack_channel_id,
-                "slack_thread_ts": slack_thread_ts,
-                "requested_action": requested_action,
-                "domain": domain,
-            }
-        )
+        call = {
+            "slack_user_id": slack_user_id,
+            "slack_channel_id": slack_channel_id,
+            "slack_thread_ts": slack_thread_ts,
+            "requested_action": requested_action,
+            "domain": domain,
+        }
+        if job_id is not None:
+            call["job_id"] = job_id
+        FakeContentFactoryClient.resolve_content_thread_calls.append(call)
         if isinstance(FakeContentFactoryClient.resolve_content_thread_result, Exception):
             raise FakeContentFactoryClient.resolve_content_thread_result
         if FakeContentFactoryClient.resolve_content_thread_result is not None:
@@ -1287,7 +1289,8 @@ async def test_write_request_survives_pending_intent_timeout_with_local_fallback
         thread_ts="111.222",
     )
 
-    assert result == "I've sent a button to connect your GitHub account. 🔌"
+    assert isinstance(result, dict)
+    assert result["message"] == "I've sent a button to connect your GitHub account. 🔌"
     assert len(posted_messages) == 1
     assert posted_messages[0]["kwargs"]["blocks"][1]["elements"][0]["text"]["text"] == "Connect GitHub Account"
     assert FakeContentFactoryClient.saved_intents == []
@@ -3201,6 +3204,187 @@ def test_confirm_topic_btn_action_surfaces_delivery_mode_prompt(monkeypatch):
     action_ids = [element["action_id"] for element in updated_messages[0]["blocks"][1]["elements"]]
     assert action_ids == ["select_article_delivery_mode", "select_article_delivery_mode"]
     assert "Generating article" not in json.dumps(updated_messages[0]["blocks"])
+
+
+def test_confirm_topic_action_recovers_via_thread_resolution_after_backend_failure(monkeypatch):
+    confirm_calls = []
+    resolve_calls = []
+
+    class FakeConfirmClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def confirm_article_topic(self, **kwargs):
+            confirm_calls.append(kwargs)
+            raise backend_module.MLAIBackendUnavailableError("Content Factory is unavailable right now.")
+
+        async def resolve_content_thread(self, **kwargs):
+            resolve_calls.append(kwargs)
+            return {
+                "requested_action": "confirm_topic",
+                "resolution": "in_progress",
+                "job_id": "job-child-123",
+                "active_job_id": "job-child-123",
+                "status": "queued",
+                "domain": "mlai.au",
+                "source_run_id": "job-123",
+            }
+
+        async def check_generation_status(self, _job_id):
+            raise AssertionError("status fallback should not run when resolve succeeds")
+
+    monkeypatch.setattr(
+        main_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            MLAI_BACKEND_URL="https://backend.test",
+            MLAI_API_KEY="api-key",
+            ROO_API_KEY="roo-api-key",
+        ),
+    )
+    monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeConfirmClient)
+    monkeypatch.setattr(main_module, "_remember_content_thread_context", lambda *args, **kwargs: None)
+
+    payload = {
+        "user": {"id": "U05QPB483K9"},
+        "channel": {"id": "C123"},
+        "message": {
+            "ts": "111.222",
+            "thread_ts": "111.222",
+            "text": "Choose a topic",
+        },
+        "actions": [
+            {
+                "action_id": "confirm_topic",
+                "value": "confirm:ai agents:job-123",
+            }
+        ],
+    }
+
+    class FakeRequest:
+        async def form(self):
+            return {"payload": json.dumps(payload)}
+
+    response = asyncio.run(main_module.slack_actions(FakeRequest()))
+    body = json.loads(response.body)
+
+    assert response.status_code == 200
+    assert "Queued generation" in body["text"]
+    assert confirm_calls == [
+        {
+            "job_id": "job-123",
+            "slack_user_id": "U05QPB483K9",
+            "confirmed_keyword": "ai agents",
+            "request_source": "roo_slackbot",
+        }
+    ]
+    assert resolve_calls == [
+        {
+            "slack_user_id": "U05QPB483K9",
+            "slack_channel_id": "C123",
+            "slack_thread_ts": "111.222",
+            "requested_action": "confirm_topic",
+            "domain": None,
+            "job_id": "job-123",
+        }
+    ]
+
+
+def test_confirm_topic_btn_action_recovers_blocked_run_after_backend_failure(monkeypatch):
+    updated_messages = []
+    confirm_calls = []
+    resolve_calls = []
+
+    class FakeConfirmClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def confirm_article_topic(self, **kwargs):
+            confirm_calls.append(kwargs)
+            raise backend_module.MLAIBackendUnavailableError("Content Factory is unavailable right now.")
+
+        async def resolve_content_thread(self, **kwargs):
+            resolve_calls.append(kwargs)
+            return {
+                "requested_action": "confirm_topic",
+                "resolution": "in_progress",
+                "job_id": "job-child-blocked-1",
+                "active_job_id": "job-child-blocked-1",
+                "status": "blocked",
+                "domain": "mlai.au",
+                "source_run_id": "job-parent-123",
+                "message": "Token refresh is temporarily unavailable.",
+            }
+
+        async def check_generation_status(self, _job_id):
+            raise AssertionError("status fallback should not run when resolve succeeds")
+
+    monkeypatch.setattr(
+        main_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            MLAI_BACKEND_URL="https://backend.test",
+            MLAI_API_KEY="api-key",
+            ROO_API_KEY="roo-api-key",
+        ),
+    )
+    monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeConfirmClient)
+    monkeypatch.setattr(main_module, "_remember_content_thread_context", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        slack_client_module,
+        "get_slack_client",
+        lambda: SimpleNamespace(chat_update=lambda **kwargs: updated_messages.append(kwargs)),
+    )
+
+    payload = {
+        "user": {"id": "U05QPB483K9"},
+        "channel": {"id": "C123"},
+        "message": {
+            "ts": "111.222",
+            "thread_ts": "111.222",
+            "text": "Choose a topic",
+            "blocks": [
+                {"type": "section", "text": {"type": "mrkdwn", "text": "Topic option"}},
+                {"type": "actions", "elements": [{"type": "button", "action_id": "confirm_topic_btn_0"}]},
+            ],
+        },
+        "actions": [
+            {
+                "action_id": "confirm_topic_btn_0",
+                "value": "confirm_topic:job-parent-123:0",
+            }
+        ],
+    }
+
+    class FakeRequest:
+        async def form(self):
+            return {"payload": json.dumps(payload)}
+
+    response = asyncio.run(main_module.slack_actions(FakeRequest()))
+
+    assert response.status_code == 200
+    assert confirm_calls == [
+        {
+            "job_id": "job-parent-123",
+            "slack_user_id": "U05QPB483K9",
+            "option_index": 0,
+            "request_source": "roo_slackbot",
+        }
+    ]
+    assert resolve_calls == [
+        {
+            "slack_user_id": "U05QPB483K9",
+            "slack_channel_id": "C123",
+            "slack_thread_ts": "111.222",
+            "requested_action": "confirm_topic",
+            "domain": None,
+            "job_id": "job-parent-123",
+        }
+    ]
+    assert len(updated_messages) == 1
+    updated_blocks = updated_messages[0]["blocks"]
+    assert all(block.get("type") != "actions" for block in updated_blocks)
+    assert "Token refresh is temporarily unavailable." in updated_blocks[-1]["elements"][0]["text"]
 
 
 @pytest.mark.asyncio

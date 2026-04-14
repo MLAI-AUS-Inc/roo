@@ -356,6 +356,20 @@ class MLAIBackendClient:
         detail = str(exc).strip()
         return detail or exc.__class__.__name__
 
+    def _raise_for_status_or_backend_unavailable(self, response: httpx.Response) -> None:
+        if response.status_code == 503:
+            try:
+                payload = response.json()
+            except ValueError:
+                payload = {}
+            message = str(
+                payload.get("message")
+                or payload.get("error")
+                or "MLAI backend is unavailable right now."
+            ).strip()
+            raise MLAIBackendUnavailableError(message)
+        response.raise_for_status()
+
     def _log_points_request_step(
         self,
         *,
@@ -632,7 +646,7 @@ class MLAIBackendClient:
             timeout=30.0,
             circuit_breaker=True,
         )
-        response.raise_for_status()
+        self._raise_for_status_or_backend_unavailable(response)
         return response.json()
 
     async def attach_content_progress_message(
@@ -742,7 +756,7 @@ class MLAIBackendClient:
             timeout=30.0,
             circuit_breaker=True,
         )
-        response.raise_for_status()
+        self._raise_for_status_or_backend_unavailable(response)
         return response.json()
 
     async def get_content_org_config(self, slack_user_id: str, domain: Optional[str] = None) -> Optional[dict]:
@@ -1356,6 +1370,7 @@ class MLAIBackendClient:
         slack_thread_ts: str,
         requested_action: str,
         domain: Optional[str] = None,
+        job_id: Optional[str] = None,
     ) -> dict:
         """Resolve the active content-factory job for a Slack thread."""
         if not self.base_url:
@@ -1369,6 +1384,8 @@ class MLAIBackendClient:
         }
         if domain:
             payload["domain"] = domain
+        if job_id:
+            payload["job_id"] = job_id
 
         response = await self._request(
             "POST",
