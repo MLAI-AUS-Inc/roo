@@ -588,6 +588,7 @@ class MLAIBackendClient:
         user_first_name: Optional[str] = None,
         user_last_name: Optional[str] = None,
         user_avatar_url: Optional[str] = None,
+        requested_by_slack_user_id: Optional[str] = None,
     ) -> dict:
         """
         Trigger article generation via mlai-backend.
@@ -613,6 +614,8 @@ class MLAIBackendClient:
             "context": context,
             "request_source": request_source,
         }
+        if requested_by_slack_user_id:
+            payload["requested_by_slack_user_id"] = self._clean_slack_id(requested_by_slack_user_id)
 
         # Only add topic/keyword if provided (omitting them triggers auto-research)
         if topic:
@@ -713,6 +716,7 @@ class MLAIBackendClient:
         delivery_mode: Optional[str] = None,
         delivery_mode_confirmed: Optional[bool] = None,
         request_source: str = CONTENT_FACTORY_REQUEST_SOURCE,
+        requested_by_slack_user_id: Optional[str] = None,
     ) -> dict:
         """
         Confirm topic selection for article generation.
@@ -738,6 +742,8 @@ class MLAIBackendClient:
             "option_index": option_index,
             "request_source": request_source,
         }
+        if requested_by_slack_user_id:
+            payload["requested_by_slack_user_id"] = self._clean_slack_id(requested_by_slack_user_id)
 
         if confirmed_keyword:
             payload["keyword"] = confirmed_keyword
@@ -1154,6 +1160,7 @@ class MLAIBackendClient:
         slack_thread_ts: Optional[str] = None,
         domain: Optional[str] = None,
         request_source: str = CONTENT_FACTORY_REQUEST_SOURCE,
+        requested_by_slack_user_id: Optional[str] = None,
     ) -> dict:
         """
         Trigger a repository scan for a user via the backend.
@@ -1167,6 +1174,8 @@ class MLAIBackendClient:
                 "slack_user_id": clean_id,
                 "request_source": request_source,
             }
+            if requested_by_slack_user_id:
+                payload["requested_by_slack_user_id"] = self._clean_slack_id(requested_by_slack_user_id)
             if domain:
                 payload["domain"] = domain
             if slack_channel_id:
@@ -1224,7 +1233,8 @@ class MLAIBackendClient:
         domain: str,
         slack_user_id: str,
         slack_channel_id: str,
-        slack_thread_ts: str
+        slack_thread_ts: str,
+        requested_by_slack_user_id: Optional[str] = None,
     ) -> dict:
         """
         Trigger articles directory scaffolding for a domain.
@@ -1248,6 +1258,8 @@ class MLAIBackendClient:
             "slack_channel_id": slack_channel_id,
             "slack_thread_ts": slack_thread_ts
         }
+        if requested_by_slack_user_id:
+            payload["requested_by_slack_user_id"] = self._clean_slack_id(requested_by_slack_user_id)
 
         response = await self._request(
             "POST",
@@ -1270,6 +1282,7 @@ class MLAIBackendClient:
         slack_user_id: str,
         slack_channel_id: str,
         slack_thread_ts: str,
+        requested_by_slack_user_id: Optional[str] = None,
     ) -> dict:
         """Approve or deny scaffold creation for a scan run."""
         if not self.base_url:
@@ -1284,6 +1297,8 @@ class MLAIBackendClient:
             "slack_channel_id": slack_channel_id,
             "slack_thread_ts": slack_thread_ts,
         }
+        if requested_by_slack_user_id:
+            payload["requested_by_slack_user_id"] = self._clean_slack_id(requested_by_slack_user_id)
 
         response = await self._request(
             "POST",
@@ -1303,6 +1318,7 @@ class MLAIBackendClient:
         domain: str,
         slack_user_id: str,
         decision: str,
+        requested_by_slack_user_id: Optional[str] = None,
     ) -> dict:
         """Persist an article-system decision and optionally resume the pending write."""
         if not self.base_url:
@@ -1314,6 +1330,8 @@ class MLAIBackendClient:
             "slack_user_id": clean_id,
             "decision": decision,
         }
+        if requested_by_slack_user_id:
+            payload["requested_by_slack_user_id"] = self._clean_slack_id(requested_by_slack_user_id)
 
         response = await self._request(
             "POST",
@@ -1345,17 +1363,26 @@ class MLAIBackendClient:
         response.raise_for_status()
         return response.json()
 
-    async def publish_article_as_pr(self, job_id: str, slack_user_id: str) -> dict:
+    async def publish_article_as_pr(
+        self,
+        job_id: str,
+        slack_user_id: str,
+        *,
+        requested_by_slack_user_id: Optional[str] = None,
+    ) -> dict:
         """Promote a completed content-only article into a draft-PR publish run."""
         if not self.base_url:
             raise ValueError("MLAI_BACKEND_URL not configured")
 
         clean_id = self._clean_slack_id(slack_user_id)
+        payload = {"slack_user_id": clean_id}
+        if requested_by_slack_user_id:
+            payload["requested_by_slack_user_id"] = self._clean_slack_id(requested_by_slack_user_id)
 
         response = await self._request(
             "POST",
             f"/api/v1/content/jobs/{job_id}/publish-pr",
-            json={"slack_user_id": clean_id},
+            json=payload,
             timeout=60.0,
             circuit_breaker=True,
         )
@@ -1371,6 +1398,7 @@ class MLAIBackendClient:
         requested_action: str,
         domain: Optional[str] = None,
         job_id: Optional[str] = None,
+        requested_by_slack_user_id: Optional[str] = None,
     ) -> dict:
         """Resolve the active content-factory job for a Slack thread."""
         if not self.base_url:
@@ -1382,6 +1410,8 @@ class MLAIBackendClient:
             "slack_thread_ts": slack_thread_ts,
             "requested_action": requested_action,
         }
+        if requested_by_slack_user_id:
+            payload["requested_by_slack_user_id"] = self._clean_slack_id(requested_by_slack_user_id)
         if domain:
             payload["domain"] = domain
         if job_id:

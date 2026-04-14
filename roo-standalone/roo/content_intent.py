@@ -9,6 +9,11 @@ from typing import Any, Dict, Optional
 DOMAIN_PATTERN = re.compile(r"\b(?:https?://)?([a-z0-9][a-z0-9.-]+\.[a-z]{2,})\b")
 SLACK_FORMATTED_ENTITY_PATTERN = re.compile(r"<([^>|]+)\|([^>]+)>")
 SLACK_PLAIN_URL_PATTERN = re.compile(r"<((?:https?://|mailto:)[^>]+)>")
+SLACK_USER_MENTION_PATTERN = re.compile(r"<@([A-Z0-9]+)>")
+TRAILING_DELEGATION_PATTERN = re.compile(
+    r"^(?P<body>.+?)\s+(?P<keyword>as|for)\s+(?P<mention><@[A-Z0-9]+>)\s*$",
+    re.IGNORECASE,
+)
 
 SCAN_PATTERNS = (
     r"^(?:please\s+)?(?:re-?scan|scan|analy[sz]e|inspect)\b",
@@ -28,6 +33,7 @@ SCAFFOLD_PATTERNS = (
 )
 RESEARCH_PATTERNS = (
     r"\bresearch\b.*\b(article|topic|keyword|blog(?:\s+post)?)\b",
+    r"\bdiscover\b.*\b(topic|topics|article|keyword|keywords|blog(?:\s+post)?)\b",
     r"\b(?:best|next)\s+article\s+to\s+write\b",
     r"\bwhat\s+should\s+i\s+write\b",
     r"\b(?:recommend|suggest)\s+(?:a\s+)?(?:topic|article|keyword)\b",
@@ -104,6 +110,48 @@ def detect_content_action(text: str) -> Optional[str]:
     if any(re.search(pattern, text_lower) for pattern in WRITE_PATTERNS):
         return "write"
     return None
+
+
+def extract_slack_user_mention(raw_value: str | None) -> Optional[str]:
+    """Extract a Slack user ID from a real mention like <@U123ABC>."""
+    value = str(raw_value or "").strip()
+    match = SLACK_USER_MENTION_PATTERN.fullmatch(value)
+    return match.group(1) if match else None
+
+
+def extract_content_factory_delegation(text: str) -> tuple[str, Optional[Dict[str, Any]]]:
+    """Strip a trailing content-factory delegation clause like `as <@U123>`.
+
+    Returns the cleaned text plus delegation metadata when the clause applies.
+    The backward-compatible `for <@U123>` alias only applies to write/article
+    requests so normal phrasing like `write an article for domain.com` is not
+    misclassified.
+    """
+    normalized = normalize_slack_text(text).strip()
+    if not normalized:
+        return normalized, None
+
+    match = TRAILING_DELEGATION_PATTERN.match(normalized)
+    if not match:
+        return normalized, None
+
+    body = str(match.group("body") or "").strip()
+    keyword = str(match.group("keyword") or "").strip().lower()
+    target_slack_user_id = extract_slack_user_mention(match.group("mention"))
+    if not body or not target_slack_user_id:
+        return normalized, None
+
+    action = detect_content_action(body)
+    if keyword == "for" and action != "write":
+        return normalized, None
+    if action not in {"scan", "scaffold", "research", "publish_pr", "write"}:
+        return normalized, None
+
+    return body, {
+        "effective_slack_user_id": target_slack_user_id,
+        "delegation_keyword": keyword,
+        "content_action": action,
+    }
 
 
 def is_explicit_scan_request(text: str, action: Optional[str] = None) -> bool:
