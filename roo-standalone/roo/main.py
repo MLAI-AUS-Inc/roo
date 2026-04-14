@@ -46,6 +46,7 @@ CONTENT_FACTORY_WATCHDOG_STOP_STATUSES = {
     "awaiting_delivery_mode",
     "awaiting_approval",
     "approval_required",
+    "auth_required",
     "completed",
     "failed",
     "error",
@@ -468,7 +469,12 @@ def _build_confirm_topic_follow_up(
     top_level_status = str(result.get("status") or "").strip().lower()
     callback_status = str(cf_response.get("status") or "").strip().lower()
     requires_delivery_mode = "awaiting_delivery_mode" in {top_level_status, callback_status}
-    status_value = "awaiting_delivery_mode" if requires_delivery_mode else (top_level_status or callback_status)
+    if requires_delivery_mode:
+        status_value = "awaiting_delivery_mode"
+    elif callback_status in {"blocked", "blocked_verification", "auth_required"}:
+        status_value = callback_status
+    else:
+        status_value = top_level_status or callback_status
     active_job_id = _extract_job_id(result) or _extract_job_id(cf_response)
     domain = str(result.get("domain") or cf_response.get("domain") or default_domain or "this domain").strip() or "this domain"
 
@@ -476,6 +482,20 @@ def _build_confirm_topic_follow_up(
         "status": status_value,
         "active_job_id": active_job_id,
         "domain": domain,
+        "message": (
+            result.get("message")
+            or result.get("error")
+            or cf_response.get("message")
+            or cf_response.get("error")
+        ),
+        "error_code": (
+            result.get("error_code")
+            or cf_response.get("error_code")
+        ),
+        "auth_url": (
+            result.get("auth_url")
+            or cf_response.get("auth_url")
+        ),
         "recommended_delivery_mode": (
             result.get("recommended_delivery_mode")
             or cf_response.get("recommended_delivery_mode")
@@ -506,9 +526,54 @@ def _confirm_topic_json_response(keyword: str, follow_up: dict[str, Any]) -> JSO
             ),
         })
 
+    status_value = str(follow_up.get("status") or "").strip().lower()
+    if status_value in {"blocked", "blocked_verification"}:
+        message = str(
+            follow_up.get("message")
+            or "This article run is blocked right now. Roo will retry when the dependency path recovers."
+        ).strip()
+        return JSONResponse(status_code=200, content={
+            "response_type": "ephemeral",
+            "replace_original": True,
+            "text": f"⏸️ {message}",
+            "blocks": [
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": f"⏸️ {message}",
+                    },
+                }
+            ],
+        })
+
+    if status_value == "auth_required":
+        message = str(
+            follow_up.get("message")
+            or "GitHub authentication is required before Roo can continue this article."
+        ).strip()
+        auth_url = str(follow_up.get("auth_url") or "").strip()
+        block_text = f"🔐 {message}"
+        if auth_url:
+            block_text = f"{block_text}\n<{auth_url}|Reconnect GitHub>"
+        return JSONResponse(status_code=200, content={
+            "response_type": "ephemeral",
+            "replace_original": True,
+            "text": f"🔐 {message}",
+            "blocks": [
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": block_text,
+                    },
+                }
+            ],
+        })
+
     _maybe_schedule_content_factory_watchdog(
         follow_up.get("active_job_id"),
-        str(follow_up.get("status") or ""),
+        status_value,
     )
     return JSONResponse(status_code=200, content={
         "response_type": "ephemeral",
@@ -524,6 +589,87 @@ def _confirm_topic_json_response(keyword: str, follow_up: dict[str, Any]) -> JSO
             }
         ]
     })
+
+
+async def _resolve_confirm_follow_up_after_failure(
+    client: Any,
+    *,
+    slack_user_id: str,
+    slack_channel_id: Optional[str],
+    slack_thread_ts: Optional[str],
+    domain: Optional[str],
+    job_id: str,
+) -> Optional[dict[str, Any]]:
+    resolved_channel_id = str(slack_channel_id or "").strip()
+    resolved_thread_ts = str(slack_thread_ts or "").strip()
+    resolved_domain = str(domain or "").strip() or None
+
+    if resolved_channel_id and resolved_thread_ts:
+        try:
+            resolution = await client.resolve_content_thread(
+                slack_user_id=slack_user_id,
+                slack_channel_id=resolved_channel_id,
+                slack_thread_ts=resolved_thread_ts,
+                requested_action="confirm_topic",
+                domain=resolved_domain,
+                job_id=job_id,
+            )
+        except Exception as exc:
+            print(f"⚠️ Failed to resolve confirm thread after error for {job_id}: {exc!r}")
+        else:
+            follow_up = _build_confirm_topic_follow_up(
+                resolution,
+                default_domain=resolved_domain,
+            )
+            if str(follow_up.get("status") or "").strip().lower() in {
+                "queued",
+                "generating",
+                "awaiting_delivery_mode",
+                "blocked",
+                "blocked_verification",
+                "auth_required",
+                "completed",
+            }:
+                return follow_up
+
+    try:
+        status_result = await client.check_generation_status(job_id)
+    except Exception as exc:
+        print(f"⚠️ Failed to load confirm status after error for {job_id}: {exc!r}")
+        return None
+
+    follow_up = _build_confirm_topic_follow_up(
+        status_result,
+        default_domain=resolved_domain,
+    )
+    if str(follow_up.get("status") or "").strip().lower() in {
+        "queued",
+        "generating",
+        "awaiting_delivery_mode",
+        "blocked",
+        "blocked_verification",
+        "auth_required",
+        "completed",
+    }:
+        return follow_up
+    return None
+
+
+def _build_confirm_follow_up_message(follow_up: dict[str, Any]) -> str:
+    status_value = str(follow_up.get("status") or "").strip().lower()
+    if status_value in {"blocked", "blocked_verification"}:
+        return str(
+            follow_up.get("message")
+            or "⏸️ Article generation is blocked right now. Roo will resume when the dependency path recovers."
+        ).strip()
+    if status_value == "auth_required":
+        return str(
+            follow_up.get("message")
+            or "🔐 GitHub authentication is required before Roo can continue this article."
+        ).strip()
+    if status_value == "completed":
+        return "✅ This article run is already complete."
+    return "✅ Generating article. No additional Roo points will be charged for this confirmation."
 
 
 async def _medhack_daily_case_loop():
@@ -2323,6 +2469,16 @@ async def slack_actions(request: Request):
             print(f"❌ Failed to confirm topic: {e}")
             import traceback
             traceback.print_exc()
+            recovered_follow_up = await _resolve_confirm_follow_up_after_failure(
+                client,
+                slack_user_id=user_id,
+                slack_channel_id=payload.get("channel", {}).get("id"),
+                slack_thread_ts=payload.get("message", {}).get("thread_ts") or payload.get("message", {}).get("ts"),
+                domain=None,
+                job_id=job_id,
+            )
+            if recovered_follow_up:
+                return _confirm_topic_json_response(keyword, recovered_follow_up)
             return JSONResponse(status_code=200, content={
                 "response_type": "ephemeral",
                 "text": f"❌ Error confirming topic: {e}"
@@ -2365,6 +2521,16 @@ async def slack_actions(request: Request):
             print(f"❌ Failed to confirm alternative topic: {e}")
             import traceback
             traceback.print_exc()
+            recovered_follow_up = await _resolve_confirm_follow_up_after_failure(
+                client,
+                slack_user_id=user_id,
+                slack_channel_id=payload.get("channel", {}).get("id"),
+                slack_thread_ts=payload.get("message", {}).get("thread_ts") or payload.get("message", {}).get("ts"),
+                domain=None,
+                job_id=job_id,
+            )
+            if recovered_follow_up:
+                return _confirm_topic_json_response(keyword, recovered_follow_up)
             return JSONResponse(status_code=200, content={
                 "response_type": "ephemeral",
                 "text": f"❌ Error confirming topic: {e}"
@@ -3614,7 +3780,7 @@ async def slack_actions(request: Request):
                     updated_blocks = [b for b in original_blocks if b.get("type") != "actions"]
                     updated_blocks.append({
                         "type": "context",
-                        "elements": [{"type": "mrkdwn", "text": "✅ Generating article. No additional Roo points will be charged for this confirmation."}]
+                        "elements": [{"type": "mrkdwn", "text": _build_confirm_follow_up_message(follow_up)}]
                     })
                     updated_text = payload.get("message", {}).get("text", "")
                     _maybe_schedule_content_factory_watchdog(
@@ -3636,6 +3802,48 @@ async def slack_actions(request: Request):
             traceback.print_exc()
             reply_channel = msg_channel
             reply_thread_ts = payload.get("message", {}).get("thread_ts") or msg_ts
+            recovered_follow_up = await _resolve_confirm_follow_up_after_failure(
+                client,
+                slack_user_id=user_id,
+                slack_channel_id=reply_channel,
+                slack_thread_ts=reply_thread_ts,
+                domain=None,
+                job_id=job_id,
+            )
+            if recovered_follow_up:
+                try:
+                    from .slack_client import get_slack_client
+
+                    slack_client = get_slack_client()
+                    if recovered_follow_up.get("requires_delivery_mode"):
+                        updated_blocks = _build_article_delivery_mode_blocks(
+                            domain=recovered_follow_up["domain"],
+                            job_id=recovered_follow_up["active_job_id"],
+                            recommended_delivery_mode=recovered_follow_up.get("recommended_delivery_mode"),
+                        )
+                        updated_text = f"Choose delivery mode for {recovered_follow_up['domain']}"
+                    else:
+                        original_blocks = payload.get("message", {}).get("blocks", [])
+                        updated_blocks = [b for b in original_blocks if b.get("type") != "actions"]
+                        updated_blocks.append({
+                            "type": "context",
+                            "elements": [{"type": "mrkdwn", "text": _build_confirm_follow_up_message(recovered_follow_up)}],
+                        })
+                        updated_text = payload.get("message", {}).get("text", "")
+                        _maybe_schedule_content_factory_watchdog(
+                            recovered_follow_up.get("active_job_id"),
+                            str(recovered_follow_up.get("status") or ""),
+                        )
+
+                    slack_client.chat_update(
+                        channel=msg_channel,
+                        ts=msg_ts,
+                        text=updated_text,
+                        blocks=updated_blocks,
+                    )
+                except Exception as recovery_exc:
+                    print(f"⚠️ Failed to update recovered confirm message: {recovery_exc}")
+                return JSONResponse(status_code=200, content={})
             if reply_channel:
                 post_message(
                     channel=reply_channel,

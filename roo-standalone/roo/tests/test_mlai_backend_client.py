@@ -134,3 +134,32 @@ async def test_trigger_repo_scan_sends_request_source(monkeypatch):
     assert captured["json"]["slack_thread_ts"] == "111.222"
     assert captured["json"]["request_source"] == CONTENT_FACTORY_REQUEST_SOURCE
     assert result["status"] == "scan_initiated"
+
+
+@pytest.mark.asyncio
+async def test_confirm_article_topic_raises_backend_unavailable_on_503(monkeypatch):
+    async def fake_request(method, endpoint, **kwargs):
+        request = httpx.Request(method, f"https://backend.test{endpoint}")
+        return httpx.Response(
+            503,
+            request=request,
+            json={
+                "status": "backend_unavailable",
+                "error_code": "CONTENT_FACTORY_UNAVAILABLE",
+                "message": "Content Factory is unavailable right now.",
+            },
+        )
+
+    client = MLAIBackendClient(
+        base_url="https://backend.test",
+        api_key="roo-api-key",
+        internal_api_key="roo-api-key",
+    )
+    monkeypatch.setattr(client, "_request", fake_request)
+
+    with pytest.raises(MLAIBackendUnavailableError, match="Content Factory is unavailable right now."):
+        await client.confirm_article_topic(
+            job_id="job-123",
+            slack_user_id="U123",
+            confirmed_keyword="ai agents",
+        )
