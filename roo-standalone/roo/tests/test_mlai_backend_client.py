@@ -137,6 +137,38 @@ async def test_trigger_repo_scan_sends_request_source(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_trigger_repo_scan_includes_requested_by_when_provided(monkeypatch):
+    captured = {}
+
+    async def fake_request(method, endpoint, **kwargs):
+        captured["json"] = kwargs["json"]
+        request = httpx.Request(method, f"https://backend.test{endpoint}")
+        return httpx.Response(
+            202,
+            request=request,
+            json={"status": "scan_initiated", "message": "Scan queued successfully."},
+        )
+
+    client = MLAIBackendClient(
+        base_url="https://backend.test",
+        api_key="roo-api-key",
+        internal_api_key="roo-api-key",
+    )
+    monkeypatch.setattr(client, "_request", fake_request)
+
+    await client.trigger_repo_scan(
+        "U0AQV5X9G0J",
+        slack_channel_id="C123",
+        slack_thread_ts="111.222",
+        domain="studynash.co",
+        requested_by_slack_user_id="U05QPB483K9",
+    )
+
+    assert captured["json"]["slack_user_id"] == "U0AQV5X9G0J"
+    assert captured["json"]["requested_by_slack_user_id"] == "U05QPB483K9"
+
+
+@pytest.mark.asyncio
 async def test_confirm_article_topic_raises_backend_unavailable_on_503(monkeypatch):
     async def fake_request(method, endpoint, **kwargs):
         request = httpx.Request(method, f"https://backend.test{endpoint}")
@@ -163,3 +195,30 @@ async def test_confirm_article_topic_raises_backend_unavailable_on_503(monkeypat
             slack_user_id="U123",
             confirmed_keyword="ai agents",
         )
+
+
+@pytest.mark.asyncio
+async def test_confirm_article_topic_includes_requested_by_when_provided(monkeypatch):
+    captured = {}
+
+    async def fake_request(method, endpoint, **kwargs):
+        captured["json"] = kwargs["json"]
+        request = httpx.Request(method, f"https://backend.test{endpoint}")
+        return httpx.Response(200, request=request, json={"status": "confirmed"})
+
+    client = MLAIBackendClient(
+        base_url="https://backend.test",
+        api_key="roo-api-key",
+        internal_api_key="roo-api-key",
+    )
+    monkeypatch.setattr(client, "_request", fake_request)
+
+    await client.confirm_article_topic(
+        job_id="job-123",
+        slack_user_id="U0AQV5X9G0J",
+        confirmed_keyword="ai agents",
+        requested_by_slack_user_id="U05QPB483K9",
+    )
+
+    assert captured["json"]["slack_user_id"] == "U0AQV5X9G0J"
+    assert captured["json"]["requested_by_slack_user_id"] == "U05QPB483K9"

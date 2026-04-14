@@ -10,7 +10,12 @@ from typing import Optional, Dict, Any, List
 from pathlib import Path
 
 from .config import get_settings
-from .content_intent import extract_domain, normalize_slack_text, parse_routing_intent
+from .content_intent import (
+    extract_content_factory_delegation,
+    extract_domain,
+    normalize_slack_text,
+    parse_routing_intent,
+)
 from .llm import chat
 from .skills.loader import Skill, load_skills
 from .skills.executor import SkillExecutor
@@ -18,6 +23,7 @@ from .slack_client import get_thread_messages
 
 
 THREAD_CONTEXT_TTL = timedelta(hours=2)
+CONTENT_FACTORY_DELEGATION_ADMIN_SLACK_ID = "U05QPB483K9"
 
 
 class RooAgent:
@@ -72,6 +78,40 @@ class RooAgent:
         # Clean the message
         clean_text = self._clean_mention(text)
         thread_context = self._get_thread_context(channel_id, thread_ts)
+        stripped_text, delegation = extract_content_factory_delegation(clean_text)
+        requested_by_slack_user_id = user_id
+        effective_slack_user_id = user_id
+
+        if delegation:
+            delegated_target = str(delegation.get("effective_slack_user_id") or "").strip()
+            if delegated_target and delegated_target != user_id:
+                if user_id != CONTENT_FACTORY_DELEGATION_ADMIN_SLACK_ID:
+                    return {
+                        "message": "Only <@U05QPB483K9> can run Content Factory as another user.",
+                        "skill_used": "content-factory",
+                        "data": None,
+                    }
+                effective_slack_user_id = delegated_target
+            clean_text = stripped_text
+        elif (
+            thread_context
+            and thread_context.get("skill_name") == "content-factory"
+            and str(thread_context.get("requested_by_slack_user_id") or "").strip() == user_id
+        ):
+            sticky_effective_slack_user_id = str(
+                thread_context.get("effective_slack_user_id") or ""
+            ).strip()
+            sticky_requested_by_slack_user_id = str(
+                thread_context.get("requested_by_slack_user_id") or ""
+            ).strip()
+            if sticky_requested_by_slack_user_id:
+                requested_by_slack_user_id = sticky_requested_by_slack_user_id
+            if sticky_effective_slack_user_id:
+                effective_slack_user_id = sticky_effective_slack_user_id
+
+        is_delegated_content_factory_request = (
+            requested_by_slack_user_id != effective_slack_user_id
+        )
         routing_intent = self._get_routing_intent(clean_text, thread_context)
         
         print(f"🔍 Processing: {clean_text[:100]}...")
@@ -105,13 +145,38 @@ class RooAgent:
 
         if skill:
             print(f"🎯 Selected skill: {skill.name}")
-            self._remember_selected_skill(skill.name, channel_id, thread_ts, clean_text)
+            self._remember_selected_skill(
+                skill.name,
+                channel_id,
+                thread_ts,
+                clean_text,
+                requested_by_slack_user_id=(
+                    requested_by_slack_user_id
+                    if skill.name == "content-factory" and is_delegated_content_factory_request
+                    else None
+                ),
+                effective_slack_user_id=(
+                    effective_slack_user_id
+                    if skill.name == "content-factory" and is_delegated_content_factory_request
+                    else None
+                ),
+            )
             effective_param_overrides = dict(param_overrides or {})
             if routing_intent and skill.name == routing_intent["skill"].name:
                 effective_param_overrides = {
                     **routing_intent.get("params", {}),
                     **effective_param_overrides,
                 }
+            if skill.name == "content-factory":
+                effective_param_overrides = {
+                    **effective_param_overrides,
+                }
+                if is_delegated_content_factory_request:
+                    effective_param_overrides = {
+                        "requested_by_slack_user_id": requested_by_slack_user_id,
+                        "effective_slack_user_id": effective_slack_user_id,
+                        **effective_param_overrides,
+                    }
             result = await self.skill_executor.execute(
                 skill=skill,
                 text=clean_text,
@@ -147,6 +212,8 @@ class RooAgent:
         domain: Optional[str] = None,
         workflow: Optional[str] = None,
         active_job_id: Optional[str] = None,
+        requested_by_slack_user_id: Optional[str] = None,
+        effective_slack_user_id: Optional[str] = None,
     ) -> None:
         """Persist recent thread routing context so follow-ups stay on the right skill."""
         thread_key = self._thread_key(channel_id, thread_ts)
@@ -161,6 +228,16 @@ class RooAgent:
             "active_job_id": (
                 active_job_id if active_job_id is not None else existing.get("active_job_id")
             ),
+            "requested_by_slack_user_id": (
+                requested_by_slack_user_id
+                if requested_by_slack_user_id is not None
+                else existing.get("requested_by_slack_user_id")
+            ),
+            "effective_slack_user_id": (
+                effective_slack_user_id
+                if effective_slack_user_id is not None
+                else existing.get("effective_slack_user_id")
+            ),
             "updated_at": datetime.now(timezone.utc),
         }
 
@@ -170,6 +247,9 @@ class RooAgent:
         channel_id: Optional[str],
         thread_ts: Optional[str],
         text: str,
+        *,
+        requested_by_slack_user_id: Optional[str] = None,
+        effective_slack_user_id: Optional[str] = None,
     ) -> None:
         workflow = None
         text_lower = text.lower()
@@ -190,6 +270,8 @@ class RooAgent:
             thread_ts,
             domain=self._extract_domain(text),
             workflow=workflow,
+            requested_by_slack_user_id=requested_by_slack_user_id,
+            effective_slack_user_id=effective_slack_user_id,
         )
 
     def _thread_key(self, channel_id: Optional[str], thread_ts: Optional[str]) -> Optional[str]:
@@ -216,6 +298,14 @@ class RooAgent:
             return None
 
         return context
+
+    def get_thread_context(
+        self,
+        channel_id: Optional[str],
+        thread_ts: Optional[str],
+    ) -> Optional[Dict[str, Any]]:
+        """Return remembered thread context for callers outside the agent."""
+        return self._get_thread_context(channel_id, thread_ts)
 
     def _get_skill_by_name(self, skill_name: str) -> Optional[Skill]:
         return next((skill for skill in self.skills if skill.name == skill_name), None)

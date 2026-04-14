@@ -328,6 +328,123 @@ def test_handle_mention_normalizes_slack_link_and_passes_scan_params(monkeypatch
     }
 
 
+def test_handle_mention_parses_delegated_scan_and_passes_identity_overrides(monkeypatch):
+    agent = _make_agent()
+    captured = {}
+
+    class FakeExecutor:
+        async def execute(self, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(
+                message="ok",
+                data=kwargs.get("param_overrides"),
+                blocks=None,
+                suppress_post=False,
+            )
+
+    agent.skill_executor = FakeExecutor()
+
+    async def fail_chat(*args, **kwargs):
+        raise AssertionError("LLM router should not be needed for delegated scans")
+
+    monkeypatch.setattr("roo.agent.chat", fail_chat)
+    monkeypatch.setattr("roo.agent.get_thread_messages", lambda channel, thread_ts: [])
+    monkeypatch.setattr("roo.slack_client.get_bot_user_id", lambda: "U090FV0GTT4")
+
+    result = asyncio.run(
+        agent.handle_mention(
+            text="<@U090FV0GTT4> scan the repo for the domain woofya.com.au as <@U0AQV5X9G0J>",
+            user_id="U05QPB483K9",
+            channel_id="C123",
+            thread_ts="123.456",
+        )
+    )
+
+    assert result["skill_used"] == "content-factory"
+    assert captured["text"] == "scan the repo for the domain woofya.com.au"
+    assert captured["param_overrides"] == {
+        "action": "scan",
+        "domain": "woofya.com.au",
+        "requested_by_slack_user_id": "U05QPB483K9",
+        "effective_slack_user_id": "U0AQV5X9G0J",
+    }
+
+
+def test_handle_mention_rejects_unauthorized_delegation(monkeypatch):
+    agent = _make_agent()
+
+    async def fail_chat(*args, **kwargs):
+        raise AssertionError("LLM router should not be needed for delegation denials")
+
+    monkeypatch.setattr("roo.agent.chat", fail_chat)
+    monkeypatch.setattr("roo.slack_client.get_bot_user_id", lambda: "U090FV0GTT4")
+
+    result = asyncio.run(
+        agent.handle_mention(
+            text="<@U090FV0GTT4> scan mlai.au as <@U0AQV5X9G0J>",
+            user_id="U123OTHER",
+            channel_id="C123",
+            thread_ts="123.456",
+        )
+    )
+
+    assert result == {
+        "message": "Only <@U05QPB483K9> can run Content Factory as another user.",
+        "skill_used": "content-factory",
+        "data": None,
+    }
+
+
+def test_handle_mention_keeps_delegated_target_sticky_within_thread(monkeypatch):
+    agent = _make_agent()
+    agent.remember_thread_context(
+        "content-factory",
+        "C123",
+        "123.456",
+        domain="studynash.co",
+        workflow="scan",
+        requested_by_slack_user_id="U05QPB483K9",
+        effective_slack_user_id="U0AQV5X9G0J",
+    )
+    captured = {}
+
+    class FakeExecutor:
+        async def execute(self, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(
+                message="ok",
+                data=kwargs.get("param_overrides"),
+                blocks=None,
+                suppress_post=False,
+            )
+
+    agent.skill_executor = FakeExecutor()
+
+    async def fail_chat(*args, **kwargs):
+        raise AssertionError("LLM router should not be needed for sticky delegated follow-up")
+
+    monkeypatch.setattr("roo.agent.chat", fail_chat)
+    monkeypatch.setattr("roo.agent.get_thread_messages", lambda channel, thread_ts: [])
+    monkeypatch.setattr("roo.slack_client.get_bot_user_id", lambda: "U090FV0GTT4")
+
+    result = asyncio.run(
+        agent.handle_mention(
+            text="<@U090FV0GTT4> publish this article as a PR",
+            user_id="U05QPB483K9",
+            channel_id="C123",
+            thread_ts="123.456",
+        )
+    )
+
+    assert result["skill_used"] == "content-factory"
+    assert captured["param_overrides"] == {
+        "action": "publish_pr",
+        "domain": "studynash.co",
+        "requested_by_slack_user_id": "U05QPB483K9",
+        "effective_slack_user_id": "U0AQV5X9G0J",
+    }
+
+
 def test_handle_mention_passes_publish_pr_job_from_thread_context(monkeypatch):
     agent = _make_agent()
     agent.remember_thread_context(

@@ -229,6 +229,8 @@ JSON:"""
         client_request_id: str,
         delivery_mode: Optional[str] = None,
         delivery_mode_confirmed: bool = False,
+        requested_by_slack_user_id: Optional[str] = None,
+        effective_slack_user_id: Optional[str] = None,
     ) -> list[dict]:
         """Build the preflight prompt for generic article requests."""
         normalized_domain = normalize_content_factory_domain(domain) or domain
@@ -238,13 +240,14 @@ JSON:"""
             if cost_points == 0
             else f"*Cost:* Starting the article run deducts {cost_points} Roo points."
         )
-        button_payload = {
-            "domain": domain,
-            "slack_user_id": user_id,
-            "channel_id": channel_id,
-            "thread_ts": thread_ts,
-            "client_request_id": client_request_id,
-        }
+        button_payload = self._content_factory_identity_payload(
+            requested_by_slack_user_id=requested_by_slack_user_id or user_id,
+            effective_slack_user_id=effective_slack_user_id or user_id,
+            domain=domain,
+            channel_id=channel_id,
+            thread_ts=thread_ts,
+            client_request_id=client_request_id,
+        )
         if delivery_mode is not None:
             button_payload["delivery_mode"] = delivery_mode
             button_payload["delivery_mode_confirmed"] = delivery_mode_confirmed
@@ -337,6 +340,8 @@ JSON:"""
         job_id: str,
         topic: Optional[str],
         recommended_delivery_mode: Optional[str],
+        requested_by_slack_user_id: Optional[str] = None,
+        effective_slack_user_id: Optional[str] = None,
     ) -> dict:
         topic_line = f"*Topic:* {topic}\n" if topic else ""
         recommended_line = ""
@@ -367,14 +372,30 @@ JSON:"""
                         "type": "button",
                         "text": {"type": "plain_text", "text": "Content Only", "emoji": True},
                         "style": "primary" if recommended_delivery_mode != "publish_code" else None,
-                        "value": json.dumps({"job_id": job_id, "domain": domain, "delivery_mode": "content_only"}),
+                        "value": json.dumps(
+                            self._content_factory_identity_payload(
+                                requested_by_slack_user_id=requested_by_slack_user_id,
+                                effective_slack_user_id=effective_slack_user_id,
+                                job_id=job_id,
+                                domain=domain,
+                                delivery_mode="content_only",
+                            )
+                        ),
                         "action_id": "select_article_delivery_mode",
                     },
                     {
                         "type": "button",
                         "text": {"type": "plain_text", "text": "Publish Via Code", "emoji": True},
                         "style": "primary" if recommended_delivery_mode == "publish_code" else None,
-                        "value": json.dumps({"job_id": job_id, "domain": domain, "delivery_mode": "publish_code"}),
+                        "value": json.dumps(
+                            self._content_factory_identity_payload(
+                                requested_by_slack_user_id=requested_by_slack_user_id,
+                                effective_slack_user_id=effective_slack_user_id,
+                                job_id=job_id,
+                                domain=domain,
+                                delivery_mode="publish_code",
+                            )
+                        ),
                         "action_id": "select_article_delivery_mode",
                     },
                 ],
@@ -393,6 +414,8 @@ JSON:"""
                 "content_factory_watchdog_mode": "awaiting_delivery_mode",
                 "content_factory_domain": domain,
                 "content_factory_workflow": "awaiting_delivery_mode",
+                "requested_by_slack_user_id": requested_by_slack_user_id,
+                "effective_slack_user_id": effective_slack_user_id,
             },
         }
 
@@ -409,6 +432,8 @@ JSON:"""
         user_id: str,
         channel_id: Optional[str],
         thread_ts: Optional[str],
+        requested_by_slack_user_id: Optional[str] = None,
+        effective_slack_user_id: Optional[str] = None,
     ) -> dict:
         """Prompt the user before triggering a fresh scan when one already exists."""
         target = f"*{domain}*" if domain else f"`{repo_name or 'this repository'}`"
@@ -446,13 +471,14 @@ JSON:"""
                             },
                             "style": "primary",
                             "value": json.dumps(
-                                {
-                                    "domain": domain,
-                                    "slack_user_id": user_id,
-                                    "channel_id": channel_id,
-                                    "thread_ts": thread_ts,
-                                    "rescan": True,
-                                }
+                                self._content_factory_identity_payload(
+                                    requested_by_slack_user_id=requested_by_slack_user_id or user_id,
+                                    effective_slack_user_id=effective_slack_user_id or user_id,
+                                    domain=domain,
+                                    channel_id=channel_id,
+                                    thread_ts=thread_ts,
+                                    rescan=True,
+                                )
                             ),
                             "action_id": "prerequisite_scan",
                         },
@@ -463,7 +489,13 @@ JSON:"""
                                 "text": "Keep Existing Scan",
                                 "emoji": True,
                             },
-                            "value": json.dumps({"domain": domain}),
+                            "value": json.dumps(
+                                self._content_factory_identity_payload(
+                                    requested_by_slack_user_id=requested_by_slack_user_id or user_id,
+                                    effective_slack_user_id=effective_slack_user_id or user_id,
+                                    domain=domain,
+                                )
+                            ),
                             "action_id": "prerequisite_cancel",
                         },
                     ],
@@ -552,11 +584,76 @@ JSON:"""
             response["blocks"] = blocks
         return response
 
+    @staticmethod
+    def _resolve_content_factory_identity_context(
+        params: dict,
+        requester_slack_user_id: str,
+    ) -> tuple[str, str, bool]:
+        requested_by_slack_user_id = str(
+            params.get("requested_by_slack_user_id") or requester_slack_user_id or ""
+        ).strip()
+        effective_slack_user_id = str(
+            params.get("effective_slack_user_id") or requested_by_slack_user_id or ""
+        ).strip()
+        is_delegated = bool(
+            requested_by_slack_user_id
+            and effective_slack_user_id
+            and requested_by_slack_user_id != effective_slack_user_id
+        )
+        return requested_by_slack_user_id, effective_slack_user_id, is_delegated
+
+    @staticmethod
+    def _content_factory_identity_payload(
+        *,
+        requested_by_slack_user_id: Optional[str],
+        effective_slack_user_id: Optional[str],
+        **extra: Any,
+    ) -> dict[str, Any]:
+        payload = dict(extra)
+        if (
+            requested_by_slack_user_id
+            and effective_slack_user_id
+            and requested_by_slack_user_id != effective_slack_user_id
+        ):
+            payload["requested_by_slack_user_id"] = requested_by_slack_user_id
+            payload["effective_slack_user_id"] = effective_slack_user_id
+        return payload
+
+    @staticmethod
+    def _delegated_backend_kwargs(
+        requested_by_slack_user_id: Optional[str],
+        effective_slack_user_id: Optional[str],
+    ) -> dict[str, str]:
+        if (
+            requested_by_slack_user_id
+            and effective_slack_user_id
+            and requested_by_slack_user_id != effective_slack_user_id
+        ):
+            return {
+                "requested_by_slack_user_id": requested_by_slack_user_id,
+            }
+        return {}
+
+    @staticmethod
+    def _delegated_content_factory_auth_required_message(
+        *,
+        effective_slack_user_id: Optional[str],
+        domain: Optional[str],
+    ) -> str:
+        target = f"<@{effective_slack_user_id}>" if effective_slack_user_id else "that user"
+        domain_label = normalize_content_factory_domain(domain) or domain or "this domain"
+        return (
+            f"GitHub auth for {target} isn't available for {domain_label}. "
+            "Ask them to reconnect GitHub, then retry the delegated run."
+        )
+
     async def _request_github_reconnect(
         self,
         api_client,
         *,
         user_id: str,
+        requested_by_slack_user_id: Optional[str] = None,
+        effective_slack_user_id: Optional[str] = None,
         domain: Optional[str],
         github_repo: Optional[str],
         trigger: str,
@@ -572,6 +669,22 @@ JSON:"""
         resume_value: Optional[dict] = None,
     ) -> Optional[Any]:
         from ..clients.mlai_backend import MLAIBackendUnavailableError
+
+        delegated_effective_slack_user_id = str(
+            effective_slack_user_id or user_id or ""
+        ).strip()
+        delegated_requested_by_slack_user_id = str(
+            requested_by_slack_user_id or user_id or ""
+        ).strip()
+        if (
+            delegated_requested_by_slack_user_id
+            and delegated_effective_slack_user_id
+            and delegated_requested_by_slack_user_id != delegated_effective_slack_user_id
+        ):
+            return self._delegated_content_factory_auth_required_message(
+                effective_slack_user_id=delegated_effective_slack_user_id,
+                domain=domain,
+            )
 
         try:
             reconnect = await api_client.reconnect_content_factory_github(
@@ -1389,6 +1502,14 @@ Keep the response concise but informative."""
         params["client_request_id"] = client_request_id
         domain = normalize_content_factory_domain(params.get("domain"))
         action = str(params.get("action") or "").strip().lower()
+        (
+            requested_by_slack_user_id,
+            effective_slack_user_id,
+            is_delegated,
+        ) = self._resolve_content_factory_identity_context(params, user_id)
+
+        if is_delegated:
+            return
 
         backend_intent: dict[str, Any] = {
             "type": "roo_content_factory",
@@ -1414,6 +1535,7 @@ Keep the response concise but informative."""
                     "slack_root_message_ts": thread_ts,
                     "request_source": CONTENT_FACTORY_REQUEST_SOURCE,
                     "client_request_id": client_request_id,
+                    "requested_by_slack_user_id": requested_by_slack_user_id,
                 },
                 "resume_context": {
                     "text": text,
@@ -1427,8 +1549,9 @@ Keep the response concise but informative."""
             from .. import main as main_module
 
             main_module._remember_pending_intent(
-                user_id,
+                requested_by_slack_user_id,
                 domain,
+                effective_slack_user_id=effective_slack_user_id,
                 intent_data={
                     "action": "write",
                     "topic": params.get("topic"),
@@ -1440,6 +1563,8 @@ Keep the response concise but informative."""
                     "request_source": CONTENT_FACTORY_REQUEST_SOURCE,
                     "text": text,
                     "params": params,
+                    "requested_by_slack_user_id": requested_by_slack_user_id,
+                    "effective_slack_user_id": effective_slack_user_id,
                 },
                 channel_id=channel_id,
                 thread_ts=thread_ts,
@@ -1448,7 +1573,7 @@ Keep the response concise but informative."""
             )
 
         try:
-            await api_client.save_pending_intent(user_id, backend_intent)
+            await api_client.save_pending_intent(requested_by_slack_user_id, backend_intent)
         except MLAIBackendUnavailableError as exc:
             print(
                 "⚠️ Failed to persist content-factory pending intent to mlai-backend: "
@@ -1551,6 +1676,8 @@ Keep the response concise but informative."""
         job_id: str,
         topic: Optional[str],
         workflow: str,
+        requested_by_slack_user_id: Optional[str] = None,
+        effective_slack_user_id: Optional[str] = None,
     ) -> dict:
         is_discovery = workflow == "auto_discovery" or not topic
         summary_text = (
@@ -1576,6 +1703,8 @@ Keep the response concise but informative."""
                 "content_factory_watchdog_mode": workflow,
                 "content_factory_domain": domain,
                 "content_factory_workflow": workflow,
+                "requested_by_slack_user_id": requested_by_slack_user_id,
+                "effective_slack_user_id": effective_slack_user_id,
             },
         }
 
@@ -1584,6 +1713,8 @@ Keep the response concise but informative."""
         *,
         domain: Optional[str],
         job_id: str,
+        requested_by_slack_user_id: Optional[str] = None,
+        effective_slack_user_id: Optional[str] = None,
     ) -> dict:
         display_domain = normalize_content_factory_domain(domain) or domain or "this domain"
         return {
@@ -1606,6 +1737,8 @@ Keep the response concise but informative."""
                 "content_factory_watchdog_mode": "publish_pr",
                 "content_factory_domain": display_domain,
                 "content_factory_workflow": "publish_pr",
+                "requested_by_slack_user_id": requested_by_slack_user_id,
+                "effective_slack_user_id": effective_slack_user_id,
             },
         }
 
@@ -1620,6 +1753,11 @@ Keep the response concise but informative."""
         thread_ts: Optional[str],
     ) -> tuple[dict, Optional[Any]]:
         from ..clients.mlai_backend import MLAIBackendUnavailableError
+        (
+            requested_by_slack_user_id,
+            effective_slack_user_id,
+            _is_delegated,
+        ) = self._resolve_content_factory_identity_context(params, user_id)
 
         requested_action = detect_content_action(text)
         if requested_action != "publish_pr":
@@ -1636,12 +1774,17 @@ Keep the response concise but informative."""
             )
 
         try:
+            delegated_backend_kwargs = self._delegated_backend_kwargs(
+                requested_by_slack_user_id,
+                effective_slack_user_id,
+            )
             resolution = await api_client.resolve_content_thread(
-                slack_user_id=user_id,
+                slack_user_id=effective_slack_user_id,
                 slack_channel_id=channel_id,
                 slack_thread_ts=thread_ts,
                 requested_action="publish_pr",
                 domain=params.get("domain"),
+                **delegated_backend_kwargs,
             )
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 404:
@@ -1677,6 +1820,8 @@ Keep the response concise but informative."""
             return params, self._build_publish_pr_start_response(
                 domain=resolved_domain,
                 job_id=publish_job_id,
+                requested_by_slack_user_id=requested_by_slack_user_id,
+                effective_slack_user_id=effective_slack_user_id,
             )
 
         return params, (
@@ -1703,7 +1848,8 @@ Keep the response concise but informative."""
         *,
         job_id: str,
         domain: Optional[str],
-        slack_user_id: str,
+        requested_by_slack_user_id: str,
+        effective_slack_user_id: str,
         channel_id: Optional[str],
         thread_ts: Optional[str],
         text: str,
@@ -1719,7 +1865,9 @@ Keep the response concise but informative."""
 
         reconnect_result = await self._request_github_reconnect(
             api_client,
-            user_id=slack_user_id,
+            user_id=effective_slack_user_id,
+            requested_by_slack_user_id=requested_by_slack_user_id,
+            effective_slack_user_id=effective_slack_user_id,
             domain=domain,
             github_repo=None,
             trigger="preflight",
@@ -1735,7 +1883,14 @@ Keep the response concise but informative."""
             return reconnect_result
 
         try:
-            response = await api_client.publish_article_as_pr(job_id, slack_user_id)
+            response = await api_client.publish_article_as_pr(
+                job_id,
+                effective_slack_user_id,
+                **self._delegated_backend_kwargs(
+                    requested_by_slack_user_id,
+                    effective_slack_user_id,
+                ),
+            )
         except MLAIBackendUnavailableError:
             return self._content_factory_backend_unavailable_message()
         except httpx.HTTPStatusError as exc:
@@ -1746,10 +1901,17 @@ Keep the response concise but informative."""
                 error_data = {}
             if isinstance(error_data, dict):
                 if error_data.get("error_code") == "AUTH_REQUIRED":
+                    if (
+                        requested_by_slack_user_id != effective_slack_user_id
+                    ):
+                        return self._delegated_content_factory_auth_required_message(
+                            effective_slack_user_id=effective_slack_user_id,
+                            domain=domain,
+                        )
                     if not error_data.get("pending_intent_stored"):
                         await self._save_content_factory_pending_intent(
                             api_client,
-                            slack_user_id,
+                            requested_by_slack_user_id,
                             params,
                             text,
                             channel_id,
@@ -1758,7 +1920,7 @@ Keep the response concise but informative."""
                     auth_url = error_data.get("auth_url")
                     if not auth_url:
                         reconnect = await api_client.reconnect_content_factory_github(
-                            slack_user_id=slack_user_id,
+                            slack_user_id=effective_slack_user_id,
                             domain=domain,
                             github_repo=None,
                             trigger="fallback_412",
@@ -1807,6 +1969,8 @@ Keep the response concise but informative."""
         return self._build_publish_pr_start_response(
             domain=resolved_domain,
             job_id=child_job_id,
+            requested_by_slack_user_id=requested_by_slack_user_id,
+            effective_slack_user_id=effective_slack_user_id,
         )
 
     def _resolve_content_factory_repo_name(
@@ -1842,6 +2006,25 @@ Keep the response concise but informative."""
 
         params = dict(params or {})
         params["client_request_id"] = self._get_content_factory_client_request_id(params)
+        (
+            requested_by_slack_user_id,
+            effective_slack_user_id,
+            is_delegated,
+        ) = self._resolve_content_factory_identity_context(params, user_id)
+        params["requested_by_slack_user_id"] = requested_by_slack_user_id
+        params["effective_slack_user_id"] = effective_slack_user_id
+
+        def content_factory_identity_payload(**extra: Any) -> dict[str, Any]:
+            return self._content_factory_identity_payload(
+                requested_by_slack_user_id=requested_by_slack_user_id,
+                effective_slack_user_id=effective_slack_user_id,
+                **extra,
+            )
+
+        delegated_backend_kwargs = self._delegated_backend_kwargs(
+            requested_by_slack_user_id,
+            effective_slack_user_id,
+        )
         
         # Get a MLAIBackendClient for API calls
         settings = get_settings()
@@ -1871,7 +2054,8 @@ Keep the response concise but informative."""
                 api_client,
                 job_id=str(params.get("job_id") or "").strip(),
                 domain=domain,
-                slack_user_id=user_id,
+                requested_by_slack_user_id=requested_by_slack_user_id,
+                effective_slack_user_id=effective_slack_user_id,
                 channel_id=channel_id,
                 thread_ts=thread_ts,
                 text=text,
@@ -1889,7 +2073,10 @@ Keep the response concise but informative."""
         # integration can return a multi-domain selection error before we ever
         # reach the domain-specific flow.
         try:
-            integration = await api_client.get_integration(user_id, domain=domain)
+            integration = await api_client.get_integration(
+                effective_slack_user_id,
+                domain=domain,
+            )
         except MLAIBackendUnavailableError:
             return self._content_factory_backend_unavailable_message()
         
@@ -1898,7 +2085,7 @@ Keep the response concise but informative."""
         if not integration and not params.get("confirmed"):
             await self._save_content_factory_pending_intent(
                 api_client,
-                user_id,
+                requested_by_slack_user_id,
                 params,
                 text,
                 channel_id,
@@ -1975,13 +2162,21 @@ Keep the response concise but informative."""
 
         # Check for Expired Token or Other Errors
         if integration and integration.get("error"):
+            if is_delegated:
+                return self._delegated_content_factory_auth_required_message(
+                    effective_slack_user_id=effective_slack_user_id,
+                    domain=domain,
+                )
             auth_url = integration.get("auth_url")
             error_msg = integration.get("error")
             
             if not auth_url:
                 # Fallback if auth_url missing in error response
                 try:
-                    auth_url_resp = await api_client.get_github_auth_url(user_id, domain=domain)
+                    auth_url_resp = await api_client.get_github_auth_url(
+                        effective_slack_user_id,
+                        domain=domain,
+                    )
                 except MLAIBackendUnavailableError:
                     return self._content_factory_backend_unavailable_message()
                 auth_url = auth_url_resp.get("auth_url")
@@ -2034,7 +2229,10 @@ Keep the response concise but informative."""
         if not integration:
             if is_article_flow:
                 try:
-                    org_config_cached = await api_client.get_content_org_config(user_id, domain=domain)
+                    org_config_cached = await api_client.get_content_org_config(
+                        effective_slack_user_id,
+                        domain=domain,
+                    )
                 except MLAIBackendUnavailableError:
                     return self._content_factory_backend_unavailable_message()
                 if org_config_cached:
@@ -2055,8 +2253,16 @@ Keep the response concise but informative."""
                     }
 
             if not integration:
+                if is_delegated:
+                    return self._delegated_content_factory_auth_required_message(
+                        effective_slack_user_id=effective_slack_user_id,
+                        domain=domain,
+                    )
                 try:
-                    auth_response = await api_client.get_github_auth_url(user_id, domain=domain)
+                    auth_response = await api_client.get_github_auth_url(
+                        effective_slack_user_id,
+                        domain=domain,
+                    )
                 except MLAIBackendUnavailableError:
                     return self._content_factory_backend_unavailable_message()
                 auth_url = auth_response.get("auth_url")
@@ -2092,7 +2298,7 @@ Keep the response concise but informative."""
 
                 await self._save_content_factory_pending_intent(
                     api_client,
-                    user_id,
+                    requested_by_slack_user_id,
                     params,
                     text,
                     channel_id,
@@ -2115,7 +2321,7 @@ Keep the response concise but informative."""
                 # No domains connected — fall back to org config lookup
                 try:
                     org_config_cached = await api_client.get_content_org_config(
-                        slack_user_id=user_id
+                        slack_user_id=effective_slack_user_id
                     )
                 except MLAIBackendUnavailableError:
                     return self._content_factory_backend_unavailable_message()
@@ -2141,7 +2347,10 @@ Keep the response concise but informative."""
         # or "write_article" without forcing a re-scan.
         if domain:
             try:
-                domain_integration = await api_client.get_integration(user_id, domain=domain)
+                domain_integration = await api_client.get_integration(
+                    effective_slack_user_id,
+                    domain=domain,
+                )
             except MLAIBackendUnavailableError:
                 return self._content_factory_backend_unavailable_message()
             if domain_integration:
@@ -2149,7 +2358,10 @@ Keep the response concise but informative."""
                 connected_domains = integration.get("connected_domains", connected_domains)
             elif is_article_flow and org_config_cached is None:
                 try:
-                    org_config_cached = await api_client.get_content_org_config(user_id, domain=domain)
+                    org_config_cached = await api_client.get_content_org_config(
+                        effective_slack_user_id,
+                        domain=domain,
+                    )
                 except MLAIBackendUnavailableError:
                     return self._content_factory_backend_unavailable_message()
 
@@ -2162,7 +2374,9 @@ Keep the response concise but informative."""
         if domain and integration and integration.get("needs_github_auth") and not is_article_flow:
             reconnect_result = await self._request_github_reconnect(
                 api_client,
-                user_id=user_id,
+                user_id=effective_slack_user_id,
+                requested_by_slack_user_id=requested_by_slack_user_id,
+                effective_slack_user_id=effective_slack_user_id,
                 domain=domain,
                 github_repo=repo_name,
                 trigger="manual",
@@ -2181,7 +2395,9 @@ Keep the response concise but informative."""
         if not repo_name and not is_article_flow:
             reconnect_result = await self._request_github_reconnect(
                 api_client,
-                user_id=user_id,
+                user_id=effective_slack_user_id,
+                requested_by_slack_user_id=requested_by_slack_user_id,
+                effective_slack_user_id=effective_slack_user_id,
                 domain=domain,
                 github_repo=None,
                 trigger="manual",
@@ -2203,7 +2419,9 @@ Keep the response concise but informative."""
 
             reconnect_result = await self._request_github_reconnect(
                 api_client,
-                user_id=user_id,
+                user_id=effective_slack_user_id,
+                requested_by_slack_user_id=requested_by_slack_user_id,
+                effective_slack_user_id=effective_slack_user_id,
                 domain=domain,
                 github_repo=repo_name,
                 trigger="preflight",
@@ -2236,19 +2454,22 @@ Keep the response concise but informative."""
                                 "type": "button",
                                 "text": {"type": "plain_text", "text": "Scan Codebase", "emoji": True},
                                 "style": "primary",
-                                "value": json.dumps({
-                                    "domain": domain,
-                                    "slack_user_id": user_id,
-                                    "channel_id": channel_id,
-                                    "thread_ts": thread_ts,
-                                    "original_intent": {"action": "scaffold"}
-                                }),
+                                "value": json.dumps(
+                                    content_factory_identity_payload(
+                                        domain=domain,
+                                        channel_id=channel_id,
+                                        thread_ts=thread_ts,
+                                        original_intent={"action": "scaffold"},
+                                    )
+                                ),
                                 "action_id": "prerequisite_scan"
                             },
                             {
                                 "type": "button",
                                 "text": {"type": "plain_text", "text": "Cancel", "emoji": True},
-                                "value": json.dumps({"domain": domain}),
+                                "value": json.dumps(
+                                    content_factory_identity_payload(domain=domain)
+                                ),
                                 "action_id": "prerequisite_cancel"
                             }
                         ]
@@ -2268,9 +2489,10 @@ Keep the response concise but informative."""
             try:
                 result = await api_client.scaffold_articles(
                     domain=domain,
-                    slack_user_id=user_id,
+                    slack_user_id=effective_slack_user_id,
                     slack_channel_id=channel_id or "",
-                    slack_thread_ts=thread_ts or ""
+                    slack_thread_ts=thread_ts or "",
+                    **delegated_backend_kwargs,
                 )
 
                 status_code = result.get("status_code")
@@ -2306,19 +2528,22 @@ Keep the response concise but informative."""
                                     "type": "button",
                                     "text": {"type": "plain_text", "text": "Scan Codebase", "emoji": True},
                                     "style": "primary",
-                                    "value": json.dumps({
-                                        "domain": domain,
-                                        "slack_user_id": user_id,
-                                        "channel_id": channel_id,
-                                        "thread_ts": thread_ts,
-                                        "original_intent": {"action": "scaffold"}
-                                    }),
+                                    "value": json.dumps(
+                                        content_factory_identity_payload(
+                                            domain=domain,
+                                            channel_id=channel_id,
+                                            thread_ts=thread_ts,
+                                            original_intent={"action": "scaffold"},
+                                        )
+                                    ),
                                     "action_id": "prerequisite_scan"
                                 },
                                 {
                                     "type": "button",
                                     "text": {"type": "plain_text", "text": "Cancel", "emoji": True},
-                                    "value": json.dumps({"domain": domain}),
+                                    "value": json.dumps(
+                                        content_factory_identity_payload(domain=domain)
+                                    ),
                                     "action_id": "prerequisite_cancel"
                                 }
                             ]
@@ -2329,6 +2554,11 @@ Keep the response concise but informative."""
                     return "I need to scan your codebase first."
                 elif status_code == 400:
                     if data.get("needs_github_auth"):
+                        if is_delegated:
+                            return self._delegated_content_factory_auth_required_message(
+                                effective_slack_user_id=effective_slack_user_id,
+                                domain=domain,
+                            )
                         oauth_url = data.get("oauth_url", "")
                         return f"❌ GitHub authentication required for *{domain}*.\n\nPlease reconnect: {oauth_url}"
                     return f"❌ Could not start scaffolding: {data.get('error', 'Unknown error')}"
@@ -2384,6 +2614,8 @@ Keep the response concise but informative."""
                 user_id=user_id,
                 channel_id=channel_id,
                 thread_ts=thread_ts,
+                requested_by_slack_user_id=requested_by_slack_user_id,
+                effective_slack_user_id=effective_slack_user_id,
             )
 
         # Compile Status Report
@@ -2427,7 +2659,9 @@ Keep the response concise but informative."""
         if needs_scan:
             reconnect_result = await self._request_github_reconnect(
                 api_client,
-                user_id=user_id,
+                user_id=effective_slack_user_id,
+                requested_by_slack_user_id=requested_by_slack_user_id,
+                effective_slack_user_id=effective_slack_user_id,
                 domain=domain,
                 github_repo=repo_name,
                 trigger="preflight",
@@ -2443,10 +2677,11 @@ Keep the response concise but informative."""
                 return reconnect_result
 
             scan_result = await api_client.trigger_repo_scan(
-                user_id, 
+                effective_slack_user_id,
                 slack_channel_id=channel_id,
                 slack_thread_ts=thread_ts,
-                domain=domain
+                domain=domain,
+                **delegated_backend_kwargs,
             )
             
             if scan_result.get("status") == "accepted":
@@ -2470,6 +2705,11 @@ Keep the response concise but informative."""
 
                 # If backend says GitHub isn't connected for this domain
                 if scan_result.get("needs_github_auth"):
+                    if is_delegated:
+                        return self._delegated_content_factory_auth_required_message(
+                            effective_slack_user_id=effective_slack_user_id,
+                            domain=domain,
+                        )
                     oauth_url = scan_result.get("oauth_url")
                     domain_name = scan_result.get("domain", domain)
                     if oauth_url:
@@ -2510,7 +2750,10 @@ Keep the response concise but informative."""
                 if any(code in str(error_msg) for code in ["404", "401", "403", "Not Found", "Bad credentials"]):
                     # Fetch Auth URL to allow reconnect
                     try:
-                        auth_response = await api_client.get_github_auth_url(user_id, domain=domain)
+                        auth_response = await api_client.get_github_auth_url(
+                            effective_slack_user_id,
+                            domain=domain,
+                        )
                     except MLAIBackendUnavailableError:
                         return self._content_factory_backend_unavailable_message()
                     auth_url = auth_response.get("auth_url")
@@ -2554,7 +2797,10 @@ Keep the response concise but informative."""
             # Legacy Sync Behavior (if backend returns 200 immediately)
             # Scan succeeded - refresh integration status
             try:
-                integration = await api_client.get_integration(user_id, domain=domain)
+                integration = await api_client.get_integration(
+                    effective_slack_user_id,
+                    domain=domain,
+                )
             except MLAIBackendUnavailableError:
                 return self._content_factory_backend_unavailable_message()
             if not integration or not integration.get("project_scanned"):
@@ -2584,6 +2830,8 @@ Keep the response concise but informative."""
                     params["client_request_id"],
                     requested_delivery_mode,
                     requested_delivery_mode_confirmed,
+                    requested_by_slack_user_id=requested_by_slack_user_id,
+                    effective_slack_user_id=effective_slack_user_id,
                 ),
             }
 
@@ -2622,13 +2870,12 @@ Keep the response concise but informative."""
                             "text": {"type": "plain_text", "text": "Use Detected Structure", "emoji": True},
                             "style": "primary",
                             "value": json.dumps(
-                                {
-                                    "domain": domain,
-                                    "slack_user_id": user_id,
-                                    "channel_id": channel_id,
-                                    "thread_ts": thread_ts,
-                                    "original_intent": original_intent,
-                                }
+                                content_factory_identity_payload(
+                                    domain=domain,
+                                    channel_id=channel_id,
+                                    thread_ts=thread_ts,
+                                    original_intent=original_intent,
+                                )
                             ),
                             "action_id": "article_system_use_detected",
                         },
@@ -2636,13 +2883,12 @@ Keep the response concise but informative."""
                             "type": "button",
                             "text": {"type": "plain_text", "text": "Rescan Repo", "emoji": True},
                             "value": json.dumps(
-                                {
-                                    "domain": domain,
-                                    "slack_user_id": user_id,
-                                    "channel_id": channel_id,
-                                    "thread_ts": thread_ts,
-                                    "original_intent": original_intent,
-                                }
+                                content_factory_identity_payload(
+                                    domain=domain,
+                                    channel_id=channel_id,
+                                    thread_ts=thread_ts,
+                                    original_intent=original_intent,
+                                )
                             ),
                             "action_id": "article_system_rescan",
                         },
@@ -2650,13 +2896,12 @@ Keep the response concise but informative."""
                             "type": "button",
                             "text": {"type": "plain_text", "text": "Set Up Articles Directory", "emoji": True},
                             "value": json.dumps(
-                                {
-                                    "domain": domain,
-                                    "slack_user_id": user_id,
-                                    "channel_id": channel_id,
-                                    "thread_ts": thread_ts,
-                                    "original_intent": original_intent,
-                                }
+                                content_factory_identity_payload(
+                                    domain=domain,
+                                    channel_id=channel_id,
+                                    thread_ts=thread_ts,
+                                    original_intent=original_intent,
+                                )
                             ),
                             "action_id": "article_system_scaffold",
                         },
@@ -2675,7 +2920,11 @@ Keep the response concise but informative."""
                 history_str = "\n".join([f"{msg.get('user')}: {msg.get('text')}" for msg in thread_history[:-1]])
                 full_context = f"Context from Thread:\n{history_str}\n\nCurrent Request: {text}"
 
-            access_error = await self._validate_content_factory_paid_access(api_client, user_id, domain)
+            access_error = await self._validate_content_factory_paid_access(
+                api_client,
+                requested_by_slack_user_id,
+                domain,
+            )
             if access_error:
                 return access_error
 
@@ -2688,7 +2937,9 @@ Keep the response concise but informative."""
             if effective_article_delivery_mode == "publish_code":
                 reconnect_result = await self._request_github_reconnect(
                     api_client,
-                    user_id=user_id,
+                    user_id=effective_slack_user_id,
+                    requested_by_slack_user_id=requested_by_slack_user_id,
+                    effective_slack_user_id=effective_slack_user_id,
                     domain=domain,
                     github_repo=repo_name,
                     trigger="preflight",
@@ -2704,13 +2955,13 @@ Keep the response concise but informative."""
                     return reconnect_result
 
             from ..slack_client import get_user_info
-            slack_info = get_user_info(user_id)
+            slack_info = get_user_info(requested_by_slack_user_id)
             real_name = str(slack_info.get("real_name") or "").strip()
             name_parts = real_name.split(" ", 1) if real_name else []
             
             # Note: topic can be None (triggers Auto-Write / Research Mode)
             response = await api_client.trigger_article_generation(
-                slack_user_id=user_id,
+                slack_user_id=effective_slack_user_id,
                 domain=domain,
                 topic=topic,
                 target_keyword=target_keyword,
@@ -2725,6 +2976,7 @@ Keep the response concise but informative."""
                 user_first_name=name_parts[0] if name_parts else None,
                 user_last_name=name_parts[1] if len(name_parts) > 1 else None,
                 user_avatar_url=str(slack_info.get("image_192") or "").strip() or None,
+                **delegated_backend_kwargs,
             )
             
             job_id = response.get("job_id")
@@ -2737,6 +2989,8 @@ Keep the response concise but informative."""
                     job_id=job_id,
                     topic=topic,
                     recommended_delivery_mode=response.get("recommended_delivery_mode"),
+                    requested_by_slack_user_id=requested_by_slack_user_id,
+                    effective_slack_user_id=effective_slack_user_id,
                 )
 
             workflow = str(
@@ -2749,6 +3003,8 @@ Keep the response concise but informative."""
                 job_id=job_id,
                 topic=topic,
                 workflow=workflow,
+                requested_by_slack_user_id=requested_by_slack_user_id,
+                effective_slack_user_id=effective_slack_user_id,
             )
             
         except MLAIBackendUnavailableError:
@@ -2762,10 +3018,15 @@ Keep the response concise but informative."""
                     error_data = {}
                 error_code = error_data.get("error_code", "")
                 if error_code == "AUTH_REQUIRED":
+                    if is_delegated:
+                        return self._delegated_content_factory_auth_required_message(
+                            effective_slack_user_id=effective_slack_user_id,
+                            domain=domain,
+                        )
                     if not error_data.get("pending_intent_stored"):
                         await self._save_content_factory_pending_intent(
                             api_client,
-                            user_id,
+                            requested_by_slack_user_id,
                             params,
                             text,
                             channel_id,
@@ -2774,7 +3035,7 @@ Keep the response concise but informative."""
                     auth_url = error_data.get("auth_url")
                     if not auth_url:
                         reconnect = await api_client.reconnect_content_factory_github(
-                            slack_user_id=user_id,
+                            slack_user_id=effective_slack_user_id,
                             domain=domain,
                             github_repo=repo_name,
                             trigger="fallback_412",
@@ -2800,10 +3061,18 @@ Keep the response concise but informative."""
                         }
                     return message
                 if error_code == "PUBLISH_TARGET_ACTION_REQUIRED":
+                    if is_delegated:
+                        return self._delegated_content_factory_auth_required_message(
+                            effective_slack_user_id=effective_slack_user_id,
+                            domain=domain,
+                        )
                     auth_url = None
                     if domain:
                         try:
-                            auth_response = await api_client.get_github_auth_url(user_id, domain=domain)
+                            auth_response = await api_client.get_github_auth_url(
+                                effective_slack_user_id,
+                                domain=domain,
+                            )
                         except MLAIBackendUnavailableError:
                             return self._content_factory_backend_unavailable_message()
                         auth_url = auth_response.get("auth_url")
@@ -2884,37 +3153,40 @@ Keep the response concise but informative."""
                                         "type": "button",
                                         "text": {"type": "plain_text", "text": "Use Detected Structure", "emoji": True},
                                         "style": "primary",
-                                        "value": json.dumps({
-                                            "domain": domain,
-                                            "slack_user_id": user_id,
-                                            "channel_id": channel_id,
-                                            "thread_ts": thread_ts,
-                                            "original_intent": original_intent,
-                                        }),
+                                        "value": json.dumps(
+                                            content_factory_identity_payload(
+                                                domain=domain,
+                                                channel_id=channel_id,
+                                                thread_ts=thread_ts,
+                                                original_intent=original_intent,
+                                            )
+                                        ),
                                         "action_id": "article_system_use_detected",
                                     },
                                     {
                                         "type": "button",
                                         "text": {"type": "plain_text", "text": "Rescan Repo", "emoji": True},
-                                        "value": json.dumps({
-                                            "domain": domain,
-                                            "slack_user_id": user_id,
-                                            "channel_id": channel_id,
-                                            "thread_ts": thread_ts,
-                                            "original_intent": original_intent,
-                                        }),
+                                        "value": json.dumps(
+                                            content_factory_identity_payload(
+                                                domain=domain,
+                                                channel_id=channel_id,
+                                                thread_ts=thread_ts,
+                                                original_intent=original_intent,
+                                            )
+                                        ),
                                         "action_id": "article_system_rescan",
                                     },
                                     {
                                         "type": "button",
                                         "text": {"type": "plain_text", "text": "Set Up Articles Directory", "emoji": True},
-                                        "value": json.dumps({
-                                            "domain": domain,
-                                            "slack_user_id": user_id,
-                                            "channel_id": channel_id,
-                                            "thread_ts": thread_ts,
-                                            "original_intent": original_intent,
-                                        }),
+                                        "value": json.dumps(
+                                            content_factory_identity_payload(
+                                                domain=domain,
+                                                channel_id=channel_id,
+                                                thread_ts=thread_ts,
+                                                original_intent=original_intent,
+                                            )
+                                        ),
                                         "action_id": "article_system_scaffold",
                                     },
                                 ],
@@ -2949,19 +3221,22 @@ Keep the response concise but informative."""
                                     "type": "button",
                                     "text": {"type": "plain_text", "text": "Set Up Articles Directory", "emoji": True},
                                     "style": "primary",
-                                    "value": json.dumps({
-                                        "domain": domain,
-                                        "slack_user_id": user_id,
-                                        "channel_id": channel_id,
-                                        "thread_ts": thread_ts,
-                                        "original_intent": original_intent,
-                                    }),
+                                    "value": json.dumps(
+                                        content_factory_identity_payload(
+                                            domain=domain,
+                                            channel_id=channel_id,
+                                            thread_ts=thread_ts,
+                                            original_intent=original_intent,
+                                        )
+                                    ),
                                     "action_id": "prerequisite_scaffold",
                                 },
                                 {
                                     "type": "button",
                                     "text": {"type": "plain_text", "text": "Cancel", "emoji": True},
-                                    "value": json.dumps({"domain": domain}),
+                                    "value": json.dumps(
+                                        content_factory_identity_payload(domain=domain)
+                                    ),
                                     "action_id": "prerequisite_cancel",
                                 },
                             ],
@@ -2994,19 +3269,22 @@ Keep the response concise but informative."""
                                     "type": "button",
                                     "text": {"type": "plain_text", "text": "Scan Codebase", "emoji": True},
                                     "style": "primary",
-                                    "value": json.dumps({
-                                        "domain": domain,
-                                        "slack_user_id": user_id,
-                                        "channel_id": channel_id,
-                                        "thread_ts": thread_ts,
-                                        "original_intent": original_intent
-                                    }),
+                                    "value": json.dumps(
+                                        content_factory_identity_payload(
+                                            domain=domain,
+                                            channel_id=channel_id,
+                                            thread_ts=thread_ts,
+                                            original_intent=original_intent,
+                                        )
+                                    ),
                                     "action_id": "prerequisite_scan"
                                 },
                                 {
                                     "type": "button",
                                     "text": {"type": "plain_text", "text": "Cancel", "emoji": True},
-                                    "value": json.dumps({"domain": domain}),
+                                    "value": json.dumps(
+                                        content_factory_identity_payload(domain=domain)
+                                    ),
                                     "action_id": "prerequisite_cancel"
                                 }
                             ]
@@ -3038,19 +3316,22 @@ Keep the response concise but informative."""
                                     "type": "button",
                                     "text": {"type": "plain_text", "text": "Set Up Articles Directory", "emoji": True},
                                     "style": "primary",
-                                    "value": json.dumps({
-                                        "domain": domain,
-                                        "slack_user_id": user_id,
-                                        "channel_id": channel_id,
-                                        "thread_ts": thread_ts,
-                                        "original_intent": original_intent
-                                    }),
+                                    "value": json.dumps(
+                                        content_factory_identity_payload(
+                                            domain=domain,
+                                            channel_id=channel_id,
+                                            thread_ts=thread_ts,
+                                            original_intent=original_intent,
+                                        )
+                                    ),
                                     "action_id": "prerequisite_scaffold"
                                 },
                                 {
                                     "type": "button",
                                     "text": {"type": "plain_text", "text": "Cancel", "emoji": True},
-                                    "value": json.dumps({"domain": domain}),
+                                    "value": json.dumps(
+                                        content_factory_identity_payload(domain=domain)
+                                    ),
                                     "action_id": "prerequisite_cancel"
                                 }
                             ]
@@ -3068,6 +3349,11 @@ Keep the response concise but informative."""
                     error_data = {}
                 # Structured error: GitHub not connected for this domain
                 if error_data.get("needs_github_auth"):
+                    if is_delegated:
+                        return self._delegated_content_factory_auth_required_message(
+                            effective_slack_user_id=effective_slack_user_id,
+                            domain=domain,
+                        )
                     oauth_url = error_data.get("oauth_url")
                     domain_name = error_data.get("domain", domain)
                     if oauth_url and channel_id:
