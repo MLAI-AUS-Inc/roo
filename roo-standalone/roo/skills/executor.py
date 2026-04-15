@@ -676,15 +676,11 @@ JSON:"""
         delegated_requested_by_slack_user_id = str(
             requested_by_slack_user_id or user_id or ""
         ).strip()
-        if (
+        is_delegated = bool(
             delegated_requested_by_slack_user_id
             and delegated_effective_slack_user_id
             and delegated_requested_by_slack_user_id != delegated_effective_slack_user_id
-        ):
-            return self._delegated_content_factory_auth_required_message(
-                effective_slack_user_id=delegated_effective_slack_user_id,
-                domain=domain,
-            )
+        )
 
         try:
             reconnect = await api_client.reconnect_content_factory_github(
@@ -701,6 +697,12 @@ JSON:"""
 
         if reconnect.get("status") != "auth_started":
             return None
+
+        if is_delegated:
+            return self._delegated_content_factory_auth_required_message(
+                effective_slack_user_id=delegated_effective_slack_user_id,
+                domain=domain,
+            )
 
         if save_pending and text is not None and params is not None:
             await self._save_content_factory_pending_intent(
