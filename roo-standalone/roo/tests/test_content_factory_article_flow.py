@@ -643,6 +643,14 @@ async def test_delegated_scan_auth_blocker_returns_error_without_reconnect(monke
         "needs_github_auth": True,
         "recommended_next_action": "scan",
     }
+    FakeContentFactoryClient.reconnect_results["mlai.au"] = {
+        "status": "auth_started",
+        "connection_state": "auth_required",
+        "domain": "mlai.au",
+        "github_repo": "MLAI-AUS-Inc/mlai-au",
+        "auth_url": "https://github.test/reconnect",
+        "message": "GitHub needs to be connected for mlai.au before Roo can continue.",
+    }
 
     result = await executor._execute_content_factory(
         skill=None,
@@ -662,8 +670,90 @@ async def test_delegated_scan_auth_blocker_returns_error_without_reconnect(monke
         "GitHub auth for <@U0AQV5X9G0J> isn't available for mlai.au. "
         "Ask them to reconnect GitHub, then retry the delegated run."
     )
-    assert FakeContentFactoryClient.reconnect_calls == []
+    assert FakeContentFactoryClient.reconnect_calls[-1]["slack_user_id"] == "U0AQV5X9G0J"
     assert FakeContentFactoryClient.last_instance.repo_scan_calls == []
+    assert FakeContentFactoryClient.saved_intents == []
+
+
+@pytest.mark.asyncio
+async def test_delegated_publish_code_article_preflight_queues_when_backend_reports_connected(monkeypatch):
+    executor = SkillExecutor()
+    _patch_content_factory(monkeypatch)
+    monkeypatch.setattr(
+        executor_module,
+        "post_message",
+        lambda *args, **kwargs: {"ts": "111.222"},
+    )
+    FakeContentFactoryClient.domain_integrations["woofya.com.au"] = {
+        **FakeContentFactoryClient.domain_integrations["woofya.com.au"],
+        "article_delivery_mode": "publish_code",
+    }
+
+    result = await executor._execute_content_factory(
+        skill=None,
+        text="write an article for woofya.com.au about dog grooming tips",
+        params={
+            "domain": "woofya.com.au",
+            "topic": "dog grooming tips",
+            "requested_by_slack_user_id": "U05QPB483K9",
+            "effective_slack_user_id": "U0AQV5X9G0J",
+        },
+        user_id="U05QPB483K9",
+        channel_id="C123",
+        thread_ts="111.222",
+    )
+
+    assert isinstance(result, dict)
+    assert FakeContentFactoryClient.reconnect_calls[-1]["slack_user_id"] == "U0AQV5X9G0J"
+    trigger_call = FakeContentFactoryClient.last_instance.trigger_calls[0]
+    assert trigger_call["slack_user_id"] == "U0AQV5X9G0J"
+    assert trigger_call["requested_by_slack_user_id"] == "U05QPB483K9"
+    assert FakeContentFactoryClient.saved_intents == []
+
+
+@pytest.mark.asyncio
+async def test_delegated_publish_code_article_returns_auth_error_only_when_backend_requires_reconnect(monkeypatch):
+    executor = SkillExecutor()
+    _patch_content_factory(monkeypatch)
+    monkeypatch.setattr(
+        executor_module,
+        "post_message",
+        lambda *args, **kwargs: {"ts": "111.222"},
+    )
+    FakeContentFactoryClient.domain_integrations["woofya.com.au"] = {
+        **FakeContentFactoryClient.domain_integrations["woofya.com.au"],
+        "article_delivery_mode": "publish_code",
+    }
+    FakeContentFactoryClient.reconnect_results["woofya.com.au"] = {
+        "status": "auth_started",
+        "connection_state": "auth_required",
+        "domain": "woofya.com.au",
+        "github_repo": "MLAI-AUS-Inc/mlai-au",
+        "auth_url": "https://github.test/reconnect",
+        "message": "GitHub needs to be connected for woofya.com.au before Roo can continue.",
+    }
+
+    result = await executor._execute_content_factory(
+        skill=None,
+        text="write an article for woofya.com.au about dog grooming tips",
+        params={
+            "domain": "woofya.com.au",
+            "topic": "dog grooming tips",
+            "requested_by_slack_user_id": "U05QPB483K9",
+            "effective_slack_user_id": "U0AQV5X9G0J",
+        },
+        user_id="U05QPB483K9",
+        channel_id="C123",
+        thread_ts="111.222",
+    )
+
+    assert result == (
+        "GitHub auth for <@U0AQV5X9G0J> isn't available for woofya.com.au. "
+        "Ask them to reconnect GitHub, then retry the delegated run."
+    )
+    assert FakeContentFactoryClient.reconnect_calls[-1]["slack_user_id"] == "U0AQV5X9G0J"
+    assert FakeContentFactoryClient.last_instance.trigger_calls == []
+    assert FakeContentFactoryClient.saved_intents == []
 
 
 @pytest.mark.asyncio
