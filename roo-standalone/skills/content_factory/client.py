@@ -215,6 +215,8 @@ class ContentFactoryClient:
                 return {
                     "success": True,
                     "preview_url": publish_data.get("preview_url"),
+                    "primary_action_url": publish_data.get("primary_action_url"),
+                    "primary_action_label": publish_data.get("primary_action_label"),
                     "pr_url": publish_data.get("pr_url"),
                     "pr_number": publish_data.get("pr_number"),
                     "branch_name": publish_data.get("branch_name"),

@@ -2503,10 +2503,14 @@ Keep the response concise but informative."""
                 if status_code == 200:
                     pr_url = data.get("pr_url", "")
                     preview_url = data.get("preview_url", "")
+                    primary_action_url = data.get("primary_action_url", "")
+                    primary_action_label = data.get("primary_action_label", "")
                     detail_parts = []
                     if pr_url:
                         detail_parts.append(f"<{pr_url}|View PR>")
-                    if preview_url:
+                    if primary_action_url:
+                        detail_parts.append(f"<{primary_action_url}|{primary_action_label or 'Open Review'}>")
+                    elif preview_url:
                         detail_parts.append(f"<{preview_url}|View Preview>")
                     detail_text = f" {' | '.join(detail_parts)}" if detail_parts else ""
                     return f"📁 Articles directory already exists for *{domain}*.{detail_text}"
@@ -3463,11 +3467,15 @@ Keep the response concise but informative."""
             publish_result = await client.publish_article(job_id, slack_user_id)
             
             preview_url = publish_result.get("preview_url")
+            primary_action_url = publish_result.get("primary_action_url")
+            primary_action_label = publish_result.get("primary_action_label") or "Preview"
             pr_url = publish_result.get("pr_url")
+            review_url = primary_action_url or preview_url
+            review_label = primary_action_label if primary_action_url else "Preview"
             
             final_msg = (
                 f"🎉 *Article Published!* \n\n"
-                f"👀 *Preview:* {preview_url}\n"
+                f"👀 *{review_label}:* {review_url}\n"
                 f"💻 *Pull Request:* {pr_url}\n\n"
                 f"Review the content and merge the PR when you're ready!"
             )
