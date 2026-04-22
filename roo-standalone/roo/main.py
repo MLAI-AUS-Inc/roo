@@ -11,7 +11,7 @@ import hmac
 import hashlib
 import re
 import time
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from typing import Any, Optional
 from uuid import uuid4
 import httpx
@@ -35,12 +35,15 @@ from .points_request_approval import (
     remember_points_request_summary,
 )
 from .slack_client import get_message, post_message, send_dm
+from .coworking_booking_intents import coworking_booking_retry_loop
 
 # Pending intents for auto-continue after prerequisite steps complete.
 # Key: "{slack_user_id}:{domain}" → {"action": "write", "topic": "...", "channel_id": "...", "thread_ts": "..."}
 _pending_intents: dict = {}
 _pending_intents_by_job: dict[str, str] = {}
 PENDING_INTENT_TTL_SECONDS = 30 * 60
+APP_MENTION_DEDUPE_TTL_SECONDS = 10 * 60
+_recent_app_mention_events: dict[str, float] = {}
 CONTENT_FACTORY_WATCHDOG_POLL_SECONDS = 120
 CONTENT_FACTORY_WATCHDOG_STOP_STATUSES = {
     "awaiting_confirmation",
@@ -56,6 +59,50 @@ CONTENT_FACTORY_WATCHDOG_STOP_STATUSES = {
     "denied",
     "cancelled",
 }
+
+
+def _app_mention_event_key(payload: dict[str, Any], event: dict[str, Any]) -> Optional[str]:
+    team_id = (
+        payload.get("team_id")
+        or payload.get("team")
+        or event.get("team")
+        or ""
+    )
+    channel_id = str(event.get("channel") or "").strip()
+    user_id = str(event.get("user") or "").strip()
+    message_ts = str(event.get("ts") or "").strip()
+    if not channel_id or not user_id or not message_ts:
+        return None
+    return f"{team_id}:{channel_id}:{user_id}:{message_ts}"
+
+
+def _mark_app_mention_event_seen(
+    payload: dict[str, Any],
+    event: dict[str, Any],
+    *,
+    now: Optional[float] = None,
+) -> bool:
+    current_time = now if now is not None else time.monotonic()
+    expired_keys = [
+        key
+        for key, recorded_at in _recent_app_mention_events.items()
+        if current_time - recorded_at >= APP_MENTION_DEDUPE_TTL_SECONDS
+    ]
+    for key in expired_keys:
+        _recent_app_mention_events.pop(key, None)
+    if expired_keys:
+        print(f"🧹 Slack app_mention dedupe TTL expired count={len(expired_keys)}")
+
+    dedupe_key = _app_mention_event_key(payload, event)
+    if not dedupe_key:
+        return True
+
+    if dedupe_key in _recent_app_mention_events:
+        print(f"↩️ Slack app_mention dedupe hit key={dedupe_key}")
+        return False
+
+    _recent_app_mention_events[dedupe_key] = current_time
+    return True
 
 
 def _pending_intent_key(slack_user_id: Optional[str], domain: Optional[str]) -> Optional[str]:
@@ -1013,6 +1060,7 @@ async def lifespan(app: FastAPI):
     """Application lifespan handler for startup/shutdown."""
     settings = get_settings()
     app.state.startup_complete = False
+    coworking_retry_task: Optional[asyncio.Task] = None
     print(f"🦘 Roo Standalone starting...")
     print(f"   LLM Provider: {settings.default_llm_provider}")
     print(f"   Skills Dir: {settings.SKILLS_DIR}")
@@ -1020,6 +1068,8 @@ async def lifespan(app: FastAPI):
     # Initialize agent on startup
     agent = get_agent()
     print(f"   Loaded {len(agent.skills)} skills")
+    coworking_retry_task = asyncio.create_task(coworking_booking_retry_loop())
+    app.state.coworking_retry_task = coworking_retry_task
     app.state.startup_complete = True
 
     # MedHack daily case scheduler (currently disabled)
@@ -1027,7 +1077,13 @@ async def lifespan(app: FastAPI):
     # medhack_task = asyncio.create_task(_medhack_daily_case_loop())
     # print("   Started MedHack daily case scheduler")
 
-    yield
+    try:
+        yield
+    finally:
+        if coworking_retry_task:
+            coworking_retry_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await coworking_retry_task
 
     # Cancel the background task on shutdown (disabled)
     # medhack_task.cancel()
@@ -1177,6 +1233,8 @@ async def slack_events(request: Request):
     #     print(f"⚠️ Quest processing failed: {e}")
     
     if event_type == "app_mention":
+        if not _mark_app_mention_event_seen(payload, event):
+            return JSONResponse(status_code=200, content={})
         # Process mention asynchronously
         asyncio.create_task(_handle_mention(event))
         return JSONResponse(status_code=200, content={})

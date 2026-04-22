@@ -12,6 +12,7 @@ sys.modules.setdefault("frontmatter", SimpleNamespace(load=lambda *args, **kwarg
 sys.modules.pop("roo.skills.executor", None)
 
 backend_module = importlib.import_module("roo.clients.mlai_backend")
+coworking_module = importlib.import_module("roo.coworking_booking_intents")
 main_module = importlib.import_module("roo.main")
 approval_module = importlib.import_module("roo.points_request_approval")
 slack_client_module = importlib.import_module("roo.slack_client")
@@ -1366,6 +1367,111 @@ async def test_slack_events_message_subtype_does_not_trigger_intro_handler(monke
 
 
 @pytest.mark.asyncio
+async def test_slack_events_dedupes_retried_app_mention(monkeypatch):
+    handled_events = []
+    scheduled_tasks = []
+    real_create_task = asyncio.create_task
+    main_module._recent_app_mention_events.clear()
+
+    async def fake_handle_mention(event):
+        handled_events.append(event)
+
+    def fake_create_task(coro):
+        task = real_create_task(coro)
+        scheduled_tasks.append(task)
+        return task
+
+    monkeypatch.setattr(main_module, "_handle_mention", fake_handle_mention)
+    monkeypatch.setattr(main_module.asyncio, "create_task", fake_create_task)
+
+    payload = {
+        "team_id": "T123",
+        "event": {
+            "type": "app_mention",
+            "user": "U123",
+            "channel": "C123",
+            "ts": "111.222",
+            "text": "<@UROO> book me in today",
+        },
+    }
+
+    class FakeRequest:
+        async def json(self):
+            return payload
+
+    response_1 = await main_module.slack_events(FakeRequest())
+    response_2 = await main_module.slack_events(FakeRequest())
+
+    assert response_1.status_code == 200
+    assert response_2.status_code == 200
+    await asyncio.gather(*scheduled_tasks)
+    assert handled_events == [payload["event"]]
+    main_module._recent_app_mention_events.clear()
+
+
+@pytest.mark.asyncio
+async def test_slack_events_allows_new_app_mention_timestamp(monkeypatch):
+    handled_events = []
+    scheduled_tasks = []
+    real_create_task = asyncio.create_task
+    main_module._recent_app_mention_events.clear()
+
+    async def fake_handle_mention(event):
+        handled_events.append(event)
+
+    def fake_create_task(coro):
+        task = real_create_task(coro)
+        scheduled_tasks.append(task)
+        return task
+
+    monkeypatch.setattr(main_module, "_handle_mention", fake_handle_mention)
+    monkeypatch.setattr(main_module.asyncio, "create_task", fake_create_task)
+
+    first_event = {
+        "type": "app_mention",
+        "user": "U123",
+        "channel": "C123",
+        "ts": "111.222",
+        "text": "<@UROO> book me in today",
+    }
+    second_event = dict(first_event, ts="111.333")
+
+    class FakeRequest:
+        def __init__(self, event):
+            self._payload = {"team_id": "T123", "event": event}
+
+        async def json(self):
+            return self._payload
+
+    response_1 = await main_module.slack_events(FakeRequest(first_event))
+    response_2 = await main_module.slack_events(FakeRequest(second_event))
+
+    assert response_1.status_code == 200
+    assert response_2.status_code == 200
+    await asyncio.gather(*scheduled_tasks)
+    assert handled_events == [first_event, second_event]
+    main_module._recent_app_mention_events.clear()
+
+
+def test_app_mention_dedupe_logs_ttl_expiry(capsys):
+    main_module._recent_app_mention_events.clear()
+    event = {
+        "type": "app_mention",
+        "user": "U123",
+        "channel": "C123",
+        "ts": "111.222",
+    }
+    payload = {"team_id": "T123", "event": event}
+
+    assert main_module._mark_app_mention_event_seen(payload, event, now=1000.0)
+    assert main_module._mark_app_mention_event_seen(payload, dict(event, ts="111.333"), now=2000.0)
+
+    captured = capsys.readouterr()
+    assert "Slack app_mention dedupe TTL expired count=1" in captured.out
+    main_module._recent_app_mention_events.clear()
+
+
+@pytest.mark.asyncio
 async def test_handle_start_here_intro_awards_and_posts_thread_reply(monkeypatch):
     posted_messages = []
     FakeStartHereAwardClient.response = {"awarded": True, "new_balance": 2}
@@ -1639,8 +1745,9 @@ async def test_execute_mlai_points_returns_backend_unavailable_message(monkeypat
 
 
 @pytest.mark.asyncio
-async def test_book_coworking_still_succeeds_when_balance_refresh_times_out():
+async def test_book_coworking_still_succeeds_when_balance_refresh_times_out(tmp_path):
     monkeypatch = pytest.MonkeyPatch()
+    store = coworking_module.CoworkingBookingIntentStore(tmp_path / "intents.db")
 
     class FakeCoworkingClient:
         async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None):
@@ -1651,6 +1758,7 @@ async def test_book_coworking_still_succeeds_when_balance_refresh_times_out():
 
     executor = SkillExecutor()
     monkeypatch.setattr("roo.utils.get_current_date", lambda: __import__("datetime").date(2026, 4, 9))
+    monkeypatch.setattr(executor_module, "get_coworking_intent_store", lambda: store)
 
     try:
         result = await executor._handle_points_action(
@@ -1668,6 +1776,38 @@ async def test_book_coworking_still_succeeds_when_balance_refresh_times_out():
 
     assert "Booked you in for **2026-04-09**" in result
     assert "Balance remaining" not in result
+
+
+@pytest.mark.asyncio
+async def test_book_coworking_persists_intent_and_queues_backend_timeout(tmp_path, monkeypatch):
+    store = coworking_module.CoworkingBookingIntentStore(tmp_path / "intents.db")
+
+    class TimeoutCoworkingClient:
+        async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None):
+            raise backend_module.MLAIBackendUnavailableError("backend unavailable")
+
+    executor = SkillExecutor()
+    monkeypatch.setattr(executor_module, "get_coworking_intent_store", lambda: store)
+
+    result = await executor._handle_points_action(
+        client=TimeoutCoworkingClient(),
+        action="book_coworking",
+        params={"date": "2026-04-22"},
+        text="book coworking today",
+        user_id="U123",
+        channel_id="C123",
+        thread_ts="111.222",
+        skill=SimpleNamespace(name="mlai-points"),
+    )
+
+    intent = store.get_by_key("coworking:U123:2026-04-22")
+    assert "queued it and will keep retrying automatically" in result
+    assert intent["status"] == "pending_retry"
+    assert intent["slack_user_id"] == "U123"
+    assert intent["booking_date"] == "2026-04-22"
+    assert intent["channel_id"] == "C123"
+    assert intent["thread_ts"] == "111.222"
+    assert "backend unavailable" in intent["last_error"]
 
 
 @pytest.mark.asyncio

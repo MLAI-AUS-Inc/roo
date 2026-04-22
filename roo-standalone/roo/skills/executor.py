@@ -33,6 +33,10 @@ from ..points_request_approval import (
 )
 from ..slack_client import post_message
 from ..config import get_settings
+from ..coworking_booking_intents import (
+    get_coworking_intent_store,
+    is_retryable_coworking_exception,
+)
 
 
 POINTS_SUPER_ADMIN_SLACK_ID = "U05QPB483K9"
@@ -572,6 +576,14 @@ JSON:"""
         return (
             "I couldn't reach the MLAI points backend just now, so I couldn't confirm that action. "
             "Please try again in a moment."
+        )
+
+    @staticmethod
+    def _coworking_booking_queued_message(booking_date: str) -> str:
+        return (
+            f"I got your coworking booking request for **{booking_date}**, but MLAI backend "
+            "didn't confirm it yet. I've queued it and will keep retrying automatically. "
+            "I won't double-book the same day."
         )
 
     @staticmethod
@@ -4122,7 +4134,47 @@ Keep the response concise but informative."""
                 else:
                     return "What date would you like to book? Use format YYYY-MM-DD (e.g., \"book 2025-12-20\")"
             
-            result = await client.book_coworking(user_id, booking_date, channel_id)
+            try:
+                store = get_coworking_intent_store()
+                intent = store.record_intent(
+                    slack_user_id=user_id,
+                    booking_date=booking_date,
+                    channel_id=channel_id,
+                    thread_ts=thread_ts,
+                    request_text=text,
+                )
+                leased_intent = store.reserve_for_processing(
+                    int(intent["id"]),
+                    owner=f"roo-sync-{uuid4().hex}",
+                )
+            except Exception as exc:
+                print(
+                    "🏢 coworking_intent_persist_failed "
+                    f"slack_user_id={user_id} booking_date={booking_date} "
+                    f"exc_type={exc.__class__.__name__} exc={exc}"
+                )
+                return (
+                    "I couldn't safely queue your coworking booking request just now, "
+                    "so I didn't send it to MLAI backend. Please try again in a moment."
+                )
+
+            if not leased_intent:
+                return (
+                    f"I already have your coworking booking request for **{booking_date}** "
+                    "queued or in progress. I'll confirm in this thread when it completes."
+                )
+
+            try:
+                result = await client.book_coworking(user_id, booking_date, channel_id)
+                store.mark_confirmed(int(leased_intent["id"]), backend_result=result)
+            except Exception as exc:
+                error = f"{exc.__class__.__name__}: {exc}"
+                if is_retryable_coworking_exception(exc):
+                    store.mark_retryable_failure(int(leased_intent["id"]), error=error)
+                    return self._coworking_booking_queued_message(booking_date)
+                store.mark_blocked(int(leased_intent["id"]), error=error)
+                raise
+
             cost = result.get("points_cost", 1)
             from roo.clients.mlai_backend import MLAIBackendUnavailableError
 
