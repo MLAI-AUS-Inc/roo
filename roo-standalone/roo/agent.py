@@ -465,7 +465,7 @@ class RooAgent:
             today = self._get_today().isoformat()
             return await self._execute_fast_points(
                 user_id, "book_coworking", 
-                date=today, channel_id=channel_id
+                date=today, channel_id=channel_id, thread_ts=thread_ts
             )
 
         # 5. Coworking Cancel: "coworking cancel" (assumes today/upcoming)
@@ -500,7 +500,8 @@ class RooAgent:
             settings = get_settings()
             client = ClientClass(
                 base_url=settings.MLAI_BACKEND_URL,
-                api_key=settings.MLAI_API_KEY
+                api_key=settings.ROO_API_KEY or settings.MLAI_API_KEY,
+                internal_api_key=settings.INTERNAL_API_KEY or settings.ROO_API_KEY or settings.MLAI_API_KEY,
             )
             
             # Re-use the executor's logic for response formatting to DRY
@@ -541,8 +542,16 @@ class RooAgent:
             
             elif action == "book_coworking":
                 booking_date = kwargs.get("date")
-                res = await client.book_coworking(user_id, booking_date, kwargs.get("channel_id"))
-                msg = f"You beauty! 🎉\nBooked you in for **{booking_date}**. Cost: {res.get('points_cost', 1)} point."
+                msg = await self.skill_executor._handle_points_action(
+                    client=client,
+                    action="book_coworking",
+                    params={"date": booking_date},
+                    text=f"coworking book {booking_date}",
+                    user_id=user_id,
+                    channel_id=kwargs.get("channel_id"),
+                    thread_ts=kwargs.get("thread_ts"),
+                    skill=skill,
+                )
                 
             elif action == "cancel_coworking":
                 booking_date = kwargs.get("date")

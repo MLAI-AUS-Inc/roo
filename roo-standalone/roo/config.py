@@ -44,6 +44,8 @@ class Settings(BaseSettings):
     SKILLS_DIR: str = "skills"
     TIMEZONE: str = "Australia/Melbourne"
     ROUTER_MODEL: str = "gpt-5.4"
+    COWORKING_INTENTS_DB_PATH: str = "data/coworking_booking_intents.db"
+    COWORKING_RETRY_POLL_SECONDS: float = 30.0
 
     @property
     def default_llm_provider(self) -> str:
