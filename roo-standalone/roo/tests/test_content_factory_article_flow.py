@@ -589,6 +589,130 @@ async def test_requested_domain_bypasses_generic_multi_domain_error(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_publish_ready_registry_target_writes_without_scaffold_prompt(monkeypatch):
+    executor = SkillExecutor()
+    posted_messages = []
+    _patch_content_factory(monkeypatch)
+    FakeContentFactoryClient.domain_integrations["skedy.io"] = {
+        "github_repo": "mesieou/skedy-ai",
+        "domain_github_repo": "mesieou/skedy-ai",
+        "project_scanned": True,
+        "scan_completed": True,
+        "content_research_ready": True,
+        "last_scanned_at": "2026-04-23T00:00:00Z",
+        "last_article": None,
+        "recommended_next_action": "research_article",
+        "registry_driven_seo_ready": True,
+        "article_system": {},
+        "publish_targets": [
+            {
+                "target_id": "registry_driven_seo_shared_lib_seo_public_pages_ts",
+                "kind": "registry_driven_seo",
+                "delivery_adapter": "registry_entry",
+                "registry_status": "publish_ready",
+                "readiness": {
+                    "structure_ready": True,
+                    "mapping_ready": True,
+                    "routing_ready": True,
+                    "safety_ready": True,
+                },
+                "registration_strategy": {
+                    "type": "registry_entry_patch",
+                    "registry_path": "shared/lib/seo/public-pages.ts",
+                },
+            }
+        ],
+        "connected_domains": [
+            {
+                "domain": "skedy.io",
+                "github_repo": "mesieou/skedy-ai",
+                "scanned": True,
+            }
+        ],
+        "selected_domain": "skedy.io",
+    }
+    monkeypatch.setattr(
+        executor_module,
+        "post_message",
+        lambda *args, **kwargs: posted_messages.append({"args": args, "kwargs": kwargs}) or {"ts": "111.222"},
+    )
+
+    result = await executor._execute_content_factory(
+        skill=None,
+        text="write an article for skedy.io about best ai receptionist for tradies australia",
+        params={"domain": "skedy.io", "topic": "best ai receptionist for tradies australia"},
+        user_id="U05QPB483K9",
+        channel_id="C123",
+        thread_ts="111.222",
+    )
+
+    assert result["data"]["content_factory_progress_job_id"] == "job-123"
+    assert FakeContentFactoryClient.last_instance.trigger_calls
+    assert FakeContentFactoryClient.last_instance.trigger_calls[0]["domain"] == "skedy.io"
+    assert "Set Up Articles Directory" not in json.dumps(posted_messages)
+
+
+@pytest.mark.asyncio
+async def test_unsafe_registry_target_shows_diagnostic_instead_of_scaffold_prompt(monkeypatch):
+    executor = SkillExecutor()
+    posted_messages = []
+    _patch_content_factory(monkeypatch)
+    FakeContentFactoryClient.domain_integrations["skedy.io"] = {
+        "github_repo": "mesieou/skedy-ai",
+        "domain_github_repo": "mesieou/skedy-ai",
+        "project_scanned": True,
+        "scan_completed": True,
+        "content_research_ready": True,
+        "last_scanned_at": "2026-04-23T00:00:00Z",
+        "last_article": None,
+        "recommended_next_action": "scaffold",
+        "registry_driven_seo_ready": False,
+        "article_system": {
+            "state": "missing",
+            "system_type": "registry_driven_seo",
+            "directory_path": "shared/lib/seo/public-pages.ts",
+            "readiness": {
+                "structure_ready": True,
+                "mapping_ready": False,
+                "routing_ready": True,
+                "safety_ready": False,
+            },
+            "diagnostics": {
+                "issues": ["route field is ambiguous"],
+            },
+        },
+        "connected_domains": [
+            {
+                "domain": "skedy.io",
+                "github_repo": "mesieou/skedy-ai",
+                "scanned": True,
+            }
+        ],
+        "selected_domain": "skedy.io",
+    }
+    monkeypatch.setattr(
+        executor_module,
+        "post_message",
+        lambda *args, **kwargs: posted_messages.append({"args": args, "kwargs": kwargs}) or {"ts": "111.222"},
+    )
+
+    result = await executor._execute_content_factory(
+        skill=None,
+        text="write an article for skedy.io about best ai receptionist for tradies australia",
+        params={"domain": "skedy.io", "topic": "best ai receptionist for tradies australia"},
+        user_id="U05QPB483K9",
+        channel_id="C123",
+        thread_ts="111.222",
+    )
+
+    assert result["suppress_post"] is True
+    assert "registry-driven SEO system" in result["message"]
+    assert "route field is ambiguous" in result["message"]
+    assert "Set Up Articles Directory" not in json.dumps(posted_messages)
+    assert FakeContentFactoryClient.last_instance.trigger_calls == []
+
+
+@pytest.mark.asyncio
 async def test_delegated_article_request_uses_effective_user_for_backend_and_requester_for_billing(monkeypatch):
     executor = SkillExecutor()
     _patch_content_factory(monkeypatch)
@@ -2854,6 +2978,97 @@ def test_scan_complete_auto_write_resumes_when_scaffold_not_needed(monkeypatch):
     assert scheduled_job_ids == ["article-job-123"]
     assert main_module._pending_intents == {}
     assert posted_messages
+
+
+def test_scan_complete_auto_write_resumes_for_publish_ready_registry_target(monkeypatch):
+    posted_messages = []
+    trigger_calls = []
+
+    main_module._remember_pending_intent(
+        "U05QPB483K9",
+        "skedy.io",
+        intent_data={
+            "action": "write",
+            "topic": "best ai receptionist for tradies australia",
+            "target_keyword": "best ai receptionist for tradies australia",
+        },
+        channel_id="C123",
+        thread_ts="111.222",
+        wait_for="scan_complete",
+    )
+
+    class FakeAutoContinueClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def trigger_article_generation(self, **kwargs):
+            trigger_calls.append(kwargs)
+            return {"job_id": "article-job-registry-123"}
+
+    def capture_task(coro):
+        try:
+            coro.send(None)
+        except StopIteration:
+            pass
+        return SimpleNamespace(cancel=lambda: None)
+
+    monkeypatch.setattr(
+        main_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            MLAI_BACKEND_URL="https://backend.test",
+            MLAI_API_KEY="api-key",
+            ROO_API_KEY="roo-api-key",
+        ),
+    )
+    monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeAutoContinueClient)
+    monkeypatch.setattr(
+        main_module,
+        "post_message",
+        lambda *args, **kwargs: (
+            posted_messages.append((args, kwargs)) or {"ts": "live-status-001"}
+        ),
+    )
+    monkeypatch.setattr(
+        slack_client_module,
+        "get_user_info",
+        lambda user_id: {
+            "id": user_id,
+            "email": "sam@example.com",
+            "real_name": "Sam Donegan",
+            "image_192": "https://avatar.test/sam.png",
+        },
+    )
+    monkeypatch.setattr(main_module, "_watch_content_factory_quiet_run", lambda job_id: None)
+    monkeypatch.setattr(asyncio, "create_task", capture_task)
+
+    payload = {
+        "event_type": "scan_complete",
+        "slack_user_id": "U05QPB483K9",
+        "job_id": "scan-job-registry-123",
+        "domain": "skedy.io",
+        "channel_id": "C123",
+        "thread_ts": "111.222",
+        "components_count": 0,
+        "article_system": {
+            "system_type": "registry_driven_seo",
+            "directory_path": "shared/lib/seo/public-pages.ts",
+            "readiness": {
+                "publish_ready": True,
+            },
+        },
+    }
+
+    class FakeRequest:
+        async def json(self):
+            return payload
+
+    response = asyncio.run(main_module.content_factory_callback(FakeRequest()))
+
+    assert response == {"status": "ok"}
+    assert len(trigger_calls) == 1
+    assert trigger_calls[0]["domain"] == "skedy.io"
+    assert "registry-driven SEO system" in posted_messages[0][1]["blocks"][0]["text"]["text"]
 
 
 def test_scan_complete_does_not_auto_scaffold_without_approval_metadata(monkeypatch):
