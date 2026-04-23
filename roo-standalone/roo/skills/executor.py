@@ -2004,6 +2004,216 @@ Keep the response concise but informative."""
             )
 
         return integration.get("github_repo"), domain_info
+
+    @staticmethod
+    def _is_registry_driven_publish_target(target: Any) -> bool:
+        if not isinstance(target, dict):
+            return False
+        strategy = target.get("registration_strategy")
+        if not isinstance(strategy, dict):
+            strategy = {}
+        return (
+            str(target.get("kind") or "").strip() == "registry_driven_seo"
+            or str(target.get("delivery_adapter") or "").strip() == "registry_entry"
+            or str(strategy.get("type") or "").strip() == "registry_entry_patch"
+        )
+
+    @classmethod
+    def _registry_target_readiness(cls, target: Any) -> dict[str, bool]:
+        if not cls._is_registry_driven_publish_target(target):
+            return {
+                "structure_ready": False,
+                "mapping_ready": False,
+                "routing_ready": False,
+                "safety_ready": False,
+            }
+        strategy = target.get("registration_strategy") if isinstance(target, dict) else {}
+        if not isinstance(strategy, dict):
+            strategy = {}
+        readiness = target.get("readiness") if isinstance(target, dict) else {}
+        if not isinstance(readiness, dict):
+            readiness = strategy.get("readiness") if isinstance(strategy.get("readiness"), dict) else {}
+        status = str(
+            (target or {}).get("registry_status")
+            or (target or {}).get("status")
+            or readiness.get("status")
+            or ""
+        ).strip()
+        all_ready = status == "publish_ready" or bool(readiness.get("publish_ready"))
+        return {
+            key: bool(readiness.get(key) or all_ready)
+            for key in ("structure_ready", "mapping_ready", "routing_ready", "safety_ready")
+        }
+
+    @classmethod
+    def _registry_target_publish_ready(cls, target: Any) -> bool:
+        if not cls._is_registry_driven_publish_target(target):
+            return False
+        readiness = cls._registry_target_readiness(target)
+        return all(readiness.values())
+
+    @staticmethod
+    def _registry_target_from_article_system(article_system: Any) -> Optional[dict]:
+        if not isinstance(article_system, dict):
+            return None
+        if str(article_system.get("system_type") or "").strip() != "registry_driven_seo":
+            return None
+        registry = article_system.get("registry") if isinstance(article_system.get("registry"), dict) else {}
+        mutation_target = article_system.get("publish_mutation_target")
+        mutation_target_path = (
+            mutation_target.get("registry_path")
+            or mutation_target.get("path")
+            or mutation_target.get("file")
+            if isinstance(mutation_target, dict)
+            else mutation_target
+        )
+        content_source = article_system.get("content_source")
+        content_source_path = (
+            content_source.get("path")
+            or content_source.get("registry_path")
+            or content_source.get("file")
+            if isinstance(content_source, dict)
+            else content_source
+        )
+        registry_path = (
+            registry.get("path")
+            or mutation_target_path
+            or content_source_path
+            or article_system.get("directory_path")
+            or article_system.get("directory_name")
+        )
+        return {
+            "kind": "registry_driven_seo",
+            "delivery_adapter": "registry_entry",
+            "readiness": article_system.get("readiness") if isinstance(article_system.get("readiness"), dict) else {},
+            "diagnostics": article_system.get("diagnostics") if isinstance(article_system.get("diagnostics"), dict) else {},
+            "observability": article_system.get("observability") if isinstance(article_system.get("observability"), dict) else {},
+            "registration_strategy": {
+                "type": "registry_entry_patch",
+                "registry_path": registry_path,
+                "route_template": article_system.get("route_template") or "",
+            },
+        }
+
+    @classmethod
+    def _best_registry_driven_target(cls, *sources: Any) -> Optional[dict]:
+        targets: list[dict] = []
+        for source in sources:
+            if not source:
+                continue
+            if isinstance(source, list):
+                candidates = source
+            elif isinstance(source, dict):
+                candidates = source.get("publish_targets") or source.get("targets") or []
+                if cls._is_registry_driven_publish_target(source):
+                    candidates = [source, *list(candidates or [])]
+                else:
+                    direct_target = cls._registry_target_from_article_system(source)
+                    nested_target = cls._registry_target_from_article_system(source.get("article_system"))
+                    synthesized = [target for target in (direct_target, nested_target) if target]
+                    if synthesized:
+                        candidates = [*list(candidates or []), *synthesized]
+            else:
+                candidates = []
+            for candidate in candidates:
+                if isinstance(candidate, dict) and cls._is_registry_driven_publish_target(candidate):
+                    targets.append(candidate)
+        if not targets:
+            return None
+        return next((target for target in targets if cls._registry_target_publish_ready(target)), None) or targets[0]
+
+    @staticmethod
+    def _registry_target_path(target: Optional[dict], article_system: Optional[dict] = None) -> str:
+        target = target or {}
+        article_system = article_system or {}
+        strategy = target.get("registration_strategy") if isinstance(target.get("registration_strategy"), dict) else {}
+        registry = article_system.get("registry") if isinstance(article_system.get("registry"), dict) else {}
+        return str(
+            strategy.get("registry_path")
+            or target.get("registry_path")
+            or target.get("content_source")
+            or registry.get("path")
+            or article_system.get("directory_path")
+            or article_system.get("directory_name")
+            or "the detected registry"
+        ).strip()
+
+    @classmethod
+    def _registry_target_issues(cls, target: Optional[dict], article_system: Optional[dict] = None) -> list[str]:
+        issues: list[str] = []
+        target = target or {}
+        article_system = article_system or {}
+        strategy = target.get("registration_strategy") if isinstance(target.get("registration_strategy"), dict) else {}
+        readiness = cls._registry_target_readiness(target)
+        for key, ready in readiness.items():
+            if not ready:
+                issues.append(f"{key.replace('_', ' ')} is not proven")
+
+        diagnostic_sources = [
+            target.get("diagnostics"),
+            strategy.get("diagnostics"),
+            article_system.get("diagnostics"),
+            target.get("observability"),
+            article_system.get("observability"),
+        ]
+        for source in diagnostic_sources:
+            if not isinstance(source, dict):
+                continue
+            for key in ("issues", "blocking_issues", "fallback_reasons"):
+                raw_items = source.get(key)
+                if isinstance(raw_items, str):
+                    raw_items = [raw_items]
+                for item in raw_items or []:
+                    text = str(item or "").strip()
+                    if text and text not in issues:
+                        issues.append(text)
+            fallback_reason = str(source.get("fallback_reason") or "").strip()
+            if fallback_reason and fallback_reason not in issues:
+                issues.append(fallback_reason)
+        return issues
+
+    @classmethod
+    def _registry_target_diagnostic_message(
+        cls,
+        *,
+        domain: str,
+        target: Optional[dict],
+        article_system: Optional[dict] = None,
+    ) -> str:
+        registry_path = cls._registry_target_path(target, article_system)
+        issues = cls._registry_target_issues(target, article_system)
+        issue_text = ""
+        if issues:
+            issue_text = "\n\nBlockers:\n" + "\n".join(f"- {item}" for item in issues[:6])
+        return (
+            f"I found a registry-driven SEO system for *{domain}* at `{registry_path}`, "
+            f"but it is not safe to patch automatically yet."
+            f"{issue_text}\n\n"
+            "Roo stopped before changing the repository. Use content-only delivery for now, "
+            "or add/confirm a `.content-factory/target.yml` hook after the registry target is proven."
+        )
+
+    @classmethod
+    def _registry_target_diagnostic_blocks(
+        cls,
+        *,
+        domain: str,
+        target: Optional[dict],
+        article_system: Optional[dict] = None,
+    ) -> list[dict]:
+        return [
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": cls._registry_target_diagnostic_message(
+                        domain=domain,
+                        target=target,
+                        article_system=article_system,
+                    ),
+                },
+            }
+        ]
     
     async def _execute_content_factory(
         self,
@@ -2856,6 +3066,29 @@ Keep the response concise but informative."""
         article_system = (integration or {}).get("article_system") or {}
         if not article_system and domain_info:
             article_system = domain_info.get("article_system") or {}
+        registry_target = self._best_registry_driven_target(integration, domain_info, article_system)
+        registry_target_ready = self._registry_target_publish_ready(registry_target)
+
+        if (
+            topic
+            and registry_target
+            and not registry_target_ready
+            and recommended_next_action in {"scaffold", "confirm_article_system"}
+        ):
+            message = self._registry_target_diagnostic_message(
+                domain=domain,
+                target=registry_target,
+                article_system=article_system,
+            )
+            blocks = self._registry_target_diagnostic_blocks(
+                domain=domain,
+                target=registry_target,
+                article_system=article_system,
+            )
+            if channel_id:
+                post_message(channel_id, f"Registry target needs confirmation for {domain}", thread_ts=thread_ts, blocks=blocks)
+                return self._already_posted_response(message, blocks=blocks)
+            return message
 
         if topic and recommended_next_action == "confirm_article_system":
             original_intent = {
@@ -3084,6 +3317,33 @@ Keep the response concise but informative."""
                             effective_slack_user_id=effective_slack_user_id,
                             domain=domain,
                         )
+                    error_article_system = error_data.get("article_system") or article_system or {}
+                    error_registry_target = self._best_registry_driven_target(
+                        error_data,
+                        integration,
+                        domain_info,
+                        error_article_system,
+                    )
+                    if error_registry_target and not self._registry_target_publish_ready(error_registry_target):
+                        message = self._registry_target_diagnostic_message(
+                            domain=domain,
+                            target=error_registry_target,
+                            article_system=error_article_system,
+                        )
+                        blocks = self._registry_target_diagnostic_blocks(
+                            domain=domain,
+                            target=error_registry_target,
+                            article_system=error_article_system,
+                        )
+                        if channel_id:
+                            post_message(
+                                channel_id,
+                                f"Registry target needs confirmation for {domain}",
+                                thread_ts=thread_ts,
+                                blocks=blocks,
+                            )
+                            return self._already_posted_response(message, blocks=blocks)
+                        return message
                     auth_url = None
                     if domain:
                         try:
@@ -3144,6 +3404,32 @@ Keep the response concise but informative."""
                         or article_system.get("directory_name")
                         or "the detected article directory"
                     )
+                    error_registry_target = self._best_registry_driven_target(
+                        error_data,
+                        integration,
+                        domain_info,
+                        article_system,
+                    )
+                    if error_registry_target and not self._registry_target_publish_ready(error_registry_target):
+                        message = self._registry_target_diagnostic_message(
+                            domain=domain,
+                            target=error_registry_target,
+                            article_system=article_system,
+                        )
+                        blocks = self._registry_target_diagnostic_blocks(
+                            domain=domain,
+                            target=error_registry_target,
+                            article_system=article_system,
+                        )
+                        if channel_id:
+                            post_message(
+                                channel_id,
+                                f"Registry target needs confirmation for {domain}",
+                                thread_ts=thread_ts,
+                                blocks=blocks,
+                            )
+                            return self._already_posted_response(message, blocks=blocks)
+                        return message
                     original_intent = {
                         "action": "write",
                         "client_request_id": params["client_request_id"],
