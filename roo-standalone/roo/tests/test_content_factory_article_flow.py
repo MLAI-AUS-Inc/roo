@@ -14,6 +14,7 @@ sys.modules.pop("roo.skills.executor", None)
 sys.modules.pop("roo.main", None)
 
 backend_module = importlib.import_module("roo.clients.mlai_backend")
+identity_module = importlib.import_module("roo.content_factory_identity")
 executor_module = importlib.import_module("roo.skills.executor")
 slack_client_module = importlib.import_module("roo.slack_client")
 main_module = importlib.import_module("roo.main")
@@ -1274,6 +1275,29 @@ async def test_existing_scan_confirmation_emits_delegated_identity_pair(monkeypa
     assert button_value["requested_by_slack_user_id"] == "U05QPB483K9"
     assert button_value["effective_slack_user_id"] == "U0AQV5X9G0J"
     assert "slack_user_id" not in button_value
+
+
+def test_resolve_content_factory_action_identity_uses_supplied_thread_context():
+    identity = identity_module.resolve_content_factory_action_identity(
+        value_data={"domain": "mlai.au"},
+        thread_context={
+            "requested_by_slack_user_id": "U05QPB483K9",
+            "effective_slack_user_id": "U0AQV5X9G0J",
+        },
+    )
+
+    assert identity.requested_by_slack_user_id == "U05QPB483K9"
+    assert identity.effective_slack_user_id == "U0AQV5X9G0J"
+    assert identity.source == "thread_context"
+    assert identity.is_delegated is True
+
+
+def test_resolve_content_factory_action_identity_rejects_partial_thread_context():
+    with pytest.raises(identity_module.ContentFactoryIdentityResolutionError):
+        identity_module.resolve_content_factory_action_identity(
+            value_data={"domain": "mlai.au"},
+            thread_context={"requested_by_slack_user_id": "U05QPB483K9"},
+        )
 
 
 @pytest.mark.asyncio

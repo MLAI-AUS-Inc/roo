@@ -376,6 +376,19 @@ class _ContentFactoryActionContext:
     effective_slack_user_id: str
 
 
+def _content_factory_thread_context(
+    channel_id: Optional[str],
+    thread_ts: Optional[str],
+) -> Optional[dict[str, Any]]:
+    if not channel_id or not thread_ts:
+        return None
+    try:
+        thread_context = get_agent().get_thread_context(channel_id, thread_ts) or {}
+    except Exception:
+        return None
+    return thread_context if isinstance(thread_context, dict) else None
+
+
 def _resolve_content_factory_action_context(
     *,
     payload: dict[str, Any],
@@ -394,12 +407,15 @@ def _resolve_content_factory_action_context(
         or message.get("thread_ts")
         or msg_ts
     )
+    thread_context = _content_factory_thread_context(
+        reply_channel or msg_channel,
+        reply_thread_ts,
+    )
 
     try:
         identity = resolve_content_factory_action_identity(
             value_data=resolved_value_data,
-            channel_id=reply_channel or msg_channel,
-            thread_ts=reply_thread_ts,
+            thread_context=thread_context,
         )
     except ContentFactoryIdentityResolutionError as exc:
         return None, _content_factory_action_denied_response(
