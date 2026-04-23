@@ -2,9 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import re
-from typing import Any, Optional
-
-from .agent import get_agent
+from typing import Any, Mapping, Optional
 
 
 CONTENT_FACTORY_STALE_ACTION_TEXT = (
@@ -82,19 +80,14 @@ def build_content_factory_identity_payload(
     return payload
 
 
-def _thread_context_identity(
-    channel_id: Optional[str],
-    thread_ts: Optional[str],
+def resolve_content_factory_thread_identity(
+    *,
+    thread_context: Optional[Mapping[str, Any]] = None,
 ) -> Optional[ResolvedContentFactoryIdentity]:
-    if not channel_id or not thread_ts:
-        return None
-    try:
-        thread_context = get_agent().get_thread_context(channel_id, thread_ts) or {}
-    except Exception:
-        thread_context = {}
+    resolved_thread_context = thread_context if isinstance(thread_context, Mapping) else {}
 
-    requested_by = clean_slack_user_id(thread_context.get("requested_by_slack_user_id"))
-    effective = clean_slack_user_id(thread_context.get("effective_slack_user_id"))
+    requested_by = clean_slack_user_id(resolved_thread_context.get("requested_by_slack_user_id"))
+    effective = clean_slack_user_id(resolved_thread_context.get("effective_slack_user_id"))
     if bool(requested_by) != bool(effective):
         raise ContentFactoryIdentityResolutionError(CONTENT_FACTORY_STALE_ACTION_TEXT)
     if not requested_by or not effective:
@@ -110,8 +103,7 @@ def _thread_context_identity(
 def resolve_content_factory_action_identity(
     *,
     value_data: Optional[dict[str, Any]] = None,
-    channel_id: Optional[str] = None,
-    thread_ts: Optional[str] = None,
+    thread_context: Optional[Mapping[str, Any]] = None,
 ) -> ResolvedContentFactoryIdentity:
     resolved_value_data = value_data if isinstance(value_data, dict) else {}
     explicit_requested_by = clean_slack_user_id(
@@ -144,7 +136,7 @@ def resolve_content_factory_action_identity(
             is_delegated=False,
         )
 
-    thread_identity = _thread_context_identity(channel_id, thread_ts)
+    thread_identity = resolve_content_factory_thread_identity(thread_context=thread_context)
     if thread_identity is not None:
         return thread_identity
 

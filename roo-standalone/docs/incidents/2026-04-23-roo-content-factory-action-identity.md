@@ -8,6 +8,8 @@ The immediate symptom showed up on `skedy.io` repeat-scan prompts. The root caus
 
 The permanent fix is a shared Content Factory action identity contract. New Roo-emitted buttons now carry explicit requester and effective identities, action handlers resolve identity from payload first, and thread context remains legacy fallback only.
 
+Follow-up correction made the module boundary explicit: the shared identity module no longer reaches into Roo runtime state. Thread-context lookup lives in `roo/main.py`, while `roo/content_factory_identity.py` remains a pure resolver for payload and optional thread-context data.
+
 ## Impact
 
 - Affected Content Factory Slack actions could silently fail before reaching MLAI backend.
@@ -72,6 +74,7 @@ Safety rules:
 - partial explicit identity is invalid and fails safe
 - explicit payload identity is never overridden by thread context
 - if identity cannot be proven safely, Roo returns a stale-action ephemeral response instead of silently doing nothing
+- thread-context lookup is performed in `roo/main.py` and passed into the shared resolver as data, rather than being fetched inside the shared module
 
 ### Handler changes
 
@@ -97,7 +100,7 @@ Updated Content Factory button builders in `roo/skills/executor.py` so new butto
 ## Change Inventory
 
 - `roo/content_factory_identity.py`: canonical identity payload builder, resolver, stale-action guard
-- `roo/main.py`: centralized Content Factory action-context resolution and owner enforcement
+- `roo/main.py`: centralized Content Factory action-context resolution, thread-context lookup, and owner enforcement
 - `roo/skills/executor.py`: canonical payload emission for Content Factory buttons
 - `roo/tests/test_content_factory_article_flow.py`: regression coverage for canonical, delegated, legacy, and invalid payloads
 
