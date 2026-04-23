@@ -24,6 +24,11 @@ from ..content_factory_progress import (
     is_free_content_factory_domain,
     normalize_content_factory_domain,
 )
+from ..content_factory_identity import (
+    build_content_factory_identity_payload,
+    is_delegated_content_factory_request,
+    resolve_content_factory_identity_context,
+)
 from ..content_intent import detect_content_action, is_explicit_scan_request
 from ..llm import chat, embed, get_llm_client
 from ..points_request_approval import (
@@ -244,7 +249,7 @@ JSON:"""
             if cost_points == 0
             else f"*Cost:* Starting the article run deducts {cost_points} Roo points."
         )
-        button_payload = self._content_factory_identity_payload(
+        button_payload = build_content_factory_identity_payload(
             requested_by_slack_user_id=requested_by_slack_user_id or user_id,
             effective_slack_user_id=effective_slack_user_id or user_id,
             domain=domain,
@@ -377,7 +382,7 @@ JSON:"""
                         "text": {"type": "plain_text", "text": "Content Only", "emoji": True},
                         "style": "primary" if recommended_delivery_mode != "publish_code" else None,
                         "value": json.dumps(
-                            self._content_factory_identity_payload(
+                            build_content_factory_identity_payload(
                                 requested_by_slack_user_id=requested_by_slack_user_id,
                                 effective_slack_user_id=effective_slack_user_id,
                                 job_id=job_id,
@@ -392,7 +397,7 @@ JSON:"""
                         "text": {"type": "plain_text", "text": "Publish Via Code", "emoji": True},
                         "style": "primary" if recommended_delivery_mode == "publish_code" else None,
                         "value": json.dumps(
-                            self._content_factory_identity_payload(
+                            build_content_factory_identity_payload(
                                 requested_by_slack_user_id=requested_by_slack_user_id,
                                 effective_slack_user_id=effective_slack_user_id,
                                 job_id=job_id,
@@ -475,7 +480,7 @@ JSON:"""
                             },
                             "style": "primary",
                             "value": json.dumps(
-                                self._content_factory_identity_payload(
+                                build_content_factory_identity_payload(
                                     requested_by_slack_user_id=requested_by_slack_user_id or user_id,
                                     effective_slack_user_id=effective_slack_user_id or user_id,
                                     domain=domain,
@@ -494,7 +499,7 @@ JSON:"""
                                 "emoji": True,
                             },
                             "value": json.dumps(
-                                self._content_factory_identity_payload(
+                                build_content_factory_identity_payload(
                                     requested_by_slack_user_id=requested_by_slack_user_id or user_id,
                                     effective_slack_user_id=effective_slack_user_id or user_id,
                                     domain=domain,
@@ -597,49 +602,13 @@ JSON:"""
         return response
 
     @staticmethod
-    def _resolve_content_factory_identity_context(
-        params: dict,
-        requester_slack_user_id: str,
-    ) -> tuple[str, str, bool]:
-        requested_by_slack_user_id = str(
-            params.get("requested_by_slack_user_id") or requester_slack_user_id or ""
-        ).strip()
-        effective_slack_user_id = str(
-            params.get("effective_slack_user_id") or requested_by_slack_user_id or ""
-        ).strip()
-        is_delegated = bool(
-            requested_by_slack_user_id
-            and effective_slack_user_id
-            and requested_by_slack_user_id != effective_slack_user_id
-        )
-        return requested_by_slack_user_id, effective_slack_user_id, is_delegated
-
-    @staticmethod
-    def _content_factory_identity_payload(
-        *,
-        requested_by_slack_user_id: Optional[str],
-        effective_slack_user_id: Optional[str],
-        **extra: Any,
-    ) -> dict[str, Any]:
-        payload = dict(extra)
-        if (
-            requested_by_slack_user_id
-            and effective_slack_user_id
-            and requested_by_slack_user_id != effective_slack_user_id
-        ):
-            payload["requested_by_slack_user_id"] = requested_by_slack_user_id
-            payload["effective_slack_user_id"] = effective_slack_user_id
-        return payload
-
-    @staticmethod
     def _delegated_backend_kwargs(
         requested_by_slack_user_id: Optional[str],
         effective_slack_user_id: Optional[str],
     ) -> dict[str, str]:
-        if (
-            requested_by_slack_user_id
-            and effective_slack_user_id
-            and requested_by_slack_user_id != effective_slack_user_id
+        if is_delegated_content_factory_request(
+            requested_by_slack_user_id,
+            effective_slack_user_id,
         ):
             return {
                 "requested_by_slack_user_id": requested_by_slack_user_id,
@@ -688,10 +657,9 @@ JSON:"""
         delegated_requested_by_slack_user_id = str(
             requested_by_slack_user_id or user_id or ""
         ).strip()
-        is_delegated = bool(
-            delegated_requested_by_slack_user_id
-            and delegated_effective_slack_user_id
-            and delegated_requested_by_slack_user_id != delegated_effective_slack_user_id
+        is_delegated = is_delegated_content_factory_request(
+            delegated_requested_by_slack_user_id,
+            delegated_effective_slack_user_id,
         )
 
         try:
@@ -731,13 +699,21 @@ JSON:"""
         if not auth_url:
             return message
 
+        resolved_resume_value = None
+        if include_resume:
+            resolved_resume_value = build_content_factory_identity_payload(
+                requested_by_slack_user_id=delegated_requested_by_slack_user_id,
+                effective_slack_user_id=delegated_effective_slack_user_id,
+                **(resume_value or {}),
+            )
+
         blocks = self._build_github_reconnect_blocks(
             message,
             auth_url,
             button_label=button_label,
             include_resume=include_resume,
             resume_action=resume_action,
-            resume_value=resume_value,
+            resume_value=resolved_resume_value,
         )
         short_message = (
             f"{message} Use the button above to continue."
@@ -1520,7 +1496,19 @@ Keep the response concise but informative."""
             requested_by_slack_user_id,
             effective_slack_user_id,
             is_delegated,
-        ) = self._resolve_content_factory_identity_context(params, user_id)
+        ) = (
+            lambda identity: (
+                identity.requested_by_slack_user_id,
+                identity.effective_slack_user_id,
+                identity.is_delegated,
+            )
+        )(
+            resolve_content_factory_identity_context(
+                requester_slack_user_id=user_id,
+                requested_by_slack_user_id=params.get("requested_by_slack_user_id"),
+                effective_slack_user_id=params.get("effective_slack_user_id"),
+            )
+        )
 
         if is_delegated:
             return
@@ -1771,7 +1759,19 @@ Keep the response concise but informative."""
             requested_by_slack_user_id,
             effective_slack_user_id,
             _is_delegated,
-        ) = self._resolve_content_factory_identity_context(params, user_id)
+        ) = (
+            lambda identity: (
+                identity.requested_by_slack_user_id,
+                identity.effective_slack_user_id,
+                identity.is_delegated,
+            )
+        )(
+            resolve_content_factory_identity_context(
+                requester_slack_user_id=user_id,
+                requested_by_slack_user_id=params.get("requested_by_slack_user_id"),
+                effective_slack_user_id=params.get("effective_slack_user_id"),
+            )
+        )
 
         requested_action = detect_content_action(text)
         if requested_action != "publish_pr":
@@ -1915,8 +1915,9 @@ Keep the response concise but informative."""
                 error_data = {}
             if isinstance(error_data, dict):
                 if error_data.get("error_code") == "AUTH_REQUIRED":
-                    if (
-                        requested_by_slack_user_id != effective_slack_user_id
+                    if is_delegated_content_factory_request(
+                        requested_by_slack_user_id,
+                        effective_slack_user_id,
                     ):
                         return self._delegated_content_factory_auth_required_message(
                             effective_slack_user_id=effective_slack_user_id,
@@ -2234,12 +2235,24 @@ Keep the response concise but informative."""
             requested_by_slack_user_id,
             effective_slack_user_id,
             is_delegated,
-        ) = self._resolve_content_factory_identity_context(params, user_id)
+        ) = (
+            lambda identity: (
+                identity.requested_by_slack_user_id,
+                identity.effective_slack_user_id,
+                identity.is_delegated,
+            )
+        )(
+            resolve_content_factory_identity_context(
+                requester_slack_user_id=user_id,
+                requested_by_slack_user_id=params.get("requested_by_slack_user_id"),
+                effective_slack_user_id=params.get("effective_slack_user_id"),
+            )
+        )
         params["requested_by_slack_user_id"] = requested_by_slack_user_id
         params["effective_slack_user_id"] = effective_slack_user_id
 
         def content_factory_identity_payload(**extra: Any) -> dict[str, Any]:
-            return self._content_factory_identity_payload(
+            return build_content_factory_identity_payload(
                 requested_by_slack_user_id=requested_by_slack_user_id,
                 effective_slack_user_id=effective_slack_user_id,
                 **extra,
@@ -2317,12 +2330,14 @@ Keep the response concise but informative."""
             )
 
             confirm_value = json.dumps(
-                {
-                    "text": text,
-                    "params": params,
-                    "channel_id": channel_id,
-                    "thread_ts": thread_ts,
-                }
+                build_content_factory_identity_payload(
+                    requested_by_slack_user_id=requested_by_slack_user_id,
+                    effective_slack_user_id=effective_slack_user_id,
+                    text=text,
+                    params=params,
+                    channel_id=channel_id,
+                    thread_ts=thread_ts,
+                )
             )
             disclaimer_cost_text = (
                 f"*Cost:* Articles for **{normalize_content_factory_domain(domain) or domain or 'this domain'}** are free. "
@@ -2435,7 +2450,15 @@ Keep the response concise but informative."""
                                 "emoji": True
                             },
                             "action_id": "resume_scan",
-                            "value": "resume_scan",
+                            "value": json.dumps(
+                                build_content_factory_identity_payload(
+                                    requested_by_slack_user_id=requested_by_slack_user_id,
+                                    effective_slack_user_id=effective_slack_user_id,
+                                    domain=domain,
+                                    channel_id=channel_id,
+                                    thread_ts=thread_ts,
+                                )
+                            ),
                             "style": "primary"
                         }
                     ]
@@ -5223,7 +5246,15 @@ Keep the response concise but informative."""
                                             "emoji": True
                                         },
                                         "action_id": "resume_scan",
-                                        "value": "resume_scan",
+                                        "value": json.dumps(
+                                            build_content_factory_identity_payload(
+                                                requested_by_slack_user_id=requested_by_slack_user_id,
+                                                effective_slack_user_id=effective_slack_user_id,
+                                                domain=domain,
+                                                channel_id=channel_id,
+                                                thread_ts=thread_ts,
+                                            )
+                                        ),
                                         "style": "primary"
                                     }
                                 ]
