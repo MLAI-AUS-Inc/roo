@@ -9,9 +9,9 @@ import asyncio
 import json
 import hmac
 import hashlib
-import re
 import time
 from contextlib import asynccontextmanager, suppress
+from dataclasses import dataclass
 from typing import Any, Optional
 from uuid import uuid4
 import httpx
@@ -26,6 +26,14 @@ from .content_factory_progress import (
     build_live_status_blocks,
     get_content_factory_article_cost_points,
     normalize_content_factory_domain,
+)
+from .content_factory_identity import (
+    CONTENT_FACTORY_STALE_ACTION_TEXT,
+    ContentFactoryIdentityResolutionError,
+    build_content_factory_identity_payload as _content_factory_identity_payload,
+    clean_slack_user_id as _clean_slack_user_id,
+    is_delegated_content_factory_request as _is_delegated_content_factory_request,
+    resolve_content_factory_action_identity,
 )
 from .points_request_approval import (
     APPROVAL_REACTION_NAMES,
@@ -146,32 +154,6 @@ def _content_factory_client_request_id(raw_value: Any) -> str:
     if client_request_id:
         return client_request_id
     return f"content-factory-{uuid4().hex}"
-
-
-def _clean_slack_user_id(raw_value: Any) -> Optional[str]:
-    value = str(raw_value or "").strip()
-    if not value:
-        return None
-    match = re.fullmatch(r"<@([A-Z0-9]+)>", value)
-    if match:
-        return match.group(1)
-    return value
-
-
-def _content_factory_identity_payload(
-    *,
-    requested_by_slack_user_id: Optional[str],
-    effective_slack_user_id: Optional[str],
-    **extra: Any,
-) -> dict[str, Any]:
-    payload = dict(extra)
-    if _is_delegated_content_factory_request(
-        requested_by_slack_user_id,
-        effective_slack_user_id,
-    ):
-        payload["requested_by_slack_user_id"] = requested_by_slack_user_id
-        payload["effective_slack_user_id"] = effective_slack_user_id
-    return payload
 
 
 def _is_registry_driven_publish_target(target: Any) -> bool:
@@ -361,15 +343,6 @@ def _registry_target_summary(
     )
 
 
-def _is_delegated_content_factory_request(
-    requested_by_slack_user_id: Optional[str],
-    effective_slack_user_id: Optional[str],
-) -> bool:
-    requested_by = str(requested_by_slack_user_id or "").strip()
-    effective = str(effective_slack_user_id or "").strip()
-    return bool(requested_by and effective and requested_by != effective)
-
-
 def _delegated_content_factory_auth_error_text(
     *,
     effective_slack_user_id: Optional[str],
@@ -383,42 +356,6 @@ def _delegated_content_factory_auth_error_text(
     )
 
 
-def _resolve_content_thread_identities(
-    *,
-    value_data: Optional[dict[str, Any]] = None,
-    channel_id: Optional[str] = None,
-    thread_ts: Optional[str] = None,
-    fallback_requested_by_slack_user_id: Optional[str] = None,
-    fallback_effective_slack_user_id: Optional[str] = None,
-) -> tuple[Optional[str], Optional[str]]:
-    resolved_value_data = value_data if isinstance(value_data, dict) else {}
-    requested_by_slack_user_id = _clean_slack_user_id(
-        resolved_value_data.get("requested_by_slack_user_id")
-        or resolved_value_data.get("slack_user_id")
-        or fallback_requested_by_slack_user_id
-    )
-    effective_slack_user_id = _clean_slack_user_id(
-        resolved_value_data.get("effective_slack_user_id")
-        or fallback_effective_slack_user_id
-    )
-
-    if channel_id and thread_ts:
-        try:
-            thread_context = get_agent().get_thread_context(channel_id, thread_ts) or {}
-        except Exception:
-            thread_context = {}
-        requested_by_slack_user_id = requested_by_slack_user_id or _clean_slack_user_id(
-            thread_context.get("requested_by_slack_user_id")
-        )
-        effective_slack_user_id = effective_slack_user_id or _clean_slack_user_id(
-            thread_context.get("effective_slack_user_id")
-        )
-
-    requested_by_slack_user_id = requested_by_slack_user_id or effective_slack_user_id
-    effective_slack_user_id = effective_slack_user_id or requested_by_slack_user_id
-    return requested_by_slack_user_id, effective_slack_user_id
-
-
 def _content_factory_action_denied_response(text: str) -> JSONResponse:
     return JSONResponse(
         status_code=200,
@@ -426,6 +363,67 @@ def _content_factory_action_denied_response(text: str) -> JSONResponse:
             "response_type": "ephemeral",
             "text": text,
         },
+    )
+
+
+@dataclass(frozen=True)
+class _ContentFactoryActionContext:
+    msg_channel: Optional[str]
+    msg_ts: Optional[str]
+    reply_channel: Optional[str]
+    reply_thread_ts: Optional[str]
+    requested_by_slack_user_id: str
+    effective_slack_user_id: str
+
+
+def _resolve_content_factory_action_context(
+    *,
+    payload: dict[str, Any],
+    value_data: Optional[dict[str, Any]],
+    acting_slack_user_id: Optional[str],
+    denial_text: str,
+    stale_action_text: str = CONTENT_FACTORY_STALE_ACTION_TEXT,
+) -> tuple[Optional[_ContentFactoryActionContext], Optional[JSONResponse]]:
+    message = payload.get("message", {})
+    msg_channel = payload.get("channel", {}).get("id")
+    msg_ts = message.get("ts")
+    resolved_value_data = value_data if isinstance(value_data, dict) else {}
+    reply_channel = resolved_value_data.get("channel_id") or msg_channel
+    reply_thread_ts = (
+        resolved_value_data.get("thread_ts")
+        or message.get("thread_ts")
+        or msg_ts
+    )
+
+    try:
+        identity = resolve_content_factory_action_identity(
+            value_data=resolved_value_data,
+            channel_id=reply_channel or msg_channel,
+            thread_ts=reply_thread_ts,
+        )
+    except ContentFactoryIdentityResolutionError as exc:
+        return None, _content_factory_action_denied_response(
+            str(exc) or stale_action_text
+        )
+
+    owner_error = _enforce_content_factory_action_owner(
+        acting_slack_user_id=acting_slack_user_id,
+        requested_by_slack_user_id=identity.requested_by_slack_user_id,
+        denial_text=denial_text,
+    )
+    if owner_error is not None:
+        return None, owner_error
+
+    return (
+        _ContentFactoryActionContext(
+            msg_channel=msg_channel,
+            msg_ts=msg_ts,
+            reply_channel=reply_channel,
+            reply_thread_ts=reply_thread_ts,
+            requested_by_slack_user_id=identity.requested_by_slack_user_id,
+            effective_slack_user_id=identity.effective_slack_user_id,
+        ),
+        None,
     )
 
 
@@ -2927,20 +2925,33 @@ async def slack_actions(request: Request):
     print(f"🖱️ Action: {action_id} from {user_id}")
     
     if action_id == "resume_scan":
+        value = actions[0].get("value", "")
+        try:
+            value_data = json.loads(value) if value else {}
+        except json.JSONDecodeError:
+            value_data = {}
+
+        action_context, action_error = _resolve_content_factory_action_context(
+            payload=payload,
+            value_data=value_data,
+            acting_slack_user_id=user_id,
+            denial_text="⚠️ Only the user who requested this run can resume it.",
+        )
+        if action_error is not None:
+            return action_error
+
         print(f"🔄 Resuming scan/writing for {user_id} via button click")
-        
-        # Acknowledge immediately (prevents timeout error on button)
-        # In background, trigger the scan command as if user typed "@Roo scan repo"
-        # This will trigger the backend scan and subsequent flow
+
         agent = get_agent()
-        asyncio.create_task(agent.handle_mention(
-            text="scan repo",
-            user_id=user_id,
-            channel_id=channel_id,
-            thread_ts=thread_ts
-        ))
-        
-        # We could update the message here to say "Resuming...", but ack is sufficient for now.
+        asyncio.create_task(
+            agent.handle_mention(
+                text="scan repo",
+                user_id=user_id,
+                channel_id=action_context.reply_channel or channel_id,
+                thread_ts=action_context.reply_thread_ts or thread_ts,
+            )
+        )
+
         return JSONResponse(status_code=200, content={})
 
     if action_id == "confirm_content_factory":
@@ -2968,14 +2979,23 @@ async def slack_actions(request: Request):
                 )
             return JSONResponse(status_code=200, content={})
 
+        action_context, action_error = _resolve_content_factory_action_context(
+            payload=payload,
+            value_data=value_data,
+            acting_slack_user_id=user_id,
+            denial_text="⚠️ Only the user who requested this article can continue it.",
+        )
+        if action_error is not None:
+            return action_error
+
         resumed_params = {**param_overrides, "confirmed": True}
 
         asyncio.create_task(_handle_mention(
             {
                 "user": user_id,
                 "text": original_text,
-                "channel": original_channel_id,
-                "thread_ts": original_thread_ts,
+                "channel": original_channel_id or action_context.reply_channel,
+                "thread_ts": original_thread_ts or action_context.reply_thread_ts,
                 "param_overrides": resumed_params,
             }
         ))
@@ -2993,26 +3013,21 @@ async def slack_actions(request: Request):
         value_channel_id = value_data.get("channel_id")
         value_thread_ts = value_data.get("thread_ts")
 
-        msg_channel = payload.get("channel", {}).get("id")
-        msg_ts = payload.get("message", {}).get("ts")
-        reply_channel = value_channel_id or channel_id or msg_channel
-        reply_thread_ts = value_thread_ts or payload.get("message", {}).get("thread_ts") or msg_ts
-        (
-            requested_by_slack_user_id,
-            effective_slack_user_id,
-        ) = _resolve_content_thread_identities(
+        action_context, action_error = _resolve_content_factory_action_context(
+            payload=payload,
             value_data=value_data,
-            channel_id=reply_channel,
-            thread_ts=reply_thread_ts,
-        )
-
-        owner_error = _enforce_content_factory_action_owner(
             acting_slack_user_id=user_id,
-            requested_by_slack_user_id=requested_by_slack_user_id,
             denial_text="⚠️ Only the user who requested this article can publish it as a PR.",
         )
-        if owner_error is not None:
-            return owner_error
+        if action_error is not None:
+            return action_error
+
+        requested_by_slack_user_id = action_context.requested_by_slack_user_id
+        effective_slack_user_id = action_context.effective_slack_user_id
+        msg_channel = action_context.msg_channel
+        msg_ts = action_context.msg_ts
+        reply_channel = action_context.reply_channel or channel_id
+        reply_thread_ts = action_context.reply_thread_ts
 
         if not job_id:
             if reply_channel:
@@ -3118,21 +3133,17 @@ async def slack_actions(request: Request):
         if not keyword or not job_id:
             return JSONResponse(status_code=400, content={"error": "Invalid value format"})
 
-        (
-            requested_by_slack_user_id,
-            effective_slack_user_id,
-        ) = _resolve_content_thread_identities(
+        action_context, action_error = _resolve_content_factory_action_context(
+            payload=payload,
             value_data=value_data,
-            channel_id=payload.get("channel", {}).get("id"),
-            thread_ts=payload.get("message", {}).get("thread_ts") or payload.get("message", {}).get("ts"),
-        )
-        owner_error = _enforce_content_factory_action_owner(
             acting_slack_user_id=user_id,
-            requested_by_slack_user_id=requested_by_slack_user_id,
             denial_text="⚠️ Only the user who requested this article can confirm the topic.",
         )
-        if owner_error is not None:
-            return owner_error
+        if action_error is not None:
+            return action_error
+
+        requested_by_slack_user_id = action_context.requested_by_slack_user_id
+        effective_slack_user_id = action_context.effective_slack_user_id
 
         print(f"✅ User {user_id} confirmed topic '{keyword}' for job {job_id}")
 
@@ -3171,8 +3182,8 @@ async def slack_actions(request: Request):
             recovered_follow_up = await _resolve_confirm_follow_up_after_failure(
                 client,
                 slack_user_id=effective_slack_user_id or user_id,
-                slack_channel_id=payload.get("channel", {}).get("id"),
-                slack_thread_ts=payload.get("message", {}).get("thread_ts") or payload.get("message", {}).get("ts"),
+                slack_channel_id=action_context.reply_channel,
+                slack_thread_ts=action_context.reply_thread_ts,
                 domain=domain,
                 job_id=job_id,
                 requested_by_slack_user_id=requested_by_slack_user_id,
@@ -3213,21 +3224,17 @@ async def slack_actions(request: Request):
         if not keyword or not job_id:
             return JSONResponse(status_code=400, content={"error": "Invalid value format"})
 
-        (
-            requested_by_slack_user_id,
-            effective_slack_user_id,
-        ) = _resolve_content_thread_identities(
+        action_context, action_error = _resolve_content_factory_action_context(
+            payload=payload,
             value_data=value_data,
-            channel_id=payload.get("channel", {}).get("id"),
-            thread_ts=payload.get("message", {}).get("thread_ts") or payload.get("message", {}).get("ts"),
-        )
-        owner_error = _enforce_content_factory_action_owner(
             acting_slack_user_id=user_id,
-            requested_by_slack_user_id=requested_by_slack_user_id,
             denial_text="⚠️ Only the user who requested this article can confirm the topic.",
         )
-        if owner_error is not None:
-            return owner_error
+        if action_error is not None:
+            return action_error
+
+        requested_by_slack_user_id = action_context.requested_by_slack_user_id
+        effective_slack_user_id = action_context.effective_slack_user_id
 
         print(f"✅ User {user_id} selected alternative topic '{keyword}' for job {job_id}")
 
@@ -3266,8 +3273,8 @@ async def slack_actions(request: Request):
             recovered_follow_up = await _resolve_confirm_follow_up_after_failure(
                 client,
                 slack_user_id=effective_slack_user_id or user_id,
-                slack_channel_id=payload.get("channel", {}).get("id"),
-                slack_thread_ts=payload.get("message", {}).get("thread_ts") or payload.get("message", {}).get("ts"),
+                slack_channel_id=action_context.reply_channel,
+                slack_thread_ts=action_context.reply_thread_ts,
                 domain=domain,
                 job_id=job_id,
                 requested_by_slack_user_id=requested_by_slack_user_id,
@@ -3299,21 +3306,17 @@ async def slack_actions(request: Request):
         else:
             job_id = value.split(":", 1)[1] if ":" in value else None
 
-        (
-            requested_by_slack_user_id,
-            effective_slack_user_id,
-        ) = _resolve_content_thread_identities(
+        action_context, action_error = _resolve_content_factory_action_context(
+            payload=payload,
             value_data=value_data,
-            channel_id=payload.get("channel", {}).get("id"),
-            thread_ts=payload.get("message", {}).get("thread_ts") or payload.get("message", {}).get("ts"),
-        )
-        owner_error = _enforce_content_factory_action_owner(
             acting_slack_user_id=user_id,
-            requested_by_slack_user_id=requested_by_slack_user_id,
             denial_text="⚠️ Only the user who requested this article can cancel topic selection.",
         )
-        if owner_error is not None:
-            return owner_error
+        if action_error is not None:
+            return action_error
+
+        requested_by_slack_user_id = action_context.requested_by_slack_user_id
+        effective_slack_user_id = action_context.effective_slack_user_id
 
         print(f"❌ User {user_id} cancelled topic selection for job {job_id}")
 
@@ -3360,27 +3363,21 @@ async def slack_actions(request: Request):
         delivery_mode = value_data.get("delivery_mode")
         scan_run_id = str(value_data.get("scan_run_id") or "").strip()
 
-        # Get message context for button removal
-        msg_channel = payload.get("channel", {}).get("id")
-        msg_ts = payload.get("message", {}).get("ts")
-        reply_channel = value_channel_id or msg_channel
-        reply_thread_ts = value_thread_ts or payload.get("message", {}).get("thread_ts") or msg_ts
-        (
-            requested_by_slack_user_id,
-            effective_slack_user_id,
-        ) = _resolve_content_thread_identities(
+        action_context, action_error = _resolve_content_factory_action_context(
+            payload=payload,
             value_data=value_data,
-            channel_id=reply_channel,
-            thread_ts=reply_thread_ts,
-        )
-
-        owner_error = _enforce_content_factory_action_owner(
             acting_slack_user_id=user_id,
-            requested_by_slack_user_id=requested_by_slack_user_id,
             denial_text="⚠️ Only the user who initiated the scan can confirm this action.",
         )
-        if owner_error is not None:
-            return owner_error
+        if action_error is not None:
+            return action_error
+
+        requested_by_slack_user_id = action_context.requested_by_slack_user_id
+        effective_slack_user_id = action_context.effective_slack_user_id
+        msg_channel = action_context.msg_channel
+        msg_ts = action_context.msg_ts
+        reply_channel = action_context.reply_channel
+        reply_thread_ts = action_context.reply_thread_ts
 
         print(f"📁 User {user_id} confirmed scaffold for {domain}")
 
@@ -3562,26 +3559,21 @@ async def slack_actions(request: Request):
         value_thread_ts = value_data.get("thread_ts")
         scan_run_id = str(value_data.get("scan_run_id") or "").strip()
 
-        msg_channel = payload.get("channel", {}).get("id")
-        msg_ts = payload.get("message", {}).get("ts")
-        reply_channel = value_channel_id or msg_channel
-        reply_thread_ts = value_thread_ts or payload.get("message", {}).get("thread_ts") or msg_ts
-        (
-            requested_by_slack_user_id,
-            effective_slack_user_id,
-        ) = _resolve_content_thread_identities(
+        action_context, action_error = _resolve_content_factory_action_context(
+            payload=payload,
             value_data=value_data,
-            channel_id=reply_channel,
-            thread_ts=reply_thread_ts,
-        )
-
-        owner_error = _enforce_content_factory_action_owner(
             acting_slack_user_id=user_id,
-            requested_by_slack_user_id=requested_by_slack_user_id,
             denial_text="⚠️ Only the user who initiated the scan can confirm this action.",
         )
-        if owner_error is not None:
-            return owner_error
+        if action_error is not None:
+            return action_error
+
+        requested_by_slack_user_id = action_context.requested_by_slack_user_id
+        effective_slack_user_id = action_context.effective_slack_user_id
+        msg_channel = action_context.msg_channel
+        msg_ts = action_context.msg_ts
+        reply_channel = action_context.reply_channel
+        reply_thread_ts = action_context.reply_thread_ts
 
         print(f"⏭️ User {user_id} skipped scaffold for {domain}")
 
@@ -3658,26 +3650,21 @@ async def slack_actions(request: Request):
         delivery_mode = value_data.get("delivery_mode")
         delivery_mode_confirmed = bool(value_data.get("delivery_mode_confirmed")) if delivery_mode is not None else None
 
-        msg_channel = payload.get("channel", {}).get("id")
-        msg_ts = payload.get("message", {}).get("ts")
-        reply_channel = value_channel_id or msg_channel
-        reply_thread_ts = value_thread_ts or payload.get("message", {}).get("thread_ts") or msg_ts
-        (
-            requested_by_slack_user_id,
-            effective_slack_user_id,
-        ) = _resolve_content_thread_identities(
+        action_context, action_error = _resolve_content_factory_action_context(
+            payload=payload,
             value_data=value_data,
-            channel_id=reply_channel,
-            thread_ts=reply_thread_ts,
-        )
-
-        owner_error = _enforce_content_factory_action_owner(
             acting_slack_user_id=user_id,
-            requested_by_slack_user_id=requested_by_slack_user_id,
             denial_text="⚠️ Only the user who initiated the scan can confirm this action.",
         )
-        if owner_error is not None:
-            return owner_error
+        if action_error is not None:
+            return action_error
+
+        requested_by_slack_user_id = action_context.requested_by_slack_user_id
+        effective_slack_user_id = action_context.effective_slack_user_id
+        msg_channel = action_context.msg_channel
+        msg_ts = action_context.msg_ts
+        reply_channel = action_context.reply_channel
+        reply_thread_ts = action_context.reply_thread_ts
 
         print(f"✍️ User {user_id} requested first article for {domain}")
 
@@ -3767,23 +3754,18 @@ async def slack_actions(request: Request):
 
         domain = value_data.get("domain", "your site")
 
-        msg_channel = payload.get("channel", {}).get("id")
-        msg_ts = payload.get("message", {}).get("ts")
-        (
-            requested_by_slack_user_id,
-            _effective_slack_user_id,
-        ) = _resolve_content_thread_identities(
+        action_context, action_error = _resolve_content_factory_action_context(
+            payload=payload,
             value_data=value_data,
-            channel_id=msg_channel,
-            thread_ts=payload.get("message", {}).get("thread_ts") or msg_ts,
-        )
-        owner_error = _enforce_content_factory_action_owner(
             acting_slack_user_id=user_id,
-            requested_by_slack_user_id=requested_by_slack_user_id,
             denial_text="⚠️ Only the user who requested this scan can skip the first article prompt.",
         )
-        if owner_error is not None:
-            return owner_error
+        if action_error is not None:
+            return action_error
+
+        requested_by_slack_user_id = action_context.requested_by_slack_user_id
+        msg_channel = action_context.msg_channel
+        msg_ts = action_context.msg_ts
 
         print(f"⏭️ User {user_id} skipped first article for {domain}")
 
@@ -3824,26 +3806,21 @@ async def slack_actions(request: Request):
         delivery_mode = value_data.get("delivery_mode")
         delivery_mode_confirmed = bool(value_data.get("delivery_mode_confirmed")) if delivery_mode is not None else None
 
-        msg_channel = payload.get("channel", {}).get("id")
-        msg_ts = payload.get("message", {}).get("ts")
-        reply_channel = value_channel_id or msg_channel
-        reply_thread_ts = value_thread_ts or payload.get("message", {}).get("thread_ts") or msg_ts
-        (
-            requested_by_slack_user_id,
-            effective_slack_user_id,
-        ) = _resolve_content_thread_identities(
+        action_context, action_error = _resolve_content_factory_action_context(
+            payload=payload,
             value_data=value_data,
-            channel_id=reply_channel,
-            thread_ts=reply_thread_ts,
-        )
-
-        owner_error = _enforce_content_factory_action_owner(
             acting_slack_user_id=user_id,
-            requested_by_slack_user_id=requested_by_slack_user_id,
             denial_text="⚠️ Only the user who initiated this request can choose the article direction.",
         )
-        if owner_error is not None:
-            return owner_error
+        if action_error is not None:
+            return action_error
+
+        requested_by_slack_user_id = action_context.requested_by_slack_user_id
+        effective_slack_user_id = action_context.effective_slack_user_id
+        msg_channel = action_context.msg_channel
+        msg_ts = action_context.msg_ts
+        reply_channel = action_context.reply_channel
+        reply_thread_ts = action_context.reply_thread_ts
 
         print(f"🔍 User {user_id} chose article discovery for {domain}")
         _remember_content_thread_context(
@@ -3965,26 +3942,21 @@ async def slack_actions(request: Request):
         value_thread_ts = value_data.get("thread_ts")
         delivery_mode = value_data.get("delivery_mode")
 
-        msg_channel = payload.get("channel", {}).get("id")
-        msg_ts = payload.get("message", {}).get("ts")
-        reply_channel = value_channel_id or msg_channel
-        reply_thread_ts = value_thread_ts or payload.get("message", {}).get("thread_ts") or msg_ts
-        (
-            requested_by_slack_user_id,
-            effective_slack_user_id,
-        ) = _resolve_content_thread_identities(
+        action_context, action_error = _resolve_content_factory_action_context(
+            payload=payload,
             value_data=value_data,
-            channel_id=reply_channel,
-            thread_ts=reply_thread_ts,
-        )
-
-        owner_error = _enforce_content_factory_action_owner(
             acting_slack_user_id=user_id,
-            requested_by_slack_user_id=requested_by_slack_user_id,
             denial_text="⚠️ Only the user who initiated this request can choose the article direction.",
         )
-        if owner_error is not None:
-            return owner_error
+        if action_error is not None:
+            return action_error
+
+        requested_by_slack_user_id = action_context.requested_by_slack_user_id
+        effective_slack_user_id = action_context.effective_slack_user_id
+        msg_channel = action_context.msg_channel
+        msg_ts = action_context.msg_ts
+        reply_channel = action_context.reply_channel
+        reply_thread_ts = action_context.reply_thread_ts
 
         is_dm = bool(reply_channel and reply_channel.startswith("D"))
         normalized_domain = normalize_content_factory_domain(domain) or domain or "this domain"
@@ -4048,25 +4020,20 @@ async def slack_actions(request: Request):
         job_id = value_data.get("job_id")
         domain = value_data.get("domain")
         delivery_mode = value_data.get("delivery_mode")
-        (
-            requested_by_slack_user_id,
-            effective_slack_user_id,
-        ) = _resolve_content_thread_identities(
-            value_data=value_data,
-            channel_id=payload.get("channel", {}).get("id"),
-            thread_ts=payload.get("message", {}).get("thread_ts") or payload.get("message", {}).get("ts"),
-        )
-
         if not job_id or delivery_mode not in {"content_only", "publish_code"}:
             return JSONResponse(status_code=400, content={"error": "job_id and delivery_mode are required"})
 
-        owner_error = _enforce_content_factory_action_owner(
+        action_context, action_error = _resolve_content_factory_action_context(
+            payload=payload,
+            value_data=value_data,
             acting_slack_user_id=user_id,
-            requested_by_slack_user_id=requested_by_slack_user_id,
             denial_text="⚠️ Only the user who requested this article can choose the delivery mode.",
         )
-        if owner_error is not None:
-            return owner_error
+        if action_error is not None:
+            return action_error
+
+        requested_by_slack_user_id = action_context.requested_by_slack_user_id
+        effective_slack_user_id = action_context.effective_slack_user_id
 
         from .clients.mlai_backend import MLAIBackendClient
 
@@ -4084,8 +4051,8 @@ async def slack_actions(request: Request):
             )
             if result.get("job_id") or result.get("run_id"):
                 _remember_content_thread_context(
-                    payload.get("channel", {}).get("id"),
-                    payload.get("message", {}).get("thread_ts") or payload.get("message", {}).get("ts"),
+                    action_context.reply_channel,
+                    action_context.reply_thread_ts,
                     domain,
                     "awaiting_delivery_mode",
                     active_job_id=result.get("job_id") or result.get("run_id"),
@@ -4203,26 +4170,21 @@ async def slack_actions(request: Request):
         value_thread_ts = value_data.get("thread_ts")
         original_intent = value_data.get("original_intent", {})
 
-        msg_channel = payload.get("channel", {}).get("id")
-        msg_ts = payload.get("message", {}).get("ts")
-
-        reply_channel = value_channel_id or msg_channel
-        reply_thread_ts = value_thread_ts or payload.get("message", {}).get("thread_ts") or msg_ts
-        (
-            requested_by_slack_user_id,
-            effective_slack_user_id,
-        ) = _resolve_content_thread_identities(
+        action_context, action_error = _resolve_content_factory_action_context(
+            payload=payload,
             value_data=value_data,
-            channel_id=reply_channel,
-            thread_ts=reply_thread_ts,
-        )
-        owner_error = _enforce_content_factory_action_owner(
             acting_slack_user_id=user_id,
-            requested_by_slack_user_id=requested_by_slack_user_id,
             denial_text="⚠️ Only the user who requested this article can choose the article-system action.",
         )
-        if owner_error is not None:
-            return owner_error
+        if action_error is not None:
+            return action_error
+
+        requested_by_slack_user_id = action_context.requested_by_slack_user_id
+        effective_slack_user_id = action_context.effective_slack_user_id
+        msg_channel = action_context.msg_channel
+        msg_ts = action_context.msg_ts
+        reply_channel = action_context.reply_channel
+        reply_thread_ts = action_context.reply_thread_ts
 
         decision = {
             "article_system_use_detected": "use_detected",
@@ -4369,28 +4331,23 @@ async def slack_actions(request: Request):
         value_thread_ts = value_data.get("thread_ts")
         original_intent = value_data.get("original_intent", {})
 
-        msg_channel = payload.get("channel", {}).get("id")
-        msg_ts = payload.get("message", {}).get("ts")
-
         print(f"🔍 User {user_id} triggered prerequisite scan for {domain}")
 
-        reply_channel = value_channel_id or msg_channel
-        reply_thread_ts = value_thread_ts or payload.get("message", {}).get("thread_ts") or msg_ts
-        (
-            requested_by_slack_user_id,
-            effective_slack_user_id,
-        ) = _resolve_content_thread_identities(
+        action_context, action_error = _resolve_content_factory_action_context(
+            payload=payload,
             value_data=value_data,
-            channel_id=reply_channel,
-            thread_ts=reply_thread_ts,
-        )
-        owner_error = _enforce_content_factory_action_owner(
             acting_slack_user_id=user_id,
-            requested_by_slack_user_id=requested_by_slack_user_id,
             denial_text="⚠️ Only the user who requested this run can start the prerequisite scan.",
         )
-        if owner_error is not None:
-            return owner_error
+        if action_error is not None:
+            return action_error
+
+        requested_by_slack_user_id = action_context.requested_by_slack_user_id
+        effective_slack_user_id = action_context.effective_slack_user_id
+        msg_channel = action_context.msg_channel
+        msg_ts = action_context.msg_ts
+        reply_channel = action_context.reply_channel
+        reply_thread_ts = action_context.reply_thread_ts
 
         # Remove buttons and show status
         try:
@@ -4489,7 +4446,15 @@ async def slack_actions(request: Request):
                                         "emoji": True
                                     },
                                     "action_id": "resume_scan",
-                                    "value": json.dumps({"domain": domain}),
+                                    "value": json.dumps(
+                                        _content_factory_identity_payload(
+                                            requested_by_slack_user_id=requested_by_slack_user_id,
+                                            effective_slack_user_id=effective_slack_user_id,
+                                            domain=domain,
+                                            channel_id=reply_channel,
+                                            thread_ts=reply_thread_ts,
+                                        )
+                                    ),
                                     "style": "primary"
                                 }
                             ]
@@ -4550,28 +4515,23 @@ async def slack_actions(request: Request):
         value_thread_ts = value_data.get("thread_ts")
         original_intent = value_data.get("original_intent", {})
 
-        msg_channel = payload.get("channel", {}).get("id")
-        msg_ts = payload.get("message", {}).get("ts")
-
         print(f"📁 User {user_id} triggered prerequisite scaffold for {domain}")
 
-        reply_channel = value_channel_id or msg_channel
-        reply_thread_ts = value_thread_ts or payload.get("message", {}).get("thread_ts") or msg_ts
-        (
-            requested_by_slack_user_id,
-            effective_slack_user_id,
-        ) = _resolve_content_thread_identities(
+        action_context, action_error = _resolve_content_factory_action_context(
+            payload=payload,
             value_data=value_data,
-            channel_id=reply_channel,
-            thread_ts=reply_thread_ts,
-        )
-        owner_error = _enforce_content_factory_action_owner(
             acting_slack_user_id=user_id,
-            requested_by_slack_user_id=requested_by_slack_user_id,
             denial_text="⚠️ Only the user who requested this run can create the articles directory.",
         )
-        if owner_error is not None:
-            return owner_error
+        if action_error is not None:
+            return action_error
+
+        requested_by_slack_user_id = action_context.requested_by_slack_user_id
+        effective_slack_user_id = action_context.effective_slack_user_id
+        msg_channel = action_context.msg_channel
+        msg_ts = action_context.msg_ts
+        reply_channel = action_context.reply_channel
+        reply_thread_ts = action_context.reply_thread_ts
 
         # Remove buttons and show status
         try:
@@ -4713,24 +4673,19 @@ async def slack_actions(request: Request):
             value_data = {}
 
         domain = value_data.get("domain", "")
-        msg_channel = payload.get("channel", {}).get("id")
-        msg_ts = payload.get("message", {}).get("ts")
-        (
-            requested_by_slack_user_id,
-            effective_slack_user_id,
-        ) = _resolve_content_thread_identities(
+        action_context, action_error = _resolve_content_factory_action_context(
+            payload=payload,
             value_data=value_data,
-            channel_id=msg_channel,
-            thread_ts=payload.get("message", {}).get("thread_ts") or msg_ts,
-        )
-
-        owner_error = _enforce_content_factory_action_owner(
             acting_slack_user_id=user_id,
-            requested_by_slack_user_id=requested_by_slack_user_id,
             denial_text="⚠️ Only the user who requested this run can cancel it.",
         )
-        if owner_error is not None:
-            return owner_error
+        if action_error is not None:
+            return action_error
+
+        requested_by_slack_user_id = action_context.requested_by_slack_user_id
+        effective_slack_user_id = action_context.effective_slack_user_id
+        msg_channel = action_context.msg_channel
+        msg_ts = action_context.msg_ts
 
         print(f"⏭️ User {user_id} cancelled prerequisite for {domain}")
 
@@ -4783,22 +4738,19 @@ async def slack_actions(request: Request):
 
         print(f"✅ User {user_id} confirmed topic for job {job_id}, option {option_index}")
 
-        msg_channel = payload.get("channel", {}).get("id")
-        msg_ts = payload.get("message", {}).get("ts")
-        (
-            requested_by_slack_user_id,
-            effective_slack_user_id,
-        ) = _resolve_content_thread_identities(
-            channel_id=msg_channel,
-            thread_ts=payload.get("message", {}).get("thread_ts") or msg_ts,
-        )
-        owner_error = _enforce_content_factory_action_owner(
+        action_context, action_error = _resolve_content_factory_action_context(
+            payload=payload,
+            value_data=None,
             acting_slack_user_id=user_id,
-            requested_by_slack_user_id=requested_by_slack_user_id,
             denial_text="⚠️ Only the user who requested this article can confirm the topic.",
         )
-        if owner_error is not None:
-            return owner_error
+        if action_error is not None:
+            return action_error
+
+        requested_by_slack_user_id = action_context.requested_by_slack_user_id
+        effective_slack_user_id = action_context.effective_slack_user_id
+        msg_channel = action_context.msg_channel
+        msg_ts = action_context.msg_ts
 
         # Call confirm endpoint
         from .clients.mlai_backend import MLAIBackendClient
@@ -4822,8 +4774,8 @@ async def slack_actions(request: Request):
             print(f"✅ Topic confirmed for job {job_id}")
             follow_up = _build_confirm_topic_follow_up(result)
             _remember_content_thread_context(
-                payload.get("channel", {}).get("id"),
-                payload.get("message", {}).get("thread_ts") or payload.get("message", {}).get("ts"),
+                action_context.reply_channel,
+                action_context.reply_thread_ts,
                 follow_up.get("domain"),
                 "awaiting_delivery_mode" if follow_up.get("requires_delivery_mode") else "write",
                 active_job_id=follow_up.get("active_job_id"),
@@ -4869,8 +4821,8 @@ async def slack_actions(request: Request):
             print(f"❌ Failed to confirm topic: {e}")
             import traceback
             traceback.print_exc()
-            reply_channel = msg_channel
-            reply_thread_ts = payload.get("message", {}).get("thread_ts") or msg_ts
+            reply_channel = action_context.reply_channel
+            reply_thread_ts = action_context.reply_thread_ts
             recovered_follow_up = await _resolve_confirm_follow_up_after_failure(
                 client,
                 slack_user_id=effective_slack_user_id or user_id,
@@ -4927,22 +4879,18 @@ async def slack_actions(request: Request):
 
     # Handler for cancel_topic_btn
     if action_id == "cancel_topic_btn":
-        msg_channel = payload.get("channel", {}).get("id")
-        msg_ts = payload.get("message", {}).get("ts")
-        (
-            requested_by_slack_user_id,
-            _effective_slack_user_id,
-        ) = _resolve_content_thread_identities(
-            channel_id=msg_channel,
-            thread_ts=payload.get("message", {}).get("thread_ts") or msg_ts,
-        )
-        owner_error = _enforce_content_factory_action_owner(
+        action_context, action_error = _resolve_content_factory_action_context(
+            payload=payload,
+            value_data=None,
             acting_slack_user_id=user_id,
-            requested_by_slack_user_id=requested_by_slack_user_id,
             denial_text="⚠️ Only the user who requested this article can cancel topic selection.",
         )
-        if owner_error is not None:
-            return owner_error
+        if action_error is not None:
+            return action_error
+
+        requested_by_slack_user_id = action_context.requested_by_slack_user_id
+        msg_channel = action_context.msg_channel
+        msg_ts = action_context.msg_ts
 
         print(f"❌ User {user_id} cancelled topic selection")
 
