@@ -1256,12 +1256,79 @@ async def _medhack_daily_case_loop():
         await asyncio.sleep(sleep_seconds)
 
 
+async def _trigger_jobs_daily_run() -> None:
+    settings = get_settings()
+    if not settings.JOBS_API_URL:
+        print("Jobs scheduler skipped: JOBS_API_URL is not configured")
+        return
+
+    url = settings.JOBS_API_URL.rstrip("/") + "/jobs/daily-run"
+    headers: dict[str, str] = {}
+    if settings.JOBS_TRIGGER_TOKEN:
+        headers["Authorization"] = f"Bearer {settings.JOBS_TRIGGER_TOKEN}"
+
+    payload = {
+        "collect_live": settings.JOBS_COLLECT_LIVE,
+        "post_to_slack": settings.JOBS_POST_TO_SLACK,
+        "post_to_notion": settings.JOBS_POST_TO_NOTION,
+        "max_pages": settings.JOBS_MAX_PAGES,
+        "per_keyword_limit": settings.JOBS_PER_KEYWORD_LIMIT,
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(url, json=payload, headers=headers)
+            response.raise_for_status()
+            data = response.json()
+            print(
+                "Jobs scheduler triggered daily run "
+                f"run_id={data.get('run_id')} status={data.get('status')} "
+                f"status_url={data.get('status_url')}"
+            )
+    except Exception as exc:
+        print(f"Jobs scheduler trigger failed: {exc}")
+
+
+async def _jobs_daily_run_loop() -> None:
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+
+    settings = get_settings()
+    tz = ZoneInfo(settings.TIMEZONE)
+
+    await asyncio.sleep(10)
+
+    while True:
+        try:
+            now = datetime.now(tz)
+            next_run = now.replace(
+                hour=settings.JOBS_SCHEDULE_HOUR,
+                minute=settings.JOBS_SCHEDULE_MINUTE,
+                second=0,
+                microsecond=0,
+            )
+            if now >= next_run:
+                next_run += timedelta(days=1)
+
+            sleep_seconds = max(1.0, (next_run - now).total_seconds())
+            print(
+                "Jobs scheduler waiting "
+                f"{sleep_seconds / 3600:.2f} hours until {next_run.isoformat()}"
+            )
+            await asyncio.sleep(sleep_seconds)
+            await _trigger_jobs_daily_run()
+        except Exception as exc:
+            print(f"Jobs scheduler loop error: {exc}")
+            await asyncio.sleep(60)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan handler for startup/shutdown."""
     settings = get_settings()
     app.state.startup_complete = False
     coworking_retry_task: Optional[asyncio.Task] = None
+    jobs_scheduler_task: Optional[asyncio.Task] = None
     print(f"🦘 Roo Standalone starting...")
     print(f"   LLM Provider: {settings.default_llm_provider}")
     print(f"   Skills Dir: {settings.SKILLS_DIR}")
@@ -1271,6 +1338,14 @@ async def lifespan(app: FastAPI):
     print(f"   Loaded {len(agent.skills)} skills")
     coworking_retry_task = asyncio.create_task(coworking_booking_retry_loop())
     app.state.coworking_retry_task = coworking_retry_task
+    if settings.JOBS_SCHEDULER_ENABLED:
+        jobs_scheduler_task = asyncio.create_task(_jobs_daily_run_loop())
+        app.state.jobs_scheduler_task = jobs_scheduler_task
+        print(
+            "   Started jobs daily scheduler "
+            f"for {settings.JOBS_SCHEDULE_HOUR:02d}:{settings.JOBS_SCHEDULE_MINUTE:02d} "
+            f"{settings.TIMEZONE}"
+        )
     app.state.startup_complete = True
 
     # MedHack daily case scheduler (currently disabled)
@@ -1281,6 +1356,10 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        if jobs_scheduler_task:
+            jobs_scheduler_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await jobs_scheduler_task
         if coworking_retry_task:
             coworking_retry_task.cancel()
             with suppress(asyncio.CancelledError):
