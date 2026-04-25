@@ -56,6 +56,9 @@ class Settings(BaseSettings):
     JOBS_POST_TO_NOTION: bool = True
     JOBS_MAX_PAGES: Optional[int] = 1
     JOBS_PER_KEYWORD_LIMIT: Optional[int] = 5
+    JOBS_RETRY_ATTEMPTS: int = 3
+    JOBS_RETRY_DELAY_SECONDS: int = 300
+    JOBS_FAILURE_STOP_AFTER_DAYS: int = 3
 
     @property
     def default_llm_provider(self) -> str:

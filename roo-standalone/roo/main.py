@@ -12,7 +12,9 @@ import hashlib
 import time
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
+from datetime import date
 from typing import Any, Optional
+from urllib.parse import urlparse
 from uuid import uuid4
 import httpx
 
@@ -1256,12 +1258,28 @@ async def _medhack_daily_case_loop():
         await asyncio.sleep(sleep_seconds)
 
 
-async def _trigger_jobs_daily_run() -> None:
-    settings = get_settings()
+def _validate_jobs_scheduler_settings(settings: Settings) -> None:
     if not settings.JOBS_API_URL:
-        print("Jobs scheduler skipped: JOBS_API_URL is not configured")
-        return
+        raise ValueError("JOBS_API_URL must be configured when JOBS_SCHEDULER_ENABLED=true")
+    parsed = urlparse(settings.JOBS_API_URL)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("JOBS_API_URL must be a valid http(s) URL when JOBS_SCHEDULER_ENABLED=true")
+    if not settings.JOBS_TRIGGER_TOKEN or not settings.JOBS_TRIGGER_TOKEN.strip():
+        raise ValueError("JOBS_TRIGGER_TOKEN must be configured when JOBS_SCHEDULER_ENABLED=true")
+    if not 0 <= settings.JOBS_SCHEDULE_HOUR <= 23:
+        raise ValueError("JOBS_SCHEDULE_HOUR must be between 0 and 23")
+    if not 0 <= settings.JOBS_SCHEDULE_MINUTE <= 59:
+        raise ValueError("JOBS_SCHEDULE_MINUTE must be between 0 and 59")
+    if settings.JOBS_RETRY_ATTEMPTS < 1:
+        raise ValueError("JOBS_RETRY_ATTEMPTS must be at least 1")
+    if settings.JOBS_RETRY_DELAY_SECONDS < 1:
+        raise ValueError("JOBS_RETRY_DELAY_SECONDS must be at least 1")
+    if settings.JOBS_FAILURE_STOP_AFTER_DAYS < 1:
+        raise ValueError("JOBS_FAILURE_STOP_AFTER_DAYS must be at least 1")
 
+
+async def _trigger_jobs_daily_run() -> bool:
+    settings = get_settings()
     url = settings.JOBS_API_URL.rstrip("/") + "/jobs/daily-run"
     headers: dict[str, str] = {}
     if settings.JOBS_TRIGGER_TOKEN:
@@ -1285,8 +1303,10 @@ async def _trigger_jobs_daily_run() -> None:
                 f"run_id={data.get('run_id')} status={data.get('status')} "
                 f"status_url={data.get('status_url')}"
             )
+            return True
     except Exception as exc:
         print(f"Jobs scheduler trigger failed: {exc}")
+        return False
 
 
 async def _jobs_daily_run_loop() -> None:
@@ -1295,6 +1315,8 @@ async def _jobs_daily_run_loop() -> None:
 
     settings = get_settings()
     tz = ZoneInfo(settings.TIMEZONE)
+    consecutive_failed_days = 0
+    last_attempted_day: Optional[date] = None
 
     await asyncio.sleep(10)
 
@@ -1316,7 +1338,40 @@ async def _jobs_daily_run_loop() -> None:
                 f"{sleep_seconds / 3600:.2f} hours until {next_run.isoformat()}"
             )
             await asyncio.sleep(sleep_seconds)
-            await _trigger_jobs_daily_run()
+            scheduled_day = next_run.date()
+            if last_attempted_day == scheduled_day:
+                continue
+
+            success = False
+            for attempt in range(1, settings.JOBS_RETRY_ATTEMPTS + 1):
+                success = await _trigger_jobs_daily_run()
+                if success:
+                    consecutive_failed_days = 0
+                    last_attempted_day = scheduled_day
+                    break
+
+                if attempt < settings.JOBS_RETRY_ATTEMPTS:
+                    print(
+                        "Jobs scheduler retrying "
+                        f"attempt {attempt + 1}/{settings.JOBS_RETRY_ATTEMPTS} in "
+                        f"{settings.JOBS_RETRY_DELAY_SECONDS} seconds"
+                    )
+                    await asyncio.sleep(settings.JOBS_RETRY_DELAY_SECONDS)
+
+            if not success:
+                last_attempted_day = scheduled_day
+                consecutive_failed_days += 1
+                print(
+                    "Jobs scheduler exhausted retries "
+                    f"for {scheduled_day.isoformat()} "
+                    f"(consecutive failed days: {consecutive_failed_days})"
+                )
+                if consecutive_failed_days >= settings.JOBS_FAILURE_STOP_AFTER_DAYS:
+                    print(
+                        "Jobs scheduler stopped after repeated failures. "
+                        "Please inspect JOBS_API_URL, JOBS_TRIGGER_TOKEN, and the jobs service."
+                    )
+                    return
         except Exception as exc:
             print(f"Jobs scheduler loop error: {exc}")
             await asyncio.sleep(60)
@@ -1339,6 +1394,7 @@ async def lifespan(app: FastAPI):
     coworking_retry_task = asyncio.create_task(coworking_booking_retry_loop())
     app.state.coworking_retry_task = coworking_retry_task
     if settings.JOBS_SCHEDULER_ENABLED:
+        _validate_jobs_scheduler_settings(settings)
         jobs_scheduler_task = asyncio.create_task(_jobs_daily_run_loop())
         app.state.jobs_scheduler_task = jobs_scheduler_task
         print(
