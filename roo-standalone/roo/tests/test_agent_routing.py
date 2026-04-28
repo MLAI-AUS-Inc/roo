@@ -85,6 +85,19 @@ def test_request_points_phrase_routes_to_points():
     assert skill.name == "mlai-points"
 
 
+def test_coworking_report_wording_routes_to_points():
+    agent = _make_agent()
+
+    for text in [
+        "coworking report last 3 months",
+        "coworking summary last 6 months",
+        "coworking overview from 2026-01-01 to 2026-03-31",
+    ]:
+        skill = agent._select_skill_from_triggers(text)
+        assert skill is not None
+        assert skill.name == "mlai-points"
+
+
 def test_promote_points_admin_phrase_routes_to_points():
     agent = _make_agent()
 

@@ -1002,6 +1002,24 @@ class MLAIBackendClient:
         response.raise_for_status()
         return response.json()
 
+    async def get_coworking_report(self, slack_user_id: str, start_date: str, end_date: str) -> dict:
+        """Get active coworking booking report for an inclusive date range."""
+        response = await self._request(
+            "GET",
+            f"{self._points_base}/coworking/report/",
+            params={
+                "slack_user_id": self._clean_slack_id(slack_user_id),
+                "start_date": start_date,
+                "end_date": end_date,
+            },
+            timeout=15.0,
+            transport_retries=1,
+            retry_backoff_seconds=0.25,
+            circuit_breaker=True,
+        )
+        response.raise_for_status()
+        return response.json()
+
     async def book_coworking(self, slack_user_id: str, booking_date: str, slack_channel_id: Optional[str] = None) -> dict:
         """Book a coworking day."""
         try:

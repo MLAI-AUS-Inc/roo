@@ -9,7 +9,9 @@ Follows Anthropic's Agent Skills pattern for execution.
 import json
 import re
 import asyncio
+import calendar
 from dataclasses import dataclass
+from datetime import date, timedelta
 from typing import Any, Optional, List
 from difflib import SequenceMatcher
 from uuid import uuid4
@@ -3921,6 +3923,16 @@ Keep the response concise but informative."""
         if explicit_points_request:
             return "request_points"
 
+        if action in [
+            "coworking_report",
+            "report_coworking",
+            "coworking_summary",
+            "coworking_overview",
+        ]:
+            return "coworking_report"
+        if action in ["report", "summary", "overview"] and "coworking" in text_lower:
+            return "coworking_report"
+
         if action == "book":
             action = "book_coworking"
         elif action in ["create", "task", "create_task"]:
@@ -3942,6 +3954,11 @@ Keep the response concise but informative."""
             return "claim_task"
         if "submit" in text_lower:
             return "submit_task"
+        if "coworking" in text_lower and any(
+            w in text_lower
+            for w in ["report", "summary", "overview", "how many users", "attendance"]
+        ):
+            return "coworking_report"
         if any(w in text_lower for w in ["coworking check", "check coworking", "availability"]):
             return "check_coworking"
         if any(w in text_lower for w in ["coworking book", "book coworking", "book me"]):
@@ -4000,6 +4017,13 @@ Keep the response concise but informative."""
         return (
             f"Sorry mate, only <@{POINTS_SUPER_ADMIN_SLACK_ID}> can manage "
             "Points Admin access and weekly allowances. 🔒"
+        )
+
+    def _coworking_report_super_admin_denial(self) -> str:
+        """Fixed denial response for coworking booking reports."""
+        return (
+            f"Sorry mate, only <@{POINTS_SUPER_ADMIN_SLACK_ID}> can generate "
+            "coworking reports. 🔒"
         )
 
     def _is_points_admin_promotion_command(self, text: str) -> bool:
@@ -4179,6 +4203,118 @@ Keep the response concise but informative."""
                 param_targets.append(cleaned_target)
 
         return bool(param_targets) and all(param_target == user_id for param_target in param_targets)
+
+    def _shift_months(self, value: date, months: int) -> date:
+        """Move a date by calendar months, clamping to the target month's end."""
+        target_month_index = value.month - 1 + months
+        target_year = value.year + target_month_index // 12
+        target_month = target_month_index % 12 + 1
+        target_day = min(value.day, calendar.monthrange(target_year, target_month)[1])
+        return date(target_year, target_month, target_day)
+
+    def _resolve_coworking_report_range(self, text: str, params: dict) -> tuple[Optional[str], Optional[str], Optional[str]]:
+        """Resolve coworking report start/end dates from presets, params, or text."""
+        text_lower = text.lower()
+        months = None
+        if re.search(r"\blast\s+3\s+months?\b", text_lower):
+            months = 3
+        elif re.search(r"\blast\s+6\s+months?\b", text_lower):
+            months = 6
+        elif re.search(r"\b(?:last|past)\s+(?:1\s+)?years?\b", text_lower) or re.search(
+            r"\blast\s+12\s+months?\b",
+            text_lower,
+        ):
+            months = 12
+
+        if months:
+            from ..utils import get_current_date
+
+            today = get_current_date()
+            start = self._shift_months(today, -months) + timedelta(days=1)
+            return start.isoformat(), today.isoformat(), None
+
+        start_date = params.get("start_date") or params.get("from_date")
+        end_date = params.get("end_date") or params.get("to_date")
+        iso_dates = re.findall(r"\b\d{4}-\d{2}-\d{2}\b", text)
+        if len(iso_dates) >= 2:
+            start_date, end_date = iso_dates[0], iso_dates[1]
+
+        if not start_date or not end_date:
+            return (
+                None,
+                None,
+                "Give me a start date and end date, like `coworking report from 2026-01-01 to 2026-03-31`, "
+                "or ask for `coworking report last 3 months`.",
+            )
+
+        try:
+            start = date.fromisoformat(str(start_date))
+            end = date.fromisoformat(str(end_date))
+        except ValueError:
+            return None, None, "Use ISO dates for coworking reports, like `2026-01-01`."
+
+        range_days = (end - start).days + 1
+        if range_days <= 0:
+            return None, None, "The coworking report end date must be on or after the start date."
+        if range_days > 366:
+            return None, None, "Coworking reports are limited to 366 days. Try a shorter date range."
+
+        return start.isoformat(), end.isoformat(), None
+
+    def _format_coworking_report(self, report: dict) -> str:
+        """Format a coworking booking report for Slack."""
+        report_range = report.get("range", {})
+        totals = report.get("totals", {})
+        daily = report.get("daily", [])
+        weekly = report.get("weekly", [])
+        monthly = report.get("monthly", [])
+
+        busiest_days = totals.get("busiest_days") or []
+        if busiest_days:
+            busiest = ", ".join(
+                f"{day.get('date')} ({day.get('booked_users', 0)})"
+                for day in busiest_days[:5]
+            )
+            if len(busiest_days) > 5:
+                busiest += f", +{len(busiest_days) - 5} more"
+        else:
+            busiest = "None"
+
+        monthly_lines = ["Month      User-days Active"]
+        for row in monthly:
+            monthly_lines.append(
+                f"{row.get('month', ''):<10} {int(row.get('booked_user_days', 0)):>9} {int(row.get('active_days', 0)):>6}"
+            )
+
+        weekly_lines = ["Week start User-days Active"]
+        for row in weekly:
+            weekly_lines.append(
+                f"{row.get('week_start', ''):<10} {int(row.get('booked_user_days', 0)):>9} {int(row.get('active_days', 0)):>6}"
+            )
+
+        daily_lines = ["Date       Users"]
+        for row in daily:
+            daily_lines.append(f"{row.get('date', ''):<10} {int(row.get('booked_users', 0)):>5}")
+
+        return "\n".join([
+            "🏢 *Coworking report*",
+            f"Range: {report_range.get('start_date')} to {report_range.get('end_date')}",
+            "Source: Active coworking bookings",
+            "",
+            "*Summary*",
+            f"Booked user-days: {totals.get('booked_user_days', 0)}",
+            f"Unique users: {totals.get('unique_users', 0)}",
+            f"Active days: {totals.get('active_days', 0)} of {totals.get('range_days', 0)}",
+            f"Average per day: {totals.get('average_per_day', 0)}",
+            f"Busiest day: {busiest}",
+            "",
+            "*Monthly*",
+            "```\n" + "\n".join(monthly_lines) + "\n```",
+            "*Weekly*",
+            "```\n" + "\n".join(weekly_lines) + "\n```",
+            "*Daily*",
+            "```\n" + "\n".join(daily_lines) + "\n```",
+        ])
 
     async def _handle_points_action(
         self,
@@ -4401,6 +4537,17 @@ Keep the response concise but informative."""
             
             return f"Submitted! 📬 Task #{task_id} is now pending approval.\n\nA Points Admin will review your work soon. Legend! 🦘"
         
+        elif action == "coworking_report":
+            if not self._is_points_super_admin(user_id):
+                return self._coworking_report_super_admin_denial()
+
+            start_date, end_date, error = self._resolve_coworking_report_range(text, params)
+            if error:
+                return error
+
+            report = await client.get_coworking_report(user_id, start_date, end_date)
+            return self._format_coworking_report(report)
+
         elif action == "check_coworking":
             check_date = params.get("date")
             days = params.get("days", 7)
@@ -4425,8 +4572,7 @@ Keep the response concise but informative."""
             booking_date = params.get("date")
             
             # Normalize date aliases
-            if booking_date:
-                from datetime import timedelta
+            if str(booking_date or "").lower() in {"today", "tomorrow"}:
                 from roo.utils import get_current_date
                 today = get_current_date()
 
@@ -4510,8 +4656,7 @@ Keep the response concise but informative."""
             booking_id = params.get("booking_id")
             
             # Normalize date aliases
-            if booking_date:
-                from datetime import timedelta
+            if str(booking_date or "").lower() in {"today", "tomorrow"}:
                 from roo.utils import get_current_date
                 today = get_current_date()
 
