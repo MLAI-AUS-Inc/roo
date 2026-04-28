@@ -1780,8 +1780,16 @@ async def test_book_coworking_still_succeeds_when_balance_refresh_times_out(tmp_
 
 
 class FakeCoworkingReportClient:
-    def __init__(self):
+    def __init__(self, admin_slack_ids=None):
         self.calls = []
+        self.admin_checks = []
+        self.admin_slack_ids = set(admin_slack_ids or [executor_module.POINTS_SUPER_ADMIN_SLACK_ID])
+
+    async def get_admin_details(self, slack_user_id):
+        self.admin_checks.append(slack_user_id)
+        if slack_user_id not in self.admin_slack_ids:
+            return None
+        return {"slack_user_id": slack_user_id, "role": "admin"}
 
     async def get_coworking_report(self, slack_user_id, start_date, end_date):
         self.calls.append((slack_user_id, start_date, end_date))
@@ -1843,7 +1851,28 @@ async def test_coworking_report_exact_range_formats_slack_report():
 
 
 @pytest.mark.asyncio
-async def test_coworking_report_denies_non_super_admin_without_backend_call():
+async def test_coworking_report_allows_points_admin():
+    client = FakeCoworkingReportClient(admin_slack_ids=["UPOINTSADMIN"])
+    executor = SkillExecutor()
+
+    result = await executor._handle_points_action(
+        client=client,
+        action="coworking_report",
+        params={"start_date": "2026-01-01", "end_date": "2026-01-31"},
+        text="coworking report 2026-01-01 2026-01-31",
+        user_id="UPOINTSADMIN",
+        channel_id="C123",
+        thread_ts="111.222",
+        skill=SimpleNamespace(name="mlai-points"),
+    )
+
+    assert client.admin_checks == ["UPOINTSADMIN"]
+    assert client.calls == [("UPOINTSADMIN", "2026-01-01", "2026-01-31")]
+    assert "Source: Active coworking bookings" in result
+
+
+@pytest.mark.asyncio
+async def test_coworking_report_denies_non_points_admin_without_report_call():
     client = FakeCoworkingReportClient()
     executor = SkillExecutor()
 
@@ -1858,7 +1887,8 @@ async def test_coworking_report_denies_non_super_admin_without_backend_call():
         skill=SimpleNamespace(name="mlai-points"),
     )
 
-    assert "only <@U05QPB483K9> can generate coworking reports" in result
+    assert "need to be a Points Admin to generate coworking reports" in result
+    assert client.admin_checks == ["UOTHER"]
     assert client.calls == []
 
 
@@ -1903,6 +1933,28 @@ async def test_coworking_report_this_week_uses_monday_through_today(monkeypatch)
 
     assert client.calls == [
         (executor_module.POINTS_SUPER_ADMIN_SLACK_ID, "2026-04-27", "2026-04-28")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_coworking_report_last_week_uses_previous_sunday_through_saturday(monkeypatch):
+    client = FakeCoworkingReportClient()
+    executor = SkillExecutor()
+    monkeypatch.setattr("roo.utils.get_current_date", lambda: date(2026, 4, 28))
+
+    await executor._handle_points_action(
+        client=client,
+        action="coworking_report",
+        params={},
+        text="give me a report for how many people used the coworking space last week",
+        user_id=executor_module.POINTS_SUPER_ADMIN_SLACK_ID,
+        channel_id="C123",
+        thread_ts="111.222",
+        skill=SimpleNamespace(name="mlai-points"),
+    )
+
+    assert client.calls == [
+        (executor_module.POINTS_SUPER_ADMIN_SLACK_ID, "2026-04-19", "2026-04-25")
     ]
 
 
@@ -1973,6 +2025,13 @@ def test_resolve_points_action_detects_coworking_report_wording():
         executor._resolve_points_action(
             {},
             "how many people used the coworking space this week",
+        )
+        == "coworking_report"
+    )
+    assert (
+        executor._resolve_points_action(
+            {},
+            "give me a report for how many people used the coworking space last week",
         )
         == "coworking_report"
     )

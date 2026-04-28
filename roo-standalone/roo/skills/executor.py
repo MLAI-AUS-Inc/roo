@@ -4030,11 +4030,10 @@ Keep the response concise but informative."""
             "Points Admin access and weekly allowances. 🔒"
         )
 
-    def _coworking_report_super_admin_denial(self) -> str:
+    def _coworking_report_points_admin_denial(self) -> str:
         """Fixed denial response for coworking booking reports."""
         return (
-            f"Sorry mate, only <@{POINTS_SUPER_ADMIN_SLACK_ID}> can generate "
-            "coworking reports. 🔒"
+            "Sorry mate, you'll need to be a Points Admin to generate coworking reports. 🔒"
         )
 
     def _is_points_admin_promotion_command(self, text: str) -> bool:
@@ -4234,6 +4233,15 @@ Keep the response concise but informative."""
     def _resolve_coworking_report_range(self, text: str, params: dict) -> tuple[Optional[str], Optional[str], Optional[str]]:
         """Resolve coworking report start/end dates from presets, params, or text."""
         text_lower = text.lower()
+        if re.search(r"\blast\s+week\b", text_lower):
+            from ..utils import get_current_date
+
+            today = get_current_date()
+            current_sunday_start = today - timedelta(days=(today.weekday() + 1) % 7)
+            start = current_sunday_start - timedelta(days=7)
+            end = current_sunday_start - timedelta(days=1)
+            return start.isoformat(), end.isoformat(), None
+
         if re.search(r"\bthis\s+week\b", text_lower):
             from ..utils import get_current_date
 
@@ -4564,8 +4572,8 @@ Keep the response concise but informative."""
             return f"Submitted! 📬 Task #{task_id} is now pending approval.\n\nA Points Admin will review your work soon. Legend! 🦘"
         
         elif action == "coworking_report":
-            if not self._is_points_super_admin(user_id):
-                return self._coworking_report_super_admin_denial()
+            if not await client.get_admin_details(user_id):
+                return self._coworking_report_points_admin_denial()
 
             start_date, end_date, error = self._resolve_coworking_report_range(text, params)
             if error:
