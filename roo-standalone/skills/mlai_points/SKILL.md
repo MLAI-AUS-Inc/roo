@@ -86,6 +86,8 @@ Parse user messages to identify the action and parameters:
 | `coworking check <date>` | check_coworking | "Is there space on Dec 20?" |
 | `coworking report from <start> to <end>` | coworking_report | "Coworking report from 2026-01-01 to 2026-03-31" |
 | `coworking report <start> <end>` | coworking_report | "Coworking report 2026-01-01 2026-03-31" |
+| `coworking report this week` | coworking_report | "How many people used the coworking space this week?" |
+| `coworking report last week` | coworking_report | "How many people used the coworking space last week?" |
 | `coworking report last 3/6 months` | coworking_report | "Coworking report last 3 months" |
 | `coworking report last year` | coworking_report | "Coworking report last year" |
 | `coworking book <date/today>` | book_coworking | "Book me in for today", "@Roo coworking book today" |
@@ -127,9 +129,9 @@ For super admin actions (promote admin, revoke admin, change allowance):
 - The backend must still validate the requester for defense in depth
 
 For coworking report actions:
-- Roo must fail fast unless the requester Slack ID is `U05QPB483K9`
+- Roo must fail fast unless the requester is a Points Admin
 - Count only active bookings (`status=booked`), not cancelled bookings
-- Support exact inclusive date ranges and presets: last 3 months, last 6 months, last year
+- Support exact inclusive date ranges and presets: this week, last week, last 3 months, last 6 months, last year
 - Format the response as a concise Slack report with summary, monthly, weekly, and daily counts
 - The backend must still validate the requester for defense in depth
 
