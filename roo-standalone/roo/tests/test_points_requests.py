@@ -1884,11 +1884,98 @@ async def test_coworking_report_last_three_months_uses_current_date(monkeypatch)
     ]
 
 
+@pytest.mark.asyncio
+async def test_coworking_report_this_week_uses_monday_through_today(monkeypatch):
+    client = FakeCoworkingReportClient()
+    executor = SkillExecutor()
+    monkeypatch.setattr("roo.utils.get_current_date", lambda: date(2026, 4, 28))
+
+    await executor._handle_points_action(
+        client=client,
+        action="coworking_report",
+        params={},
+        text="how many people used the coworking space this week",
+        user_id=executor_module.POINTS_SUPER_ADMIN_SLACK_ID,
+        channel_id="C123",
+        thread_ts="111.222",
+        skill=SimpleNamespace(name="mlai-points"),
+    )
+
+    assert client.calls == [
+        (executor_module.POINTS_SUPER_ADMIN_SLACK_ID, "2026-04-27", "2026-04-28")
+    ]
+
+
+def test_extract_http_error_detail_suppresses_html_500_body():
+    executor = SkillExecutor()
+    request = httpx.Request("GET", "https://backend.test/api/v1/points/coworking/report/")
+    response = httpx.Response(
+        500,
+        request=request,
+        text="<!doctype html><html><body><h1>Server Error (500)</h1></body></html>",
+    )
+    exc = httpx.HTTPStatusError("server error", request=request, response=response)
+
+    detail = executor._extract_http_error_detail(exc)
+
+    assert "<!doctype html>" not in detail
+    assert "temporarily unavailable" in detail
+
+
+@pytest.mark.asyncio
+async def test_execute_mlai_points_html_500_uses_backend_unavailable_message(monkeypatch):
+    executor = SkillExecutor()
+    skill = SimpleNamespace(name="mlai-points")
+
+    async def fake_handle_points_action(**kwargs):
+        request = httpx.Request(
+            "GET",
+            "https://backend.test/api/v1/points/coworking/report/",
+        )
+        response = httpx.Response(
+            500,
+            request=request,
+            text="<!doctype html><html><body><h1>Server Error (500)</h1></body></html>",
+        )
+        raise httpx.HTTPStatusError("server error", request=request, response=response)
+
+    monkeypatch.setattr(executor, "_handle_points_action", fake_handle_points_action)
+    monkeypatch.setattr(
+        executor_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            MLAI_BACKEND_URL="https://backend.test",
+            MLAI_API_KEY="api-key",
+            ROO_API_KEY="roo-api-key",
+            INTERNAL_API_KEY="internal-key",
+        ),
+    )
+
+    result = await executor._execute_mlai_points(
+        skill=skill,
+        text="how many people used the coworking space this week",
+        params={},
+        user_id=executor_module.POINTS_SUPER_ADMIN_SLACK_ID,
+        channel_id="C123",
+        thread_ts="111.222",
+    )
+
+    assert "<!doctype html>" not in result
+    assert "couldn't reach the MLAI points backend" in result
+
+
 def test_resolve_points_action_detects_coworking_report_wording():
     executor = SkillExecutor()
 
     assert executor._resolve_points_action({}, "coworking summary last 6 months") == "coworking_report"
     assert executor._resolve_points_action({"action": "report"}, "coworking report last year") == "coworking_report"
+    assert (
+        executor._resolve_points_action(
+            {},
+            "how many people used the coworking space this week",
+        )
+        == "coworking_report"
+    )
 
 
 @pytest.mark.asyncio

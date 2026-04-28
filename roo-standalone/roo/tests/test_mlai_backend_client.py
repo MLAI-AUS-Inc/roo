@@ -167,6 +167,32 @@ async def test_get_coworking_report_uses_canonical_endpoint(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_get_coworking_report_503_raises_backend_unavailable(monkeypatch):
+    async def fake_request(method, endpoint, **kwargs):
+        request = httpx.Request(method, f"https://backend.test{endpoint}")
+        return httpx.Response(
+            503,
+            request=request,
+            json={
+                "status": "error",
+                "message": "Points subsystem is temporarily unavailable",
+                "error_code": "database_connection_interrupted",
+                "retryable": True,
+            },
+        )
+
+    client = MLAIBackendClient(
+        base_url="https://backend.test",
+        api_key="roo-api-key",
+        internal_api_key="roo-api-key",
+    )
+    monkeypatch.setattr(client, "_request", fake_request)
+
+    with pytest.raises(MLAIBackendUnavailableError, match="Points subsystem is temporarily unavailable"):
+        await client.get_coworking_report("U123", "2026-01-01", "2026-01-31")
+
+
+@pytest.mark.asyncio
 async def test_trigger_repo_scan_includes_requested_by_when_provided(monkeypatch):
     captured = {}
 

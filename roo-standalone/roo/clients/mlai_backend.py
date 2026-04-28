@@ -1017,7 +1017,7 @@ class MLAIBackendClient:
             retry_backoff_seconds=0.25,
             circuit_breaker=True,
         )
-        response.raise_for_status()
+        self._raise_for_status_or_backend_unavailable(response)
         return response.json()
 
     async def book_coworking(self, slack_user_id: str, booking_date: str, slack_channel_id: Optional[str] = None) -> dict:
