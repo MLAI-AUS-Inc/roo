@@ -3838,6 +3838,7 @@ Keep the response concise but informative."""
         if ClientClass is None:
             return "Sorry mate, the Points skill isn't properly configured. Missing implementation."
         
+        action = None
         try:
             settings = get_settings()
             if not settings.MLAI_BACKEND_URL:
@@ -3898,6 +3899,8 @@ Keep the response concise but informative."""
                     return f"🛑 {error_detail}"
                 except Exception:
                     return f"Ran into a snag with that request (400 Bad Request)."
+            elif e.response.status_code >= 500:
+                return self._points_backend_unavailable_message(action)
             else:
                 error_detail = self._extract_http_error_detail(e)
                 return f"Ran into a snag: {error_detail or str(e)}"
@@ -3956,7 +3959,15 @@ Keep the response concise but informative."""
             return "submit_task"
         if "coworking" in text_lower and any(
             w in text_lower
-            for w in ["report", "summary", "overview", "how many users", "attendance"]
+            for w in [
+                "report",
+                "summary",
+                "overview",
+                "how many users",
+                "how many people",
+                "used the coworking",
+                "attendance",
+            ]
         ):
             return "coworking_report"
         if any(w in text_lower for w in ["coworking check", "check coworking", "availability"]):
@@ -4148,10 +4159,18 @@ Keep the response concise but informative."""
 
     def _extract_http_error_detail(self, exc: httpx.HTTPStatusError) -> str:
         """Extract a compact error string from a backend HTTP error."""
+        if exc.response.status_code >= 500:
+            return "MLAI backend is temporarily unavailable. Please try again in a moment."
+
         try:
             payload = exc.response.json()
         except ValueError:
-            return exc.response.text.strip()
+            body = exc.response.text.strip()
+            body_lower = body.lower()
+            content_type = exc.response.headers.get("content-type", "").lower()
+            if "<!doctype html" in body_lower or "<html" in body_lower or "html" in content_type:
+                return "MLAI backend returned an unexpected error response. Please try again in a moment."
+            return body
         except Exception:
             return ""
 
@@ -4215,6 +4234,13 @@ Keep the response concise but informative."""
     def _resolve_coworking_report_range(self, text: str, params: dict) -> tuple[Optional[str], Optional[str], Optional[str]]:
         """Resolve coworking report start/end dates from presets, params, or text."""
         text_lower = text.lower()
+        if re.search(r"\bthis\s+week\b", text_lower):
+            from ..utils import get_current_date
+
+            today = get_current_date()
+            start = today - timedelta(days=today.weekday())
+            return start.isoformat(), today.isoformat(), None
+
         months = None
         if re.search(r"\blast\s+3\s+months?\b", text_lower):
             months = 3
