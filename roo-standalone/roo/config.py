@@ -46,6 +46,19 @@ class Settings(BaseSettings):
     ROUTER_MODEL: str = "gpt-5.4"
     COWORKING_INTENTS_DB_PATH: str = "data/coworking_booking_intents.db"
     COWORKING_RETRY_POLL_SECONDS: float = 30.0
+    JOBS_SCHEDULER_ENABLED: bool = False
+    JOBS_API_URL: Optional[str] = None
+    JOBS_TRIGGER_TOKEN: Optional[str] = None
+    JOBS_SCHEDULE_HOUR: int = 7
+    JOBS_SCHEDULE_MINUTE: int = 0
+    JOBS_COLLECT_LIVE: bool = True
+    JOBS_POST_TO_SLACK: bool = False
+    JOBS_POST_TO_NOTION: bool = True
+    JOBS_MAX_PAGES: Optional[int] = 1
+    JOBS_PER_KEYWORD_LIMIT: Optional[int] = 5
+    JOBS_RETRY_ATTEMPTS: int = 3
+    JOBS_RETRY_DELAY_SECONDS: int = 300
+    JOBS_FAILURE_STOP_AFTER_DAYS: int = 3
 
     @property
     def default_llm_provider(self) -> str:
