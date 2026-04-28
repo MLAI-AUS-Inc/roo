@@ -137,6 +137,36 @@ async def test_trigger_repo_scan_sends_request_source(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_get_coworking_report_uses_canonical_endpoint(monkeypatch):
+    captured = {}
+
+    async def fake_request(method, endpoint, **kwargs):
+        captured["method"] = method
+        captured["endpoint"] = endpoint
+        captured["params"] = kwargs["params"]
+        request = httpx.Request(method, f"https://backend.test{endpoint}")
+        return httpx.Response(200, request=request, json={"totals": {"booked_user_days": 3}})
+
+    client = MLAIBackendClient(
+        base_url="https://backend.test",
+        api_key="roo-api-key",
+        internal_api_key="roo-api-key",
+    )
+    monkeypatch.setattr(client, "_request", fake_request)
+
+    result = await client.get_coworking_report("<@U123>", "2026-01-01", "2026-01-31")
+
+    assert result == {"totals": {"booked_user_days": 3}}
+    assert captured["method"] == "GET"
+    assert captured["endpoint"] == "/api/v1/points/coworking/report/"
+    assert captured["params"] == {
+        "slack_user_id": "U123",
+        "start_date": "2026-01-01",
+        "end_date": "2026-01-31",
+    }
+
+
+@pytest.mark.asyncio
 async def test_trigger_repo_scan_includes_requested_by_when_provided(monkeypatch):
     captured = {}
 

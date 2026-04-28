@@ -36,6 +36,7 @@ This skill enables Roo to interact with the MLAI Points System via API, allowing
 - Promote one tagged user to Points Admin
 - Revoke one tagged user's Points Admin access
 - Change one tagged Points Admin's weekly allowance
+- Generate coworking usage reports for date ranges and standard lookback windows
 
 ### Admin Weekly Allowance
 
@@ -53,9 +54,11 @@ Example responses:
 
 ## Parameters
 
-- **action**: The action to perform (required) - e.g., "balance", "request_points", "book_coworking", "claim_task", "submit_task", "award_points", "create_task"
+- **action**: The action to perform (required) - e.g., "balance", "request_points", "book_coworking", "coworking_report", "claim_task", "submit_task", "award_points", "create_task"
 - **task_id**: Task ID number for task-related actions
 - **date**: Date for coworking bookings (YYYY-MM-DD format)
+- **start_date**: Start date for coworking reports (YYYY-MM-DD format)
+- **end_date**: End date for coworking reports (YYYY-MM-DD format)
 - **points**: The number of points to award (integer, positive only)
 - **reason**: A short description of why the points are being awarded or requested
 - **target_user**: A single Slack User ID (e.g., U012ABC) or mention (e.g., <@U012ABC>) of the person receiving points. For single-user awards.
@@ -81,6 +84,10 @@ Parse user messages to identify the action and parameters:
 | `task claim <id>` | claim_task | "I'll claim task 42" |
 | `task submit <id> <text>` | submit_task | "Task 42 done, fixed the typo" |
 | `coworking check <date>` | check_coworking | "Is there space on Dec 20?" |
+| `coworking report from <start> to <end>` | coworking_report | "Coworking report from 2026-01-01 to 2026-03-31" |
+| `coworking report <start> <end>` | coworking_report | "Coworking report 2026-01-01 2026-03-31" |
+| `coworking report last 3/6 months` | coworking_report | "Coworking report last 3 months" |
+| `coworking report last year` | coworking_report | "Coworking report last year" |
 | `coworking book <date/today>` | book_coworking | "Book me in for today", "@Roo coworking book today" |
 | `coworking cancel <date>` | cancel_coworking | "Cancel my booking for Friday", "@Roo coworking cancel" |
 | `rewards`, `points rewards` | list_rewards | "What rewards are available?", "@Roo points rewards" |
@@ -117,6 +124,13 @@ For admin-only actions (create, approve, award):
 
 For super admin actions (promote admin, revoke admin, change allowance):
 - Roo must fail fast unless the requester Slack ID is `U05QPB483K9`
+- The backend must still validate the requester for defense in depth
+
+For coworking report actions:
+- Roo must fail fast unless the requester Slack ID is `U05QPB483K9`
+- Count only active bookings (`status=booked`), not cancelled bookings
+- Support exact inclusive date ranges and presets: last 3 months, last 6 months, last year
+- Format the response as a concise Slack report with summary, monthly, weekly, and daily counts
 - The backend must still validate the requester for defense in depth
 
 ### Step 3: Execute via API

@@ -1,6 +1,7 @@
 import asyncio
 import importlib
 import sys
+from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -1776,6 +1777,118 @@ async def test_book_coworking_still_succeeds_when_balance_refresh_times_out(tmp_
 
     assert "Booked you in for **2026-04-09**" in result
     assert "Balance remaining" not in result
+
+
+class FakeCoworkingReportClient:
+    def __init__(self):
+        self.calls = []
+
+    async def get_coworking_report(self, slack_user_id, start_date, end_date):
+        self.calls.append((slack_user_id, start_date, end_date))
+        return {
+            "range": {
+                "start_date": start_date,
+                "end_date": end_date,
+                "source": "active_coworking_bookings",
+            },
+            "totals": {
+                "booked_user_days": 3,
+                "unique_users": 2,
+                "active_days": 2,
+                "range_days": 31,
+                "average_per_day": 0.1,
+                "busiest_days": [{"date": start_date, "booked_users": 2}],
+            },
+            "monthly": [
+                {"month": start_date[:7], "booked_user_days": 3, "active_days": 2},
+            ],
+            "weekly": [
+                {"week_start": start_date, "booked_user_days": 3, "active_days": 2},
+            ],
+            "daily": [
+                {"date": start_date, "booked_users": 2},
+                {"date": end_date, "booked_users": 1},
+            ],
+        }
+
+
+@pytest.mark.asyncio
+async def test_coworking_report_exact_range_formats_slack_report():
+    client = FakeCoworkingReportClient()
+    executor = SkillExecutor()
+
+    result = await executor._handle_points_action(
+        client=client,
+        action="coworking_report",
+        params={},
+        text="coworking report from 2026-01-01 to 2026-01-31",
+        user_id=executor_module.POINTS_SUPER_ADMIN_SLACK_ID,
+        channel_id="C123",
+        thread_ts="111.222",
+        skill=SimpleNamespace(name="mlai-points"),
+    )
+
+    assert client.calls == [
+        (executor_module.POINTS_SUPER_ADMIN_SLACK_ID, "2026-01-01", "2026-01-31")
+    ]
+    assert "Source: Active coworking bookings" in result
+    assert "Booked user-days: 3" in result
+    assert "Unique users: 2" in result
+    assert "*Monthly*" in result
+    assert "*Weekly*" in result
+    assert "*Daily*" in result
+    assert "2026-01" in result
+    assert "2026-01-01" in result
+    assert "```" in result
+
+
+@pytest.mark.asyncio
+async def test_coworking_report_denies_non_super_admin_without_backend_call():
+    client = FakeCoworkingReportClient()
+    executor = SkillExecutor()
+
+    result = await executor._handle_points_action(
+        client=client,
+        action="coworking_report",
+        params={"start_date": "2026-01-01", "end_date": "2026-01-31"},
+        text="coworking report 2026-01-01 2026-01-31",
+        user_id="UOTHER",
+        channel_id="C123",
+        thread_ts="111.222",
+        skill=SimpleNamespace(name="mlai-points"),
+    )
+
+    assert "only <@U05QPB483K9> can generate coworking reports" in result
+    assert client.calls == []
+
+
+@pytest.mark.asyncio
+async def test_coworking_report_last_three_months_uses_current_date(monkeypatch):
+    client = FakeCoworkingReportClient()
+    executor = SkillExecutor()
+    monkeypatch.setattr("roo.utils.get_current_date", lambda: date(2026, 4, 28))
+
+    await executor._handle_points_action(
+        client=client,
+        action="coworking_report",
+        params={},
+        text="coworking report last 3 months",
+        user_id=executor_module.POINTS_SUPER_ADMIN_SLACK_ID,
+        channel_id="C123",
+        thread_ts="111.222",
+        skill=SimpleNamespace(name="mlai-points"),
+    )
+
+    assert client.calls == [
+        (executor_module.POINTS_SUPER_ADMIN_SLACK_ID, "2026-01-29", "2026-04-28")
+    ]
+
+
+def test_resolve_points_action_detects_coworking_report_wording():
+    executor = SkillExecutor()
+
+    assert executor._resolve_points_action({}, "coworking summary last 6 months") == "coworking_report"
+    assert executor._resolve_points_action({"action": "report"}, "coworking report last year") == "coworking_report"
 
 
 @pytest.mark.asyncio
