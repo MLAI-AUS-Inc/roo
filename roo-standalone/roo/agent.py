@@ -452,9 +452,20 @@ class RooAgent:
         if re.match(r'^(?:points|balance|my points)$', text_lower):
             return await self._execute_fast_points(user_id, "balance")
             
-        # 2. Earn/Tasks: "points earn", "earn points", "tasks"
-        if re.match(r'^(?:points\s+earn|earn\s+points|tasks|ways\s+to\s+earn)$', text_lower):
-            return await self._execute_fast_points(user_id, "list_tasks")
+        # 2. Earn/Tasks shortcuts
+        if re.match(
+            r'^(?:points\s+earn|earn\s+points|ways\s+to\s+earn|'
+            r'tasks(?:\s+(?:all|mine|review|open))?|'
+            r'my\s+tasks|review\s+tasks|open\s+tasks|all\s+tasks)$',
+            text_lower,
+        ):
+            return await self._execute_fast_points(
+                user_id,
+                "list_tasks",
+                text=text,
+                channel_id=channel_id,
+                thread_ts=thread_ts,
+            )
 
         # 3. Rewards: "points rewards", "rewards"
         if re.match(r'^(?:points\s+rewards|rewards)$', text_lower):
@@ -515,19 +526,20 @@ class RooAgent:
                     f"G'day mate! Here's your points summary:\n\n"
                     f"💰 **Current Balance:** {data.get('balance', 0)} points\n"
                     f"📈 **Lifetime Earned:** {data.get('lifetime_earned', 0)} points\n"
-                    f"Nice work! Check out `@Roo points earn` to get more! 🦘"
+                    f"Nice work! Check out `@Roo tasks` to get more! 🦘"
                 )
                 
             elif action == "list_tasks":
-                tasks = await client.list_tasks(status="open")
-                if not tasks:
-                    msg = "No open tasks at the moment. Check back soon! 🦘"
-                else:
-                    lines = ["📋 **Open Tasks:**\n"]
-                    for t in tasks[:10]:
-                        lines.append(f"• **#{t['id']}** - {t['title']} ({t['points']} pts) 📂 {t['portfolio']}")
-                    lines.append("\nTo claim one, just say `@Roo claim task <ID>`")
-                    msg = "\n".join(lines)
+                msg = await self.skill_executor._handle_points_action(
+                    client=client,
+                    action="list_tasks",
+                    params={},
+                    text=kwargs.get("text", "tasks"),
+                    user_id=user_id,
+                    channel_id=kwargs.get("channel_id"),
+                    thread_ts=kwargs.get("thread_ts"),
+                    skill=skill,
+                )
             
             elif action == "list_rewards":
                 rewards = await client.list_rewards(user_id)

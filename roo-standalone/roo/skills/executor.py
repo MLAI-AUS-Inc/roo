@@ -3873,6 +3873,11 @@ Keep the response concise but informative."""
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 403:
                 return "Sorry mate, you're not authorized to do that. Only Points Admins can perform that action. 🔒"
+            elif e.response.status_code == 409:
+                error_detail = self._extract_http_error_detail(e)
+                return error_detail or (
+                    "That task changed while you were editing it. Refresh it and try again."
+                )
             elif e.response.status_code == 404:
                 if action == "request_points":
                     error_detail = self._extract_http_error_detail(e)
@@ -3951,10 +3956,14 @@ Keep the response concise but informative."""
             return "history"
         if "request" in text_lower and "point" in text_lower and "reward" not in text_lower:
             return "request_points"
-        if any(w in text_lower for w in ["tasks open", "open tasks", "available tasks", "tasks"]):
+        if any(w in text_lower for w in ["tasks mine", "my tasks", "tasks review", "review tasks", "tasks all", "all tasks"]):
+            return "list_tasks"
+        if any(w in text_lower for w in ["tasks open", "open tasks", "tasks"]):
             return "list_tasks"
         if "claim" in text_lower:
             return "claim_task"
+        if "unclaim" in text_lower or "release task" in text_lower:
+            return "unclaim_task"
         if "submit" in text_lower:
             return "submit_task"
         if "coworking" in text_lower and any(
@@ -3970,6 +3979,18 @@ Keep the response concise but informative."""
             ]
         ):
             return "coworking_report"
+        task_reference_present = bool(
+            re.search(r"\bROO-\d+\b", text, re.IGNORECASE)
+            or re.search(r"(?:task|#)\s*\d+", text, re.IGNORECASE)
+        )
+        if any(w in text_lower for w in ["delete task", "cancel task", "archive task"]):
+            return "cancel_task"
+        if "coworking" not in text_lower and re.search(r"\b(cancel|delete|archive)\b", text_lower) and (task_reference_present or "task" in text_lower):
+            return "cancel_task"
+        if any(w in text_lower for w in ["edit task", "update task", "change task"]):
+            return "edit_task"
+        if re.search(r"\b(edit|update|change|mark|set)\b", text_lower) and (task_reference_present or "task" in text_lower):
+            return "edit_task"
         if any(w in text_lower for w in ["coworking check", "check coworking", "availability"]):
             return "check_coworking"
         if any(w in text_lower for w in ["coworking book", "book coworking", "book me"]):
@@ -3993,6 +4014,112 @@ Keep the response concise but informative."""
         if any(w in text_lower for w in ["deduct", "remove points"]):
             return "deduct_points"
         return action
+
+    def _extract_task_identifier(self, text: str, explicit_task_id=None) -> Optional[str]:
+        """Extract either a numeric task id or a ROO task code from text."""
+        import re
+
+        if explicit_task_id:
+            identifier = str(explicit_task_id).strip()
+            return identifier.upper() if identifier.lower().startswith("roo-") else identifier
+
+        code_match = re.search(r'\b(ROO-\d+)\b', text, re.IGNORECASE)
+        if code_match:
+            return code_match.group(1).upper()
+
+        id_match = re.search(r'(?:task|#)\s*(\d+)', text, re.IGNORECASE)
+        if id_match:
+            return id_match.group(1)
+
+        bare_id_match = re.search(r'\b(\d+)\b', text)
+        if bare_id_match:
+            return bare_id_match.group(1)
+
+        return None
+
+    def _resolve_task_list_mode(self, text: str, params: dict) -> str:
+        """Resolve which task list variant the user asked for."""
+        explicit_mode = str(params.get("list_mode", "") or "").strip().lower()
+        if explicit_mode in {"all", "mine", "review", "open"}:
+            return explicit_mode
+        if explicit_mode == "available":
+            return "open"
+
+        text_lower = text.lower()
+        if "tasks all" in text_lower or "all tasks" in text_lower:
+            return "all"
+        if "tasks mine" in text_lower or "my tasks" in text_lower:
+            return "mine"
+        if "tasks review" in text_lower or "review tasks" in text_lower:
+            return "review"
+        if "tasks open" in text_lower or "open tasks" in text_lower:
+            return "open"
+        return "open"
+
+    def _coerce_optional_bool(self, value: Any) -> Optional[bool]:
+        if isinstance(value, bool):
+            return value
+        if value is None:
+            return None
+        normalized = str(value).strip().lower()
+        if normalized in {"true", "yes", "on", "1", "ready", "publish", "published"}:
+            return True
+        if normalized in {"false", "no", "off", "0", "not ready", "draft", "unpublish"}:
+            return False
+        return None
+
+    def _extract_task_edit_updates(self, params: dict, text: str = "") -> dict:
+        updates: dict[str, Any] = {}
+        text_lower = text.lower()
+        scalar_fields = [
+            "title",
+            "description",
+            "portfolio",
+            "work_domain",
+            "review_flow",
+            "reviewer_slack_id",
+            "fallback_reviewer_slack_id",
+            "repo",
+            "difficulty",
+            "due_date",
+            "acceptance_criteria",
+            "how_to_test",
+            "definition_of_done",
+            "blocked_reason",
+        ]
+        for field in scalar_fields:
+            value = params.get(field)
+            if value not in (None, ""):
+                updates[field] = value
+
+        if params.get("task_title") and "title" not in updates:
+            updates["title"] = params["task_title"]
+
+        points = params.get("points")
+        if points not in (None, ""):
+            updates["points"] = int(points)
+
+        estimate_minutes = params.get("estimate_minutes")
+        if estimate_minutes not in (None, ""):
+            updates["estimate_minutes"] = int(estimate_minutes)
+
+        volunteer_ready = self._coerce_optional_bool(params.get("volunteer_ready"))
+        if volunteer_ready is not None:
+            updates["volunteer_ready"] = volunteer_ready
+        elif "volunteer ready" in text_lower:
+            updates["volunteer_ready"] = not any(
+                phrase in text_lower
+                for phrase in ["not volunteer ready", "no longer volunteer ready", "unpublish", "mark draft"]
+            )
+
+        target_user = params.get("target_user") or params.get("target_slack_id")
+        if target_user not in (None, ""):
+            if "fallback reviewer" in text_lower and "fallback_reviewer_slack_id" not in updates:
+                updates["fallback_reviewer_slack_id"] = target_user
+            elif "reviewer" in text_lower and "reviewer_slack_id" not in updates:
+                updates["reviewer_slack_id"] = target_user
+
+        return updates
 
     def _resolve_points_admin_management_action(
         self,
@@ -4378,7 +4505,7 @@ Keep the response concise but informative."""
                 f"💰 **Current Balance:** {balance} points\n"
                 f"📈 **Lifetime Earned:** {earned} points\n"
                 f"📉 **Lifetime Spent:** {spent} points\n\n"
-                f"Nice work! Check out open tasks to earn more 🦘"
+                f"Nice work! Check out `tasks` to earn more 🦘"
             )
         
         elif action == "history":
@@ -4510,66 +4637,106 @@ Keep the response concise but informative."""
             )
 
         elif action == "list_tasks":
-            status = params.get("status", "open")
+            text_lower = text.lower()
+            if "tasks quick" in text_lower or "quick tasks" in text_lower:
+                return 'Use `tasks` or `tasks open` for claimable work. `tasks quick` is no longer supported.'
+
+            list_mode = self._resolve_task_list_mode(text, params)
             portfolio = params.get("portfolio")
-            tasks = await client.list_tasks(status, portfolio)
+
+            list_kwargs = {"status": None, "portfolio": portfolio}
+            if list_mode == "open":
+                list_kwargs["claimable"] = True
+            elif list_mode == "mine":
+                list_kwargs["assigned_to_me"] = user_id
+            elif list_mode == "review":
+                list_kwargs["reviewer_slack_id"] = user_id
+                list_kwargs["needs_review"] = True
+
+            tasks = await client.list_tasks(**list_kwargs)
             
             if not tasks:
-                return f"No {status} tasks at the moment. Check back soon! 🦘"
+                empty_messages = {
+                    "all": "No tasks at the moment. Check back soon! 🦘",
+                    "open": "No open tasks at the moment. Check back soon! 🦘",
+                    "mine": "You don't have any tasks assigned right now. 🦘",
+                    "review": "Nothing is waiting for your review right now. 🦘",
+                }
+                return empty_messages.get(list_mode, "No tasks at the moment. Check back soon! 🦘")
             
-            lines = [f"📋 **{status.title()} Tasks:**\n"]
+            headings = {
+                "all": "All Tasks",
+                "open": "Open Tasks",
+                "mine": "My Tasks",
+                "review": "Tasks To Review",
+            }
+            heading = headings.get(list_mode, "Tasks")
+            lines = [f"📋 **{heading}:**\n"]
             for task in tasks[:10]:
                 tid = task.get("id")
+                task_code = task.get("task_code") or f"#{tid}"
                 title = task.get("title", "Untitled")[:40]
-                pts = task.get("points", 0)
+                pts = task.get("points_estimate", task.get("points", 0))
                 port = task.get("portfolio", "")
-                lines.append(f"• **#{tid}** - {title} ({pts} pts) 📂 {port}")
+                estimate_minutes = task.get("estimate_minutes")
+                estimate_text = f" · ~{estimate_minutes} min" if estimate_minutes else ""
+                status_text = task.get("status", "")
+                status_suffix = f" · {status_text}" if list_mode in {"all", "mine", "review"} and status_text else ""
+                lines.append(f"• **{task_code}** - {title} ({pts} pts){estimate_text} 📂 {port}{status_suffix}")
             
-            lines.append("\nKeen to help? Just say \"claim task <id>\" to get started!")
+            footer_messages = {
+                "all": '\nUse "tasks" to see what can be claimed right now.',
+                "open": '\nKeen to help? Just say "claim task <id or code>" to get started!',
+                "mine": '\nSubmit with "task submit <id or code> <description>" when you are done.',
+                "review": '\nApprove or reject with "task approve <id or code>" or "task reject <id or code> <reason>".',
+            }
+            lines.append(footer_messages.get(list_mode, ""))
             return "\n".join(lines)
         
         elif action == "claim_task":
-            task_id = params.get("task_id")
+            task_id = self._extract_task_identifier(text, params.get("task_id"))
             if not task_id:
-                # Try to extract from text
-                import re
-                match = re.search(r'(?:task|#)\s*(\d+)', text, re.IGNORECASE)
-                if match:
-                    task_id = int(match.group(1))
-                else:
-                    return "Which task do you want to claim? Give me the task ID (e.g., \"claim task 42\")"
-            
-            result = await client.claim_task(int(task_id), user_id)
+                return "Which task do you want to claim? Give me the task ID or code (e.g., \"claim task 42\" or \"claim ROO-0042\")"
+
+            result = await client.claim_task(task_id, user_id)
+            display_id = result.get("task_code") or f"#{result.get('id', task_id)}"
             title = result.get("title", "")
-            pts = result.get("points", 0)
+            pts = result.get("points_estimate", result.get("points", 0))
             
-            return f"Ripper! 🎉 You've claimed **#{task_id} - {title}** ({pts} pts).\n\nWhen you're done, submit your work with \"task submit {task_id} <description>\""
+            return f"Ripper! 🎉 You've claimed **{display_id} - {title}** ({pts} pts).\n\nWhen you're done, submit your work with \"task submit {display_id} <description>\""
+
+        elif action == "unclaim_task":
+            task_id = self._extract_task_identifier(text, params.get("task_id"))
+            if not task_id:
+                return "Which task do you want to release? Give me the task ID or code."
+
+            result = await client.unclaim_task(task_id, user_id)
+            task = result.get("task", {})
+            display_id = task.get("task_code") or f"#{task.get('id', task_id)}"
+            title = task.get("title", "")
+            return f"Released **{display_id} - {title}** back to the volunteer queue."
         
         elif action == "submit_task":
-            task_id = params.get("task_id")
+            task_id = self._extract_task_identifier(text, params.get("task_id"))
             submission_text = params.get("submission_text", "")
             submission_url = params.get("submission_url")
             
             if not task_id:
-                import re
-                match = re.search(r'(?:task|#)\s*(\d+)', text, re.IGNORECASE)
-                if match:
-                    task_id = int(match.group(1))
-                else:
-                    return "Which task are you submitting? Give me the task ID (e.g., \"submit task 42 done!\")"
+                return "Which task are you submitting? Give me the task ID or code (e.g., \"submit task 42 done!\" or \"submit ROO-0042 done!\")"
             
             if not submission_text:
                 # Extract text after the task ID
                 import re
-                match = re.search(r'(?:task|#)\s*\d+\s+(.+)', text, re.IGNORECASE)
+                match = re.search(r'(?:task\s+)?(?:ROO-\d+|#?\d+)\s+(.+)', text, re.IGNORECASE)
                 if match:
                     submission_text = match.group(1)
                 else:
                     submission_text = "Submitted via Slack"
             
-            result = await client.submit_task(int(task_id), user_id, submission_text, submission_url)
+            result = await client.submit_task(task_id, user_id, submission_text, submission_url)
             
-            return f"Submitted! 📬 Task #{task_id} is now pending approval.\n\nA Points Admin will review your work soon. Legend! 🦘"
+            display_id = result.get("task_code") or task_id
+            return f"Submitted! 📬 Task {display_id} is now pending approval.\n\nA reviewer will take a look soon. Legend! 🦘"
         
         elif action == "coworking_report":
             if not await client.get_admin_details(user_id):
@@ -4925,6 +5092,7 @@ Keep the response concise but informative."""
                 return "Sorry mate, but I can't create tasks. You need to be a Points Admin for that! If you reckon you should have access, have a chat with the committee. 🤔"
             
             task_id = result.get("id")
+            task_code = result.get("task_code")
             pts = result.get("points", points)
             port = result.get("portfolio", portfolio)
             
@@ -4934,7 +5102,43 @@ Keep the response concise but informative."""
             elif assigned_to:
                  assigned_msg = f" and assigned to <@{client._clean_slack_id(assigned_to)}>"
             
-            return f"✅ Beauty! Created task **{title}** worth **{pts} points**{assigned_msg}. Task ID: #{task_id}"
+            task_ref = f"{task_code} / #{task_id}" if task_code else f"#{task_id}"
+            return f"✅ Beauty! Created task **{title}** worth **{pts} points**{assigned_msg}. Task ID: {task_ref}"
+
+        elif action == "edit_task":
+            task_id = self._extract_task_identifier(text, params.get("task_id"))
+            if not task_id:
+                return "Which task do you want to edit? Give me the task ID or code."
+
+            current_task = await client.get_task(task_id)
+            updates = self._extract_task_edit_updates(params, text)
+            if not updates:
+                return (
+                    "Tell me what you want to change. "
+                    "You can edit: title, description, points, portfolio, work domain, review flow, reviewer, "
+                    "fallback reviewer, repo, estimate minutes, difficulty, due date, volunteer ready, "
+                    "acceptance criteria, how to test, definition of done, and blocked reason."
+                )
+
+            result = await client.update_task(
+                task_id,
+                user_id,
+                updates,
+                expected_updated_at=current_task["updated_at"],
+            )
+            display_id = result.get("task_code") or f"#{result.get('id', task_id)}"
+            changed_fields = ", ".join(sorted(updates.keys()))
+            return f"Updated **{display_id}**. Changed: {changed_fields}."
+
+        elif action == "cancel_task":
+            task_id = self._extract_task_identifier(text, params.get("task_id"))
+            if not task_id:
+                return "Which task do you want to cancel? Give me the task ID or code."
+
+            reason = params.get("reason", "")
+            result = await client.cancel_task(task_id, user_id, reason=reason)
+            display_id = result.get("task_code") or f"#{result.get('id', task_id)}"
+            return f"Cancelled **{display_id}**. The task history is preserved, and it is no longer available for claim."
         
         elif action == "view_rate_card":
              card = await client.get_rate_card()
@@ -4951,36 +5155,30 @@ Keep the response concise but informative."""
              return "\n".join(lines)
         
         elif action == "approve_task":
-            task_id = params.get("task_id")
-            
+            task_id = self._extract_task_identifier(text, params.get("task_id"))
+
             if not task_id:
-                import re
-                match = re.search(r'(?:task|#)\s*(\d+)', text, re.IGNORECASE)
-                if match:
-                    task_id = int(match.group(1))
-                else:
-                    return "Which task are you approving? Give me the task ID (e.g., \"approve task 42\")"
-            
-            result = await client.approve_task(int(task_id), user_id)
+                return "Which task are you approving? Give me the task ID or code (e.g., \"approve task 42\" or \"approve ROO-0042\")"
+
+            result = await client.approve_task(task_id, user_id)
             points_awarded = result.get("points_awarded", 0)
+            task = result.get("task", {})
+            display_id = task.get("task_code") or f"#{task.get('id', task_id)}"
             
-            return f"Approved! ✅ Task #{task_id} completed. {points_awarded} points awarded. 🎉"
+            return f"Approved! ✅ Task {display_id} completed. {points_awarded} points awarded. 🎉"
         
         elif action == "reject_task":
-            task_id = params.get("task_id")
+            task_id = self._extract_task_identifier(text, params.get("task_id"))
             reason = params.get("reason", "")
             
             if not task_id:
-                import re
-                match = re.search(r'(?:task|#)\s*(\d+)', text, re.IGNORECASE)
-                if match:
-                    task_id = int(match.group(1))
-                else:
-                    return "Which task are you rejecting? Give me the task ID."
+                return "Which task are you rejecting? Give me the task ID or code."
             
-            result = await client.reject_task(int(task_id), user_id, reason)
+            result = await client.reject_task(task_id, user_id, reason)
+            task = result.get("task", {})
+            display_id = task.get("task_code") or f"#{task.get('id', task_id)}"
             
-            return f"Task #{task_id} rejected. The volunteer can resubmit if needed."
+            return f"Task {display_id} rejected. The volunteer can resubmit if needed."
         
         elif action in ["deduct_points", "deduct"]:
             return "Sorry mate, I can only award points, not deduct them! 🚫"

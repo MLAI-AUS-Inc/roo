@@ -14,23 +14,32 @@ trigger_keywords:
 
 # MLAI Points System Skill
 
-This skill enables Roo to interact with the MLAI Points System via API, allowing members to check their balance, book coworking days, claim and submit tasks, and redeem rewards.
+This skill enables Roo to interact with the MLAI Points System via API, allowing members to check their balance, book coworking days, browse open and assigned task queues, claim and submit structured tasks, and redeem rewards.
 
 ## Capabilities
 
 ### Member Actions
 - Check points balance and history
 - Request points for yourself in Slack for admin approval
-- View and claim open tasks
+- View task queues and claim open tasks
 - Submit completed work for approval
+- Unclaim a task before any submission exists
 - Book and cancel coworking days
 - View rewards catalog and request redemptions
 
 ### Admin Actions (requires PointsAdmin role)
 - Create new tasks with point values
+- Edit supported task fields
+- Cancel/archive tasks while preserving history
 - Approve or reject task submissions
 - Award points manually
 - Set coworking capacity overrides
+
+### Structured Task Notes
+- Volunteers can refer to tasks by numeric ID or by task code such as `ROO-0042`
+- A task can only have one active assignee at a time
+- `unclaim` is only allowed before any submission exists
+- Approval awards points once, on final acceptance
 
 ### Super Admin Actions (restricted to Slack user `U05QPB483K9`)
 - Promote one tagged user to Points Admin
@@ -55,7 +64,7 @@ Example responses:
 ## Parameters
 
 - **action**: The action to perform (required) - e.g., "balance", "request_points", "book_coworking", "coworking_report", "claim_task", "submit_task", "award_points", "create_task"
-- **task_id**: Task ID number for task-related actions
+- **task_id**: Task ID number or task code (for example `42` or `ROO-0042`) for task-related actions
 - **date**: Date for coworking bookings (YYYY-MM-DD format)
 - **start_date**: Start date for coworking reports (YYYY-MM-DD format)
 - **end_date**: End date for coworking reports (YYYY-MM-DD format)
@@ -68,7 +77,21 @@ Example responses:
 - **submission_text**: Description of work completed for task submissions
 - **reward_code**: Code for reward redemption requests
 - **task_title**: (Admin) Title for a new task
+- **title**: (Admin) Updated task title when editing
+- **description**: (Admin) Updated task description when editing
 - **portfolio**: (Admin) Portfolio for a new task (tech, marketing, events, general, governance). Defaults to the admin's assigned portfolio if omitted.
+- **work_domain**: (Admin) Task domain such as tech, event_ops, or content_comms
+- **review_flow**: (Admin) Review flow such as pr_review or deliverable_review
+- **reviewer_slack_id**: (Admin) Primary reviewer Slack ID for a task
+- **fallback_reviewer_slack_id**: (Admin) Fallback reviewer Slack ID for a task
+- **repo**: (Admin) Repo or codebase context for a task
+- **estimate_minutes**: (Admin) Estimated task duration in minutes
+- **difficulty**: (Admin) Difficulty label such as tiny, small, medium, large, or lead
+- **volunteer_ready**: (Admin) Whether the task is ready for the volunteer queue
+- **acceptance_criteria**: (Admin) What must be true for the task to be accepted
+- **how_to_test**: (Admin) How the reviewer should verify the task
+- **definition_of_done**: (Admin) Concise completion criteria
+- **blocked_reason**: (Admin) Reason the task is blocked, if any
 - **assigned_to_user_id**: (Admin) Optional Slack User ID to assign a new task to (e.g. U012ABC or @alice)
 
 ## Command Recognition
@@ -80,9 +103,13 @@ Parse user messages to identify the action and parameters:
 | `points`, `balance` | balance | "What's my points balance?", "@Roo points" |
 | `request <n> points for <reason>` | request_points | "Request 5 points for helping at the event" |
 | `points earn` | list_tasks | "How do I earn points?", "@Roo points earn" |
-| `tasks`, `tasks open` | list_tasks | "What tasks are available?" |
-| `task claim <id>` | claim_task | "I'll claim task 42" |
-| `task submit <id> <text>` | submit_task | "Task 42 done, fixed the typo" |
+| `tasks`, `tasks open` | list_tasks | "What can I claim right now?" |
+| `tasks mine` | list_tasks | "Show me my tasks" |
+| `tasks review` | list_tasks | "Show me tasks waiting for my review" |
+| `tasks all` | list_tasks | "Show me all tasks" |
+| `task claim <id/code>` | claim_task | "I'll claim task 42", "Claim ROO-0042" |
+| `task unclaim <id/code>` | unclaim_task | "Unclaim ROO-0042" |
+| `task submit <id/code> <text>` | submit_task | "Task 42 done, fixed the typo" |
 | `coworking check <date>` | check_coworking | "Is there space on Dec 20?" |
 | `coworking report from <start> to <end>` | coworking_report | "Coworking report from 2026-01-01 to 2026-03-31" |
 | `coworking report <start> <end>` | coworking_report | "Coworking report 2026-01-01 2026-03-31" |
@@ -97,7 +124,12 @@ Parse user messages to identify the action and parameters:
 | `buy a <item>` | request_reward | "Can I buy a sticker?" (LLM infers code) |
 | `task create <title> ...` | create_task | (Admin) "Create task called 'Fix docs' with 3 points" |
 | `create a task ...` | create_task | (Admin) "Create a task called 'Update README' and assign 5 points" |
-| `task approve <id>` | approve_task | (Admin) "Approve task 42" |
+| `task edit <id/code> ...` | edit_task | (Admin) "Edit ROO-0042 and set points to 12" |
+| `task update <id/code> ...` | edit_task | (Admin) "Update task 42 and change reviewer to <@U123>" |
+| `task cancel <id/code>` | cancel_task | (Admin) "Cancel ROO-0042" |
+| `delete task <id/code>` | cancel_task | (Admin) "Delete task 42" maps to cancel/archive |
+| `task approve <id/code>` | approve_task | (Admin) "Approve task 42", "Approve ROO-0042" |
+| `task reject <id/code>` | reject_task | (Admin) "Reject ROO-0042 and ask for tests" |
 | `points award @user +5 reason` | award_points | (Admin) "Give @sam 5 points for helping out" |
 | `reward @user for <activity>` | award_points | (Admin) "Reward @sam for newsletter" (suggests points from rate card) |
 | `promote <@USER> to roo points admin` | promote_points_admin | (Super Admin) "Promote <@U123> to roo points admin" |
@@ -115,12 +147,13 @@ Parse user messages to identify the action and parameters:
 Parse the user's message to determine which action they want:
 - Look for action keywords (balance, book, claim, etc.)
 - Extract any IDs, dates, or amounts mentioned
+- Accept both numeric task ids and `ROO-xxxx` task codes
 - Treat `request ... points for ...` as `request_points`, not `award_points`
 - For admin actions, verify the Slack mention format
 - For super admin actions, require exactly one tagged Slack user, never fall through into `award_points`, and require a positive numeric allowance when changing allowance
 
 ### Step 2: Permission Check
-For admin-only actions (create, approve, award):
+For admin-only actions (create, edit, cancel, approve, reject, award):
 - The API will validate the requester's Slack ID
 - If 403 returned, respond with friendly denial
 
@@ -143,7 +176,7 @@ Call the appropriate MLAIBackendClient method with extracted parameters.
 ### Step 4: Format Response
 Generate friendly response with relevant information:
 - Balance: Show points count and encourage engagement
-- Tasks: Format as numbered list with points and portfolio
+- Tasks: Format as a short list with task code, points, and portfolio
 - Bookings: Confirm date and show remaining balance
 - Errors: Explain what went wrong and suggest alternatives
 
@@ -165,18 +198,18 @@ G'day mate! Here's your points summary:
 📈 **Lifetime Earned:** 42 points
 📉 **Lifetime Spent:** 27 points
 
-Nice work! Check out /tasks to earn more 🦘
+Nice work! Check out "@Roo tasks" to earn more 🦘
 ```
 
 ### Task List
 ```
 Here are the open tasks up for grabs:
 
-1. **#42 - Fix typos in README** (3 pts) 📂 tech
-2. **#43 - Design event banner** (5 pts) 📂 marketing
-3. **#44 - Help with workshop setup** (2 pts) 📂 events
+1. **ROO-0042 - Fix typos in README** (3 pts) 📂 tech
+2. **ROO-0043 - Design event banner** (5 pts) 📂 marketing
+3. **ROO-0044 - Help with workshop setup** (2 pts) 📂 events
 
-Keen to help? Just say "claim task 42" to get started!
+Keen to help? Just say "claim task ROO-0042" to get started!
 ```
 
 ### Coworking Booking Success
@@ -196,7 +229,7 @@ Ah sorry mate, looks like you're a bit short on points.
 You need 1 point for coworking, but you've got 0.
 
 Here are some ways to earn points:
-• Check out open tasks with "@Roo tasks open"
+• Check out open tasks with "@Roo tasks"
 • Volunteer at upcoming events
 • Help out fellow community members
 
@@ -226,6 +259,7 @@ That sounds like it could be 'Draft newsletter edition' (12 pts) or 'Newsletter 
 | User not found | "Hmm, I can't find your account. Have you linked your Slack? Check with the team." |
 | Insufficient balance | Show balance, explain cost, suggest earning opportunities |
 | Task not open | "That task isn't available to claim right now (status: {status})" |
+| Task cannot be unclaimed | "That task already has submitted work on it, so it can't be released back to the queue." |
 | No availability | "No spots left on {date}. Want to check another day?" |
 | Network error | "Having trouble reaching the points system. Mind trying again in a tick?" |
 | Permission denied | Friendly explanation, point to admins if they need help |

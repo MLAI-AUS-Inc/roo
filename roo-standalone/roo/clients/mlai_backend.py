@@ -5,7 +5,7 @@ HTTP client for communicating with the mlai-backend service.
 """
 import asyncio
 import time
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Union
 from uuid import uuid4
 
 import httpx
@@ -934,7 +934,20 @@ class MLAIBackendClient:
         response.raise_for_status()
         return response.json()[:limit]
     
-    async def list_tasks(self, status: Optional[str] = "open", portfolio: Optional[str] = None) -> List[dict]:
+    async def list_tasks(
+        self,
+        status: Optional[str] = "open",
+        portfolio: Optional[str] = None,
+        *,
+        claimable: Optional[bool] = None,
+        assigned_to_me: Optional[str] = None,
+        reviewer_slack_id: Optional[str] = None,
+        needs_review: Optional[bool] = None,
+        volunteer_ready: Optional[bool] = None,
+        work_domain: Optional[str] = None,
+        review_flow: Optional[str] = None,
+        task_code: Optional[str] = None,
+    ) -> List[dict]:
         """List tasks, optionally filtered by status and portfolio."""
         if not self.base_url:
             return []
@@ -943,6 +956,22 @@ class MLAIBackendClient:
             params["status"] = status
         if portfolio:
             params["portfolio"] = portfolio
+        if claimable is not None:
+            params["claimable"] = str(bool(claimable)).lower()
+        if assigned_to_me:
+            params["assigned_to_me"] = self._clean_slack_id(assigned_to_me)
+        if reviewer_slack_id:
+            params["reviewer_slack_id"] = self._clean_slack_id(reviewer_slack_id)
+        if needs_review is not None:
+            params["needs_review"] = str(bool(needs_review)).lower()
+        if volunteer_ready is not None:
+            params["volunteer_ready"] = str(bool(volunteer_ready)).lower()
+        if work_domain:
+            params["work_domain"] = work_domain
+        if review_flow:
+            params["review_flow"] = review_flow
+        if task_code:
+            params["task_code"] = task_code
         response = await self._request(
             "GET",
             f"{self._points_base}/tasks/",
@@ -955,11 +984,40 @@ class MLAIBackendClient:
         response.raise_for_status()
         return response.json()
 
-    async def claim_task(self, task_id: int, slack_user_id: str) -> dict:
+    async def get_task_by_code(self, task_code: str) -> dict:
+        """Get a specific task by volunteer-facing task code."""
+        response = await self._request(
+            "GET",
+            f"{self._points_base}/tasks/by-code/{task_code}/",
+            timeout=10.0,
+            circuit_breaker=True,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def _resolve_task_id(self, task_identifier: Union[int, str]) -> int:
+        """Resolve numeric task ids and ROO task codes to a numeric id."""
+        if isinstance(task_identifier, int):
+            return task_identifier
+
+        identifier = str(task_identifier).strip()
+        if identifier.startswith("#"):
+            identifier = identifier[1:]
+        if identifier.isdigit():
+            return int(identifier)
+        if identifier.upper().startswith("ROO-"):
+            task = await self.get_task_by_code(identifier.upper())
+            if not task.get("id"):
+                raise ValueError(f"Task {identifier} did not return an id")
+            return int(task["id"])
+        raise ValueError(f"Unsupported task identifier: {task_identifier}")
+
+    async def claim_task(self, task_id: Union[int, str], slack_user_id: str) -> dict:
         """Claim a task for completion."""
+        resolved_task_id = await self._resolve_task_id(task_id)
         response = await self._request(
             "POST",
-            f"{self._points_base}/tasks/{task_id}/claim/",
+            f"{self._points_base}/tasks/{resolved_task_id}/claim/",
             json={"slack_user_id": self._clean_slack_id(slack_user_id)},
             timeout=10.0,
             circuit_breaker=True,
@@ -967,8 +1025,22 @@ class MLAIBackendClient:
         response.raise_for_status()
         return response.json()
 
-    async def submit_task(self, task_id: int, slack_user_id: str, submission_text: str, submission_url: Optional[str] = None) -> dict:
+    async def unclaim_task(self, task_id: Union[int, str], slack_user_id: str) -> dict:
+        """Release a claimed task before any submission exists."""
+        resolved_task_id = await self._resolve_task_id(task_id)
+        response = await self._request(
+            "POST",
+            f"{self._points_base}/tasks/{resolved_task_id}/unclaim/",
+            json={"slack_user_id": self._clean_slack_id(slack_user_id)},
+            timeout=10.0,
+            circuit_breaker=True,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def submit_task(self, task_id: Union[int, str], slack_user_id: str, submission_text: str, submission_url: Optional[str] = None) -> dict:
         """Submit completed work for a task."""
+        resolved_task_id = await self._resolve_task_id(task_id)
         payload = {
             "slack_user_id": slack_user_id,
             "submission_text": submission_text,
@@ -977,7 +1049,7 @@ class MLAIBackendClient:
             payload["submission_url"] = submission_url
         response = await self._request(
             "POST",
-            f"{self._points_base}/tasks/{task_id}/submit/",
+            f"{self._points_base}/tasks/{resolved_task_id}/submit/",
             json=payload,
             timeout=10.0,
             circuit_breaker=True,
@@ -1449,11 +1521,12 @@ class MLAIBackendClient:
     # Missing Admin / Points Methods
     # =========================================================================
 
-    async def get_task(self, task_id: int) -> dict:
+    async def get_task(self, task_id: Union[int, str]) -> dict:
         """Get a specific task by ID."""
+        resolved_task_id = await self._resolve_task_id(task_id)
         response = await self._request(
             "GET",
-            f"{self._points_base}/tasks/{task_id}/",
+            f"{self._points_base}/tasks/{resolved_task_id}/",
             timeout=10.0,
             circuit_breaker=True,
         )
@@ -1705,18 +1778,19 @@ class MLAIBackendClient:
 
     async def approve_task(
         self,
-        task_id: int,
+        task_id: Union[int, str],
         admin_slack_id: str,
         submission_id: Optional[str] = None
     ) -> dict:
         """Approve a task submission (admin only)."""
+        resolved_task_id = await self._resolve_task_id(task_id)
         payload = {"slack_user_id": admin_slack_id}
         if submission_id:
             payload["submission_id"] = submission_id
             
         response = await self._request(
             "POST",
-            f"{self._points_base}/tasks/{task_id}/approve/",
+            f"{self._points_base}/tasks/{resolved_task_id}/approve/",
             json=payload,
             timeout=15.0,
             circuit_breaker=True,
@@ -1727,12 +1801,13 @@ class MLAIBackendClient:
 
     async def reject_task(
         self,
-        task_id: int,
+        task_id: Union[int, str],
         admin_slack_id: str,
         reason: str = "",
         submission_id: Optional[str] = None
     ) -> dict:
         """Reject a task submission (admin only)."""
+        resolved_task_id = await self._resolve_task_id(task_id)
         payload = {
             "slack_user_id": admin_slack_id,
             "reason": reason,
@@ -1742,7 +1817,55 @@ class MLAIBackendClient:
             
         response = await self._request(
             "POST",
-            f"{self._points_base}/tasks/{task_id}/reject/",
+            f"{self._points_base}/tasks/{resolved_task_id}/reject/",
+            json=payload,
+            timeout=10.0,
+            circuit_breaker=True,
+            use_admin_headers=True,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def update_task(
+        self,
+        task_id: Union[int, str],
+        admin_slack_id: str,
+        updates: dict,
+        *,
+        expected_updated_at: str,
+    ) -> dict:
+        """Edit a task through the admin task update contract."""
+        resolved_task_id = await self._resolve_task_id(task_id)
+        payload = {
+            **updates,
+            "slack_user_id": self._clean_slack_id(admin_slack_id),
+            "expected_updated_at": expected_updated_at,
+        }
+        response = await self._request(
+            "PATCH",
+            f"{self._points_base}/tasks/{resolved_task_id}/",
+            json=payload,
+            timeout=10.0,
+            circuit_breaker=True,
+            use_admin_headers=True,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def cancel_task(
+        self,
+        task_id: Union[int, str],
+        admin_slack_id: str,
+        reason: Optional[str] = None,
+    ) -> dict:
+        """Cancel/archive a task (admin only)."""
+        resolved_task_id = await self._resolve_task_id(task_id)
+        payload = {"slack_user_id": self._clean_slack_id(admin_slack_id)}
+        if reason:
+            payload["reason"] = reason
+        response = await self._request(
+            "POST",
+            f"{self._points_base}/tasks/{resolved_task_id}/cancel/",
             json=payload,
             timeout=10.0,
             circuit_breaker=True,
