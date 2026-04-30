@@ -107,9 +107,9 @@ Parse user messages to identify the action and parameters:
 | `tasks mine` | list_tasks | "Show me my tasks" |
 | `tasks review` | list_tasks | "Show me tasks waiting for my review" |
 | `tasks all` | list_tasks | "Show me all tasks" |
-| `task claim <id/code>` | claim_task | "I'll claim task 42", "Claim ROO-0042" |
+| `task claim <id/code>` | claim_task | "Task claim 42", "Task claim ROO-0042" |
 | `task unclaim <id/code>` | unclaim_task | "Unclaim ROO-0042" |
-| `task submit <id/code> <text>` | submit_task | "Task 42 done, fixed the typo" |
+| `task submit <id/code> <text>` | submit_task | "Task submit 42 fixed the typo" |
 | `coworking check <date>` | check_coworking | "Is there space on Dec 20?" |
 | `coworking report from <start> to <end>` | coworking_report | "Coworking report from 2026-01-01 to 2026-03-31" |
 | `coworking report <start> <end>` | coworking_report | "Coworking report 2026-01-01 2026-03-31" |
@@ -128,8 +128,8 @@ Parse user messages to identify the action and parameters:
 | `task update <id/code> ...` | edit_task | (Admin) "Update task 42 and change reviewer to <@U123>" |
 | `task cancel <id/code>` | cancel_task | (Admin) "Cancel ROO-0042" |
 | `delete task <id/code>` | cancel_task | (Admin) "Delete task 42" maps to cancel/archive |
-| `task approve <id/code>` | approve_task | (Admin) "Approve task 42", "Approve ROO-0042" |
-| `task reject <id/code>` | reject_task | (Admin) "Reject ROO-0042 and ask for tests" |
+| `task approve <id/code>` | approve_task | (Admin) "Task approve 42", "Task approve ROO-0042" |
+| `task reject <id/code>` | reject_task | (Admin) "Task reject ROO-0042 and ask for tests" |
 | `points award @user +5 reason` | award_points | (Admin) "Give @sam 5 points for helping out" |
 | `reward @user for <activity>` | award_points | (Admin) "Reward @sam for newsletter" (suggests points from rate card) |
 | `promote <@USER> to roo points admin` | promote_points_admin | (Super Admin) "Promote <@U123> to roo points admin" |
@@ -209,7 +209,7 @@ Here are the open tasks up for grabs:
 2. **ROO-0043 - Design event banner** (5 pts) 📂 marketing
 3. **ROO-0044 - Help with workshop setup** (2 pts) 📂 events
 
-Keen to help? Just say "claim task ROO-0042" to get started!
+Keen to help? Just say "task claim ROO-0042" to get started!
 ```
 
 ### Coworking Booking Success

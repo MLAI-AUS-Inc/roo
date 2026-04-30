@@ -3928,6 +3928,9 @@ Keep the response concise but informative."""
         if management_action:
             return management_action
 
+        if self._is_task_list_request(text, params):
+            return "list_tasks"
+
         if explicit_points_request:
             return "request_points"
 
@@ -4037,24 +4040,66 @@ Keep the response concise but informative."""
 
         return None
 
-    def _resolve_task_list_mode(self, text: str, params: dict) -> str:
-        """Resolve which task list variant the user asked for."""
+    def _match_task_list_mode(self, text: str, params: dict) -> Optional[str]:
+        """Match a task list request to a specific queue, if one is clearly requested."""
         explicit_mode = str(params.get("list_mode", "") or "").strip().lower()
         if explicit_mode in {"all", "mine", "review", "open"}:
             return explicit_mode
         if explicit_mode == "available":
             return "open"
 
-        text_lower = text.lower()
+        text_lower = " ".join(text.lower().split())
         if "tasks all" in text_lower or "all tasks" in text_lower:
             return "all"
-        if "tasks mine" in text_lower or "my tasks" in text_lower:
+        if any(
+            phrase in text_lower
+            for phrase in [
+                "tasks mine",
+                "my tasks",
+                "my work",
+                "show me my tasks",
+                "what am i working on",
+            ]
+        ):
             return "mine"
-        if "tasks review" in text_lower or "review tasks" in text_lower:
+        if any(
+            phrase in text_lower
+            for phrase in [
+                "tasks review",
+                "review tasks",
+                "what needs my review",
+                "what is waiting for my review",
+                "tasks waiting for my review",
+            ]
+        ):
             return "review"
-        if "tasks open" in text_lower or "open tasks" in text_lower:
+        if any(
+            phrase in text_lower
+            for phrase in [
+                "tasks open",
+                "open tasks",
+                "what tasks are open",
+                "what tasks are available",
+                "what can i claim",
+                "claimable tasks",
+                "show me tasks",
+                "show me the tasks",
+                "give me the tasks",
+                "list tasks",
+            ]
+        ):
             return "open"
-        return "open"
+        if text_lower == "tasks":
+            return "open"
+        return None
+
+    def _is_task_list_request(self, text: str, params: Optional[dict] = None) -> bool:
+        """Return true when the text clearly asks for a task list view."""
+        return self._match_task_list_mode(text, params or {}) is not None
+
+    def _resolve_task_list_mode(self, text: str, params: dict) -> str:
+        """Resolve which task list variant the user asked for."""
+        return self._match_task_list_mode(text, params) or "open"
 
     def _coerce_optional_bool(self, value: Any) -> Optional[bool]:
         if isinstance(value, bool):
@@ -4686,7 +4731,7 @@ Keep the response concise but informative."""
             
             footer_messages = {
                 "all": '\nUse "tasks" to see what can be claimed right now.',
-                "open": '\nKeen to help? Just say "claim task <id or code>" to get started!',
+                "open": '\nKeen to help? Just say "task claim <id or code>" to get started!',
                 "mine": '\nSubmit with "task submit <id or code> <description>" when you are done.',
                 "review": '\nApprove or reject with "task approve <id or code>" or "task reject <id or code> <reason>".',
             }
@@ -4696,7 +4741,7 @@ Keep the response concise but informative."""
         elif action == "claim_task":
             task_id = self._extract_task_identifier(text, params.get("task_id"))
             if not task_id:
-                return "Which task do you want to claim? Give me the task ID or code (e.g., \"claim task 42\" or \"claim ROO-0042\")"
+                return "Which task do you want to claim? Give me the task ID or code (e.g., \"task claim 42\" or \"task claim ROO-0042\")"
 
             result = await client.claim_task(task_id, user_id)
             display_id = result.get("task_code") or f"#{result.get('id', task_id)}"
@@ -4722,7 +4767,7 @@ Keep the response concise but informative."""
             submission_url = params.get("submission_url")
             
             if not task_id:
-                return "Which task are you submitting? Give me the task ID or code (e.g., \"submit task 42 done!\" or \"submit ROO-0042 done!\")"
+                return "Which task are you submitting? Give me the task ID or code (e.g., \"task submit 42 done!\" or \"task submit ROO-0042 done!\")"
             
             if not submission_text:
                 # Extract text after the task ID
@@ -5158,7 +5203,7 @@ Keep the response concise but informative."""
             task_id = self._extract_task_identifier(text, params.get("task_id"))
 
             if not task_id:
-                return "Which task are you approving? Give me the task ID or code (e.g., \"approve task 42\" or \"approve ROO-0042\")"
+                return "Which task are you approving? Give me the task ID or code (e.g., \"task approve 42\" or \"task approve ROO-0042\")"
 
             result = await client.approve_task(task_id, user_id)
             points_awarded = result.get("points_awarded", 0)

@@ -81,3 +81,19 @@ async def test_tasks_quick_returns_explicit_unsupported_message():
 
     assert result == 'Use `tasks` or `tasks open` for claimable work. `tasks quick` is no longer supported.'
     assert client.calls == []
+
+
+def test_plain_english_task_list_requests_override_bad_model_action_guesses():
+    executor = SkillExecutor()
+
+    assert executor._resolve_points_action({"action": "create_task"}, "give me the tasks please") == "list_tasks"
+    assert executor._resolve_points_action({"action": "request_points"}, "what tasks are open?") == "list_tasks"
+
+
+def test_plain_english_task_list_modes_are_resolved_correctly():
+    executor = SkillExecutor()
+
+    assert executor._resolve_task_list_mode("what tasks are open?", {}) == "open"
+    assert executor._resolve_task_list_mode("what am I working on?", {}) == "mine"
+    assert executor._resolve_task_list_mode("what needs my review?", {}) == "review"
+    assert executor._resolve_task_list_mode("show me all tasks", {}) == "all"
