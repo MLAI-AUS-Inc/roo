@@ -362,6 +362,19 @@ class RooAgent:
         )
         return any(re.search(pattern, text) for pattern in patterns)
 
+    def _looks_like_luma_request(self, text: str) -> bool:
+        patterns = (
+            r'\bluma\b',
+            r'\battendees?\b',
+            r'\bguest\s+lists?\b',
+            r'\bguests?\b.*\bcsv\b',
+            r'\bcsv\b.*\bguests?\b',
+            r'\bcsv\b.*\bmlai\s+events?\b',
+            r'\bmlai\s+events?\b.*\bcsv\b',
+            r'\bpast\s+csv\s+documents?\b',
+        )
+        return any(re.search(pattern, text) for pattern in patterns)
+
     def _looks_like_content_follow_up(self, text: str) -> bool:
         patterns = (
             r'\bwrite\b',
@@ -396,6 +409,10 @@ class RooAgent:
 
         text_lower = text.lower().strip()
         content_skill = self._get_skill_by_name("content-factory")
+        luma_skill = self._get_skill_by_name("luma-events")
+
+        if luma_skill and self._looks_like_luma_request(text_lower):
+            return luma_skill
 
         if content_skill and self._looks_like_content_request(text_lower):
             return content_skill
@@ -684,6 +701,7 @@ Routing rules:
 - Prefer content-factory for domain-backed repo scans, article/blog writing, SEO research, content planning, scaffolding blog/article pages, and requests like "scan the domain mlai.au" or "scan the repo for the domain mlai.au".
 - Prefer github-integration for GitHub auth, reconnecting GitHub, or account/integration management.
 - Prefer mlai-points for points, rewards, coworking, and task management.
+- Prefer luma-events for Luma attendee exports, guest lists, CSV documents, and recent/past MLAI event attendee CSVs.
 
 Examples:
 - "please research the best article for me to write" -> content-factory
@@ -692,6 +710,7 @@ Examples:
 - "reconnect github for woofya.com.au" -> github-integration
 - "write me an article about how to build an ai agent harness for long-running specific tasks" -> content-factory
 - "create a task called fix docs worth 5 points" -> mlai-points
+- "give me CSVs for the past 3 MLAI events" -> luma-events
 
 Respond with ONLY the skill name (e.g., "connect_users" or "none"):"""
 
