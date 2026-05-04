@@ -46,6 +46,11 @@ class Settings(BaseSettings):
     ROUTER_MODEL: str = "gpt-5.4"
     COWORKING_INTENTS_DB_PATH: str = "data/coworking_booking_intents.db"
     COWORKING_RETRY_POLL_SECONDS: float = 30.0
+    BOOST_LINK_LOVE_ENABLED: bool = True
+    BOOST_LINK_LOVE_CHANNEL_NAME: str = "boost-my-startup"
+    BOOST_LINK_LOVE_DB_PATH: str = "data/link_love_awards.db"
+    BOOST_LINK_LOVE_NOTIFICATION_DELAY_SECONDS: int = 60
+    BOOST_LINK_LOVE_RETRY_POLL_SECONDS: float = 15.0
     JOBS_SCHEDULER_ENABLED: bool = False
     JOBS_API_URL: Optional[str] = None
     JOBS_TRIGGER_TOKEN: Optional[str] = None
