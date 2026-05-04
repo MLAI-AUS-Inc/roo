@@ -193,6 +193,22 @@ async def test_get_coworking_report_503_raises_backend_unavailable(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_is_admin_excludes_report_only_partner(monkeypatch):
+    client = MLAIBackendClient(
+        base_url="https://backend.test",
+        api_key="roo-api-key",
+        internal_api_key="roo-api-key",
+    )
+
+    async def fake_get_admin_details(slack_user_id):
+        return {"slack_user_id": slack_user_id, "role": "partner"}
+
+    monkeypatch.setattr(client, "get_admin_details", fake_get_admin_details)
+
+    assert await client.is_admin("UPARTNER") is False
+
+
+@pytest.mark.asyncio
 async def test_trigger_repo_scan_includes_requested_by_when_provided(monkeypatch):
     captured = {}
 

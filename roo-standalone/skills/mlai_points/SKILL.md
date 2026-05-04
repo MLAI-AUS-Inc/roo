@@ -27,7 +27,7 @@ This skill enables Roo to interact with the MLAI Points System via API, allowing
 - Book and cancel coworking days
 - View rewards catalog and request redemptions
 
-### Admin Actions (requires PointsAdmin role)
+### Full Admin Actions (requires `admin`, `committee`, or `portfolio_lead` role)
 - Create new tasks with point values
 - Edit supported task fields
 - Cancel/archive tasks while preserving history
@@ -41,11 +41,13 @@ This skill enables Roo to interact with the MLAI Points System via API, allowing
 - `unclaim` is only allowed before any submission exists
 - Approval awards points once, on final acceptance
 
+### Partner Actions (report-only)
+- Generate coworking usage reports for date ranges and standard lookback windows
+
 ### Super Admin Actions (restricted to Slack user `U05QPB483K9`)
 - Promote one tagged user to Points Admin
 - Revoke one tagged user's Points Admin access
 - Change one tagged Points Admin's weekly allowance
-- Generate coworking usage reports for date ranges and standard lookback windows
 
 ### Admin Weekly Allowance
 
@@ -153,8 +155,9 @@ Parse the user's message to determine which action they want:
 - For super admin actions, require exactly one tagged Slack user, never fall through into `award_points`, and require a positive numeric allowance when changing allowance
 
 ### Step 2: Permission Check
-For admin-only actions (create, edit, cancel, approve, reject, award):
+For full admin-only actions (create, edit, cancel, approve, reject, award):
 - The API will validate the requester's Slack ID
+- Partner admins are not full admins and must be denied for point-mutating actions
 - If 403 returned, respond with friendly denial
 
 For super admin actions (promote admin, revoke admin, change allowance):
@@ -162,7 +165,7 @@ For super admin actions (promote admin, revoke admin, change allowance):
 - The backend must still validate the requester for defense in depth
 
 For coworking report actions:
-- Roo must fail fast unless the requester is a Points Admin
+- Roo must fail fast unless the requester is a full Points Admin or report-only partner
 - Count only active bookings (`status=booked`), not cancelled bookings
 - Support exact inclusive date ranges and presets: this week, last week, last 3 months, last 6 months, last year
 - Format the response as a concise Slack report with summary, monthly, weekly, and daily counts

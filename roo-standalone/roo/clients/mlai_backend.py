@@ -13,6 +13,7 @@ import httpx
 from ..config import get_settings
 
 CONTENT_FACTORY_REQUEST_SOURCE = "roo_slackbot"
+FULL_POINTS_ADMIN_ROLES = {"admin", "committee", "portfolio_lead"}
 
 
 class MLAIBackendUnavailableError(RuntimeError):
@@ -1592,13 +1593,16 @@ class MLAIBackendClient:
             return []
 
     async def is_admin(self, slack_user_id: str) -> bool:
-        """Check if a user is a Points Admin (with caching)."""
+        """Check if a user is a full Points Admin (with caching)."""
         if slack_user_id in self._admin_cache:
             return self._admin_cache[slack_user_id]
         
         try:
             details = await self.get_admin_details(slack_user_id)
-            is_admin = details is not None
+            is_admin = (
+                isinstance(details, dict)
+                and str(details.get("role") or "").strip().lower() in FULL_POINTS_ADMIN_ROLES
+            )
             self._admin_cache[slack_user_id] = is_admin
             return is_admin
         except Exception:
@@ -2221,14 +2225,14 @@ class MLAIBackendClient:
     ) -> dict:
         """System award points (bypasses client-side admin checks)."""
         payload = {
-            "admin_slack_id": admin_slack_id,
+            "created_by_slack_id": admin_slack_id,
             "target_slack_id": self._clean_slack_id(target_slack_id),
             "points": points,
             "reason": reason,
         }
         response = await self._request(
             "POST",
-            f"{self._points_base}/admin/award/",
+            f"{self._points_base}/system/award/",
             json=payload,
             timeout=15.0,
             circuit_breaker=True,
