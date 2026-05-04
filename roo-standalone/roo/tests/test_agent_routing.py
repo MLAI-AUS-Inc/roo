@@ -100,12 +100,14 @@ def test_request_points_phrase_routes_to_points():
 def test_luma_attendee_csv_phrase_routes_to_luma_events():
     agent = _make_agent()
 
-    skill = agent._select_skill_from_triggers(
-        "can you give me past csv documents for the past 3 MLAI events"
-    )
-
-    assert skill is not None
-    assert skill.name == "luma-events"
+    for text in [
+        "can you give me past csv documents for the past 3 MLAI events",
+        "give me a report for how many people registered for the april 29 event",
+        "how many registrations were there for the 2026-04-29 event",
+    ]:
+        skill = agent._select_skill_from_triggers(text)
+        assert skill is not None
+        assert skill.name == "luma-events"
 
 
 def test_coworking_report_wording_routes_to_points():
