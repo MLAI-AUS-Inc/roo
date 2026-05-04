@@ -355,6 +355,8 @@ class RooAgent:
             r'\bpoints?\b',
             r'\bbalance\b',
             r'\bcoworking\b',
+            r'\bbook\s+me\s+in\b',
+            r'\bcheck\b.*<@[a-z0-9]+>.*\bin\b',
             r'\brewards?\b',
             r'\bclaim\s+task\b',
             r'\bcreate\s+(?:a\s+)?task\b',

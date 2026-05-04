@@ -1914,6 +1914,222 @@ async def test_book_coworking_still_succeeds_when_balance_refresh_times_out(tmp_
     assert "Balance remaining" not in result
 
 
+@pytest.mark.asyncio
+async def test_book_coworking_defaults_missing_date_to_today(tmp_path, monkeypatch):
+    store = coworking_module.CoworkingBookingIntentStore(tmp_path / "intents.db")
+
+    class FakeCoworkingClient:
+        def __init__(self):
+            self.book_args = None
+            self.balance_args = None
+
+        async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None):
+            self.book_args = (slack_user_id, booking_date, slack_channel_id)
+            return {"points_cost": 1}
+
+        async def get_balance(self, slack_user_id):
+            self.balance_args = slack_user_id
+            return {"balance": 9}
+
+    client = FakeCoworkingClient()
+    executor = SkillExecutor()
+    monkeypatch.setattr("roo.utils.get_current_date", lambda: date(2026, 5, 4))
+    monkeypatch.setattr(executor_module, "get_coworking_intent_store", lambda: store)
+
+    result = await executor._handle_points_action(
+        client=client,
+        action="book_coworking",
+        params={},
+        text="book me in",
+        user_id="U123",
+        channel_id="C123",
+        thread_ts="111.222",
+        skill=SimpleNamespace(name="mlai-points"),
+    )
+
+    intent = store.get_by_key("coworking:U123:2026-05-04")
+    assert "Booked you in for **2026-05-04**" in result
+    assert client.book_args == ("U123", "2026-05-04", "C123")
+    assert client.balance_args == "U123"
+    assert intent["requested_by_slack_id"] == "U123"
+
+
+class FakeAdminCheckinCoworkingClient:
+    def __init__(
+        self,
+        *,
+        role="admin",
+        book_exception=None,
+        balance=14,
+    ):
+        self.role = role
+        self.book_exception = book_exception
+        self.balance = balance
+        self.admin_checks = []
+        self.book_args = None
+        self.balance_args = None
+
+    async def get_admin_details(self, slack_user_id):
+        self.admin_checks.append(slack_user_id)
+        if not self.role:
+            return None
+        return {"slack_user_id": slack_user_id, "role": self.role}
+
+    async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None):
+        self.book_args = (slack_user_id, booking_date, slack_channel_id)
+        if self.book_exception:
+            raise self.book_exception
+        return {"points_cost": 1}
+
+    async def get_balance(self, slack_user_id):
+        self.balance_args = slack_user_id
+        return {"balance": self.balance}
+
+
+@pytest.mark.asyncio
+async def test_admin_checkin_books_target_for_today(tmp_path, monkeypatch):
+    store = coworking_module.CoworkingBookingIntentStore(tmp_path / "intents.db")
+    client = FakeAdminCheckinCoworkingClient(balance=13)
+    executor = SkillExecutor()
+    monkeypatch.setattr("roo.utils.get_current_date", lambda: date(2026, 5, 4))
+    monkeypatch.setattr(executor_module, "get_coworking_intent_store", lambda: store)
+    monkeypatch.setattr(slack_client_module, "get_bot_user_id", lambda: "UROO")
+
+    result = await executor._handle_points_action(
+        client=client,
+        action="admin_checkin_coworking",
+        params={},
+        text="check <@UTARGET> in today",
+        user_id="UADMIN",
+        channel_id="C123",
+        thread_ts="111.222",
+        skill=SimpleNamespace(name="mlai-points"),
+    )
+
+    intent = store.get_by_key("coworking:UTARGET:2026-05-04")
+    assert "Checked <@UTARGET> in for **2026-05-04**" in result
+    assert "Their balance: 13 pts" in result
+    assert client.book_args == ("UTARGET", "2026-05-04", "C123")
+    assert client.balance_args == "UTARGET"
+    assert intent["requested_by_slack_id"] == "UADMIN"
+
+
+@pytest.mark.asyncio
+async def test_admin_checkin_honors_explicit_date(tmp_path, monkeypatch):
+    store = coworking_module.CoworkingBookingIntentStore(tmp_path / "intents.db")
+    client = FakeAdminCheckinCoworkingClient()
+    executor = SkillExecutor()
+    monkeypatch.setattr(executor_module, "get_coworking_intent_store", lambda: store)
+    monkeypatch.setattr(slack_client_module, "get_bot_user_id", lambda: "UROO")
+
+    result = await executor._handle_points_action(
+        client=client,
+        action="admin_checkin_coworking",
+        params={"date": "2026-06-01"},
+        text="check <@UTARGET> in 2026-06-01",
+        user_id="UADMIN",
+        channel_id="C123",
+        thread_ts="111.222",
+        skill=SimpleNamespace(name="mlai-points"),
+    )
+
+    assert "Checked <@UTARGET> in for **2026-06-01**" in result
+    assert client.book_args == ("UTARGET", "2026-06-01", "C123")
+
+
+@pytest.mark.asyncio
+async def test_admin_checkin_denies_partner_without_booking(tmp_path, monkeypatch):
+    store = coworking_module.CoworkingBookingIntentStore(tmp_path / "intents.db")
+    client = FakeAdminCheckinCoworkingClient(role="partner")
+    executor = SkillExecutor()
+    monkeypatch.setattr("roo.utils.get_current_date", lambda: date(2026, 5, 4))
+    monkeypatch.setattr(executor_module, "get_coworking_intent_store", lambda: store)
+    monkeypatch.setattr(slack_client_module, "get_bot_user_id", lambda: "UROO")
+
+    result = await executor._handle_points_action(
+        client=client,
+        action="admin_checkin_coworking",
+        params={},
+        text="check <@UTARGET> in today",
+        user_id="UPARTNER",
+        channel_id="C123",
+        thread_ts="111.222",
+        skill=SimpleNamespace(name="mlai-points"),
+    )
+
+    assert "partner admins can only generate coworking reports" in result
+    assert client.book_args is None
+    assert store.counts_by_status() == {}
+
+
+@pytest.mark.asyncio
+async def test_admin_checkin_requires_exactly_one_target(monkeypatch):
+    executor = SkillExecutor()
+    client = FakeAdminCheckinCoworkingClient()
+    monkeypatch.setattr(slack_client_module, "get_bot_user_id", lambda: "UROO")
+
+    missing_result = await executor._handle_points_action(
+        client=client,
+        action="admin_checkin_coworking",
+        params={},
+        text="check in today",
+        user_id="UADMIN",
+        channel_id="C123",
+        thread_ts="111.222",
+        skill=SimpleNamespace(name="mlai-points"),
+    )
+    multiple_result = await executor._handle_points_action(
+        client=client,
+        action="admin_checkin_coworking",
+        params={},
+        text="check <@UONE> and <@UTWO> in today",
+        user_id="UADMIN",
+        channel_id="C123",
+        thread_ts="111.222",
+        skill=SimpleNamespace(name="mlai-points"),
+    )
+
+    assert "Mention exactly one user" in missing_result
+    assert "Tag exactly one user" in multiple_result
+    assert client.book_args is None
+
+
+@pytest.mark.asyncio
+async def test_admin_checkin_insufficient_balance_message_names_target(tmp_path, monkeypatch):
+    request = httpx.Request("POST", "https://backend.test/api/v1/points/coworking/book/")
+    response = httpx.Response(
+        400,
+        request=request,
+        json={"detail": "Insufficient balance: need 1 point"},
+    )
+    store = coworking_module.CoworkingBookingIntentStore(tmp_path / "intents.db")
+    client = FakeAdminCheckinCoworkingClient(
+        book_exception=httpx.HTTPStatusError("bad request", request=request, response=response),
+        balance=0,
+    )
+    executor = SkillExecutor()
+    monkeypatch.setattr("roo.utils.get_current_date", lambda: date(2026, 5, 4))
+    monkeypatch.setattr(executor_module, "get_coworking_intent_store", lambda: store)
+    monkeypatch.setattr(slack_client_module, "get_bot_user_id", lambda: "UROO")
+
+    result = await executor._handle_points_action(
+        client=client,
+        action="admin_checkin_coworking",
+        params={},
+        text="check <@UTARGET> in today",
+        user_id="UADMIN",
+        channel_id="C123",
+        thread_ts="111.222",
+        skill=SimpleNamespace(name="mlai-points"),
+    )
+
+    intent = store.get_by_key("coworking:UTARGET:2026-05-04")
+    assert "I couldn't check <@UTARGET> in" in result
+    assert "Their current balance is **0 points**" in result
+    assert "UADMIN" not in result
+    assert intent["status"] == "blocked"
+
+
 def make_coworking_report(start_date: str, end_date: str, counts: list[int], unique_users: int = 2) -> dict:
     start = date.fromisoformat(start_date)
     end = date.fromisoformat(end_date)
@@ -2447,6 +2663,16 @@ def test_resolve_points_action_detects_coworking_report_wording():
             "show coworking trends for the last 3 months and recommendations",
         )
         == "coworking_report"
+    )
+
+
+def test_resolve_points_action_detects_coworking_shortcuts():
+    executor = SkillExecutor()
+
+    assert executor._resolve_points_action({}, "book me in") == "book_coworking"
+    assert (
+        executor._resolve_points_action({}, "check <@UTARGET> in today")
+        == "admin_checkin_coworking"
     )
 
 

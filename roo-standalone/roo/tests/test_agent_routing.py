@@ -97,6 +97,19 @@ def test_request_points_phrase_routes_to_points():
     assert skill.name == "mlai-points"
 
 
+def test_coworking_booking_shortcuts_route_to_points():
+    agent = _make_agent()
+
+    for text in [
+        "book me in",
+        "book me in today",
+        "check <@U123ABC> in today",
+    ]:
+        skill = agent._select_skill_from_triggers(text)
+        assert skill is not None
+        assert skill.name == "mlai-points"
+
+
 def test_luma_attendee_csv_phrase_routes_to_luma_events():
     agent = _make_agent()
 

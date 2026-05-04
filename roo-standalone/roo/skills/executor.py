@@ -4206,6 +4206,15 @@ Keep the response concise but informative."""
             return "coworking_report"
         if action in ["report", "summary", "overview"] and "coworking" in text_lower:
             return "coworking_report"
+        if self._is_coworking_admin_checkin_request(text):
+            return "admin_checkin_coworking"
+        if action in [
+            "admin_checkin_coworking",
+            "coworking_checkin",
+            "checkin_coworking",
+            "check_in_coworking",
+        ]:
+            return "admin_checkin_coworking"
 
         if action == "book":
             action = "book_coworking"
@@ -4305,6 +4314,16 @@ Keep the response concise but informative."""
         for typo, replacement in replacements.items():
             text_lower = text_lower.replace(typo, replacement)
         return text_lower
+
+    def _is_coworking_admin_checkin_request(self, text: str) -> bool:
+        """Detect admin coworking check-in commands like `check <@U123> in today`."""
+        return bool(
+            re.search(
+                r"\bcheck\b.*<@[A-Z0-9]+>.*\bin\b",
+                str(text or ""),
+                re.IGNORECASE,
+            )
+        )
 
     def _extract_task_identifier(self, text: str, explicit_task_id=None) -> Optional[str]:
         """Extract either a numeric task id or a ROO task code from text."""
@@ -5335,6 +5354,232 @@ Keep the response concise but informative."""
         context = self._build_coworking_analysis_context("coworking report", report, None, None)
         return self._format_coworking_analysis_fallback(context)
 
+    def _resolve_coworking_booking_date(
+        self,
+        params: dict,
+        text: str,
+        *,
+        default_to_today: bool,
+    ) -> Optional[str]:
+        """Resolve coworking booking/check-in date from params, text, or today's default."""
+        raw_date = str(params.get("date") or "").strip().strip(".,")
+
+        if not raw_date:
+            match = re.search(r"(\d{4}-\d{2}-\d{2})", str(text or ""))
+            if match:
+                raw_date = match.group(1)
+
+        text_lower = self._normalize_points_routing_text(text)
+        if not raw_date:
+            if re.search(r"\btomorrow\b", text_lower):
+                raw_date = "tomorrow"
+            elif re.search(r"\btoday\b", text_lower):
+                raw_date = "today"
+
+        if raw_date.lower() not in {"today", "tomorrow"} and (raw_date or not default_to_today):
+            return raw_date or None
+
+        from roo.utils import get_current_date
+        today = get_current_date()
+        if raw_date.lower() == "today":
+            return today.isoformat()
+        if raw_date.lower() == "tomorrow":
+            return (today + timedelta(days=1)).isoformat()
+        return today.isoformat()
+
+    def _extract_coworking_checkin_targets(
+        self,
+        text: str,
+        params: dict,
+        *,
+        bot_id: Optional[str],
+    ) -> list[str]:
+        """Extract target Slack IDs for admin coworking check-in."""
+        target_slack_ids: list[str] = []
+
+        for mentioned_user in re.findall(r"<@([A-Z0-9]+)>", str(text or ""), re.IGNORECASE):
+            if not bot_id or mentioned_user != bot_id:
+                target_slack_ids.append(mentioned_user)
+
+        if not target_slack_ids:
+            param_values: list[Any] = []
+            param_values.extend(params.get("target_users", []) or [])
+            param_values.extend(
+                [
+                    params.get("target_user"),
+                    params.get("target_slack_id"),
+                ]
+            )
+            for raw_target in param_values:
+                if raw_target in (None, ""):
+                    continue
+                cleaned = re.sub(r"[<@>]", "", str(raw_target)).strip()
+                if cleaned and (not bot_id or cleaned != bot_id):
+                    target_slack_ids.append(cleaned)
+
+        deduped: list[str] = []
+        for target in target_slack_ids:
+            if target not in deduped:
+                deduped.append(target)
+        return deduped
+
+    def _coworking_booking_already_queued_message(
+        self,
+        *,
+        booking_date: str,
+        target_user_id: str,
+        admin_checkin: bool,
+    ) -> str:
+        if admin_checkin:
+            return (
+                f"I already have a coworking check-in request for <@{target_user_id}> "
+                f"on **{booking_date}** queued or in progress. I'll confirm in this thread "
+                "when it completes."
+            )
+        return (
+            f"I already have your coworking booking request for **{booking_date}** "
+            "queued or in progress. I'll confirm in this thread when it completes."
+        )
+
+    def _coworking_booking_queued_for_retry_message(
+        self,
+        *,
+        booking_date: str,
+        target_user_id: str,
+        admin_checkin: bool,
+    ) -> str:
+        if admin_checkin:
+            return (
+                f"I got the coworking check-in request for <@{target_user_id}> on "
+                f"**{booking_date}**, but MLAI backend didn't confirm it yet. I've queued "
+                "it and will keep retrying automatically. I won't double-book the same day."
+            )
+        return self._coworking_booking_queued_message(booking_date)
+
+    def _format_coworking_booking_success(
+        self,
+        *,
+        booking_date: str,
+        target_user_id: str,
+        cost: int,
+        new_balance: Optional[int],
+        admin_checkin: bool,
+    ) -> str:
+        point_word = "point" if cost == 1 else "points"
+        if admin_checkin:
+            balance_line = f"\nTheir balance: {new_balance} pts" if new_balance is not None else ""
+            return (
+                f"You beauty! 🎉\n\n"
+                f"Checked <@{target_user_id}> in for **{booking_date}** at the coworking space.\n"
+                f"Cost: {cost} {point_word}{balance_line}"
+            )
+
+        balance_line = ""
+        if new_balance is not None:
+            balance_line = f" (Balance remaining: {new_balance} points)"
+
+        return (
+            f"You beauty! 🎉\n\n"
+            f"Booked you in for **{booking_date}** at the coworking space.\n"
+            f"Cost: {cost} {point_word}{balance_line}\n\n"
+            f"See you there, legend!"
+        )
+
+    async def _format_admin_coworking_bad_request(
+        self,
+        *,
+        client,
+        target_user_id: str,
+        exc: httpx.HTTPStatusError,
+    ) -> str:
+        error_detail = self._extract_http_error_detail(exc) or "Bad request"
+        balance_line = ""
+        if "balance" in error_detail.lower() or "insufficient" in error_detail.lower():
+            try:
+                balance_data = await client.get_balance(target_user_id)
+                current_balance = balance_data.get("balance", 0)
+                balance_line = f"\n\nTheir current balance is **{current_balance} points**."
+            except Exception:
+                pass
+        return f"🛑 I couldn't check <@{target_user_id}> in: {error_detail}{balance_line}"
+
+    async def _book_coworking_with_intent(
+        self,
+        *,
+        client,
+        target_user_id: str,
+        requested_by_user_id: str,
+        booking_date: str,
+        text: str,
+        channel_id: Optional[str],
+        thread_ts: Optional[str],
+        admin_checkin: bool,
+    ) -> str:
+        try:
+            store = get_coworking_intent_store()
+            intent = store.record_intent(
+                slack_user_id=target_user_id,
+                requested_by_slack_id=requested_by_user_id,
+                booking_date=booking_date,
+                channel_id=channel_id,
+                thread_ts=thread_ts,
+                request_text=text,
+            )
+            leased_intent = store.reserve_for_processing(
+                int(intent["id"]),
+                owner=f"roo-sync-{uuid4().hex}",
+            )
+        except Exception as exc:
+            print(
+                "🏢 coworking_intent_persist_failed "
+                f"slack_user_id={target_user_id} requested_by={requested_by_user_id} "
+                f"booking_date={booking_date} exc_type={exc.__class__.__name__} exc={exc}"
+            )
+            return (
+                "I couldn't safely queue that coworking booking request just now, "
+                "so I didn't send it to MLAI backend. Please try again in a moment."
+            )
+
+        if not leased_intent:
+            return self._coworking_booking_already_queued_message(
+                booking_date=booking_date,
+                target_user_id=target_user_id,
+                admin_checkin=admin_checkin,
+            )
+
+        try:
+            result = await client.book_coworking(target_user_id, booking_date, channel_id)
+            store.mark_confirmed(int(leased_intent["id"]), backend_result=result)
+        except Exception as exc:
+            error = f"{exc.__class__.__name__}: {exc}"
+            if is_retryable_coworking_exception(exc):
+                store.mark_retryable_failure(int(leased_intent["id"]), error=error)
+                return self._coworking_booking_queued_for_retry_message(
+                    booking_date=booking_date,
+                    target_user_id=target_user_id,
+                    admin_checkin=admin_checkin,
+                )
+            store.mark_blocked(int(leased_intent["id"]), error=error)
+            raise
+
+        cost = result.get("points_cost", 1)
+        from roo.clients.mlai_backend import MLAIBackendUnavailableError
+
+        new_balance = None
+        try:
+            balance_data = await client.get_balance(target_user_id)
+            new_balance = balance_data.get("balance", 0)
+        except MLAIBackendUnavailableError:
+            pass
+
+        return self._format_coworking_booking_success(
+            booking_date=booking_date,
+            target_user_id=target_user_id,
+            cost=cost,
+            new_balance=new_balance,
+            admin_checkin=admin_checkin,
+        )
+
     async def _handle_points_action(
         self,
         client,
@@ -5630,6 +5875,54 @@ Keep the response concise but informative."""
             )
             return await self._format_coworking_analysis_response(context)
 
+        elif action == "admin_checkin_coworking":
+            from ..slack_client import get_bot_user_id
+            try:
+                bot_id = get_bot_user_id()
+            except Exception:
+                bot_id = None
+
+            target_slack_ids = self._extract_coworking_checkin_targets(
+                text,
+                params,
+                bot_id=bot_id,
+            )
+            if not target_slack_ids:
+                return "Who should I check in? Mention exactly one user, like `check @Jasmine in today`."
+            if len(target_slack_ids) != 1:
+                return "Tag exactly one user to check them in for coworking."
+
+            admin_details = await client.get_admin_details(user_id)
+            if not self._is_full_points_admin_details(admin_details):
+                return self._full_points_admin_denial(admin_details, "check people in for coworking")
+
+            target_user_id = target_slack_ids[0]
+            booking_date = self._resolve_coworking_booking_date(
+                params,
+                text,
+                default_to_today=True,
+            )
+
+            try:
+                return await self._book_coworking_with_intent(
+                    client=client,
+                    target_user_id=target_user_id,
+                    requested_by_user_id=user_id,
+                    booking_date=booking_date,
+                    text=text,
+                    channel_id=channel_id,
+                    thread_ts=thread_ts,
+                    admin_checkin=True,
+                )
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code == 400:
+                    return await self._format_admin_coworking_bad_request(
+                        client=client,
+                        target_user_id=target_user_id,
+                        exc=exc,
+                    )
+                raise
+
         elif action == "check_coworking":
             check_date = params.get("date")
             days = params.get("days", 7)
@@ -5651,86 +5944,20 @@ Keep the response concise but informative."""
             return "\n".join(lines)
         
         elif action == "book_coworking":
-            booking_date = params.get("date")
-            
-            # Normalize date aliases
-            if str(booking_date or "").lower() in {"today", "tomorrow"}:
-                from roo.utils import get_current_date
-                today = get_current_date()
-
-                if booking_date.lower() == "today":
-                    booking_date = today.isoformat()
-                elif booking_date.lower() == "tomorrow":
-                    booking_date = (today + timedelta(days=1)).isoformat()
-            
-            if not booking_date:
-                import re
-                match = re.search(r'(\d{4}-\d{2}-\d{2})', text)
-                if match:
-                    booking_date = match.group(1)
-                else:
-                    return "What date would you like to book? Use format YYYY-MM-DD (e.g., \"book 2025-12-20\")"
-            
-            try:
-                store = get_coworking_intent_store()
-                intent = store.record_intent(
-                    slack_user_id=user_id,
-                    booking_date=booking_date,
-                    channel_id=channel_id,
-                    thread_ts=thread_ts,
-                    request_text=text,
-                )
-                leased_intent = store.reserve_for_processing(
-                    int(intent["id"]),
-                    owner=f"roo-sync-{uuid4().hex}",
-                )
-            except Exception as exc:
-                print(
-                    "🏢 coworking_intent_persist_failed "
-                    f"slack_user_id={user_id} booking_date={booking_date} "
-                    f"exc_type={exc.__class__.__name__} exc={exc}"
-                )
-                return (
-                    "I couldn't safely queue your coworking booking request just now, "
-                    "so I didn't send it to MLAI backend. Please try again in a moment."
-                )
-
-            if not leased_intent:
-                return (
-                    f"I already have your coworking booking request for **{booking_date}** "
-                    "queued or in progress. I'll confirm in this thread when it completes."
-                )
-
-            try:
-                result = await client.book_coworking(user_id, booking_date, channel_id)
-                store.mark_confirmed(int(leased_intent["id"]), backend_result=result)
-            except Exception as exc:
-                error = f"{exc.__class__.__name__}: {exc}"
-                if is_retryable_coworking_exception(exc):
-                    store.mark_retryable_failure(int(leased_intent["id"]), error=error)
-                    return self._coworking_booking_queued_message(booking_date)
-                store.mark_blocked(int(leased_intent["id"]), error=error)
-                raise
-
-            cost = result.get("points_cost", 1)
-            from roo.clients.mlai_backend import MLAIBackendUnavailableError
-
-            new_balance = None
-            try:
-                balance_data = await client.get_balance(user_id)
-                new_balance = balance_data.get("balance", 0)
-            except MLAIBackendUnavailableError:
-                pass
-
-            balance_line = ""
-            if new_balance is not None:
-                balance_line = f" (Balance remaining: {new_balance} points)"
-
-            return (
-                f"You beauty! 🎉\n\n"
-                f"Booked you in for **{booking_date}** at the coworking space.\n"
-                f"Cost: {cost} point{balance_line}\n\n"
-                f"See you there, legend!"
+            booking_date = self._resolve_coworking_booking_date(
+                params,
+                text,
+                default_to_today=True,
+            )
+            return await self._book_coworking_with_intent(
+                client=client,
+                target_user_id=user_id,
+                requested_by_user_id=user_id,
+                booking_date=booking_date,
+                text=text,
+                channel_id=channel_id,
+                thread_ts=thread_ts,
+                admin_checkin=False,
             )
         
         elif action == "cancel_coworking":

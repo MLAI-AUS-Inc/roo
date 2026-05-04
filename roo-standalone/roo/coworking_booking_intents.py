@@ -82,6 +82,7 @@ class CoworkingBookingIntentStore:
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         idempotency_key TEXT NOT NULL UNIQUE,
                         slack_user_id TEXT NOT NULL,
+                        requested_by_slack_id TEXT,
                         booking_date TEXT NOT NULL,
                         channel_id TEXT,
                         thread_ts TEXT,
@@ -100,6 +101,15 @@ class CoworkingBookingIntentStore:
                     )
                     """
                 )
+                columns = {
+                    row["name"]
+                    for row in conn.execute("PRAGMA table_info(coworking_booking_intents)").fetchall()
+                }
+                if "requested_by_slack_id" not in columns:
+                    conn.execute(
+                        "ALTER TABLE coworking_booking_intents "
+                        "ADD COLUMN requested_by_slack_id TEXT"
+                    )
                 conn.execute(
                     """
                     CREATE INDEX IF NOT EXISTS idx_coworking_intents_due
@@ -124,6 +134,7 @@ class CoworkingBookingIntentStore:
         self,
         *,
         slack_user_id: str,
+        requested_by_slack_id: Optional[str] = None,
         booking_date: str,
         channel_id: Optional[str],
         thread_ts: Optional[str],
@@ -132,6 +143,8 @@ class CoworkingBookingIntentStore:
         self._ensure_schema()
         current_time = _now()
         idempotency_key = build_coworking_intent_key(slack_user_id, booking_date)
+        cleaned_slack_user_id = str(slack_user_id).strip()
+        cleaned_requested_by = str(requested_by_slack_id or cleaned_slack_user_id).strip()
         with self._lock:
             with self._connect() as conn:
                 conn.execute(
@@ -139,6 +152,7 @@ class CoworkingBookingIntentStore:
                     INSERT INTO coworking_booking_intents (
                         idempotency_key,
                         slack_user_id,
+                        requested_by_slack_id,
                         booking_date,
                         channel_id,
                         thread_ts,
@@ -148,8 +162,9 @@ class CoworkingBookingIntentStore:
                         created_at,
                         updated_at
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)
                     ON CONFLICT(idempotency_key) DO UPDATE SET
+                        requested_by_slack_id = excluded.requested_by_slack_id,
                         channel_id = excluded.channel_id,
                         thread_ts = excluded.thread_ts,
                         request_text = excluded.request_text,
@@ -182,7 +197,8 @@ class CoworkingBookingIntentStore:
                     """,
                     (
                         idempotency_key,
-                        str(slack_user_id).strip(),
+                        cleaned_slack_user_id,
+                        cleaned_requested_by,
                         str(booking_date).strip(),
                         channel_id,
                         thread_ts,
@@ -452,6 +468,40 @@ def _safe_post_thread_message(*, channel_id: Optional[str], thread_ts: Optional[
     post_message(channel=channel_id, thread_ts=thread_ts, text=text)
 
 
+def _coworking_retry_confirmed_message(
+    *,
+    slack_user_id: str,
+    requested_by_slack_id: str,
+    booking_date: str,
+) -> str:
+    if requested_by_slack_id and requested_by_slack_id != slack_user_id:
+        return (
+            "I retried the queued coworking check-in for "
+            f"<@{slack_user_id}> and confirmed {booking_date}. They're booked."
+        )
+    return (
+        "I retried your queued coworking booking and confirmed "
+        f"{booking_date}. You're booked."
+    )
+
+
+def _coworking_retry_blocked_message(
+    *,
+    slack_user_id: str,
+    requested_by_slack_id: str,
+    error: str,
+) -> str:
+    if requested_by_slack_id and requested_by_slack_id != slack_user_id:
+        return (
+            "I retried the coworking check-in for "
+            f"<@{slack_user_id}>, but I still can't process it. Reason: {error}"
+        )
+    return (
+        "I retried your coworking booking request, but I still can't process it. "
+        f"Reason: {error}"
+    )
+
+
 async def process_coworking_booking_intent(
     intent: dict[str, Any],
     *,
@@ -464,6 +514,7 @@ async def process_coworking_booking_intent(
     intent_id = int(intent["id"])
     booking_date = str(intent["booking_date"])
     slack_user_id = str(intent["slack_user_id"])
+    requested_by_slack_id = str(intent.get("requested_by_slack_id") or slack_user_id)
     channel_id = intent.get("channel_id")
     thread_ts = intent.get("thread_ts")
 
@@ -476,9 +527,10 @@ async def process_coworking_booking_intent(
                 _safe_post_thread_message(
                     channel_id=channel_id,
                     thread_ts=thread_ts,
-                    text=(
-                        "I retried your queued coworking booking and confirmed "
-                        f"{booking_date}. You're booked."
+                    text=_coworking_retry_confirmed_message(
+                        slack_user_id=slack_user_id,
+                        requested_by_slack_id=requested_by_slack_id,
+                        booking_date=booking_date,
                     ),
                 )
             return {"status": "confirmed", "already_booked": True, "intent_id": intent_id}
@@ -489,9 +541,10 @@ async def process_coworking_booking_intent(
             _safe_post_thread_message(
                 channel_id=channel_id,
                 thread_ts=thread_ts,
-                text=(
-                    "I retried your queued coworking booking and confirmed "
-                    f"{booking_date}. You're booked."
+                text=_coworking_retry_confirmed_message(
+                    slack_user_id=slack_user_id,
+                    requested_by_slack_id=requested_by_slack_id,
+                    booking_date=booking_date,
                 ),
             )
         return {"status": "confirmed", "backend_result": backend_result, "intent_id": intent_id}
@@ -513,9 +566,10 @@ async def process_coworking_booking_intent(
             _safe_post_thread_message(
                 channel_id=channel_id,
                 thread_ts=thread_ts,
-                text=(
-                    "I retried your coworking booking request, but I still can't process it. "
-                    f"Reason: {error}"
+                text=_coworking_retry_blocked_message(
+                    slack_user_id=slack_user_id,
+                    requested_by_slack_id=requested_by_slack_id,
+                    error=error,
                 ),
             )
         return {"status": "blocked", "error": error, "intent_id": intent_id}
