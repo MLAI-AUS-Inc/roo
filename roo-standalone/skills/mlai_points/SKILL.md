@@ -25,6 +25,7 @@ This skill enables Roo to interact with the MLAI Points System via API, allowing
 - Submit completed work for approval
 - Unclaim a task before any submission exists
 - Book and cancel coworking days
+- Points Admins can check another member in for coworking from Slack
 - View rewards catalog and request redemptions
 
 ### Full Admin Actions (requires `admin`, `committee`, or `portfolio_lead` role)
@@ -65,7 +66,7 @@ Example responses:
 
 ## Parameters
 
-- **action**: The action to perform (required) - e.g., "balance", "request_points", "book_coworking", "coworking_report", "claim_task", "submit_task", "award_points", "create_task"
+- **action**: The action to perform (required) - e.g., "balance", "request_points", "book_coworking", "admin_checkin_coworking", "coworking_report", "claim_task", "submit_task", "award_points", "create_task"
 - **task_id**: Task ID number or task code (for example `42` or `ROO-0042`) for task-related actions
 - **date**: Date for coworking bookings (YYYY-MM-DD format)
 - **start_date**: Start date for coworking reports (YYYY-MM-DD format)
@@ -122,7 +123,8 @@ Parse user messages to identify the action and parameters:
 | `coworking trends/recommendations ...` | coworking_report | "Show coworking trends for the last 3 months and recommendations" |
 | `coworking report last 3/6 months` | coworking_report | "Coworking report last 3 months" |
 | `coworking report last year` | coworking_report | "Coworking report last year" |
-| `coworking book <date/today>` | book_coworking | "Book me in for today", "@Roo coworking book today" |
+| `coworking book <date/today>` | book_coworking | "Book me in", "Book me in for today", "@Roo coworking book" |
+| `check <@USER> in <date/today>` | admin_checkin_coworking | (Admin) "Check <@U123> in", "Check <@U123> in today" |
 | `coworking cancel <date>` | cancel_coworking | "Cancel my booking for Friday", "@Roo coworking cancel" |
 | `rewards`, `points rewards` | list_rewards | "What rewards are available?", "@Roo points rewards" |
 | `reward request <code>` | request_reward | "I want to get the HOTDESK_DAY reward" |
@@ -155,6 +157,8 @@ Parse the user's message to determine which action they want:
 - Accept both numeric task ids and `ROO-xxxx` task codes
 - Treat `request ... points for ...` as `request_points`, not `award_points`
 - For admin actions, verify the Slack mention format
+- Treat coworking booking requests without a date as a booking for today
+- For admin coworking check-ins, require exactly one tagged Slack user and book that user, not the admin
 - For super admin actions, require exactly one tagged Slack user, never fall through into `award_points`, and require a positive numeric allowance when changing allowance
 
 ### Step 2: Permission Check
@@ -162,6 +166,13 @@ For full admin-only actions (create, edit, cancel, approve, reject, award):
 - The API will validate the requester's Slack ID
 - Partner admins are not full admins and must be denied for point-mutating actions
 - If 403 returned, respond with friendly denial
+
+For admin coworking check-ins:
+- Roo must fail fast unless the requester is a full Points Admin
+- Partner admins are report-only and cannot check people in
+- The target user is the single non-Roo Slack mention in the message
+- The booking date defaults to today when omitted
+- The coworking booking must be created for the target user's Slack ID so the target user's points are deducted
 
 For super admin actions (promote admin, revoke admin, change allowance):
 - Roo must fail fast unless the requester Slack ID is `U05QPB483K9`
