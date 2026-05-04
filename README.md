@@ -49,5 +49,5 @@ Copy `.env.example` to `.env` and configure:
 - `DATABASE_URL` - PostgreSQL connection
 - `SLACK_BOT_TOKEN` - Slack bot token
 - `OPENAI_API_KEY` - For LLM and embeddings
-- `LUMA_API_KEY` - Luma calendar API key for attendee CSV exports
-- `LUMA_BASE_URL` - Optional Luma API base URL, defaults to `https://public-api.luma.com`
+- `MLAI_BACKEND_URL` - Backend API URL for points, admin lookup, and Luma attendee reports
+- `ROO_API_KEY`/`MLAI_API_KEY`/`INTERNAL_API_KEY` - Backend auth key for Roo-to-mlai-backend calls

@@ -1093,6 +1093,37 @@ class MLAIBackendClient:
         self._raise_for_status_or_backend_unavailable(response)
         return response.json()
 
+    async def get_luma_attendee_report(
+        self,
+        slack_user_id: str,
+        *,
+        event_count: int = 3,
+        event_date: Optional[str] = None,
+        approval_status: str = "approved",
+        include_csv: bool = False,
+    ) -> dict:
+        """Get Luma attendee summaries and optional CSV payloads from mlai-backend."""
+        params = {
+            "slack_user_id": self._clean_slack_id(slack_user_id),
+            "event_count": event_count,
+            "approval_status": approval_status,
+            "include_csv": "true" if include_csv else "false",
+        }
+        if event_date:
+            params["event_date"] = event_date
+
+        response = await self._request(
+            "GET",
+            "/api/v1/integrations/luma/attendee-report",
+            params=params,
+            timeout=30.0,
+            transport_retries=1,
+            retry_backoff_seconds=0.25,
+            circuit_breaker=True,
+        )
+        self._raise_for_status_or_backend_unavailable(response)
+        return response.json()
+
     async def book_coworking(self, slack_user_id: str, booking_date: str, slack_channel_id: Optional[str] = None) -> dict:
         """Book a coworking day."""
         try:

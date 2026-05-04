@@ -372,6 +372,8 @@ class RooAgent:
             r'\bcsv\b.*\bmlai\s+events?\b',
             r'\bmlai\s+events?\b.*\bcsv\b',
             r'\bpast\s+csv\s+documents?\b',
+            r'\bregistered\b.*\bevents?\b',
+            r'\bregistrations?\b.*\bevents?\b',
         )
         return any(re.search(pattern, text) for pattern in patterns)
 
@@ -701,7 +703,7 @@ Routing rules:
 - Prefer content-factory for domain-backed repo scans, article/blog writing, SEO research, content planning, scaffolding blog/article pages, and requests like "scan the domain mlai.au" or "scan the repo for the domain mlai.au".
 - Prefer github-integration for GitHub auth, reconnecting GitHub, or account/integration management.
 - Prefer mlai-points for points, rewards, coworking, and task management.
-- Prefer luma-events for Luma attendee exports, guest lists, CSV documents, and recent/past MLAI event attendee CSVs.
+- Prefer luma-events for Luma registration counts, attendee reports, guest lists, CSV documents, and recent/past MLAI event attendee CSVs.
 
 Examples:
 - "please research the best article for me to write" -> content-factory
@@ -711,6 +713,7 @@ Examples:
 - "write me an article about how to build an ai agent harness for long-running specific tasks" -> content-factory
 - "create a task called fix docs worth 5 points" -> mlai-points
 - "give me CSVs for the past 3 MLAI events" -> luma-events
+- "how many people registered for the april 29 event" -> luma-events
 
 Respond with ONLY the skill name (e.g., "connect_users" or "none"):"""
 
