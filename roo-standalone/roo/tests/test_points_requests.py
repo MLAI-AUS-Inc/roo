@@ -125,6 +125,9 @@ class FakePointsAdminClient:
     def _clean_slack_id(self, user_id):
         return str(user_id).strip("<@>")
 
+    async def get_admin_details(self, slack_user_id):
+        return {"slack_user_id": slack_user_id, "role": "admin"}
+
     async def promote_points_admin(self, requester_slack_id, target_slack_id):
         self.promote_args = (requester_slack_id, target_slack_id)
         return {"target_slack_id": target_slack_id}
@@ -182,6 +185,24 @@ class FakeAwardGuardClient(FakePointsAdminClient):
     async def award_points(self, requester_slack_id, target_slack_id, points, reason):
         self.award_called = True
         return {"points_awarded": points, "new_balance": 999}
+
+
+class FakePartnerRestrictedClient(FakeAwardGuardClient):
+    def __init__(self):
+        super().__init__()
+        self.create_called = False
+        self.approve_called = False
+
+    async def get_admin_details(self, slack_user_id):
+        return {"slack_user_id": slack_user_id, "role": "partner"}
+
+    async def create_task(self, *args, **kwargs):
+        self.create_called = True
+        return {"id": 1}
+
+    async def approve_task(self, *args, **kwargs):
+        self.approve_called = True
+        return {"points_awarded": 5}
 
 
 def test_resolve_points_action_prefers_request_points():
@@ -860,6 +881,86 @@ async def test_award_flow_reroutes_missing_tag_management_phrase_to_clarificatio
     assert client.allowance_lookup_called is False
     assert client.award_called is False
     assert "Tag exactly one user to change their weekly points allowance." == result
+
+
+@pytest.mark.asyncio
+async def test_partner_admin_cannot_award_points(monkeypatch):
+    executor = SkillExecutor()
+    client = FakePartnerRestrictedClient()
+
+    monkeypatch.setattr(slack_client_module, "get_bot_user_id", lambda: "UBOT")
+
+    result = await executor._handle_points_action(
+        client=client,
+        action="award_points",
+        params={"points": 5, "reason": "helping out", "target_user": "UTARGET"},
+        text="award <@UTARGET> 5 points for helping out",
+        user_id="UPARTNER",
+        channel_id="C123",
+        thread_ts="111.222",
+        skill=None,
+    )
+
+    assert "partner admins can only generate coworking reports" in result
+    assert client.allowance_lookup_called is False
+    assert client.award_called is False
+
+
+@pytest.mark.asyncio
+async def test_partner_admin_cannot_create_or_approve_tasks():
+    executor = SkillExecutor()
+    create_client = FakePartnerRestrictedClient()
+    approve_client = FakePartnerRestrictedClient()
+    edit_client = FakePartnerRestrictedClient()
+    cancel_client = FakePartnerRestrictedClient()
+
+    create_result = await executor._handle_points_action(
+        client=create_client,
+        action="create_task",
+        params={"title": "Partner task", "points": 5, "portfolio": "ops"},
+        text="create task Partner task worth 5 points",
+        user_id="UPARTNER",
+        channel_id="C123",
+        thread_ts="111.222",
+        skill=None,
+    )
+    approve_result = await executor._handle_points_action(
+        client=approve_client,
+        action="approve_task",
+        params={"task_id": 42},
+        text="approve task 42",
+        user_id="UPARTNER",
+        channel_id="C123",
+        thread_ts="111.222",
+        skill=None,
+    )
+    edit_result = await executor._handle_points_action(
+        client=edit_client,
+        action="edit_task",
+        params={"task_id": 42, "title": "Updated partner task"},
+        text="edit task 42 title to Updated partner task",
+        user_id="UPARTNER",
+        channel_id="C123",
+        thread_ts="111.222",
+        skill=None,
+    )
+    cancel_result = await executor._handle_points_action(
+        client=cancel_client,
+        action="cancel_task",
+        params={"task_id": 42},
+        text="cancel task 42",
+        user_id="UPARTNER",
+        channel_id="C123",
+        thread_ts="111.222",
+        skill=None,
+    )
+
+    assert "partner admins can only generate coworking reports" in create_result
+    assert "partner admins can only generate coworking reports" in approve_result
+    assert "partner admins can only generate coworking reports" in edit_result
+    assert "partner admins can only generate coworking reports" in cancel_result
+    assert create_client.create_called is False
+    assert approve_client.approve_called is False
 
 
 class FakeApprovalClient:
@@ -1710,6 +1811,40 @@ async def test_backend_client_award_first_channel_post_uses_canonical_endpoint(m
 
 
 @pytest.mark.asyncio
+async def test_backend_client_system_award_points_uses_system_endpoint(monkeypatch):
+    recorder = RecordingAsyncClient(json_data={"points_awarded": 12, "new_balance": 17})
+    monkeypatch.setattr(backend_module.httpx, "AsyncClient", lambda: recorder)
+
+    client = backend_module.MLAIBackendClient(
+        base_url="https://backend.test",
+        api_key="api-key",
+        internal_api_key="internal-key",
+    )
+
+    result = await client.system_award_points(
+        admin_slack_id="UROOBOT",
+        target_slack_id="<@UTARGET>",
+        points=12,
+        reason="System award",
+    )
+
+    assert result == {"points_awarded": 12, "new_balance": 17}
+    assert len(recorder.calls) == 1
+    assert recorder.calls[0]["method"] == "POST"
+    assert recorder.calls[0]["url"] == "https://backend.test/api/v1/points/system/award/"
+    assert recorder.calls[0]["json"] == {
+        "created_by_slack_id": "UROOBOT",
+        "target_slack_id": "UTARGET",
+        "points": 12,
+        "reason": "System award",
+    }
+    assert recorder.calls[0]["params"] is None
+    assert recorder.calls[0]["headers"]["Content-Type"] == "application/json"
+    assert recorder.calls[0]["headers"]["X-API-Key"] == "internal-key"
+    assert recorder.calls[0]["timeout"] == 15.0
+
+
+@pytest.mark.asyncio
 async def test_execute_mlai_points_returns_backend_unavailable_message(monkeypatch):
     executor = SkillExecutor()
     skill = SimpleNamespace(name="mlai-points")
@@ -1780,16 +1915,21 @@ async def test_book_coworking_still_succeeds_when_balance_refresh_times_out(tmp_
 
 
 class FakeCoworkingReportClient:
-    def __init__(self, admin_slack_ids=None):
+    def __init__(self, admin_slack_ids=None, admin_roles=None):
         self.calls = []
         self.admin_checks = []
-        self.admin_slack_ids = set(admin_slack_ids or [executor_module.POINTS_SUPER_ADMIN_SLACK_ID])
+        self.admin_roles = {
+            slack_id: "admin"
+            for slack_id in (admin_slack_ids or [executor_module.POINTS_SUPER_ADMIN_SLACK_ID])
+        }
+        self.admin_roles.update(admin_roles or {})
 
     async def get_admin_details(self, slack_user_id):
         self.admin_checks.append(slack_user_id)
-        if slack_user_id not in self.admin_slack_ids:
+        role = self.admin_roles.get(slack_user_id)
+        if not role:
             return None
-        return {"slack_user_id": slack_user_id, "role": "admin"}
+        return {"slack_user_id": slack_user_id, "role": role}
 
     async def get_coworking_report(self, slack_user_id, start_date, end_date):
         self.calls.append((slack_user_id, start_date, end_date))
@@ -1868,6 +2008,27 @@ async def test_coworking_report_allows_points_admin():
 
     assert client.admin_checks == ["UPOINTSADMIN"]
     assert client.calls == [("UPOINTSADMIN", "2026-01-01", "2026-01-31")]
+    assert "Source: Active coworking bookings" in result
+
+
+@pytest.mark.asyncio
+async def test_coworking_report_allows_partner_admin():
+    client = FakeCoworkingReportClient(admin_roles={"UPARTNER": "partner"})
+    executor = SkillExecutor()
+
+    result = await executor._handle_points_action(
+        client=client,
+        action="coworking_report",
+        params={"start_date": "2026-01-01", "end_date": "2026-01-31"},
+        text="coworking report 2026-01-01 2026-01-31",
+        user_id="UPARTNER",
+        channel_id="C123",
+        thread_ts="111.222",
+        skill=SimpleNamespace(name="mlai-points"),
+    )
+
+    assert client.admin_checks == ["UPARTNER"]
+    assert client.calls == [("UPARTNER", "2026-01-01", "2026-01-31")]
     assert "Source: Active coworking bookings" in result
 
 

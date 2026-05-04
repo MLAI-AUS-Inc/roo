@@ -47,6 +47,8 @@ from ..coworking_booking_intents import (
 
 
 POINTS_SUPER_ADMIN_SLACK_ID = "U05QPB483K9"
+FULL_POINTS_ADMIN_ROLES = {"admin", "committee", "portfolio_lead"}
+COWORKING_REPORT_ROLES = {*FULL_POINTS_ADMIN_ROLES, "partner"}
 
 
 @dataclass
@@ -4208,6 +4210,25 @@ Keep the response concise but informative."""
             "Sorry mate, you'll need to be a Points Admin to generate coworking reports. 🔒"
         )
 
+    def _points_admin_role(self, admin_details: Optional[dict]) -> str:
+        if not isinstance(admin_details, dict):
+            return ""
+        return str(admin_details.get("role") or "").strip().lower()
+
+    def _is_full_points_admin_details(self, admin_details: Optional[dict]) -> bool:
+        return self._points_admin_role(admin_details) in FULL_POINTS_ADMIN_ROLES
+
+    def _can_generate_coworking_report_details(self, admin_details: Optional[dict]) -> bool:
+        return self._points_admin_role(admin_details) in COWORKING_REPORT_ROLES
+
+    def _full_points_admin_denial(self, admin_details: Optional[dict], action_label: str) -> str:
+        if self._points_admin_role(admin_details) == "partner":
+            return (
+                f"Sorry mate, partner admins can only generate coworking reports. "
+                f"You need a full Points Admin role to {action_label}. 🔒"
+            )
+        return f"Sorry mate, you'll need to be a full Points Admin to {action_label}. 🔒"
+
     def _is_points_admin_promotion_command(self, text: str) -> bool:
         """Detect commands that promote a tagged user to Points Admin."""
         return bool(
@@ -4784,7 +4805,8 @@ Keep the response concise but informative."""
             return f"Submitted! 📬 Task {display_id} is now pending approval.\n\nA reviewer will take a look soon. Legend! 🦘"
         
         elif action == "coworking_report":
-            if not await client.get_admin_details(user_id):
+            admin_details = await client.get_admin_details(user_id)
+            if not self._can_generate_coworking_report_details(admin_details):
                 return self._coworking_report_points_admin_denial()
 
             start_date, end_date, error = self._resolve_coworking_report_range(text, params)
@@ -5095,16 +5117,15 @@ Keep the response concise but informative."""
             title = params.get("task_title") or params.get("title") or params.get("submission_text")
             points = params.get("points")
             description = params.get("description", "")
+            admin_details = await client.get_admin_details(user_id)
+
+            if not self._is_full_points_admin_details(admin_details):
+                return self._full_points_admin_denial(admin_details, "create tasks")
             
             # Default portfolio logic: Param > Admin's Portfolio > "events"
             portfolio = params.get("portfolio")
-            if not portfolio:
-                try:
-                    admin_details = await client.get_admin_details(user_id)
-                    if admin_details:
-                        portfolio = admin_details.get("portfolio")
-                except Exception as e:
-                    print(f"⚠️ Failed to lookup admin portfolio: {e}")
+            if not portfolio and admin_details:
+                portfolio = admin_details.get("portfolio")
             
             if not portfolio:
                 portfolio = "events" # Fallback if lookup fails
@@ -5155,6 +5176,10 @@ Keep the response concise but informative."""
             if not task_id:
                 return "Which task do you want to edit? Give me the task ID or code."
 
+            admin_details = await client.get_admin_details(user_id)
+            if not self._is_full_points_admin_details(admin_details):
+                return self._full_points_admin_denial(admin_details, "edit tasks")
+
             current_task = await client.get_task(task_id)
             updates = self._extract_task_edit_updates(params, text)
             if not updates:
@@ -5179,6 +5204,10 @@ Keep the response concise but informative."""
             task_id = self._extract_task_identifier(text, params.get("task_id"))
             if not task_id:
                 return "Which task do you want to cancel? Give me the task ID or code."
+
+            admin_details = await client.get_admin_details(user_id)
+            if not self._is_full_points_admin_details(admin_details):
+                return self._full_points_admin_denial(admin_details, "cancel tasks")
 
             reason = params.get("reason", "")
             result = await client.cancel_task(task_id, user_id, reason=reason)
@@ -5205,6 +5234,10 @@ Keep the response concise but informative."""
             if not task_id:
                 return "Which task are you approving? Give me the task ID or code (e.g., \"task approve 42\" or \"task approve ROO-0042\")"
 
+            admin_details = await client.get_admin_details(user_id)
+            if not self._is_full_points_admin_details(admin_details):
+                return self._full_points_admin_denial(admin_details, "approve tasks")
+
             result = await client.approve_task(task_id, user_id)
             points_awarded = result.get("points_awarded", 0)
             task = result.get("task", {})
@@ -5218,6 +5251,10 @@ Keep the response concise but informative."""
             
             if not task_id:
                 return "Which task are you rejecting? Give me the task ID or code."
+
+            admin_details = await client.get_admin_details(user_id)
+            if not self._is_full_points_admin_details(admin_details):
+                return self._full_points_admin_denial(admin_details, "reject tasks")
             
             result = await client.reject_task(task_id, user_id, reason)
             task = result.get("task", {})
@@ -5262,6 +5299,10 @@ Keep the response concise but informative."""
                     thread_ts=thread_ts,
                     skill=skill,
                 )
+
+            admin_details = await client.get_admin_details(user_id)
+            if not self._is_full_points_admin_details(admin_details):
+                return self._full_points_admin_denial(admin_details, "award points")
 
             # Early allowance check for award actions (before LLM/rate card lookup)
             if action in ["award_points", "award"]:
