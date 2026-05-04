@@ -1,7 +1,7 @@
 import asyncio
 import importlib
 import sys
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -1914,10 +1914,61 @@ async def test_book_coworking_still_succeeds_when_balance_refresh_times_out(tmp_
     assert "Balance remaining" not in result
 
 
+def make_coworking_report(start_date: str, end_date: str, counts: list[int], unique_users: int = 2) -> dict:
+    start = date.fromisoformat(start_date)
+    end = date.fromisoformat(end_date)
+    range_days = (end - start).days + 1
+    daily = []
+    for offset in range(range_days):
+        daily_date = start + timedelta(days=offset)
+        daily.append({
+            "date": daily_date.isoformat(),
+            "booked_users": counts[offset] if offset < len(counts) else 0,
+        })
+
+    total = sum(row["booked_users"] for row in daily)
+    active_days = sum(1 for row in daily if row["booked_users"] > 0)
+    max_count = max((row["booked_users"] for row in daily), default=0)
+    busiest_days = [
+        {"date": row["date"], "booked_users": row["booked_users"]}
+        for row in daily
+        if max_count > 0 and row["booked_users"] == max_count
+    ]
+    weekly = [{
+        "week_start": start_date,
+        "booked_user_days": total,
+        "active_days": active_days,
+    }]
+    monthly = [{
+        "month": start_date[:7],
+        "booked_user_days": total,
+        "active_days": active_days,
+    }]
+    return {
+        "range": {
+            "start_date": start_date,
+            "end_date": end_date,
+            "source": "active_coworking_bookings",
+        },
+        "totals": {
+            "booked_user_days": total,
+            "unique_users": unique_users,
+            "active_days": active_days,
+            "range_days": range_days,
+            "average_per_day": round(total / range_days, 2),
+            "busiest_days": busiest_days,
+        },
+        "monthly": monthly,
+        "weekly": weekly,
+        "daily": daily,
+    }
+
+
 class FakeCoworkingReportClient:
-    def __init__(self, admin_slack_ids=None, admin_roles=None):
+    def __init__(self, admin_slack_ids=None, admin_roles=None, reports_by_range=None):
         self.calls = []
         self.admin_checks = []
+        self.reports_by_range = reports_by_range or {}
         self.admin_roles = {
             slack_id: "admin"
             for slack_id in (admin_slack_ids or [executor_module.POINTS_SUPER_ADMIN_SLACK_ID])
@@ -1933,31 +1984,10 @@ class FakeCoworkingReportClient:
 
     async def get_coworking_report(self, slack_user_id, start_date, end_date):
         self.calls.append((slack_user_id, start_date, end_date))
-        return {
-            "range": {
-                "start_date": start_date,
-                "end_date": end_date,
-                "source": "active_coworking_bookings",
-            },
-            "totals": {
-                "booked_user_days": 3,
-                "unique_users": 2,
-                "active_days": 2,
-                "range_days": 31,
-                "average_per_day": 0.1,
-                "busiest_days": [{"date": start_date, "booked_users": 2}],
-            },
-            "monthly": [
-                {"month": start_date[:7], "booked_user_days": 3, "active_days": 2},
-            ],
-            "weekly": [
-                {"week_start": start_date, "booked_user_days": 3, "active_days": 2},
-            ],
-            "daily": [
-                {"date": start_date, "booked_users": 2},
-                {"date": end_date, "booked_users": 1},
-            ],
-        }
+        return self.reports_by_range.get(
+            (start_date, end_date),
+            make_coworking_report(start_date, end_date, [2, 1], unique_users=2),
+        )
 
 
 @pytest.mark.asyncio
@@ -1979,12 +2009,13 @@ async def test_coworking_report_exact_range_formats_slack_report():
     assert client.calls == [
         (executor_module.POINTS_SUPER_ADMIN_SLACK_ID, "2026-01-01", "2026-01-31")
     ]
-    assert "Source: Active coworking bookings" in result
+    assert "*Coworking usage*" in result
+    assert "Source: Active coworking bookings (not door check-ins)" in result
     assert "Booked user-days: 3" in result
     assert "Unique users: 2" in result
     assert "*Monthly*" in result
     assert "*Weekly*" in result
-    assert "*Daily*" in result
+    assert "*Daily*" not in result
     assert "2026-01" in result
     assert "2026-01-01" in result
     assert "```" in result
@@ -2119,6 +2150,205 @@ async def test_coworking_report_last_week_uses_previous_sunday_through_saturday(
     ]
 
 
+@pytest.mark.asyncio
+async def test_coworking_report_last_week_compares_week_prior(monkeypatch):
+    async def fail_chat(*args, **kwargs):
+        raise RuntimeError("no llm in deterministic comparison test")
+
+    monkeypatch.setattr(executor_module, "chat", fail_chat)
+    monkeypatch.setattr("roo.utils.get_current_date", lambda: date(2026, 5, 4))
+    client = FakeCoworkingReportClient(
+        reports_by_range={
+            ("2026-04-26", "2026-05-02"): make_coworking_report(
+                "2026-04-26",
+                "2026-05-02",
+                [0, 1, 4, 6, 7, 8, 2],
+                unique_users=19,
+            ),
+            ("2026-04-19", "2026-04-25"): make_coworking_report(
+                "2026-04-19",
+                "2026-04-25",
+                [0, 0, 3, 4, 5, 4, 3],
+                unique_users=14,
+            ),
+        }
+    )
+    executor = SkillExecutor()
+
+    result = await executor._handle_points_action(
+        client=client,
+        action="coworking_report",
+        params={},
+        text="how many people used the coworking space last week and how does that compare to the week prior?",
+        user_id=executor_module.POINTS_SUPER_ADMIN_SLACK_ID,
+        channel_id="C123",
+        thread_ts="111.222",
+        skill=SimpleNamespace(name="mlai-points"),
+    )
+
+    assert client.calls == [
+        (executor_module.POINTS_SUPER_ADMIN_SLACK_ID, "2026-04-26", "2026-05-02"),
+        (executor_module.POINTS_SUPER_ADMIN_SLACK_ID, "2026-04-19", "2026-04-25"),
+    ]
+    assert "Last week had 28 booked user-days" in result
+    assert "up 9 (+47.4%)" in result
+    assert "Week prior: 2026-04-19 to 2026-04-25" in result
+
+
+@pytest.mark.asyncio
+async def test_coworking_report_previous_period_uses_same_length_range(monkeypatch):
+    async def fail_chat(*args, **kwargs):
+        raise RuntimeError("no llm in deterministic comparison test")
+
+    monkeypatch.setattr(executor_module, "chat", fail_chat)
+    client = FakeCoworkingReportClient(
+        reports_by_range={
+            ("2026-01-08", "2026-01-14"): make_coworking_report(
+                "2026-01-08",
+                "2026-01-14",
+                [2, 2, 2, 2, 2, 2, 2],
+            ),
+            ("2026-01-01", "2026-01-07"): make_coworking_report(
+                "2026-01-01",
+                "2026-01-07",
+                [1, 1, 1, 1, 1, 1, 1],
+            ),
+        }
+    )
+    executor = SkillExecutor()
+
+    result = await executor._handle_points_action(
+        client=client,
+        action="coworking_report",
+        params={},
+        text="coworking report from 2026-01-08 to 2026-01-14 compared with the previous period",
+        user_id=executor_module.POINTS_SUPER_ADMIN_SLACK_ID,
+        channel_id="C123",
+        thread_ts="111.222",
+        skill=SimpleNamespace(name="mlai-points"),
+    )
+
+    assert client.calls == [
+        (executor_module.POINTS_SUPER_ADMIN_SLACK_ID, "2026-01-08", "2026-01-14"),
+        (executor_module.POINTS_SUPER_ADMIN_SLACK_ID, "2026-01-01", "2026-01-07"),
+    ]
+    assert "up 7 (+100.0%)" in result
+
+
+@pytest.mark.asyncio
+async def test_coworking_report_busiest_day_last_month(monkeypatch):
+    monkeypatch.setattr("roo.utils.get_current_date", lambda: date(2026, 5, 4))
+    counts = [0] * 30
+    counts[14] = 8
+    client = FakeCoworkingReportClient(
+        reports_by_range={
+            ("2026-04-01", "2026-04-30"): make_coworking_report(
+                "2026-04-01",
+                "2026-04-30",
+                counts,
+            ),
+        }
+    )
+    executor = SkillExecutor()
+
+    result = await executor._handle_points_action(
+        client=client,
+        action="coworking_report",
+        params={},
+        text="which day was busiest for coworking last month?",
+        user_id=executor_module.POINTS_SUPER_ADMIN_SLACK_ID,
+        channel_id="C123",
+        thread_ts="111.222",
+        skill=SimpleNamespace(name="mlai-points"),
+    )
+
+    assert client.calls == [
+        (executor_module.POINTS_SUPER_ADMIN_SLACK_ID, "2026-04-01", "2026-04-30")
+    ]
+    assert "Last month's busiest day was 2026-04-15 (8)" in result
+
+
+@pytest.mark.asyncio
+async def test_coworking_report_trends_and_recommendations_use_gpt54(monkeypatch):
+    captured = {}
+
+    async def fake_chat(messages, **kwargs):
+        captured["messages"] = messages
+        captured["kwargs"] = kwargs
+        return SimpleNamespace(
+            content=(
+                "🏢 *Coworking usage*\n"
+                "Range: 2026-01-29 to 2026-04-28\n"
+                "Source: Active coworking bookings (not door check-ins)\n\n"
+                "*Interpretation*\n"
+                "Usage is concentrated mid-week."
+            )
+        )
+
+    monkeypatch.setattr(executor_module, "chat", fake_chat)
+    monkeypatch.setattr("roo.utils.get_current_date", lambda: date(2026, 4, 28))
+    client = FakeCoworkingReportClient(
+        reports_by_range={
+            ("2026-01-29", "2026-04-28"): make_coworking_report(
+                "2026-01-29",
+                "2026-04-28",
+                [1] * 90,
+            ),
+        }
+    )
+    executor = SkillExecutor()
+
+    result = await executor._handle_points_action(
+        client=client,
+        action="coworking_report",
+        params={},
+        text="coworking report last 3 months with any trends or recommendations",
+        user_id=executor_module.POINTS_SUPER_ADMIN_SLACK_ID,
+        channel_id="C123",
+        thread_ts="111.222",
+        skill=SimpleNamespace(name="mlai-points"),
+    )
+
+    assert captured["kwargs"]["model"] == "gpt-5.4"
+    assert "active coworking bookings" in captured["messages"][1]["content"]
+    assert "*Interpretation*" in result
+    assert "Usage is concentrated mid-week." in result
+
+
+@pytest.mark.asyncio
+async def test_coworking_report_gpt_failure_falls_back_to_deterministic_summary(monkeypatch):
+    async def fail_chat(*args, **kwargs):
+        raise RuntimeError("gpt unavailable")
+
+    monkeypatch.setattr(executor_module, "chat", fail_chat)
+    monkeypatch.setattr("roo.utils.get_current_date", lambda: date(2026, 4, 28))
+    client = FakeCoworkingReportClient(
+        reports_by_range={
+            ("2026-01-29", "2026-04-28"): make_coworking_report(
+                "2026-01-29",
+                "2026-04-28",
+                [1] * 90,
+            ),
+        }
+    )
+    executor = SkillExecutor()
+
+    result = await executor._handle_points_action(
+        client=client,
+        action="coworking_report",
+        params={},
+        text="coworking report last 3 months with any trends",
+        user_id=executor_module.POINTS_SUPER_ADMIN_SLACK_ID,
+        channel_id="C123",
+        thread_ts="111.222",
+        skill=SimpleNamespace(name="mlai-points"),
+    )
+
+    assert "*Coworking usage*" in result
+    assert "Booked user-days: 90" in result
+    assert "*Interpretation*" in result
+
+
 def test_extract_http_error_detail_suppresses_html_500_body():
     executor = SkillExecutor()
     request = httpx.Request("GET", "https://backend.test/api/v1/points/coworking/report/")
@@ -2193,6 +2423,28 @@ def test_resolve_points_action_detects_coworking_report_wording():
         executor._resolve_points_action(
             {},
             "give me a report for how many people used the coworking space last week",
+        )
+        == "coworking_report"
+    )
+    assert (
+        executor._resolve_points_action(
+            {},
+            "Roo how many peopel used the coworkign space last week and how does that usage compare to the week prior?",
+        )
+        == "coworking_report"
+    )
+    assert executor._resolve_points_action({}, "which day was busiest for coworking last month") == "coworking_report"
+    assert (
+        executor._resolve_points_action(
+            {},
+            "how did coworking usage last week compare to the week prior?",
+        )
+        == "coworking_report"
+    )
+    assert (
+        executor._resolve_points_action(
+            {},
+            "show coworking trends for the last 3 months and recommendations",
         )
         == "coworking_report"
     )

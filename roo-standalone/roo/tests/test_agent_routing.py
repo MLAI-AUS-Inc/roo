@@ -119,6 +119,10 @@ def test_coworking_report_wording_routes_to_points():
         "coworking overview from 2026-01-01 to 2026-03-31",
         "how many people used the coworking space this week",
         "give me a report for how many people used the coworking space last week",
+        "Roo how many peopel used the coworkign space last week and how does that usage compare to the week prior?",
+        "which day was busiest for coworking last month",
+        "how did coworking usage last week compare to the week prior",
+        "show coworking trends for the last 3 months and recommendations",
     ]:
         skill = agent._select_skill_from_triggers(text)
         assert skill is not None
