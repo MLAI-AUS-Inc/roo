@@ -46,6 +46,7 @@ from .points_request_approval import (
 )
 from .slack_client import get_message, post_message, send_dm
 from .coworking_booking_intents import coworking_booking_retry_loop
+from .link_love import handle_link_love_reply, link_love_retry_loop
 
 # Pending intents for auto-continue after prerequisite steps complete.
 # Key: "{slack_user_id}:{domain}" → {"action": "write", "topic": "...", "channel_id": "...", "thread_ts": "..."}
@@ -1383,6 +1384,7 @@ async def lifespan(app: FastAPI):
     settings = get_settings()
     app.state.startup_complete = False
     coworking_retry_task: Optional[asyncio.Task] = None
+    link_love_task: Optional[asyncio.Task] = None
     jobs_scheduler_task: Optional[asyncio.Task] = None
     print(f"🦘 Roo Standalone starting...")
     print(f"   LLM Provider: {settings.default_llm_provider}")
@@ -1393,6 +1395,9 @@ async def lifespan(app: FastAPI):
     print(f"   Loaded {len(agent.skills)} skills")
     coworking_retry_task = asyncio.create_task(coworking_booking_retry_loop())
     app.state.coworking_retry_task = coworking_retry_task
+    if settings.BOOST_LINK_LOVE_ENABLED:
+        link_love_task = asyncio.create_task(link_love_retry_loop())
+        app.state.link_love_task = link_love_task
     if settings.JOBS_SCHEDULER_ENABLED:
         _validate_jobs_scheduler_settings(settings)
         jobs_scheduler_task = asyncio.create_task(_jobs_daily_run_loop())
@@ -1420,6 +1425,10 @@ async def lifespan(app: FastAPI):
             coworking_retry_task.cancel()
             with suppress(asyncio.CancelledError):
                 await coworking_retry_task
+        if link_love_task:
+            link_love_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await link_love_task
 
     # Cancel the background task on shutdown (disabled)
     # medhack_task.cancel()
@@ -1590,6 +1599,24 @@ async def slack_events(request: Request):
 
             asyncio.create_task(_handle_start_here_intro(event))
             return JSONResponse(status_code=200, content={})
+
+        try:
+            settings = get_settings()
+            boost_link_love_enabled = settings.BOOST_LINK_LOVE_ENABLED
+            boost_channel_name = settings.BOOST_LINK_LOVE_CHANNEL_NAME
+        except Exception as exc:
+            print(f"⚠️ Link-love config unavailable; skipping boost channel routing: {exc}")
+            boost_link_love_enabled = False
+            boost_channel_name = "boost-my-startup"
+
+        if boost_link_love_enabled:
+            boost_channel_id = get_channel_id(boost_channel_name)
+            if boost_channel_id and event.get("channel") == boost_channel_id:
+                thread_ts = str(event.get("thread_ts") or "")
+                message_ts = str(event.get("ts") or "")
+                if thread_ts and message_ts and thread_ts != message_ts:
+                    asyncio.create_task(handle_link_love_reply(event))
+                return JSONResponse(status_code=200, content={})
         
         is_dm = event.get("channel_type") == "im"
         if is_dm:
