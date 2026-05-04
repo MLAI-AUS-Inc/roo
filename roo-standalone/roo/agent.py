@@ -350,6 +350,7 @@ class RooAgent:
         return any(re.search(pattern, text) for pattern in patterns)
 
     def _looks_like_points_request(self, text: str) -> bool:
+        text = self._normalize_points_routing_text(text)
         patterns = (
             r'\bpoints?\b',
             r'\bbalance\b',
@@ -361,6 +362,20 @@ class RooAgent:
             r'\bworth\s+\d+\s+points?\b',
         )
         return any(re.search(pattern, text) for pattern in patterns)
+
+    def _normalize_points_routing_text(self, text: str) -> str:
+        """Normalize common typos before points-skill routing checks."""
+        text_lower = str(text or "").lower()
+        replacements = {
+            "coworkign": "coworking",
+            "cowokrking": "coworking",
+            "cowokring": "coworking",
+            "co working": "coworking",
+            "co-working": "coworking",
+        }
+        for typo, replacement in replacements.items():
+            text_lower = text_lower.replace(typo, replacement)
+        return text_lower
 
     def _looks_like_luma_request(self, text: str) -> bool:
         patterns = (
@@ -412,12 +427,16 @@ class RooAgent:
         text_lower = text.lower().strip()
         content_skill = self._get_skill_by_name("content-factory")
         luma_skill = self._get_skill_by_name("luma-events")
+        points_skill = self._get_skill_by_name("mlai-points")
 
         if luma_skill and self._looks_like_luma_request(text_lower):
             return luma_skill
 
         if content_skill and self._looks_like_content_request(text_lower):
             return content_skill
+
+        if points_skill and self._looks_like_points_request(text_lower):
+            return points_skill
 
         if (
             thread_context

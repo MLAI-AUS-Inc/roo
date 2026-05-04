@@ -4181,7 +4181,7 @@ Keep the response concise but informative."""
     def _resolve_points_action(self, params: dict, text: str) -> str:
         """Resolve the intended points action from extracted params and raw text."""
         action = str(params.get("action", "") or "").lower().strip()
-        text_lower = text.lower()
+        text_lower = self._normalize_points_routing_text(text)
         explicit_points_request = "request" in text_lower and "point" in text_lower and "reward" not in text_lower
 
         management_action = self._resolve_points_admin_management_action(
@@ -4242,6 +4242,16 @@ Keep the response concise but informative."""
                 "how many people",
                 "used the coworking",
                 "attendance",
+                "usage",
+                "compare",
+                "compared",
+                "comparison",
+                "busiest",
+                "quietest",
+                "trend",
+                "trends",
+                "recommendation",
+                "recommendations",
             ]
         ):
             return "coworking_report"
@@ -4280,6 +4290,21 @@ Keep the response concise but informative."""
         if any(w in text_lower for w in ["deduct", "remove points"]):
             return "deduct_points"
         return action
+
+    def _normalize_points_routing_text(self, text: str) -> str:
+        """Normalize common Slack typo variants before deterministic routing."""
+        text_lower = str(text or "").lower()
+        replacements = {
+            "coworkign": "coworking",
+            "cowokrking": "coworking",
+            "cowokring": "coworking",
+            "co working": "coworking",
+            "co-working": "coworking",
+            "peopel": "people",
+        }
+        for typo, replacement in replacements.items():
+            text_lower = text_lower.replace(typo, replacement)
+        return text_lower
 
     def _extract_task_identifier(self, text: str, explicit_task_id=None) -> Optional[str]:
         """Extract either a numeric task id or a ROO task code from text."""
@@ -4721,6 +4746,15 @@ Keep the response concise but informative."""
             start = self._shift_months(today, -months) + timedelta(days=1)
             return start.isoformat(), today.isoformat(), None
 
+        if re.search(r"\blast\s+month\b", text_lower):
+            from ..utils import get_current_date
+
+            today = get_current_date()
+            first_this_month = today.replace(day=1)
+            end = first_this_month - timedelta(days=1)
+            start = end.replace(day=1)
+            return start.isoformat(), end.isoformat(), None
+
         start_date = params.get("start_date") or params.get("from_date")
         end_date = params.get("end_date") or params.get("to_date")
         iso_dates = re.findall(r"\b\d{4}-\d{2}-\d{2}\b", text)
@@ -4749,60 +4783,557 @@ Keep the response concise but informative."""
 
         return start.isoformat(), end.isoformat(), None
 
-    def _format_coworking_report(self, report: dict) -> str:
-        """Format a coworking booking report for Slack."""
+    def _coworking_report_flags(self, text: str) -> dict:
+        """Identify optional analysis behaviors requested by the user."""
+        text_lower = text.lower()
+        return {
+            "comparison_requested": bool(
+                re.search(
+                    r"\b(?:compare|compared|comparison|versus|vs\.?|prior|previous|week before|month before)\b",
+                    text_lower,
+                )
+            ),
+            "detail_requested": bool(re.search(r"\b(?:detail|detailed|breakdown|table)\b", text_lower)),
+            "raw_requested": bool(re.search(r"\b(?:raw|daily|day by day|each day)\b", text_lower)),
+            "busiest_requested": bool(re.search(r"\b(?:busiest|peak|highest|most used)\b", text_lower)),
+            "quietest_requested": bool(re.search(r"\b(?:quietest|lowest|least used)\b", text_lower)),
+            "trend_requested": bool(re.search(r"\b(?:trend|trends|pattern|patterns|changed|change)\b", text_lower)),
+            "recommendations_requested": bool(
+                re.search(r"\b(?:recommend|recommendation|recommendations|what should|what can we do)\b", text_lower)
+            ),
+        }
+
+    def _coworking_request_needs_llm_intent(self, text: str) -> bool:
+        """Return true when deterministic date parsing may need LLM help."""
+        text_lower = text.lower()
+        if re.search(r"\b\d{4}-\d{2}-\d{2}\b", text_lower):
+            return False
+        if any(
+            phrase in text_lower
+            for phrase in [
+                "this week",
+                "last week",
+                "last month",
+                "last 3 months",
+                "last 6 months",
+                "last year",
+                "last 12 months",
+            ]
+        ):
+            return False
+        return bool(
+            "coworking" in text_lower
+            and re.search(r"\b(?:from|between|since|until|during|for|compare|trend|busiest|quietest)\b", text_lower)
+        )
+
+    def _extract_json_object(self, content: str) -> dict:
+        """Parse a best-effort JSON object from an LLM response."""
+        content = str(content or "").strip()
+        if not content:
+            return {}
+        try:
+            parsed = json.loads(content)
+            return parsed if isinstance(parsed, dict) else {}
+        except json.JSONDecodeError:
+            pass
+
+        match = re.search(r"\{.*\}", content, re.DOTALL)
+        if not match:
+            return {}
+        try:
+            parsed = json.loads(match.group(0))
+            return parsed if isinstance(parsed, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+
+    def _coworking_report_llm_model(self) -> str:
+        try:
+            return get_settings().ROUTER_MODEL
+        except Exception:
+            return "gpt-5.4"
+
+    async def _extract_coworking_report_intent_with_llm(self, text: str, params: dict) -> dict:
+        """Use GPT-5.4 to extract date/comparison hints for flexible report requests."""
+        if not self._coworking_request_needs_llm_intent(text):
+            return {}
+
+        try:
+            response = await chat(
+                [
+                    {
+                        "role": "system",
+                        "content": (
+                            "Extract coworking report intent as strict JSON only. "
+                            "Use YYYY-MM-DD dates when the user states exact dates. "
+                            "If dates are ambiguous, omit them. Allowed keys: "
+                            "start_date, end_date, comparison_start_date, comparison_end_date, "
+                            "comparison_requested, focus, detail_requested, recommendations_requested."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": json.dumps(
+                            {
+                                "message": text,
+                                "existing_params": params,
+                                "timezone": "Australia/Melbourne",
+                            }
+                        ),
+                    },
+                ],
+                model=self._coworking_report_llm_model(),
+                max_tokens=320,
+                reasoning_effort="low",
+            )
+            return self._extract_json_object(response.content)
+        except Exception as exc:
+            print(f"⚠️ Coworking report intent extraction failed: {exc}")
+            return {}
+
+    def _resolve_coworking_report_range_from_intent(
+        self,
+        text: str,
+        params: dict,
+        llm_intent: dict,
+    ) -> tuple[Optional[str], Optional[str], Optional[str]]:
+        """Resolve a primary report range, falling back to LLM-extracted dates."""
+        start_date, end_date, error = self._resolve_coworking_report_range(text, params)
+        if not error:
+            return start_date, end_date, None
+
+        merged_params = {
+            **params,
+            "start_date": llm_intent.get("start_date") or params.get("start_date") or params.get("from_date"),
+            "end_date": llm_intent.get("end_date") or params.get("end_date") or params.get("to_date"),
+        }
+        if not merged_params.get("start_date") or not merged_params.get("end_date"):
+            return start_date, end_date, error
+        return self._resolve_coworking_report_range(text, merged_params)
+
+    def _resolve_coworking_comparison_range(
+        self,
+        text: str,
+        params: dict,
+        llm_intent: dict,
+        primary_start: str,
+        primary_end: str,
+    ) -> Optional[dict]:
+        """Resolve the comparison range for a coworking analysis request."""
+        flags = self._coworking_report_flags(text)
+        comparison_requested = (
+            flags["comparison_requested"]
+            or bool(params.get("compare") or params.get("comparison_requested"))
+            or bool(llm_intent.get("comparison_requested"))
+        )
+
+        explicit_start = (
+            params.get("comparison_start_date")
+            or params.get("compare_start_date")
+            or llm_intent.get("comparison_start_date")
+        )
+        explicit_end = (
+            params.get("comparison_end_date")
+            or params.get("compare_end_date")
+            or llm_intent.get("comparison_end_date")
+        )
+        if explicit_start and explicit_end:
+            try:
+                start = date.fromisoformat(str(explicit_start))
+                end = date.fromisoformat(str(explicit_end))
+            except ValueError:
+                return None
+            if end >= start and (end - start).days + 1 <= 366:
+                return {
+                    "label": "Comparison range",
+                    "start_date": start.isoformat(),
+                    "end_date": end.isoformat(),
+                }
+
+        if not comparison_requested:
+            return None
+
+        start = date.fromisoformat(primary_start)
+        end = date.fromisoformat(primary_end)
+        range_days = (end - start).days + 1
+        comparison_end = start - timedelta(days=1)
+        comparison_start = comparison_end - timedelta(days=range_days - 1)
+
+        text_lower = text.lower()
+        label = "Previous period"
+        if re.search(r"\b(?:week prior|prior week|previous week|week before)\b", text_lower):
+            label = "Week prior"
+        elif re.search(r"\b(?:month prior|previous month|month before)\b", text_lower):
+            label = "Month prior"
+
+        return {
+            "label": label,
+            "start_date": comparison_start.isoformat(),
+            "end_date": comparison_end.isoformat(),
+        }
+
+    def _format_coworking_days(self, days: list[dict], *, limit: int = 5) -> str:
+        if not days:
+            return "None"
+        shown = [
+            f"{day.get('date')} ({int(day.get('booked_users', 0))})"
+            for day in days[:limit]
+        ]
+        if len(days) > limit:
+            shown.append(f"+{len(days) - limit} more")
+        return ", ".join(shown)
+
+    def _summarize_coworking_report(self, report: dict) -> dict:
+        """Build deterministic analysis metrics from backend coworking report JSON."""
         report_range = report.get("range", {})
         totals = report.get("totals", {})
+        daily = [
+            {
+                "date": str(row.get("date") or ""),
+                "booked_users": int(row.get("booked_users", 0) or 0),
+            }
+            for row in report.get("daily", [])
+            if row.get("date")
+        ]
+
+        total_user_days = int(totals.get("booked_user_days", sum(row["booked_users"] for row in daily)) or 0)
+        range_days = int(totals.get("range_days", len(daily)) or len(daily) or 0)
+        active_days = int(totals.get("active_days", sum(1 for row in daily if row["booked_users"] > 0)) or 0)
+        average_per_day = totals.get("average_per_day")
+        if average_per_day is None:
+            average_per_day = round(total_user_days / range_days, 2) if range_days else 0
+        average_per_day = float(average_per_day or 0)
+
+        if daily:
+            max_users = max(row["booked_users"] for row in daily)
+            min_users = min(row["booked_users"] for row in daily)
+            busiest_days = [row for row in daily if row["booked_users"] == max_users and max_users > 0]
+            quietest_days = [row for row in daily if row["booked_users"] == min_users]
+        else:
+            busiest_days = []
+            quietest_days = []
+
+        day_of_week = {}
+        for row in daily:
+            try:
+                day = date.fromisoformat(row["date"])
+            except ValueError:
+                continue
+            day_name = calendar.day_name[day.weekday()]
+            bucket = day_of_week.setdefault(
+                day_name,
+                {"day": day_name, "booked_user_days": 0, "active_days": 0, "days": 0},
+            )
+            bucket["booked_user_days"] += row["booked_users"]
+            bucket["days"] += 1
+            if row["booked_users"] > 0:
+                bucket["active_days"] += 1
+
+        day_of_week_rows = []
+        for day_name in calendar.day_name:
+            bucket = day_of_week.get(day_name)
+            if not bucket:
+                continue
+            day_of_week_rows.append({
+                **bucket,
+                "average": round(bucket["booked_user_days"] / bucket["days"], 2) if bucket["days"] else 0,
+            })
+
+        top_days = sorted(daily, key=lambda row: (-row["booked_users"], row["date"]))[:5]
+        bottom_days = sorted(daily, key=lambda row: (row["booked_users"], row["date"]))[:5]
+
+        return {
+            "range": {
+                "start_date": report_range.get("start_date"),
+                "end_date": report_range.get("end_date"),
+            },
+            "booked_user_days": total_user_days,
+            "unique_users": int(totals.get("unique_users", 0) or 0),
+            "active_days": active_days,
+            "range_days": range_days,
+            "average_per_day": round(average_per_day, 2),
+            "busiest_days": busiest_days,
+            "quietest_days": quietest_days,
+            "top_days": top_days,
+            "bottom_days": bottom_days,
+            "day_of_week": day_of_week_rows,
+            "daily": daily,
+        }
+
+    def _percent_delta(self, current: float, previous: float) -> Optional[float]:
+        if previous == 0:
+            return None
+        return round(((current - previous) / previous) * 100, 1)
+
+    def _compare_coworking_summaries(self, primary: dict, comparison: dict) -> dict:
+        booked_delta = primary["booked_user_days"] - comparison["booked_user_days"]
+        average_delta = round(primary["average_per_day"] - comparison["average_per_day"], 2)
+        active_day_delta = primary["active_days"] - comparison["active_days"]
+        unique_user_delta = primary["unique_users"] - comparison["unique_users"]
+        return {
+            "booked_user_days_delta": booked_delta,
+            "booked_user_days_percent_delta": self._percent_delta(
+                primary["booked_user_days"],
+                comparison["booked_user_days"],
+            ),
+            "average_per_day_delta": average_delta,
+            "average_per_day_percent_delta": self._percent_delta(
+                primary["average_per_day"],
+                comparison["average_per_day"],
+            ),
+            "active_days_delta": active_day_delta,
+            "unique_users_delta": unique_user_delta,
+        }
+
+    def _format_coworking_delta(self, delta: float, percent_delta: Optional[float]) -> str:
+        if delta == 0:
+            return "unchanged"
+        direction = "up" if delta > 0 else "down"
+        amount = abs(delta)
+        amount_text = str(int(amount)) if float(amount).is_integer() else str(round(amount, 2))
+        if percent_delta is None:
+            return f"{direction} {amount_text} (prior was 0)"
+        return f"{direction} {amount_text} ({percent_delta:+.1f}%)"
+
+    def _format_coworking_range(self, summary: dict) -> str:
+        report_range = summary.get("range", {})
+        return f"{report_range.get('start_date')} to {report_range.get('end_date')}"
+
+    def _coworking_primary_label(self, text: str) -> str:
+        text_lower = text.lower()
+        if re.search(r"\blast\s+week\b", text_lower):
+            return "Last week"
+        if re.search(r"\bthis\s+week\b", text_lower):
+            return "This week"
+        if re.search(r"\blast\s+month\b", text_lower):
+            return "Last month"
+        if re.search(r"\blast\s+3\s+months?\b", text_lower):
+            return "Last 3 months"
+        if re.search(r"\blast\s+6\s+months?\b", text_lower):
+            return "Last 6 months"
+        if re.search(r"\b(?:last|past)\s+(?:1\s+)?years?\b", text_lower) or re.search(r"\blast\s+12\s+months?\b", text_lower):
+            return "Last year"
+        return "Selected range"
+
+    def _build_coworking_analysis_context(
+        self,
+        text: str,
+        primary_report: dict,
+        comparison_report: Optional[dict],
+        comparison_range: Optional[dict],
+    ) -> dict:
+        flags = self._coworking_report_flags(text)
+        primary_summary = self._summarize_coworking_report(primary_report)
+        comparison_summary = self._summarize_coworking_report(comparison_report) if comparison_report else None
+        comparison = (
+            self._compare_coworking_summaries(primary_summary, comparison_summary)
+            if comparison_summary
+            else None
+        )
+        return {
+            "question": text,
+            "source": "active coworking bookings, not door check-ins",
+            "flags": flags,
+            "primary": {
+                "label": self._coworking_primary_label(text),
+                "summary": primary_summary,
+                "report": primary_report,
+            },
+            "comparison": {
+                "label": (comparison_range or {}).get("label", "Previous period"),
+                "summary": comparison_summary,
+                "report": comparison_report,
+                "metrics": comparison,
+            } if comparison_summary else None,
+        }
+
+    def _coworking_direct_answer(self, context: dict) -> str:
+        primary = context["primary"]["summary"]
+        primary_label = context["primary"]["label"]
+        flags = context["flags"]
+        comparison = context.get("comparison")
+
+        if flags.get("busiest_requested") and primary["busiest_days"]:
+            return f"{primary_label}'s busiest day was {self._format_coworking_days(primary['busiest_days'])}."
+        if flags.get("quietest_requested") and primary["quietest_days"]:
+            return f"{primary_label}'s quietest day was {self._format_coworking_days(primary['quietest_days'])}."
+        if comparison and comparison.get("metrics"):
+            metrics = comparison["metrics"]
+            return (
+                f"{primary_label} had {primary['booked_user_days']} booked user-days, "
+                f"{self._format_coworking_delta(metrics['booked_user_days_delta'], metrics['booked_user_days_percent_delta'])} "
+                f"from {comparison['label'].lower()}."
+            )
+        return (
+            f"{primary_label} had {primary['booked_user_days']} booked user-days "
+            f"across {primary['active_days']} active days."
+        )
+
+    def _coworking_table(self, headers: list[str], rows: list[list[Any]]) -> str:
+        widths = [len(header) for header in headers]
+        string_rows = [[str(cell) for cell in row] for row in rows]
+        for row in string_rows:
+            for index, cell in enumerate(row):
+                widths[index] = max(widths[index], len(cell))
+        lines = [" ".join(header.ljust(widths[index]) for index, header in enumerate(headers))]
+        for row in string_rows:
+            lines.append(" ".join(cell.ljust(widths[index]) for index, cell in enumerate(row)))
+        return "```\n" + "\n".join(lines) + "\n```"
+
+    def _coworking_detail_sections(self, report: dict, summary: dict, flags: dict) -> list[str]:
+        range_days = summary.get("range_days", 0)
+        sections = []
         daily = report.get("daily", [])
         weekly = report.get("weekly", [])
         monthly = report.get("monthly", [])
 
-        busiest_days = totals.get("busiest_days") or []
-        if busiest_days:
-            busiest = ", ".join(
-                f"{day.get('date')} ({day.get('booked_users', 0)})"
-                for day in busiest_days[:5]
-            )
-            if len(busiest_days) > 5:
-                busiest += f", +{len(busiest_days) - 5} more"
-        else:
-            busiest = "None"
+        if flags.get("raw_requested") or range_days <= 14:
+            rows = [[row.get("date", ""), int(row.get("booked_users", 0) or 0)] for row in daily]
+            sections.extend(["*Daily*", self._coworking_table(["Date", "Users"], rows)])
+            return sections
 
-        monthly_lines = ["Month      User-days Active"]
-        for row in monthly:
-            monthly_lines.append(
-                f"{row.get('month', ''):<10} {int(row.get('booked_user_days', 0)):>9} {int(row.get('active_days', 0)):>6}"
-            )
+        if range_days <= 93:
+            weekly_rows = [
+                [
+                    row.get("week_start", ""),
+                    int(row.get("booked_user_days", 0) or 0),
+                    int(row.get("active_days", 0) or 0),
+                ]
+                for row in weekly
+            ]
+            monthly_rows = [
+                [
+                    row.get("month", ""),
+                    int(row.get("booked_user_days", 0) or 0),
+                    int(row.get("active_days", 0) or 0),
+                ]
+                for row in monthly
+            ]
+            sections.extend(["*Weekly*", self._coworking_table(["Week start", "User-days", "Active"], weekly_rows)])
+            sections.extend(["*Monthly*", self._coworking_table(["Month", "User-days", "Active"], monthly_rows)])
+            return sections
 
-        weekly_lines = ["Week start User-days Active"]
-        for row in weekly:
-            weekly_lines.append(
-                f"{row.get('week_start', ''):<10} {int(row.get('booked_user_days', 0)):>9} {int(row.get('active_days', 0)):>6}"
-            )
-
-        daily_lines = ["Date       Users"]
-        for row in daily:
-            daily_lines.append(f"{row.get('date', ''):<10} {int(row.get('booked_users', 0)):>5}")
-
-        return "\n".join([
-            "🏢 *Coworking report*",
-            f"Range: {report_range.get('start_date')} to {report_range.get('end_date')}",
-            "Source: Active coworking bookings",
-            "",
-            "*Summary*",
-            f"Booked user-days: {totals.get('booked_user_days', 0)}",
-            f"Unique users: {totals.get('unique_users', 0)}",
-            f"Active days: {totals.get('active_days', 0)} of {totals.get('range_days', 0)}",
-            f"Average per day: {totals.get('average_per_day', 0)}",
-            f"Busiest day: {busiest}",
-            "",
-            "*Monthly*",
-            "```\n" + "\n".join(monthly_lines) + "\n```",
-            "*Weekly*",
-            "```\n" + "\n".join(weekly_lines) + "\n```",
-            "*Daily*",
-            "```\n" + "\n".join(daily_lines) + "\n```",
+        monthly_rows = [
+            [
+                row.get("month", ""),
+                int(row.get("booked_user_days", 0) or 0),
+                int(row.get("active_days", 0) or 0),
+            ]
+            for row in monthly
+        ]
+        sections.extend(["*Monthly*", self._coworking_table(["Month", "User-days", "Active"], monthly_rows)])
+        sections.extend([
+            "*Highlights*",
+            f"Top days: {self._format_coworking_days(summary.get('top_days', []))}",
+            f"Quietest days: {self._format_coworking_days(summary.get('bottom_days', []))}",
         ])
+        return sections
+
+    def _format_coworking_analysis_fallback(self, context: dict) -> str:
+        primary = context["primary"]["summary"]
+        comparison = context.get("comparison")
+        lines = [
+            "🏢 *Coworking usage*",
+            f"Range: {self._format_coworking_range(primary)}",
+            "Source: Active coworking bookings (not door check-ins)",
+            "",
+            self._coworking_direct_answer(context),
+            "",
+            "*Measured facts*",
+            f"• Booked user-days: {primary['booked_user_days']}",
+            f"• Unique users: {primary['unique_users']}",
+            f"• Active days: {primary['active_days']} of {primary['range_days']}",
+            f"• Average per day: {primary['average_per_day']}",
+            f"• Busiest day: {self._format_coworking_days(primary['busiest_days'])}",
+        ]
+
+        if comparison and comparison.get("summary") and comparison.get("metrics"):
+            comparison_summary = comparison["summary"]
+            metrics = comparison["metrics"]
+            lines.extend([
+                "",
+                "*Comparison*",
+                f"• {comparison['label']}: {self._format_coworking_range(comparison_summary)}",
+                f"• Prior booked user-days: {comparison_summary['booked_user_days']}",
+                f"• Change: {self._format_coworking_delta(metrics['booked_user_days_delta'], metrics['booked_user_days_percent_delta'])}",
+                f"• Average/day change: {self._format_coworking_delta(metrics['average_per_day_delta'], metrics['average_per_day_percent_delta'])}",
+                f"• Active-day change: {metrics['active_days_delta']:+d}",
+            ])
+
+        if context["flags"].get("recommendations_requested") or context["flags"].get("trend_requested"):
+            lines.extend([
+                "",
+                "*Interpretation*",
+                "• This is based on bookings only. Use it as a directional usage signal, not door-swipe attendance.",
+            ])
+
+        lines.extend(["", *self._coworking_detail_sections(context["primary"]["report"], primary, context["flags"])])
+        return "\n".join(lines)
+
+    async def _generate_coworking_llm_response(self, context: dict) -> Optional[str]:
+        """Ask GPT-5.4 to turn bounded report data into a concise Slack answer."""
+        flags = context.get("flags", {})
+        if not (
+            context.get("comparison")
+            or flags.get("trend_requested")
+            or flags.get("recommendations_requested")
+        ):
+            return None
+
+        bounded_context = {
+            "question": context["question"],
+            "source": context["source"],
+            "primary": context["primary"],
+            "comparison": context.get("comparison"),
+            "instructions": {
+                "format": "Slack mrkdwn",
+                "style": "insight first, concise, practical",
+                "facts_rule": "Only use measured booking facts from this JSON for numeric claims.",
+                "interpretation_rule": "Broader explanations or suggestions must be labelled Interpretation or Recommendations.",
+            },
+        }
+
+        try:
+            response = await chat(
+                [
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are Roo, writing an MLAI coworking usage answer for Slack. "
+                            "Start with '*Coworking usage*'. State the exact range(s) and source. "
+                            "Answer the user's question directly first. Keep it concise. "
+                            "Use only the provided JSON for booking numbers. "
+                            "Do not invent attendance, names, emails, or causes. "
+                            "If you add broader advice, put it under '*Interpretation*' or '*Recommendations*'. "
+                            "Do not include large raw tables."
+                        ),
+                    },
+                    {"role": "user", "content": json.dumps(bounded_context, sort_keys=True)},
+                ],
+                model=self._coworking_report_llm_model(),
+                max_tokens=700,
+                reasoning_effort="low",
+            )
+            content = str(response.content or "").strip()
+            return content or None
+        except Exception as exc:
+            print(f"⚠️ Coworking report GPT response failed: {exc}")
+            return None
+
+    async def _format_coworking_analysis_response(self, context: dict) -> str:
+        llm_response = await self._generate_coworking_llm_response(context)
+        if not llm_response:
+            return self._format_coworking_analysis_fallback(context)
+
+        primary = context["primary"]["summary"]
+        detail_sections = self._coworking_detail_sections(context["primary"]["report"], primary, context["flags"])
+        if detail_sections:
+            return "\n".join([llm_response, "", *detail_sections])
+        return llm_response
+
+    def _format_coworking_report(self, report: dict) -> str:
+        """Format a coworking booking report for Slack."""
+        context = self._build_coworking_analysis_context("coworking report", report, None, None)
+        return self._format_coworking_analysis_fallback(context)
 
     async def _handle_points_action(
         self,
@@ -5070,12 +5601,34 @@ Keep the response concise but informative."""
             if not self._can_generate_coworking_report_details(admin_details):
                 return self._coworking_report_points_admin_denial()
 
-            start_date, end_date, error = self._resolve_coworking_report_range(text, params)
+            llm_intent = await self._extract_coworking_report_intent_with_llm(text, params)
+            start_date, end_date, error = self._resolve_coworking_report_range_from_intent(text, params, llm_intent)
             if error:
                 return error
 
             report = await client.get_coworking_report(user_id, start_date, end_date)
-            return self._format_coworking_report(report)
+            comparison_range = self._resolve_coworking_comparison_range(
+                text,
+                params,
+                llm_intent,
+                start_date,
+                end_date,
+            )
+            comparison_report = None
+            if comparison_range:
+                comparison_report = await client.get_coworking_report(
+                    user_id,
+                    comparison_range["start_date"],
+                    comparison_range["end_date"],
+                )
+
+            context = self._build_coworking_analysis_context(
+                text,
+                report,
+                comparison_report,
+                comparison_range,
+            )
+            return await self._format_coworking_analysis_response(context)
 
         elif action == "check_coworking":
             check_date = params.get("date")
@@ -5732,7 +6285,7 @@ Keep the response concise but informative."""
         
         else:
             # Fall back to LLM for unrecognized actions
-            return await self._execute_with_llm(skill, text, params, user_id, thread_history)
+            return await self._execute_with_llm(skill, text, params, user_id, None)
 
     async def _execute_github_integration(
         self,

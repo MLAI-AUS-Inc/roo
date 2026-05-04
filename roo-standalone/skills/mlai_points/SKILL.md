@@ -117,6 +117,9 @@ Parse user messages to identify the action and parameters:
 | `coworking report <start> <end>` | coworking_report | "Coworking report 2026-01-01 2026-03-31" |
 | `coworking report this week` | coworking_report | "How many people used the coworking space this week?" |
 | `coworking report last week` | coworking_report | "How many people used the coworking space last week?" |
+| `coworking compare ...` | coworking_report | "How did coworking usage last week compare to the week prior?" |
+| `coworking busiest/quietest ...` | coworking_report | "Which day was busiest for coworking last month?" |
+| `coworking trends/recommendations ...` | coworking_report | "Show coworking trends for the last 3 months and recommendations" |
 | `coworking report last 3/6 months` | coworking_report | "Coworking report last 3 months" |
 | `coworking report last year` | coworking_report | "Coworking report last year" |
 | `coworking book <date/today>` | book_coworking | "Book me in for today", "@Roo coworking book today" |
@@ -168,7 +171,9 @@ For coworking report actions:
 - Roo must fail fast unless the requester is a full Points Admin or report-only partner
 - Count only active bookings (`status=booked`), not cancelled bookings
 - Support exact inclusive date ranges and presets: this week, last week, last 3 months, last 6 months, last year
-- Format the response as a concise Slack report with summary, monthly, weekly, and daily counts
+- Format the response insight-first, with compact detail tables only when useful or requested
+- For comparison/trend/recommendation questions, compute report metrics deterministically from backend JSON, then use GPT-5.4 only to explain the bounded numbers
+- Label broader suggestions as interpretation or recommendations, never as measured attendance facts
 - The backend must still validate the requester for defense in depth
 
 ### Step 3: Execute via API
