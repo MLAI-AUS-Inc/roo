@@ -50,6 +50,18 @@ def _make_agent() -> RooAgent:
             "github-integration",
             ["connect github", "github integration", "reconnect github", "github auth"],
         ),
+        _make_skill(
+            "luma-events",
+            [
+                "luma",
+                "attendees",
+                "guest list",
+                "csv",
+                "csv documents",
+                "past csv documents",
+                "mlai events",
+            ],
+        ),
     ]
     agent.skill_executor = SimpleNamespace()
     agent._thread_skill_context = {}
@@ -83,6 +95,17 @@ def test_request_points_phrase_routes_to_points():
 
     assert skill is not None
     assert skill.name == "mlai-points"
+
+
+def test_luma_attendee_csv_phrase_routes_to_luma_events():
+    agent = _make_agent()
+
+    skill = agent._select_skill_from_triggers(
+        "can you give me past csv documents for the past 3 MLAI events"
+    )
+
+    assert skill is not None
+    assert skill.name == "luma-events"
 
 
 def test_coworking_report_wording_routes_to_points():

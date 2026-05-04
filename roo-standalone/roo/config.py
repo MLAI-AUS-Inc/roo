@@ -32,6 +32,8 @@ class Settings(BaseSettings):
     MLAI_API_KEY: Optional[str] = None
     ROO_API_KEY: Optional[str] = None
     INTERNAL_API_KEY: Optional[str] = None
+    LUMA_API_KEY: Optional[str] = None
+    LUMA_BASE_URL: str = "https://public-api.luma.com"
 
     # GitHub OAuth
     GITHUB_CLIENT_ID: Optional[str] = None

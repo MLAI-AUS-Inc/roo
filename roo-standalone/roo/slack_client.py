@@ -87,6 +87,44 @@ def post_message(
         raise
 
 
+def upload_file(
+    channel: str,
+    content: str,
+    filename: str,
+    title: Optional[str] = None,
+    thread_ts: Optional[str] = None,
+    initial_comment: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Upload an in-memory text file to Slack.
+
+    Requires the Slack bot token to have the files:write scope.
+    """
+    client = get_slack_client()
+
+    try:
+        response = client.files_upload_v2(
+            channel=channel,
+            content=content,
+            filename=filename,
+            title=title or filename,
+            thread_ts=thread_ts,
+            initial_comment=initial_comment,
+        )
+
+        if response.get("ok"):
+            suffix = f" (thread: {thread_ts})" if thread_ts else ""
+            print(f"✅ File uploaded to {channel}{suffix}: {filename}")
+        else:
+            print(f"❌ Failed to upload file: {response}")
+
+        return response
+
+    except Exception as e:
+        print(f"❌ Slack file upload error: {e}")
+        raise
+
+
 def get_thread_messages(channel: str, thread_ts: str) -> list[dict]:
     """
     Retrieve all messages in a Slack thread for context.

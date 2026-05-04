@@ -49,6 +49,7 @@ from ..coworking_booking_intents import (
 POINTS_SUPER_ADMIN_SLACK_ID = "U05QPB483K9"
 FULL_POINTS_ADMIN_ROLES = {"admin", "committee", "portfolio_lead"}
 COWORKING_REPORT_ROLES = {*FULL_POINTS_ADMIN_ROLES, "partner"}
+LUMA_EXPORT_ROLES = {"admin", "committee", "partner"}
 
 
 @dataclass
@@ -120,6 +121,8 @@ class SkillExecutor:
                 result = await self._execute_tone_of_voice(skill, text, params, user_id)
             elif skill.name == "medhack":
                 result = await self._execute_medhack(skill, text, params, user_id, channel_id, thread_ts, thread_history)
+            elif skill.name == "luma-events":
+                result = await self._execute_luma_events(skill, text, params, user_id, channel_id, thread_ts)
             else:
                 # Generic LLM-based execution
                 result = await self._execute_with_llm(skill, text, params, user_id, thread_history)
@@ -1478,6 +1481,145 @@ Keep the response concise but informative."""
         # Note: Vector search is disabled until API endpoint is implemented
         # For now, fall back to LLM-based execution
         return await self._execute_with_llm(skill, text, params, user_id)
+
+    async def _execute_luma_events(
+        self,
+        skill: Skill,
+        text: str,
+        params: dict,
+        user_id: str,
+        channel_id: Optional[str],
+        thread_ts: Optional[str],
+    ) -> Any:
+        """Execute the Luma Events skill by exporting attendee CSVs."""
+        settings = get_settings()
+        if not getattr(settings, "MLAI_BACKEND_URL", None):
+            return (
+                "Luma attendee exports need the Points Admin lookup to be configured. "
+                "Ask the team to set `MLAI_BACKEND_URL`."
+            )
+
+        from roo.clients.mlai_backend import MLAIBackendClient, MLAIBackendUnavailableError
+
+        backend_client = MLAIBackendClient(
+            base_url=settings.MLAI_BACKEND_URL,
+            api_key=settings.ROO_API_KEY or settings.MLAI_API_KEY,
+            internal_api_key=(
+                settings.INTERNAL_API_KEY
+                or settings.ROO_API_KEY
+                or settings.MLAI_API_KEY
+            ),
+        )
+        try:
+            admin_details = await backend_client.get_admin_details(user_id)
+        except MLAIBackendUnavailableError:
+            return (
+                "I couldn't verify your Points Admin role because the MLAI backend is "
+                "temporarily unavailable. Try again in a tick."
+            )
+
+        if not self._can_export_luma_attendees_details(admin_details):
+            return (
+                "Sorry mate, you'll need to be a Points Admin with the `admin`, "
+                "`committee`, or `partner` role to export Luma attendee data. 🔒"
+            )
+
+        api_key = str(getattr(settings, "LUMA_API_KEY", "") or "").strip()
+        if not api_key:
+            return "Luma isn't configured yet. Ask the team to set `LUMA_API_KEY`."
+
+        if not channel_id:
+            return "I need a Slack channel or DM to upload the Luma CSV files."
+
+        ClientClass = skill.get_client_class("LumaEventsClient")
+        if ClientClass is None:
+            return "Sorry mate, the Luma Events skill isn't properly configured. Missing implementation."
+
+        event_count = self._resolve_luma_event_count(params, text)
+        approval_status = str(params.get("approval_status") or "approved").strip() or "approved"
+        base_url = getattr(settings, "LUMA_BASE_URL", "https://public-api.luma.com")
+        client = ClientClass(api_key=api_key, base_url=base_url)
+
+        try:
+            events = await client.get_recent_ended_events(count=event_count)
+            if not events:
+                return "I couldn't find any ended Luma events on the configured MLAI calendar."
+
+            from ..slack_client import upload_file
+
+            exported = []
+            for event in events:
+                guests = await client.list_guests(
+                    event_id=event["id"],
+                    approval_status=approval_status,
+                )
+                csv_content = client.build_attendee_csv(event, guests)
+                filename = client.build_csv_filename(event)
+                title = f"{event.get('name') or 'Luma event'} attendees"
+                upload_file(
+                    channel=channel_id,
+                    content=csv_content,
+                    filename=filename,
+                    title=title,
+                    thread_ts=thread_ts,
+                )
+                exported.append(
+                    {
+                        "event_id": event.get("id"),
+                        "event_name": event.get("name"),
+                        "filename": filename,
+                        "guest_count": len(guests),
+                    }
+                )
+
+            lines = [
+                f"Uploaded {len(exported)} Luma attendee CSV file{'s' if len(exported) != 1 else ''}:"
+            ]
+            for item in exported:
+                lines.append(
+                    f"• `{item['filename']}` — {item['guest_count']} approved guest"
+                    f"{'s' if item['guest_count'] != 1 else ''}"
+                )
+
+            return {
+                "message": "\n".join(lines),
+                "data": {
+                    "action": "export_attendees",
+                    "approval_status": approval_status,
+                    "events": exported,
+                },
+            }
+        except httpx.HTTPStatusError as e:
+            status = e.response.status_code
+            if status in (401, 403):
+                return "Luma rejected the configured API key. Check that `LUMA_API_KEY` belongs to the MLAI calendar and has access."
+            if status == 429:
+                return "Luma rate-limited the export. Try again in a minute."
+            detail = self._extract_http_error_detail(e)
+            return detail or f"Luma returned HTTP {status}. Try again in a tick."
+        except (httpx.TimeoutException, httpx.TransportError):
+            return "I'm having trouble reaching Luma right now. Try again in a tick."
+
+    def _can_export_luma_attendees_details(self, admin_details: Optional[dict]) -> bool:
+        return self._points_admin_role(admin_details) in LUMA_EXPORT_ROLES
+
+    def _resolve_luma_event_count(self, params: dict, text: str) -> int:
+        raw_count = params.get("event_count") or params.get("limit")
+        if raw_count is None:
+            text_lower = text.lower()
+            if re.search(r"\blatest\s+(?:mlai\s+)?event\b", text_lower):
+                raw_count = 1
+            else:
+                count_match = re.search(
+                    r"\b(?:past|last|recent|latest)\s+(\d{1,2})\s+(?:mlai\s+)?events?\b",
+                    text_lower,
+                )
+                raw_count = count_match.group(1) if count_match else 3
+        try:
+            count = int(raw_count)
+        except (TypeError, ValueError):
+            count = 3
+        return max(1, min(count, 10))
 
     async def _save_content_factory_pending_intent(
         self,
