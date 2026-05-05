@@ -2252,7 +2252,8 @@ class MLAIBackendClient:
         admin_slack_id: str,
         target_slack_id: str,
         points: int,
-        reason: str
+        reason: str,
+        idempotency_key: Optional[str] = None,
     ) -> dict:
         """System award points (bypasses client-side admin checks)."""
         payload = {
@@ -2261,6 +2262,8 @@ class MLAIBackendClient:
             "points": points,
             "reason": reason,
         }
+        if idempotency_key:
+            payload["idempotency_key"] = str(idempotency_key)
         response = await self._request(
             "POST",
             f"{self._points_base}/system/award/",

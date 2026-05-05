@@ -25,13 +25,21 @@ class FakeAwardClient:
         self.calls = []
         self.balances = balances or {}
 
-    async def system_award_points(self, admin_slack_id, target_slack_id, points, reason):
+    async def system_award_points(
+        self,
+        admin_slack_id,
+        target_slack_id,
+        points,
+        reason,
+        idempotency_key=None,
+    ):
         self.calls.append(
             {
                 "admin_slack_id": admin_slack_id,
                 "target_slack_id": target_slack_id,
                 "points": points,
                 "reason": reason,
+                "idempotency_key": idempotency_key,
             }
         )
         return {
@@ -44,9 +52,50 @@ class RetryableFailureAwardClient:
     def __init__(self):
         self.calls = []
 
-    async def system_award_points(self, admin_slack_id, target_slack_id, points, reason):
-        self.calls.append((admin_slack_id, target_slack_id, points, reason))
+    async def system_award_points(
+        self,
+        admin_slack_id,
+        target_slack_id,
+        points,
+        reason,
+        idempotency_key=None,
+    ):
+        self.calls.append(
+            {
+                "admin_slack_id": admin_slack_id,
+                "target_slack_id": target_slack_id,
+                "points": points,
+                "reason": reason,
+                "idempotency_key": idempotency_key,
+            }
+        )
         raise httpx.TransportError("backend temporarily unavailable")
+
+
+class NonRetryableFailureAwardClient:
+    def __init__(self):
+        self.calls = []
+
+    async def system_award_points(
+        self,
+        admin_slack_id,
+        target_slack_id,
+        points,
+        reason,
+        idempotency_key=None,
+    ):
+        self.calls.append(
+            {
+                "admin_slack_id": admin_slack_id,
+                "target_slack_id": target_slack_id,
+                "points": points,
+                "reason": reason,
+                "idempotency_key": idempotency_key,
+            }
+        )
+        request = httpx.Request("POST", "https://backend.test/api/v1/points/system/award/")
+        response = httpx.Response(400, request=request)
+        raise httpx.HTTPStatusError("bad request", request=request, response=response)
 
 
 def make_store(tmp_path):
@@ -123,6 +172,7 @@ async def test_qualifying_reply_awards_points_without_immediate_slack_post(tmp_p
             "target_slack_id": "UHELPER",
             "points": 2,
             "reason": "link-love",
+            "idempotency_key": "link_love:CBOOST:111.000:UHELPER",
         }
     ]
     assert posted_messages == []
@@ -252,9 +302,91 @@ async def test_retryable_backend_failure_keeps_award_pending(tmp_path):
     )
 
     assert result["status"] == "pending_retry"
-    assert client.calls == [("UROO", "UHELPER", 2, "link-love")]
+    assert client.calls == [
+        {
+            "admin_slack_id": "UROO",
+            "target_slack_id": "UHELPER",
+            "points": 2,
+            "reason": "link-love",
+            "idempotency_key": "link_love:CBOOST:111.000:UHELPER",
+        }
+    ]
     assert result["award"]["status"] == "pending_award"
     assert result["award"]["attempt_count"] == 1
+    assert store.get_due_notification_groups() == []
+
+
+@pytest.mark.asyncio
+async def test_retryable_backend_failure_blocks_after_max_attempts(tmp_path):
+    store = make_store(tmp_path)
+    client = RetryableFailureAwardClient()
+    _, award = store.create_award(
+        channel_id="CBOOST",
+        root_message_ts="111.000",
+        slack_user_id="UHELPER",
+        root_author_slack_id="UROOT",
+        source_reply_message_ts="222.000",
+    )
+
+    first = await link_love.process_link_love_award(
+        award,
+        store=store,
+        client=client,
+        bot_user_id="UROO",
+        notification_delay_seconds=0,
+        max_retry_attempts=2,
+    )
+    second = await link_love.process_link_love_award(
+        first["award"],
+        store=store,
+        client=client,
+        bot_user_id="UROO",
+        notification_delay_seconds=0,
+        max_retry_attempts=2,
+    )
+
+    assert first["status"] == "pending_retry"
+    assert first["award"]["status"] == "pending_award"
+    assert first["award"]["attempt_count"] == 1
+    assert second["status"] == "blocked"
+    assert second["award"]["status"] == "blocked"
+    assert second["award"]["attempt_count"] == 2
+    assert len(client.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_non_retryable_backend_failure_blocks_immediately(tmp_path):
+    store = make_store(tmp_path)
+    client = NonRetryableFailureAwardClient()
+
+    result = await link_love.handle_link_love_reply(
+        reply_event(text="Done"),
+        store=store,
+        client=client,
+        get_root_message=lambda channel, ts: root_message(),
+        llm_chat=llm_engaged,
+        bot_user_id="UROO",
+        notification_delay_seconds=0,
+    )
+
+    assert result["status"] == "blocked"
+    assert result["award"]["status"] == "blocked"
+    assert result["award"]["attempt_count"] == 0
+    assert store.get_due_notification_groups() == []
+
+
+def test_blocked_awards_are_not_notification_candidates(tmp_path):
+    store = make_store(tmp_path)
+    _, award = store.create_award(
+        channel_id="CBOOST",
+        root_message_ts="111.000",
+        slack_user_id="UHELPER",
+        root_author_slack_id="UROOT",
+        source_reply_message_ts="222.000",
+    )
+
+    store.mark_blocked(int(award["id"]), error="HTTPStatusError: bad request")
+
     assert store.get_due_notification_groups() == []
 
 

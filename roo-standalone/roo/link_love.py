@@ -20,6 +20,7 @@ LINK_LOVE_REASON = "link-love"
 DEFAULT_LINK_LOVE_DB_PATH = "data/link_love_awards.db"
 DEFAULT_RETRY_POLL_SECONDS = 15.0
 DEFAULT_PROCESSING_LEASE_SECONDS = 90.0
+DEFAULT_MAX_RETRY_ATTEMPTS = 5
 
 
 def _now() -> float:
@@ -29,6 +30,21 @@ def _now() -> float:
 def retry_delay_seconds(attempt_count: int) -> float:
     attempt_number = max(1, int(attempt_count or 1))
     return min(15 * 60, 30 * (2 ** (attempt_number - 1)))
+
+
+def link_love_backend_idempotency_key(award: dict[str, Any]) -> str:
+    return (
+        f"link_love:{award['channel_id']}:"
+        f"{award['root_message_ts']}:{award['slack_user_id']}"
+    )
+
+
+def link_love_max_retry_attempts() -> int:
+    try:
+        value = int(getattr(get_settings(), "BOOST_LINK_LOVE_MAX_RETRY_ATTEMPTS", DEFAULT_MAX_RETRY_ATTEMPTS))
+    except Exception:
+        value = DEFAULT_MAX_RETRY_ATTEMPTS
+    return max(1, value)
 
 
 def clean_slack_user_id(raw_value: Any) -> str:
@@ -497,7 +513,13 @@ class LinkLoveAwardStore:
                 ).fetchone()
             )
 
-    def mark_retryable_failure(self, award_id: int, *, error: str) -> dict[str, Any]:
+    def mark_retryable_failure(
+        self,
+        award_id: int,
+        *,
+        error: str,
+        max_attempts: Optional[int] = None,
+    ) -> dict[str, Any]:
         self._ensure_schema()
         now = _now()
         with self._lock, self._connect() as conn:
@@ -506,10 +528,12 @@ class LinkLoveAwardStore:
                 (award_id,),
             ).fetchone()
             next_attempt_count = int(row["attempt_count"] or 0) + 1 if row else 1
+            should_block = max_attempts is not None and next_attempt_count >= int(max_attempts)
             conn.execute(
                 """
                 UPDATE link_love_awards
-                SET attempt_count = ?,
+                SET status = ?,
+                    attempt_count = ?,
                     next_attempt_at = ?,
                     locked_until = NULL,
                     locked_by = NULL,
@@ -518,8 +542,9 @@ class LinkLoveAwardStore:
                 WHERE id = ?
                 """,
                 (
+                    "blocked" if should_block else "pending_award",
                     next_attempt_count,
-                    now + retry_delay_seconds(next_attempt_count),
+                    now if should_block else now + retry_delay_seconds(next_attempt_count),
                     error,
                     now,
                     award_id,
@@ -647,6 +672,7 @@ async def process_link_love_award(
     client: Any = None,
     bot_user_id: Optional[str] = None,
     notification_delay_seconds: Optional[float] = None,
+    max_retry_attempts: Optional[int] = None,
 ) -> dict[str, Any]:
     store = store or get_link_love_store()
     client = client or _build_backend_client()
@@ -660,6 +686,11 @@ async def process_link_love_award(
     else:
         settings = get_settings()
         delay = getattr(settings, "BOOST_LINK_LOVE_NOTIFICATION_DELAY_SECONDS", 60)
+    resolved_max_retry_attempts = (
+        max(1, int(max_retry_attempts))
+        if max_retry_attempts is not None
+        else link_love_max_retry_attempts()
+    )
 
     try:
         backend_result = await client.system_award_points(
@@ -667,6 +698,7 @@ async def process_link_love_award(
             target_slack_id=str(award["slack_user_id"]),
             points=LINK_LOVE_POINTS,
             reason=LINK_LOVE_REASON,
+            idempotency_key=link_love_backend_idempotency_key(award),
         )
         updated = store.mark_awarded(
             int(award["id"]),
@@ -677,7 +709,19 @@ async def process_link_love_award(
     except Exception as exc:
         error = f"{exc.__class__.__name__}: {exc}"
         if is_retryable_link_love_exception(exc):
-            updated = store.mark_retryable_failure(int(award["id"]), error=error)
+            updated = store.mark_retryable_failure(
+                int(award["id"]),
+                error=error,
+                max_attempts=resolved_max_retry_attempts,
+            )
+            if updated.get("status") == "blocked":
+                print(
+                    "⚠️ link_love_award_blocked_after_retries "
+                    f"award_id={award.get('id')} slack_user_id={award.get('slack_user_id')} "
+                    f"attempt_count={updated.get('attempt_count')} max_attempts={resolved_max_retry_attempts} "
+                    f"error={error}"
+                )
+                return {"status": "blocked", "award": updated, "error": error}
             print(
                 "🔁 link_love_award_retryable_failure "
                 f"award_id={award.get('id')} slack_user_id={award.get('slack_user_id')} error={error}"
