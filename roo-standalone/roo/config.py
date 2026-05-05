@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     
     # LLM Providers (at least one required)
     OPENAI_API_KEY: Optional[str] = None
+    OPENAI_VISION_MODEL: str = "gpt-4.1-mini"
     GOOGLE_API_KEY: Optional[str] = None
     ANTHROPIC_API_KEY: Optional[str] = None
     
@@ -32,6 +33,8 @@ class Settings(BaseSettings):
     MLAI_API_KEY: Optional[str] = None
     ROO_API_KEY: Optional[str] = None
     INTERNAL_API_KEY: Optional[str] = None
+    LINEAR_API_KEY: Optional[str] = None
+    LINEAR_DEFAULT_TEAM: Optional[str] = None
 
     # GitHub OAuth
     GITHUB_CLIENT_ID: Optional[str] = None
@@ -44,6 +47,8 @@ class Settings(BaseSettings):
     SKILLS_DIR: str = "skills"
     TIMEZONE: str = "Australia/Melbourne"
     ROUTER_MODEL: str = "gpt-5.4"
+    LINEAR_MEETING_AUTO_CREATE_MIN_CONFIDENCE: float = 0.85
+    LINEAR_MEETING_UNCERTAIN_MIN_CONFIDENCE: float = 0.65
     COWORKING_INTENTS_DB_PATH: str = "data/coworking_booking_intents.db"
     COWORKING_RETRY_POLL_SECONDS: float = 30.0
     BOOST_LINK_LOVE_ENABLED: bool = True
