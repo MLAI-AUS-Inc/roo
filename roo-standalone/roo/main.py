@@ -1653,10 +1653,15 @@ async def _handle_start_here_intro(event: dict):
     if not result.get("awarded"):
         return
 
+    try:
+        points_awarded = int(result.get("points_awarded") or 4)
+    except (TypeError, ValueError):
+        points_awarded = 4
+
     post_message(
         channel=channel_id,
         thread_ts=message_ts,
-        text=f"Welcome <@{user_id}>! You've earned 2 Roo points for introducing yourself here.",
+        text=f"Welcome <@{user_id}>! You've earned {points_awarded} Roo points for introducing yourself here.",
     )
 
 
