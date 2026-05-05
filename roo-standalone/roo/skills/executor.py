@@ -4222,6 +4222,9 @@ Keep the response concise but informative."""
             if params.get("task_title") or "create" in text_lower:
                 action = "create_task"
 
+        if action == "book_coworking" and self._coworking_target_mentions_present(text, params):
+            return "admin_checkin_coworking"
+
         if action and action != "task":
             return action
 
@@ -4316,14 +4319,26 @@ Keep the response concise but informative."""
         return text_lower
 
     def _is_coworking_admin_checkin_request(self, text: str) -> bool:
-        """Detect admin coworking check-in commands like `check <@U123> in today`."""
+        """Detect admin coworking check-in commands like `book <@U123> in today`."""
         return bool(
             re.search(
-                r"\bcheck\b.*<@[A-Z0-9]+>.*\bin\b",
+                r"\b(?:check|book)\b.*<@[A-Z0-9]+>.*\bin\b",
                 str(text or ""),
                 re.IGNORECASE,
             )
         )
+
+    def _coworking_target_mentions_present(self, text: str, params: dict) -> bool:
+        """Return True when a coworking booking request contains a non-Roo target mention."""
+        if re.search(r"<@[A-Z0-9]+>", str(text or ""), re.IGNORECASE):
+            return True
+        for raw_target in list(params.get("target_users", []) or []) + [
+            params.get("target_user"),
+            params.get("target_slack_id"),
+        ]:
+            if raw_target not in (None, ""):
+                return True
+        return False
 
     def _extract_task_identifier(self, text: str, explicit_task_id=None) -> Optional[str]:
         """Extract either a numeric task id or a ROO task code from text."""
@@ -5515,6 +5530,11 @@ Keep the response concise but informative."""
         thread_ts: Optional[str],
         admin_checkin: bool,
     ) -> str:
+        print(
+            "🏢 coworking_booking_execute "
+            f"requested_by_user_id={requested_by_user_id} target_user_id={target_user_id} "
+            f"booking_date={booking_date} admin_checkin={admin_checkin}"
+        )
         try:
             store = get_coworking_intent_store()
             intent = store.record_intent(
@@ -5942,8 +5962,25 @@ Keep the response concise but informative."""
             
             lines.append("\nBook a day with \"coworking book <date>\"")
             return "\n".join(lines)
-        
+
         elif action == "book_coworking":
+            from ..slack_client import get_bot_user_id
+            try:
+                bot_id = get_bot_user_id()
+            except Exception:
+                bot_id = None
+            target_slack_ids = self._extract_coworking_checkin_targets(
+                text,
+                params,
+                bot_id=bot_id,
+            )
+            if target_slack_ids:
+                return (
+                    "I saw a tagged user in that coworking booking request, so I didn't book you. "
+                    "Please retry as `book @user in today` or `check @user in today` so I can run "
+                    "the admin check-in flow."
+                )
+
             booking_date = self._resolve_coworking_booking_date(
                 params,
                 text,
