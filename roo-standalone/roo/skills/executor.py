@@ -3921,6 +3921,9 @@ Keep the response concise but informative."""
         text_lower = text.lower()
         explicit_points_request = "request" in text_lower and "point" in text_lower and "reward" not in text_lower
 
+        if self._is_points_topup_request(text_lower, action):
+            return "topup_points"
+
         management_action = self._resolve_points_admin_management_action(
             text,
             explicit_action=action,
@@ -4004,6 +4007,8 @@ Keep the response concise but informative."""
             return "view_rate_card"
         if any(w in text_lower for w in ["rewards", "perks"]):
             return "list_rewards"
+        if self._is_points_topup_request(text_lower, action):
+            return "topup_points"
         if "reward" in text_lower and "request" in text_lower:
             return "request_reward"
         if "task" in text_lower and "create" in text_lower:
@@ -4017,6 +4022,24 @@ Keep the response concise but informative."""
         if any(w in text_lower for w in ["deduct", "remove points"]):
             return "deduct_points"
         return action
+
+    def _is_points_topup_request(self, text_lower: str, action: str = "") -> bool:
+        if action in {"topup_points", "top_up_points", "purchase_points", "buy_points"}:
+            return True
+        if "point" not in text_lower and "pts" not in text_lower:
+            return False
+        return any(
+            phrase in text_lower
+            for phrase in (
+                "top up",
+                "top-up",
+                "topup",
+                "buy",
+                "purchase",
+                "pay for",
+                "paid points",
+            )
+        )
 
     def _extract_task_identifier(self, text: str, explicit_task_id=None) -> Optional[str]:
         """Extract either a numeric task id or a ROO task code from text."""
@@ -4679,6 +4702,39 @@ Keep the response concise but informative."""
             return (
                 "I created the points request, but I couldn't finish wiring up emoji approval for it. "
                 "Please ask a Points Admin to use the existing manual award flow for now."
+            )
+
+        elif action == "topup_points":
+            if not channel_id:
+                return "Roo Points top-ups need to start from Slack so I can keep the payment receipt in the right thread."
+
+            points = self._extract_points_request_amount(text, params.get("points"))
+            pack_by_points = {
+                5: "topup_5",
+                10: "topup_10",
+                25: "topup_25",
+            }
+            if points is None:
+                return "How many Roo Points would you like to top up? I can do 5, 10, or 25 points."
+            if points not in pack_by_points:
+                return "I can only create top-ups for 5, 10, or 25 Roo Points right now."
+
+            purchase = await client.create_points_purchase(
+                slack_user_id=user_id,
+                pack_id=pack_by_points[points],
+                slack_channel_id=channel_id,
+                slack_thread_ts=thread_ts,
+            )
+            checkout_url = purchase.get("frontend_checkout_page_url")
+            if not checkout_url:
+                return "I created the top-up request, but I couldn't get the checkout link back. Please try again."
+
+            return (
+                f"Top-up request created for *{points} Roo Points*.\n\n"
+                f"Pay here: {checkout_url}\n\n"
+                "Roo Points are an internal MLAI rewards system. They are not cash, "
+                "not transferable, and not redeemable for money. Purchased points do not "
+                "count toward lifetime earned contribution."
             )
 
         elif action == "list_tasks":

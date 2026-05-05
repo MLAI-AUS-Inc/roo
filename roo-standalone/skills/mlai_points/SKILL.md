@@ -63,7 +63,7 @@ Example responses:
 
 ## Parameters
 
-- **action**: The action to perform (required) - e.g., "balance", "request_points", "book_coworking", "coworking_report", "claim_task", "submit_task", "award_points", "create_task"
+- **action**: The action to perform (required) - e.g., "balance", "request_points", "topup_points", "book_coworking", "coworking_report", "claim_task", "submit_task", "award_points", "create_task"
 - **task_id**: Task ID number or task code (for example `42` or `ROO-0042`) for task-related actions
 - **date**: Date for coworking bookings (YYYY-MM-DD format)
 - **start_date**: Start date for coworking reports (YYYY-MM-DD format)
@@ -102,6 +102,7 @@ Parse user messages to identify the action and parameters:
 |---------|--------|---------|
 | `points`, `balance` | balance | "What's my points balance?", "@Roo points" |
 | `request <n> points for <reason>` | request_points | "Request 5 points for helping at the event" |
+| `top up <n> points`, `buy <n> points` | topup_points | "Buy 10 Roo Points", "Top up 5 points" |
 | `points earn` | list_tasks | "How do I earn points?", "@Roo points earn" |
 | `tasks`, `tasks open` | list_tasks | "What can I claim right now?" |
 | `tasks mine` | list_tasks | "Show me my tasks" |
@@ -149,6 +150,7 @@ Parse the user's message to determine which action they want:
 - Extract any IDs, dates, or amounts mentioned
 - Accept both numeric task ids and `ROO-xxxx` task codes
 - Treat `request ... points for ...` as `request_points`, not `award_points`
+- Treat `buy/top up/purchase ... points` as `topup_points`, not `request_points`
 - For admin actions, verify the Slack mention format
 - For super admin actions, require exactly one tagged Slack user, never fall through into `award_points`, and require a positive numeric allowance when changing allowance
 

@@ -32,6 +32,7 @@ class FakePointsClient:
     def __init__(self):
         self.created = None
         self.attached = None
+        self.created_purchase = None
 
     async def create_points_request(
         self,
@@ -51,6 +52,25 @@ class FakePointsClient:
             "slack_thread_ts": slack_thread_ts,
         }
         return {"id": 42}
+
+    async def create_points_purchase(
+        self,
+        slack_user_id,
+        pack_id,
+        slack_channel_id=None,
+        slack_thread_ts=None,
+    ):
+        self.created_purchase = {
+            "slack_user_id": slack_user_id,
+            "pack_id": pack_id,
+            "slack_channel_id": slack_channel_id,
+            "slack_thread_ts": slack_thread_ts,
+        }
+        return {
+            "id": "purchase-123",
+            "points_amount": 10,
+            "frontend_checkout_page_url": "https://mlai.test/roo/topup/purchase-123",
+        }
 
     async def attach_points_request_slack_summary(
         self,
@@ -206,6 +226,17 @@ def test_resolve_points_action_maps_plain_request_to_request_points():
     assert action == "request_points"
 
 
+def test_resolve_points_action_maps_buy_points_to_topup_points():
+    executor = SkillExecutor()
+
+    action = executor._resolve_points_action(
+        {"action": "request_points"},
+        "I want to buy 10 Roo Points",
+    )
+
+    assert action == "topup_points"
+
+
 def test_extract_points_request_reason_supports_requesting_phrase():
     executor = SkillExecutor()
 
@@ -323,6 +354,67 @@ async def test_request_points_creates_request_and_suppresses_auto_post(monkeypat
             "slack_thread_ts": "111.222",
         },
     }
+
+
+@pytest.mark.asyncio
+async def test_topup_points_creates_purchase_and_returns_checkout_link():
+    executor = SkillExecutor()
+    client = FakePointsClient()
+
+    result = await executor._handle_points_action(
+        client=client,
+        action="topup_points",
+        params={"points": 10},
+        text="buy 10 Roo Points",
+        user_id="U123",
+        channel_id="C123",
+        thread_ts="111.222",
+        skill=None,
+    )
+
+    assert client.created_purchase == {
+        "slack_user_id": "U123",
+        "pack_id": "topup_10",
+        "slack_channel_id": "C123",
+        "slack_thread_ts": "111.222",
+    }
+    assert "Top-up request created for *10 Roo Points*" in result
+    assert "https://mlai.test/roo/topup/purchase-123" in result
+    assert "not cash" in result
+    assert "not transferable" in result
+    assert "not redeemable for money" in result
+    assert "do not count toward lifetime earned contribution" in result
+
+
+@pytest.mark.asyncio
+async def test_topup_points_clarifies_missing_or_unsupported_pack():
+    executor = SkillExecutor()
+    client = FakePointsClient()
+
+    missing_result = await executor._handle_points_action(
+        client=client,
+        action="topup_points",
+        params={},
+        text="top up Roo Points",
+        user_id="U123",
+        channel_id="C123",
+        thread_ts="111.222",
+        skill=None,
+    )
+    unsupported_result = await executor._handle_points_action(
+        client=client,
+        action="topup_points",
+        params={"points": 12},
+        text="buy 12 Roo Points",
+        user_id="U123",
+        channel_id="C123",
+        thread_ts="111.222",
+        skill=None,
+    )
+
+    assert "5, 10, or 25" in missing_result
+    assert "5, 10, or 25" in unsupported_result
+    assert client.created_purchase is None
 
 
 @pytest.mark.asyncio
