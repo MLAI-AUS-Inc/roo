@@ -45,7 +45,7 @@ See `skills/connect_users.md` for an example.
 
 ## Environment Variables
 
-Copy `.env.example` to `.env` and configure:
+Copy `roo-standalone/.env.example` to `roo-standalone/.env` and configure:
 - `DATABASE_URL` - PostgreSQL connection
 - `SLACK_BOT_TOKEN` - Slack bot token
 - `OPENAI_API_KEY` - For LLM and embeddings

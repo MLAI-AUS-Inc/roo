@@ -1284,7 +1284,7 @@ async def _trigger_jobs_daily_run() -> bool:
     url = settings.JOBS_API_URL.rstrip("/") + "/jobs/daily-run"
     headers: dict[str, str] = {}
     if settings.JOBS_TRIGGER_TOKEN:
-        headers["Authorization"] = f"Bearer {settings.JOBS_TRIGGER_TOKEN}"
+        headers["X-API-Key"] = settings.JOBS_TRIGGER_TOKEN
 
     payload = {
         "collect_live": settings.JOBS_COLLECT_LIVE,
