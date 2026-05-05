@@ -104,6 +104,8 @@ def test_coworking_booking_shortcuts_route_to_points():
         "book me in",
         "book me in today",
         "check <@U123ABC> in today",
+        "book <@U123ABC> in today",
+        "also book <@U123ABC> in today",
     ]:
         skill = agent._select_skill_from_triggers(text)
         assert skill is not None

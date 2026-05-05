@@ -2015,6 +2015,38 @@ async def test_admin_checkin_books_target_for_today(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_admin_checkin_book_mention_phrase_books_target_for_today(tmp_path, monkeypatch):
+    store = coworking_module.CoworkingBookingIntentStore(tmp_path / "intents.db")
+    client = FakeAdminCheckinCoworkingClient(balance=13)
+    executor = SkillExecutor()
+    monkeypatch.setattr("roo.utils.get_current_date", lambda: date(2026, 5, 4))
+    monkeypatch.setattr(executor_module, "get_coworking_intent_store", lambda: store)
+    monkeypatch.setattr(slack_client_module, "get_bot_user_id", lambda: "UROO")
+
+    action = executor._resolve_points_action(
+        {"action": "book_coworking", "target_users": ["<@UTARGET>"]},
+        "also book <@UTARGET> in today",
+    )
+    result = await executor._handle_points_action(
+        client=client,
+        action=action,
+        params={"action": "book_coworking", "target_users": ["<@UTARGET>"]},
+        text="also book <@UTARGET> in today",
+        user_id="UADMIN",
+        channel_id="C123",
+        thread_ts="111.222",
+        skill=SimpleNamespace(name="mlai-points"),
+    )
+
+    intent = store.get_by_key("coworking:UTARGET:2026-05-04")
+    assert action == "admin_checkin_coworking"
+    assert "Checked <@UTARGET> in for **2026-05-04**" in result
+    assert client.book_args == ("UTARGET", "2026-05-04", "C123")
+    assert client.balance_args == "UTARGET"
+    assert intent["requested_by_slack_id"] == "UADMIN"
+
+
+@pytest.mark.asyncio
 async def test_admin_checkin_honors_explicit_date(tmp_path, monkeypatch):
     store = coworking_module.CoworkingBookingIntentStore(tmp_path / "intents.db")
     client = FakeAdminCheckinCoworkingClient()
@@ -2050,7 +2082,7 @@ async def test_admin_checkin_denies_partner_without_booking(tmp_path, monkeypatc
         client=client,
         action="admin_checkin_coworking",
         params={},
-        text="check <@UTARGET> in today",
+        text="book <@UTARGET> in today",
         user_id="UPARTNER",
         channel_id="C123",
         thread_ts="111.222",
@@ -2082,7 +2114,7 @@ async def test_admin_checkin_requires_exactly_one_target(monkeypatch):
         client=client,
         action="admin_checkin_coworking",
         params={},
-        text="check <@UONE> and <@UTWO> in today",
+        text="book <@UONE> and <@UTWO> in today",
         user_id="UADMIN",
         channel_id="C123",
         thread_ts="111.222",
@@ -2092,6 +2124,31 @@ async def test_admin_checkin_requires_exactly_one_target(monkeypatch):
     assert "Mention exactly one user" in missing_result
     assert "Tag exactly one user" in multiple_result
     assert client.book_args is None
+
+
+@pytest.mark.asyncio
+async def test_book_coworking_with_target_mention_refuses_self_booking(tmp_path, monkeypatch):
+    store = coworking_module.CoworkingBookingIntentStore(tmp_path / "intents.db")
+    client = FakeAdminCheckinCoworkingClient()
+    executor = SkillExecutor()
+    monkeypatch.setattr("roo.utils.get_current_date", lambda: date(2026, 5, 4))
+    monkeypatch.setattr(executor_module, "get_coworking_intent_store", lambda: store)
+    monkeypatch.setattr(slack_client_module, "get_bot_user_id", lambda: "UROO")
+
+    result = await executor._handle_points_action(
+        client=client,
+        action="book_coworking",
+        params={"action": "book_coworking", "target_users": ["<@UTARGET>"]},
+        text="book <@UTARGET> in today",
+        user_id="UADMIN",
+        channel_id="C123",
+        thread_ts="111.222",
+        skill=SimpleNamespace(name="mlai-points"),
+    )
+
+    assert "I saw a tagged user" in result
+    assert client.book_args is None
+    assert store.counts_by_status() == {}
 
 
 @pytest.mark.asyncio
@@ -2670,8 +2727,24 @@ def test_resolve_points_action_detects_coworking_shortcuts():
     executor = SkillExecutor()
 
     assert executor._resolve_points_action({}, "book me in") == "book_coworking"
+    assert executor._resolve_points_action({}, "book me in today") == "book_coworking"
     assert (
         executor._resolve_points_action({}, "check <@UTARGET> in today")
+        == "admin_checkin_coworking"
+    )
+    assert (
+        executor._resolve_points_action({}, "book <@UTARGET> in today")
+        == "admin_checkin_coworking"
+    )
+    assert (
+        executor._resolve_points_action(
+            {"action": "book_coworking", "target_users": ["<@UTARGET>"]},
+            "also book <@UTARGET> in today",
+        )
+        == "admin_checkin_coworking"
+    )
+    assert (
+        executor._resolve_points_action({}, "book <@UONE> and <@UTWO> in today")
         == "admin_checkin_coworking"
     )
 

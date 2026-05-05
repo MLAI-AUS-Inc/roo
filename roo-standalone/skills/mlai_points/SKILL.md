@@ -124,7 +124,7 @@ Parse user messages to identify the action and parameters:
 | `coworking report last 3/6 months` | coworking_report | "Coworking report last 3 months" |
 | `coworking report last year` | coworking_report | "Coworking report last year" |
 | `coworking book <date/today>` | book_coworking | "Book me in", "Book me in for today", "@Roo coworking book" |
-| `check <@USER> in <date/today>` | admin_checkin_coworking | (Admin) "Check <@U123> in", "Check <@U123> in today" |
+| `check/book <@USER> in <date/today>` | admin_checkin_coworking | (Admin) "Check <@U123> in", "Book <@U123> in today" |
 | `coworking cancel <date>` | cancel_coworking | "Cancel my booking for Friday", "@Roo coworking cancel" |
 | `rewards`, `points rewards` | list_rewards | "What rewards are available?", "@Roo points rewards" |
 | `reward request <code>` | request_reward | "I want to get the HOTDESK_DAY reward" |
