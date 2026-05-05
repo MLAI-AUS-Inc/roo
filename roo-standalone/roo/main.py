@@ -9,6 +9,7 @@ import asyncio
 import json
 import hmac
 import hashlib
+import re
 import time
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
@@ -70,6 +71,16 @@ CONTENT_FACTORY_WATCHDOG_STOP_STATUSES = {
     "denied",
     "cancelled",
 }
+
+
+def _looks_like_linear_meeting_file_request(text: str, has_files: bool = False) -> bool:
+    text_lower = str(text or "").lower()
+    has_linear = bool(re.search(r"\blinear\b", text_lower))
+    has_source = bool(
+        re.search(r"\b(file|pdf|docx?|document|image|screenshot|meeting|transcript|notes?|to-?dos?|action\s+items?)\b", text_lower)
+    ) or has_files
+    has_action = bool(re.search(r"\b(send|sync|turn|extract|create|add|tasks?|tickets?|issues?)\b", text_lower))
+    return has_linear and has_source and has_action
 
 
 def _app_mention_event_key(payload: dict[str, Any], event: dict[str, Any]) -> Optional[str]:
@@ -1588,11 +1599,15 @@ async def slack_events(request: Request):
         asyncio.create_task(_handle_reaction_added(event))
         return JSONResponse(status_code=200, content={})
     
-    if event_type == "message" and not event.get("bot_id") and not event.get("subtype"):
+    if (
+        event_type == "message"
+        and not event.get("bot_id")
+        and (not event.get("subtype") or event.get("subtype") == "file_share")
+    ):
         from .slack_client import get_channel_id
 
         start_here_id = get_channel_id("_start-here")
-        if start_here_id and event.get("channel") == start_here_id:
+        if start_here_id and event.get("channel") == start_here_id and not event.get("subtype"):
             if event.get("thread_ts"):
                 print(f"🧵 Ignoring thread reply in #_start-here from {event.get('user')}")
                 return JSONResponse(status_code=200, content={})
@@ -1620,6 +1635,12 @@ async def slack_events(request: Request):
         
         is_dm = event.get("channel_type") == "im"
         if is_dm:
+            event_files = event.get("files") if isinstance(event.get("files"), list) else []
+            if event.get("subtype") == "file_share" and not _looks_like_linear_meeting_file_request(
+                event.get("text", ""),
+                has_files=bool(event_files),
+            ):
+                return JSONResponse(status_code=200, content={})
             print(f"📨 Received DM from {event.get('user')}")
             asyncio.create_task(_handle_mention(event))
             return JSONResponse(status_code=200, content={})
@@ -1673,6 +1694,7 @@ async def _handle_mention(event: dict):
         channel_id = event.get("channel")
         thread_ts = event.get("thread_ts") or event.get("ts")
         param_overrides = event.get("param_overrides")
+        event_files = event.get("files") if isinstance(event.get("files"), list) else None
         
         print(f"\n🦘 ROO MENTION: from {user_id} in {channel_id}")
         print(f"   Text: {text[:100]}...")
@@ -1684,6 +1706,7 @@ async def _handle_mention(event: dict):
             channel_id=channel_id,
             thread_ts=thread_ts,
             param_overrides=param_overrides if isinstance(param_overrides, dict) else None,
+            event_files=event_files,
         )
         
         if result.get("message") and not result.get("suppress_post"):
@@ -3106,6 +3129,100 @@ async def slack_actions(request: Request):
     thread_ts = message.get("thread_ts") or message.get("ts")
     
     print(f"🖱️ Action: {action_id} from {user_id}")
+
+    if action_id in {"linear_meeting_approve", "linear_meeting_reject"}:
+        value = actions[0].get("value", "")
+        try:
+            value_data = json.loads(value) if value else {}
+        except json.JSONDecodeError:
+            value_data = {}
+
+        pending_id = str(value_data.get("pending_id") or "").strip()
+        requested_by = str(value_data.get("requested_by") or "").strip()
+        reply_channel = channel_id
+        reply_thread_ts = thread_ts
+
+        from .skills.executor import (
+            get_pending_linear_meeting_action,
+            pop_pending_linear_meeting_action,
+        )
+
+        pending = get_pending_linear_meeting_action(pending_id)
+        if not pending:
+            if reply_channel:
+                post_message(
+                    channel=reply_channel,
+                    thread_ts=reply_thread_ts,
+                    text="That Linear meeting action is no longer available. Re-run the meeting notes request if you still need it.",
+                )
+            return JSONResponse(status_code=200, content={})
+
+        pending_requested_by = str(pending.get("requested_by") or requested_by).strip()
+        if pending_requested_by and user_id != pending_requested_by:
+            if reply_channel:
+                post_message(
+                    channel=reply_channel,
+                    thread_ts=reply_thread_ts,
+                    text="Only the person who requested this Linear meeting action can approve or reject it.",
+                )
+            return JSONResponse(status_code=200, content={})
+
+        display = pending.get("display") or {}
+        title = display.get("title") or "that action item"
+
+        if action_id == "linear_meeting_reject":
+            pop_pending_linear_meeting_action(pending_id)
+            if reply_channel:
+                post_message(
+                    channel=reply_channel,
+                    thread_ts=reply_thread_ts,
+                    text=f"Skipped Linear issue creation for: {title}",
+                )
+            return JSONResponse(status_code=200, content={})
+
+        settings = get_settings()
+        if not settings.LINEAR_API_KEY:
+            if reply_channel:
+                post_message(
+                    channel=reply_channel,
+                    thread_ts=reply_thread_ts,
+                    text="Linear is not configured for Roo yet. Set `LINEAR_API_KEY` before approving this action item.",
+                )
+            return JSONResponse(status_code=200, content={})
+
+        skill = get_agent()._get_skill_by_name("linear-meeting-actions")
+        ClientClass = skill.get_client_class("LinearMeetingActionsClient") if skill else None
+        if ClientClass is None:
+            if reply_channel:
+                post_message(
+                    channel=reply_channel,
+                    thread_ts=reply_thread_ts,
+                    text="Roo could not load the Linear meeting actions client for this approval.",
+                )
+            return JSONResponse(status_code=200, content={})
+
+        try:
+            issue = await ClientClass(api_key=settings.LINEAR_API_KEY).create_issue(
+                **pending["issue_input"]
+            )
+            pop_pending_linear_meeting_action(pending_id)
+        except Exception as exc:
+            if reply_channel:
+                post_message(
+                    channel=reply_channel,
+                    thread_ts=reply_thread_ts,
+                    text=f"I couldn't create that Linear issue yet: {exc.__class__.__name__}: {exc}",
+                )
+            return JSONResponse(status_code=200, content={})
+
+        issue_label = issue.get("identifier") or issue.get("title") or title
+        if issue.get("url"):
+            created_text = f"Created <{issue['url']}|{issue_label}> from: {title}"
+        else:
+            created_text = f"Created {issue_label} from: {title}"
+        if reply_channel:
+            post_message(channel=reply_channel, thread_ts=reply_thread_ts, text=created_text)
+        return JSONResponse(status_code=200, content={})
     
     if action_id == "resume_scan":
         value = actions[0].get("value", "")

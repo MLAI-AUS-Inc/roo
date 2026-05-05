@@ -7,6 +7,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Optional, List, Dict, Any
 from enum import Enum
+import base64
 
 from .config import get_settings
 
@@ -221,3 +222,36 @@ async def embed(text: str) -> List[float]:
     """Convenience function for generating embeddings."""
     client = get_default_client()
     return await client.embed(text)
+
+
+async def extract_text_from_image(
+    *,
+    image_bytes: bytes,
+    mime_type: str,
+    prompt: str,
+    model: Optional[str] = None,
+) -> str:
+    """Extract structured text from an image using an OpenAI vision-capable model."""
+    from openai import AsyncOpenAI
+
+    settings = get_settings()
+    if not settings.OPENAI_API_KEY:
+        raise ValueError("OPENAI_API_KEY not configured")
+
+    image_base64 = base64.b64encode(image_bytes).decode("ascii")
+    data_url = f"data:{mime_type};base64,{image_base64}"
+    client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+    response = await client.chat.completions.create(
+        model=model or settings.OPENAI_VISION_MODEL,
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": data_url}},
+                ],
+            }
+        ],
+        max_tokens=2048,
+    )
+    return response.choices[0].message.content or ""
