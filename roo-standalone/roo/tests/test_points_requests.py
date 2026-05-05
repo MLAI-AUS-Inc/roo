@@ -1826,6 +1826,7 @@ async def test_backend_client_system_award_points_uses_system_endpoint(monkeypat
         target_slack_id="<@UTARGET>",
         points=12,
         reason="System award",
+        idempotency_key="link_love:CBOOST:111.000:UTARGET",
     )
 
     assert result == {"points_awarded": 12, "new_balance": 17}
@@ -1837,6 +1838,7 @@ async def test_backend_client_system_award_points_uses_system_endpoint(monkeypat
         "target_slack_id": "UTARGET",
         "points": 12,
         "reason": "System award",
+        "idempotency_key": "link_love:CBOOST:111.000:UTARGET",
     }
     assert recorder.calls[0]["params"] is None
     assert recorder.calls[0]["headers"]["Content-Type"] == "application/json"
