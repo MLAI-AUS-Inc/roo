@@ -38,7 +38,7 @@ QUESTS = {
         "name": "First Contact",
         "description": "First post in #_start-here",
         "target_count": 1,
-        "points": 2,
+        "points": 4,
         "event_type": "message",
         "channel_name": "_start-here"
     },

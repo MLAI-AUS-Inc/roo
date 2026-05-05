@@ -1062,7 +1062,7 @@ class RecordingAsyncClient:
 
 class FakeStartHereAwardClient:
     last_instance = None
-    response = {"awarded": True, "new_balance": 2}
+    response = {"awarded": True, "new_balance": 4, "points_awarded": 4}
 
     def __init__(self, *args, **kwargs):
         self.init_kwargs = kwargs
@@ -1576,7 +1576,7 @@ def test_app_mention_dedupe_logs_ttl_expiry(capsys):
 @pytest.mark.asyncio
 async def test_handle_start_here_intro_awards_and_posts_thread_reply(monkeypatch):
     posted_messages = []
-    FakeStartHereAwardClient.response = {"awarded": True, "new_balance": 2}
+    FakeStartHereAwardClient.response = {"awarded": True, "new_balance": 4, "points_awarded": 4}
 
     monkeypatch.setattr(
         main_module,
@@ -1608,9 +1608,42 @@ async def test_handle_start_here_intro_awards_and_posts_thread_reply(monkeypatch
         {
             "channel": "CSTART",
             "thread_ts": "111.222",
-            "text": "Welcome <@UINTRO>! You've earned 2 Roo points for introducing yourself here.",
+            "text": "Welcome <@UINTRO>! You've earned 4 Roo points for introducing yourself here.",
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_handle_start_here_intro_defaults_to_four_points_for_legacy_backend_response(monkeypatch):
+    posted_messages = []
+    FakeStartHereAwardClient.response = {"awarded": True, "new_balance": 4}
+
+    monkeypatch.setattr(
+        main_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            MLAI_BACKEND_URL="https://backend.test",
+            MLAI_API_KEY="api-key",
+            ROO_API_KEY="roo-api-key",
+            INTERNAL_API_KEY="internal-key",
+        ),
+    )
+    monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeStartHereAwardClient)
+    monkeypatch.setattr(
+        main_module,
+        "post_message",
+        lambda **kwargs: posted_messages.append(kwargs),
+    )
+
+    await main_module._handle_start_here_intro(
+        {
+            "user": "UINTRO",
+            "channel": "CSTART",
+            "ts": "111.222",
+        }
+    )
+
+    assert posted_messages[0]["text"] == "Welcome <@UINTRO>! You've earned 4 Roo points for introducing yourself here."
 
 
 @pytest.mark.asyncio
@@ -1781,7 +1814,7 @@ async def test_backend_client_approve_points_request_uses_canonical_endpoint(mon
 
 @pytest.mark.asyncio
 async def test_backend_client_award_first_channel_post_uses_canonical_endpoint(monkeypatch):
-    recorder = RecordingAsyncClient(json_data={"awarded": True, "new_balance": 2})
+    recorder = RecordingAsyncClient(json_data={"awarded": True, "new_balance": 4, "points_awarded": 4})
     monkeypatch.setattr(backend_module.httpx, "AsyncClient", lambda: recorder)
 
     client = backend_module.MLAIBackendClient(
@@ -1795,7 +1828,7 @@ async def test_backend_client_award_first_channel_post_uses_canonical_endpoint(m
         channel_id="CSTART",
     )
 
-    assert result == {"awarded": True, "new_balance": 2}
+    assert result == {"awarded": True, "new_balance": 4, "points_awarded": 4}
     assert len(recorder.calls) == 1
     assert recorder.calls[0]["method"] == "POST"
     assert recorder.calls[0]["url"] == "https://backend.test/api/v1/activity/first-post-award/"
