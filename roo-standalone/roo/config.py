@@ -33,7 +33,6 @@ class Settings(BaseSettings):
     MLAI_API_KEY: Optional[str] = None
     ROO_API_KEY: Optional[str] = None
     INTERNAL_API_KEY: Optional[str] = None
-    LINEAR_API_KEY: Optional[str] = None
     LINEAR_DEFAULT_TEAM: Optional[str] = None
 
     # GitHub OAuth

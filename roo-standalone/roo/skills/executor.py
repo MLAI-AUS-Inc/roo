@@ -1522,11 +1522,6 @@ Keep the response concise but informative."""
         event_files: Optional[List[dict]] = None,
     ) -> dict:
         settings = get_settings()
-        if not getattr(settings, "LINEAR_API_KEY", None):
-            return {
-                "message": "Linear meeting actions are not configured yet. Set `LINEAR_API_KEY` for Roo first."
-            }
-
         source_result = await self._build_linear_meeting_source_result(
             text=text,
             params=params,
@@ -1548,7 +1543,7 @@ Keep the response concise but informative."""
         if ClientClass is None:
             return {"message": "Linear meeting actions are missing their Linear client implementation."}
 
-        client = ClientClass(api_key=settings.LINEAR_API_KEY)
+        client = ClientClass()
         try:
             teams, users, projects, labels, recent_issues = await asyncio.gather(
                 client.list_teams(),
