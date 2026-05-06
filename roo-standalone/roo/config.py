@@ -33,7 +33,6 @@ class Settings(BaseSettings):
     MLAI_API_KEY: Optional[str] = None
     ROO_API_KEY: Optional[str] = None
     INTERNAL_API_KEY: Optional[str] = None
-    LINEAR_API_KEY: Optional[str] = None
     LINEAR_DEFAULT_TEAM: Optional[str] = None
 
     # GitHub OAuth
@@ -58,6 +57,7 @@ class Settings(BaseSettings):
     BOOST_LINK_LOVE_NOTIFICATION_DELAY_SECONDS: int = 60
     BOOST_LINK_LOVE_RETRY_POLL_SECONDS: float = 15.0
     BOOST_LINK_LOVE_MAX_RETRY_ATTEMPTS: int = 5
+    BOOST_LINK_LOVE_MAX_ROOT_AGE_DAYS: int = 7
     JOBS_SCHEDULER_ENABLED: bool = False
     JOBS_API_URL: Optional[str] = None
     JOBS_TRIGGER_TOKEN: Optional[str] = None

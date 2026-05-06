@@ -21,6 +21,8 @@ DEFAULT_LINK_LOVE_DB_PATH = "data/link_love_awards.db"
 DEFAULT_RETRY_POLL_SECONDS = 15.0
 DEFAULT_PROCESSING_LEASE_SECONDS = 90.0
 DEFAULT_MAX_RETRY_ATTEMPTS = 5
+DEFAULT_MAX_ROOT_AGE_DAYS = 7
+SECONDS_PER_DAY = 24 * 60 * 60
 
 
 def _now() -> float:
@@ -45,6 +47,30 @@ def link_love_max_retry_attempts() -> int:
     except Exception:
         value = DEFAULT_MAX_RETRY_ATTEMPTS
     return max(1, value)
+
+
+def link_love_max_root_age_seconds() -> float:
+    try:
+        days = float(getattr(get_settings(), "BOOST_LINK_LOVE_MAX_ROOT_AGE_DAYS", DEFAULT_MAX_ROOT_AGE_DAYS))
+    except Exception:
+        days = DEFAULT_MAX_ROOT_AGE_DAYS
+    return max(0.0, days) * SECONDS_PER_DAY
+
+
+def slack_timestamp_to_epoch_seconds(slack_ts: str) -> float:
+    return float(str(slack_ts or "").strip())
+
+
+def is_link_love_root_expired(
+    root_message_ts: str,
+    *,
+    now: Optional[float] = None,
+    max_age_seconds: Optional[float] = None,
+) -> bool:
+    root_epoch_seconds = slack_timestamp_to_epoch_seconds(root_message_ts)
+    current_time = _now() if now is None else float(now)
+    allowed_age = link_love_max_root_age_seconds() if max_age_seconds is None else float(max_age_seconds)
+    return current_time - root_epoch_seconds > allowed_age
 
 
 def clean_slack_user_id(raw_value: Any) -> str:
@@ -274,6 +300,30 @@ class LinkLoveAwardStore:
                     """,
                     (channel_id, reply_message_ts),
                 ).fetchone()
+            )
+
+    def has_expired_reply_check(
+        self,
+        *,
+        channel_id: str,
+        root_message_ts: str,
+        slack_user_id: str,
+    ) -> bool:
+        self._ensure_schema()
+        with self._connect() as conn:
+            return (
+                conn.execute(
+                    """
+                    SELECT 1 FROM link_love_reply_checks
+                    WHERE channel_id = ?
+                      AND root_message_ts = ?
+                      AND slack_user_id = ?
+                      AND classification_status = 'expired'
+                    LIMIT 1
+                    """,
+                    (channel_id, root_message_ts, slack_user_id),
+                ).fetchone()
+                is not None
             )
 
     def create_reply_check(
@@ -665,6 +715,23 @@ def _build_notification_text(awards: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def _build_expired_link_love_notice(slack_user_id: str) -> str:
+    return (
+        f"Sorry <@{slack_user_id}>, this post is more than a week old, "
+        "so it no longer qualifies for link-love points."
+    )
+
+
+def post_expired_link_love_notice(*, channel_id: str, root_message_ts: str, slack_user_id: str) -> None:
+    from .slack_client import post_message
+
+    post_message(
+        channel=channel_id,
+        thread_ts=root_message_ts,
+        text=_build_expired_link_love_notice(slack_user_id),
+    )
+
+
 async def process_link_love_award(
     award: dict[str, Any],
     *,
@@ -829,6 +896,49 @@ async def handle_link_love_reply(
             raw_response=classification.raw_response,
         )
         return {"status": "ineligible", "classification": classification}
+
+    try:
+        root_expired = is_link_love_root_expired(root_message_ts)
+    except (TypeError, ValueError) as exc:
+        error = f"invalid root timestamp: {root_message_ts}"
+        print(
+            "⚠️ link_love_invalid_root_timestamp "
+            f"channel_id={channel_id} root_message_ts={root_message_ts} "
+            f"reply_message_ts={reply_message_ts} error={exc}"
+        )
+        store.mark_reply_check_classified(
+            int(reply_check["id"]),
+            status="ineligible",
+            qualifies=False,
+            reason=error,
+            raw_response=classification.raw_response,
+        )
+        return {"status": "ignored", "reason": "invalid_root_message_ts", "classification": classification}
+
+    if root_expired:
+        already_notified = store.has_expired_reply_check(
+            channel_id=channel_id,
+            root_message_ts=root_message_ts,
+            slack_user_id=slack_user_id,
+        )
+        store.mark_reply_check_classified(
+            int(reply_check["id"]),
+            status="expired",
+            qualifies=False,
+            reason="root post is older than the link-love award window",
+            raw_response=classification.raw_response,
+        )
+        if not already_notified:
+            post_expired_link_love_notice(
+                channel_id=channel_id,
+                root_message_ts=root_message_ts,
+                slack_user_id=slack_user_id,
+            )
+        return {
+            "status": "expired",
+            "classification": classification,
+            "notice_posted": not already_notified,
+        }
 
     award_created, award = store.create_award(
         channel_id=channel_id,

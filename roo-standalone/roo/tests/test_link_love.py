@@ -125,6 +125,12 @@ async def llm_not_engaged(*args, **kwargs):
     return FakeLLMResponse('{"engaged": false, "confidence": 0.93, "reason": "vague support only"}')
 
 
+@pytest.fixture(autouse=True)
+def stable_link_love_clock(monkeypatch):
+    monkeypatch.setattr(link_love, "_now", lambda: 1_000_000.0)
+    monkeypatch.setattr(link_love, "link_love_max_root_age_seconds", lambda: 2_000_000.0)
+
+
 def test_parse_link_love_classification_handles_fenced_json():
     result = link_love.parse_link_love_classification(
         '```json\n{"engaged": true, "confidence": 0.87, "reason": "liked"}\n```'
@@ -146,6 +152,22 @@ def test_link_love_prompt_excludes_vague_support():
     assert "love it" in prompt_text.lower()
     assert "done" in prompt_text.lower()
     assert "liked" in prompt_text.lower()
+
+
+def test_link_love_root_expiry_boundary():
+    max_age = 7 * 24 * 60 * 60
+    now = 1_000_000.0
+
+    assert link_love.is_link_love_root_expired(
+        str(now - max_age),
+        now=now,
+        max_age_seconds=max_age,
+    ) is False
+    assert link_love.is_link_love_root_expired(
+        str(now - max_age - 0.001),
+        now=now,
+        max_age_seconds=max_age,
+    ) is True
 
 
 @pytest.mark.asyncio
@@ -284,6 +306,149 @@ async def test_non_proof_reply_can_be_followed_by_later_proof_reply(tmp_path):
     assert first["status"] == "ineligible"
     assert second["status"] == "awarded"
     assert len(client.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_expired_qualifying_reply_posts_notice_and_does_not_award(tmp_path, monkeypatch):
+    store = make_store(tmp_path)
+    client = FakeAwardClient()
+    posted_messages = []
+    max_age = 7 * 24 * 60 * 60
+    root_ts = str(1_000_000.0 - max_age - 1)
+    monkeypatch.setattr(link_love, "link_love_max_root_age_seconds", lambda: max_age)
+    monkeypatch.setattr(slack_client_module, "post_message", lambda **kwargs: posted_messages.append(kwargs))
+
+    result = await link_love.handle_link_love_reply(
+        reply_event(root_ts=root_ts, text="Done"),
+        store=store,
+        client=client,
+        get_root_message=lambda channel, ts: root_message(),
+        llm_chat=llm_engaged,
+        bot_user_id="UROO",
+        notification_delay_seconds=0,
+    )
+
+    assert result["status"] == "expired"
+    assert result["notice_posted"] is True
+    assert client.calls == []
+    assert store.get_due_notification_groups() == []
+    assert posted_messages == [
+        {
+            "channel": "CBOOST",
+            "thread_ts": root_ts,
+            "text": (
+                "Sorry <@UHELPER>, this post is more than a week old, "
+                "so it no longer qualifies for link-love points."
+            ),
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_expired_non_proof_reply_does_not_post_notice_or_award(tmp_path, monkeypatch):
+    store = make_store(tmp_path)
+    client = FakeAwardClient()
+    posted_messages = []
+    max_age = 7 * 24 * 60 * 60
+    root_ts = str(1_000_000.0 - max_age - 1)
+    monkeypatch.setattr(link_love, "link_love_max_root_age_seconds", lambda: max_age)
+    monkeypatch.setattr(slack_client_module, "post_message", lambda **kwargs: posted_messages.append(kwargs))
+
+    result = await link_love.handle_link_love_reply(
+        reply_event(root_ts=root_ts, text="Love it!"),
+        store=store,
+        client=client,
+        get_root_message=lambda channel, ts: root_message(),
+        llm_chat=llm_not_engaged,
+        bot_user_id="UROO",
+        notification_delay_seconds=0,
+    )
+
+    assert result["status"] == "ineligible"
+    assert client.calls == []
+    assert posted_messages == []
+
+
+@pytest.mark.asyncio
+async def test_expired_qualifying_replies_post_one_notice_per_user_per_root(tmp_path, monkeypatch):
+    store = make_store(tmp_path)
+    client = FakeAwardClient()
+    posted_messages = []
+    max_age = 7 * 24 * 60 * 60
+    root_ts = str(1_000_000.0 - max_age - 1)
+    monkeypatch.setattr(link_love, "link_love_max_root_age_seconds", lambda: max_age)
+    monkeypatch.setattr(slack_client_module, "post_message", lambda **kwargs: posted_messages.append(kwargs))
+
+    first = await link_love.handle_link_love_reply(
+        reply_event(root_ts=root_ts, reply_ts="222.000", text="Done"),
+        store=store,
+        client=client,
+        get_root_message=lambda channel, ts: root_message(),
+        llm_chat=llm_engaged,
+        bot_user_id="UROO",
+        notification_delay_seconds=0,
+    )
+    second = await link_love.handle_link_love_reply(
+        reply_event(root_ts=root_ts, reply_ts="333.000", text="Liked"),
+        store=store,
+        client=client,
+        get_root_message=lambda channel, ts: root_message(),
+        llm_chat=llm_engaged,
+        bot_user_id="UROO",
+        notification_delay_seconds=0,
+    )
+
+    assert first["status"] == "expired"
+    assert first["notice_posted"] is True
+    assert second["status"] == "expired"
+    assert second["notice_posted"] is False
+    assert client.calls == []
+    assert len(posted_messages) == 1
+
+
+@pytest.mark.asyncio
+async def test_exactly_one_week_old_qualifying_reply_still_awards(tmp_path, monkeypatch):
+    store = make_store(tmp_path)
+    client = FakeAwardClient()
+    max_age = 7 * 24 * 60 * 60
+    root_ts = str(1_000_000.0 - max_age)
+    monkeypatch.setattr(link_love, "link_love_max_root_age_seconds", lambda: max_age)
+
+    result = await link_love.handle_link_love_reply(
+        reply_event(root_ts=root_ts, text="Done"),
+        store=store,
+        client=client,
+        get_root_message=lambda channel, ts: root_message(),
+        llm_chat=llm_engaged,
+        bot_user_id="UROO",
+        notification_delay_seconds=0,
+    )
+
+    assert result["status"] == "awarded"
+    assert len(client.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_invalid_root_timestamp_does_not_award(tmp_path, monkeypatch):
+    store = make_store(tmp_path)
+    client = FakeAwardClient()
+    posted_messages = []
+    monkeypatch.setattr(slack_client_module, "post_message", lambda **kwargs: posted_messages.append(kwargs))
+
+    result = await link_love.handle_link_love_reply(
+        reply_event(root_ts="not-a-ts", text="Done"),
+        store=store,
+        client=client,
+        get_root_message=lambda channel, ts: root_message(),
+        llm_chat=llm_engaged,
+        bot_user_id="UROO",
+        notification_delay_seconds=0,
+    )
+
+    assert result["status"] == "ignored"
+    assert result["reason"] == "invalid_root_message_ts"
+    assert client.calls == []
+    assert posted_messages == []
 
 
 @pytest.mark.asyncio
