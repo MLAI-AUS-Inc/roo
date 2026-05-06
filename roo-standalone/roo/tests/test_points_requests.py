@@ -68,6 +68,56 @@ class FakePointsClient:
         return {"ok": True}
 
 
+class FakeTopupPurchaseClient:
+    def __init__(self, response=None):
+        self.created = None
+        self.response = response or {
+            "id": "purchase-uuid",
+            "frontend_checkout_page_url": "https://mlai.au/roo/topup/purchase-uuid",
+        }
+
+    async def create_points_purchase(
+        self,
+        slack_user_id,
+        pack_id=None,
+        points_amount=None,
+        purchase_from=None,
+    ):
+        self.created = {
+            "slack_user_id": slack_user_id,
+            "pack_id": pack_id,
+            "points_amount": points_amount,
+            "purchase_from": purchase_from,
+        }
+        return self.response
+
+
+class FailingTopupPurchaseClient(FakeTopupPurchaseClient):
+    async def create_points_purchase(
+        self,
+        slack_user_id,
+        pack_id=None,
+        points_amount=None,
+        purchase_from=None,
+    ):
+        self.created = {
+            "slack_user_id": slack_user_id,
+            "pack_id": pack_id,
+            "points_amount": points_amount,
+            "purchase_from": purchase_from,
+        }
+        request = httpx.Request(
+            "POST",
+            "https://backend.test/api/v1/points/purchases/",
+        )
+        response = httpx.Response(
+            400,
+            request=request,
+            json={"error": "Top-up purchases are not available for this account."},
+        )
+        raise httpx.HTTPStatusError("bad request", request=request, response=response)
+
+
 class FailingCreatePointsClient(FakePointsClient):
     async def create_points_request(
         self,
@@ -222,6 +272,30 @@ def test_resolve_points_action_maps_plain_request_to_request_points():
     action = executor._resolve_points_action(
         {"action": "request"},
         "I'm requesting 6 points for volunteering at MedHack",
+    )
+
+    assert action == "request_points"
+
+
+def test_resolve_points_action_maps_topup_phrases():
+    executor = SkillExecutor()
+
+    for text in [
+        "/roo topup",
+        "top up Roo Points",
+        "buy 10 roo points",
+        "add roo points",
+        "I need more points",
+    ]:
+        assert executor._resolve_points_action({}, text) == "topup_points"
+
+
+def test_request_points_phrase_does_not_map_to_topup():
+    executor = SkillExecutor()
+
+    action = executor._resolve_points_action(
+        {},
+        "request 5 points for helping at the event",
     )
 
     assert action == "request_points"
@@ -475,6 +549,146 @@ async def test_request_points_rejected_in_dm():
     )
 
     assert "shared channel or thread" in result
+
+
+@pytest.mark.asyncio
+async def test_topup_points_disabled_returns_feature_message(monkeypatch):
+    executor = SkillExecutor()
+    client = FakeTopupPurchaseClient()
+
+    monkeypatch.setattr(
+        executor_module,
+        "get_settings",
+        lambda: SimpleNamespace(ROO_POINTS_TOPUP_ENABLED=False),
+    )
+
+    result = await executor._handle_points_action(
+        client=client,
+        action="topup_points",
+        params={"points": 10},
+        text="buy 10 roo points",
+        user_id="U123",
+        channel_id="C123",
+        thread_ts="111.222",
+        skill=SimpleNamespace(name="mlai-points"),
+    )
+
+    assert "not enabled yet" in result
+    assert client.created is None
+
+
+@pytest.mark.asyncio
+async def test_topup_points_missing_pack_lists_fixed_packs(monkeypatch):
+    executor = SkillExecutor()
+
+    monkeypatch.setattr(
+        executor_module,
+        "get_settings",
+        lambda: SimpleNamespace(ROO_POINTS_TOPUP_ENABLED=True),
+    )
+
+    result = await executor._handle_points_action(
+        client=FakeTopupPurchaseClient(),
+        action="topup_points",
+        params={},
+        text="top up Roo Points",
+        user_id="U123",
+        channel_id="C123",
+        thread_ts="111.222",
+        skill=SimpleNamespace(name="mlai-points"),
+    )
+
+    assert "Available Top-up Roo Points packs" in result
+    assert "5 Top-up Roo Points - A$19.99" in result
+    assert "10 Top-up Roo Points - A$36.99" in result
+    assert "25 Top-up Roo Points - A$63.99" in result
+    assert "price per point" not in result.lower()
+
+
+@pytest.mark.asyncio
+async def test_topup_points_unsupported_pack_is_rejected(monkeypatch):
+    executor = SkillExecutor()
+
+    monkeypatch.setattr(
+        executor_module,
+        "get_settings",
+        lambda: SimpleNamespace(ROO_POINTS_TOPUP_ENABLED=True),
+    )
+
+    result = await executor._handle_points_action(
+        client=FakeTopupPurchaseClient(),
+        action="topup_points",
+        params={"points": 100},
+        text="buy 100 roo points",
+        user_id="U123",
+        channel_id="C123",
+        thread_ts="111.222",
+        skill=SimpleNamespace(name="mlai-points"),
+    )
+
+    assert "5, 10, or 25 Top-up Roo Points" in result
+
+
+@pytest.mark.asyncio
+async def test_topup_points_valid_pack_creates_purchase(monkeypatch):
+    executor = SkillExecutor()
+    client = FakeTopupPurchaseClient()
+
+    monkeypatch.setattr(
+        executor_module,
+        "get_settings",
+        lambda: SimpleNamespace(ROO_POINTS_TOPUP_ENABLED=True),
+    )
+
+    result = await executor._handle_points_action(
+        client=client,
+        action="topup_points",
+        params={},
+        text="buy 10 roo points",
+        user_id="U123",
+        channel_id="C123",
+        thread_ts="111.222",
+        skill=SimpleNamespace(name="mlai-points"),
+    )
+
+    assert "https://mlai.au/roo/topup/purchase-uuid" in result
+    assert "not money" in result
+    assert "no cash value" in result
+    assert client.created == {
+        "slack_user_id": "U123",
+        "pack_id": "topup_10",
+        "points_amount": None,
+        "purchase_from": {
+            "source": "slack",
+            "slack_channel_id": "C123",
+            "slack_thread_ts": "111.222",
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_topup_points_backend_error_is_friendly(monkeypatch):
+    executor = SkillExecutor()
+
+    monkeypatch.setattr(
+        executor_module,
+        "get_settings",
+        lambda: SimpleNamespace(ROO_POINTS_TOPUP_ENABLED=True),
+    )
+
+    result = await executor._handle_points_action(
+        client=FailingTopupPurchaseClient(),
+        action="topup_points",
+        params={"points": 10},
+        text="buy 10 roo points",
+        user_id="U123",
+        channel_id="C123",
+        thread_ts="111.222",
+        skill=SimpleNamespace(name="mlai-points"),
+    )
+
+    assert "couldn't create that top-up checkout" in result
+    assert "Top-up purchases are not available" in result
 
 
 @pytest.mark.asyncio
@@ -1303,6 +1517,17 @@ async def test_reaction_approval_ignores_other_emoji(monkeypatch):
     assert direct_messages == []
 
 
+def test_linear_meeting_file_request_helper_allows_short_attached_file_prompt():
+    assert main_module._looks_like_linear_meeting_file_request(
+        "send this to Linear as tasks",
+        has_files=True,
+    )
+    assert not main_module._looks_like_linear_meeting_file_request(
+        "send this to Linear as tasks",
+        has_files=False,
+    )
+
+
 @pytest.mark.asyncio
 async def test_slack_events_start_here_message_triggers_intro_handler(monkeypatch):
     handled_events = []
@@ -1711,6 +1936,55 @@ async def test_backend_client_create_points_request_uses_canonical_endpoint(monk
         "reason": "running the 21st x MLAI event",
         "slack_channel_id": "C123",
         "slack_thread_ts": "111.222",
+    }
+    assert recorder.calls[0]["params"] is None
+    assert recorder.calls[0]["headers"]["Content-Type"] == "application/json"
+    assert recorder.calls[0]["headers"]["X-API-Key"] == "api-key"
+    assert recorder.calls[0]["headers"]["X-Request-ID"].startswith("roo-")
+    assert recorder.calls[0]["timeout"] == 10.0
+
+
+@pytest.mark.asyncio
+async def test_backend_client_create_points_purchase_uses_canonical_endpoint(monkeypatch):
+    recorder = RecordingAsyncClient(
+        json_data={
+            "id": "purchase-uuid",
+            "frontend_checkout_page_url": "https://mlai.au/roo/topup/purchase-uuid",
+        }
+    )
+    monkeypatch.setattr(backend_module.httpx, "AsyncClient", lambda: recorder)
+
+    client = backend_module.MLAIBackendClient(
+        base_url="https://backend.test",
+        api_key="api-key",
+        internal_api_key="internal-key",
+    )
+
+    result = await client.create_points_purchase(
+        slack_user_id="<@U123>",
+        pack_id="topup_10",
+        purchase_from={
+            "source": "slack",
+            "slack_channel_id": "C123",
+            "slack_thread_ts": "111.222",
+        },
+    )
+
+    assert result == {
+        "id": "purchase-uuid",
+        "frontend_checkout_page_url": "https://mlai.au/roo/topup/purchase-uuid",
+    }
+    assert len(recorder.calls) == 1
+    assert recorder.calls[0]["method"] == "POST"
+    assert recorder.calls[0]["url"] == "https://backend.test/api/v1/points/purchases/"
+    assert recorder.calls[0]["json"] == {
+        "slack_user_id": "U123",
+        "pack_id": "topup_10",
+        "purchase_from": {
+            "source": "slack",
+            "slack_channel_id": "C123",
+            "slack_thread_ts": "111.222",
+        },
     }
     assert recorder.calls[0]["params"] is None
     assert recorder.calls[0]["headers"]["Content-Type"] == "application/json"

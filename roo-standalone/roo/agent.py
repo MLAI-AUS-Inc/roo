@@ -354,6 +354,9 @@ class RooAgent:
         text = self._normalize_points_routing_text(text)
         patterns = (
             r'\bpoints?\b',
+            r'\btop\s*up\b',
+            r'\btopup\b',
+            r'\btop-up\b',
             r'\bbalance\b',
             r'\bcoworking\b',
             r'\bbook\s+me\s+in\b',

@@ -57,6 +57,27 @@ POINTS_SUPER_ADMIN_SLACK_ID = "U05QPB483K9"
 FULL_POINTS_ADMIN_ROLES = {"admin", "committee", "portfolio_lead"}
 COWORKING_REPORT_ROLES = {*FULL_POINTS_ADMIN_ROLES, "partner"}
 LINEAR_MEETING_PENDING_ACTIONS: dict[str, dict[str, Any]] = {}
+ROO_TOPUP_PACKS = {
+    "topup_5": {
+        "points": 5,
+        "label": "5 Top-up Roo Points",
+        "price": "A$19.99",
+    },
+    "topup_10": {
+        "points": 10,
+        "label": "10 Top-up Roo Points",
+        "price": "A$36.99",
+    },
+    "topup_25": {
+        "points": 25,
+        "label": "25 Top-up Roo Points",
+        "price": "A$63.99",
+    },
+}
+ROO_TOPUP_PACK_BY_POINTS = {
+    pack["points"]: pack_id for pack_id, pack in ROO_TOPUP_PACKS.items()
+}
+
 
 @dataclass
 class SkillResult:
@@ -5063,6 +5084,9 @@ Only include actionable work someone agreed to do. Do not include decisions, FYI
         if self._is_task_list_request(text, params):
             return "list_tasks"
 
+        if self._looks_like_points_topup_request(text):
+            return "topup_points"
+
         if explicit_points_request:
             return "request_points"
 
@@ -5101,6 +5125,8 @@ Only include actionable work someone agreed to do. Do not include decisions, FYI
             return "balance"
         if "history" in text_lower:
             return "history"
+        if self._looks_like_points_topup_request(text):
+            return "topup_points"
         if "request" in text_lower and "point" in text_lower and "reward" not in text_lower:
             return "request_points"
         if any(w in text_lower for w in ["tasks mine", "my tasks", "tasks review", "review tasks", "tasks all", "all tasks"]):
@@ -5171,6 +5197,74 @@ Only include actionable work someone agreed to do. Do not include decisions, FYI
         if any(w in text_lower for w in ["deduct", "remove points"]):
             return "deduct_points"
         return action
+
+    def _looks_like_points_topup_request(self, text: str) -> bool:
+        """Return True for member requests to buy fixed top-up Roo Points packs."""
+        text_lower = self._normalize_points_routing_text(text)
+        if re.search(r"\btop\s*up\b|\btopup\b|\btop-up\b", text_lower):
+            return True
+        if re.search(r"\bbuy\b.*\b(?:roo\s+)?points?\b", text_lower):
+            return True
+        if re.search(r"\badd\b.*\b(?:roo\s+)?points?\b", text_lower):
+            return True
+        return bool(re.search(r"\bi\s+need\s+more\s+(?:roo\s+)?points?\b", text_lower))
+
+    def _resolve_topup_pack_id(self, text: str, params: dict) -> tuple[Optional[str], Optional[int]]:
+        """Resolve a top-up pack ID; return unsupported amount when a non-pack amount is present."""
+        pack_candidates = [
+            params.get("pack_id"),
+            params.get("pack"),
+            params.get("topup_pack"),
+        ]
+        for candidate in pack_candidates:
+            value = str(candidate or "").strip().lower()
+            if not value:
+                continue
+            value = value.replace("-", "_")
+            if value in ROO_TOPUP_PACKS:
+                return value, None
+            match = re.search(r"\b(\d+)\b", value)
+            if match:
+                amount = int(match.group(1))
+                return ROO_TOPUP_PACK_BY_POINTS.get(amount), amount
+
+        point_candidates = [
+            params.get("points_amount"),
+            params.get("points"),
+            params.get("amount"),
+        ]
+        for candidate in point_candidates:
+            if candidate in (None, ""):
+                continue
+            try:
+                amount = int(candidate)
+            except (TypeError, ValueError):
+                continue
+            return ROO_TOPUP_PACK_BY_POINTS.get(amount), amount
+
+        text_lower = self._normalize_points_routing_text(text)
+        exact_pack = re.search(r"\btopup[_\s-]*(5|10|25)\b", text_lower)
+        if exact_pack:
+            amount = int(exact_pack.group(1))
+            return ROO_TOPUP_PACK_BY_POINTS[amount], None
+
+        amount_match = re.search(r"\b(\d+)\b", text_lower)
+        if amount_match:
+            amount = int(amount_match.group(1))
+            return ROO_TOPUP_PACK_BY_POINTS.get(amount), amount
+
+        return None, None
+
+    def _topup_pack_list_message(self) -> str:
+        lines = ["Available Top-up Roo Points packs:"]
+        for pack_id in ("topup_5", "topup_10", "topup_25"):
+            pack = ROO_TOPUP_PACKS[pack_id]
+            lines.append(f"- {pack['label']} - {pack['price']}")
+        lines.append("")
+        lines.append(
+            "Top-up Roo Points are optional and do not count toward lifetime earned contribution."
+        )
+        return "\n".join(lines)
 
     def _normalize_points_routing_text(self, text: str) -> str:
         """Normalize common Slack typo variants before deterministic routing."""
@@ -6486,6 +6580,45 @@ Only include actionable work someone agreed to do. Do not include decisions, FYI
         # Member Actions
         # =====================================================================
         
+        if action == "topup_points":
+            settings = get_settings()
+            if not getattr(settings, "ROO_POINTS_TOPUP_ENABLED", False):
+                return "Top-up checkout is not enabled yet. Ask the MLAI team to finish enabling Stripe top-ups first."
+
+            pack_id, unsupported_amount = self._resolve_topup_pack_id(text, params)
+            if not pack_id:
+                if unsupported_amount is None:
+                    return self._topup_pack_list_message()
+                return "I can only help with these fixed top-up packs right now: 5, 10, or 25 Top-up Roo Points."
+
+            purchase_from = {"source": "slack"}
+            if channel_id:
+                purchase_from["slack_channel_id"] = channel_id
+            if thread_ts:
+                purchase_from["slack_thread_ts"] = thread_ts
+
+            try:
+                purchase = await client.create_points_purchase(
+                    slack_user_id=user_id,
+                    pack_id=pack_id,
+                    purchase_from=purchase_from,
+                )
+            except httpx.HTTPStatusError as exc:
+                error_detail = self._extract_http_error_detail(exc)
+                detail = f" {error_detail}" if error_detail else ""
+                return f"I couldn't create that top-up checkout yet.{detail}"
+
+            checkout_url = str(purchase.get("frontend_checkout_page_url") or "").strip()
+            if not checkout_url:
+                return "I created the top-up request, but the checkout link was missing. Ask the MLAI team to check the points purchase API."
+
+            return (
+                "I created your Top-up Roo Points checkout. Continue here:\n"
+                f"{checkout_url}\n\n"
+                "Top-up Roo Points are MLAI community reward points. They are not money, "
+                "have no cash value, cannot be converted to cash, and cannot be sold or transferred."
+            )
+
         if action == "balance":
             data = await client.get_balance(user_id)
             balance = data.get("balance", 0)

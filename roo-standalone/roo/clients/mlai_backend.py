@@ -2084,6 +2084,33 @@ class MLAIBackendClient:
         )
         return response.json()
 
+    async def create_points_purchase(
+        self,
+        slack_user_id: str,
+        pack_id: Optional[str] = None,
+        points_amount: Optional[int] = None,
+        purchase_from: Optional[dict] = None,
+    ) -> dict:
+        """Create a pending Roo Points top-up purchase."""
+        payload = {
+            "slack_user_id": self._clean_slack_id(slack_user_id),
+            "purchase_from": {"source": "slack", **(purchase_from or {})},
+        }
+        if pack_id:
+            payload["pack_id"] = pack_id
+        if points_amount is not None:
+            payload["points_amount"] = points_amount
+
+        response = await self._request(
+            "POST",
+            f"{self._points_base}/purchases/",
+            json=payload,
+            timeout=10.0,
+            circuit_breaker=True,
+        )
+        response.raise_for_status()
+        return response.json()
+
     async def attach_points_request_slack_summary(
         self,
         request_id: int,
