@@ -3180,16 +3180,6 @@ async def slack_actions(request: Request):
                 )
             return JSONResponse(status_code=200, content={})
 
-        settings = get_settings()
-        if not settings.LINEAR_API_KEY:
-            if reply_channel:
-                post_message(
-                    channel=reply_channel,
-                    thread_ts=reply_thread_ts,
-                    text="Linear is not configured for Roo yet. Set `LINEAR_API_KEY` before approving this action item.",
-                )
-            return JSONResponse(status_code=200, content={})
-
         skill = get_agent()._get_skill_by_name("linear-meeting-actions")
         ClientClass = skill.get_client_class("LinearMeetingActionsClient") if skill else None
         if ClientClass is None:
@@ -3202,9 +3192,7 @@ async def slack_actions(request: Request):
             return JSONResponse(status_code=200, content={})
 
         try:
-            issue = await ClientClass(api_key=settings.LINEAR_API_KEY).create_issue(
-                **pending["issue_input"]
-            )
+            issue = await ClientClass().create_issue(**pending["issue_input"])
             pop_pending_linear_meeting_action(pending_id)
         except Exception as exc:
             if reply_channel:
