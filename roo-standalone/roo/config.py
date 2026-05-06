@@ -51,6 +51,7 @@ class Settings(BaseSettings):
     LINEAR_MEETING_UNCERTAIN_MIN_CONFIDENCE: float = 0.65
     COWORKING_INTENTS_DB_PATH: str = "data/coworking_booking_intents.db"
     COWORKING_RETRY_POLL_SECONDS: float = 30.0
+    ROO_POINTS_TOPUP_ENABLED: bool = False
     BOOST_LINK_LOVE_ENABLED: bool = True
     BOOST_LINK_LOVE_CHANNEL_NAME: str = "boost-my-startup"
     BOOST_LINK_LOVE_DB_PATH: str = "data/link_love_awards.db"

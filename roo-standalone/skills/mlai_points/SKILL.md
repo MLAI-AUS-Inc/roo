@@ -10,6 +10,13 @@ trigger_keywords:
   - tasks
   - reward
   - rewards
+  - topup
+  - top-up
+  - top up
+  - buy points
+  - buy roo points
+  - add points
+  - add roo points
 ---
 
 # MLAI Points System Skill
@@ -27,6 +34,7 @@ This skill enables Roo to interact with the MLAI Points System via API, allowing
 - Book and cancel coworking days
 - Points Admins can check another member in for coworking from Slack
 - View rewards catalog and request redemptions
+- Buy fixed packs of Top-up Roo Points through MLAI checkout
 
 ### Full Admin Actions (requires `admin`, `committee`, or `portfolio_lead` role)
 - Create new tasks with point values
@@ -67,6 +75,7 @@ Example responses:
 ## Parameters
 
 - **action**: The action to perform (required) - e.g., "balance", "request_points", "book_coworking", "admin_checkin_coworking", "coworking_report", "claim_task", "submit_task", "award_points", "create_task"
+- **pack_id**: Top-up pack ID for `topup_points`; one of `topup_5`, `topup_10`, or `topup_25`
 - **task_id**: Task ID number or task code (for example `42` or `ROO-0042`) for task-related actions
 - **date**: Date for coworking bookings (YYYY-MM-DD format)
 - **start_date**: Start date for coworking reports (YYYY-MM-DD format)
@@ -104,6 +113,7 @@ Parse user messages to identify the action and parameters:
 | Pattern | Action | Example |
 |---------|--------|---------|
 | `points`, `balance` | balance | "What's my points balance?", "@Roo points" |
+| `topup`, `top up Roo Points`, `buy <n> Roo Points`, `add Roo Points`, `I need more points` | topup_points | "@Roo buy 10 Roo Points" |
 | `request <n> points for <reason>` | request_points | "Request 5 points for helping at the event" |
 | `points earn` | list_tasks | "How do I earn points?", "@Roo points earn" |
 | `tasks`, `tasks open` | list_tasks | "What can I claim right now?" |
@@ -195,9 +205,21 @@ Call the appropriate MLAIBackendClient method with extracted parameters.
 ### Step 4: Format Response
 Generate friendly response with relevant information:
 - Balance: Show points count and encourage engagement
+- Top-up: Show only fixed pack prices or the MLAI checkout link; never show a price-per-point value
 - Tasks: Format as a short list with task code, points, and portfolio
 - Bookings: Confirm date and show remaining balance
 - Errors: Explain what went wrong and suggest alternatives
+
+## Top-up Roo Points
+
+Allowed fixed packs:
+- `topup_5`: 5 Top-up Roo Points - A$19.99
+- `topup_10`: 10 Top-up Roo Points - A$36.99
+- `topup_25`: 25 Top-up Roo Points - A$63.99
+
+Top-up Roo Points are MLAI's internal community reward points. They are not money, have no cash value, cannot be converted to cash, and cannot be sold or transferred. The price of Top-up Roo Points does not represent a monetary value for Roo Points.
+
+Top-up Roo Points are optional and do not count toward lifetime earned contribution.
 
 ## Response Style
 
