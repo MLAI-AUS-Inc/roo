@@ -6,12 +6,13 @@ Skill Executor
 Executes skill actions based on the skill definition.
 Follows Anthropic's Agent Skills pattern for execution.
 """
+import base64
 import json
 import re
 import asyncio
 import calendar
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any, Optional, List
 from difflib import SequenceMatcher
 from uuid import uuid4
@@ -32,7 +33,13 @@ from ..content_factory_identity import (
     resolve_content_factory_identity_context,
 )
 from ..content_intent import detect_content_action, is_explicit_scan_request
-from ..llm import chat, embed, get_llm_client
+from ..linear_meeting_sources import (
+    ParsedSource,
+    SourceParseResult,
+    parse_linear_meeting_sources,
+    source_text_chunks,
+)
+from ..llm import chat, embed, extract_text_from_image, get_llm_client
 from ..points_request_approval import (
     build_points_request_metadata,
     build_points_request_record,
@@ -47,6 +54,29 @@ from ..coworking_booking_intents import (
 
 
 POINTS_SUPER_ADMIN_SLACK_ID = "U05QPB483K9"
+FULL_POINTS_ADMIN_ROLES = {"admin", "committee", "portfolio_lead"}
+COWORKING_REPORT_ROLES = {*FULL_POINTS_ADMIN_ROLES, "partner"}
+LINEAR_MEETING_PENDING_ACTIONS: dict[str, dict[str, Any]] = {}
+ROO_TOPUP_PACKS = {
+    "topup_5": {
+        "points": 5,
+        "label": "5 Top-up Roo Points",
+        "price": "A$19.99",
+    },
+    "topup_10": {
+        "points": 10,
+        "label": "10 Top-up Roo Points",
+        "price": "A$36.99",
+    },
+    "topup_25": {
+        "points": 25,
+        "label": "25 Top-up Roo Points",
+        "price": "A$63.99",
+    },
+}
+ROO_TOPUP_PACK_BY_POINTS = {
+    pack["points"]: pack_id for pack_id, pack in ROO_TOPUP_PACKS.items()
+}
 
 
 @dataclass
@@ -58,6 +88,14 @@ class SkillResult:
     error: Optional[str] = None
     blocks: Optional[list] = None
     suppress_post: bool = False
+
+
+def get_pending_linear_meeting_action(pending_id: str) -> Optional[dict[str, Any]]:
+    return LINEAR_MEETING_PENDING_ACTIONS.get(pending_id)
+
+
+def pop_pending_linear_meeting_action(pending_id: str) -> Optional[dict[str, Any]]:
+    return LINEAR_MEETING_PENDING_ACTIONS.pop(pending_id, None)
 
 
 class SkillExecutor:
@@ -114,10 +152,23 @@ class SkillExecutor:
                 result = await self._execute_mlai_points(skill, text, params, user_id, channel_id, thread_ts)
             elif skill.name == "github-integration":
                 result = await self._execute_github_integration(skill, text, params, user_id, channel_id, thread_ts)
+            elif skill.name == "linear-meeting-actions":
+                result = await self._execute_linear_meeting_actions(
+                    skill,
+                    text,
+                    params,
+                    user_id,
+                    channel_id,
+                    thread_ts,
+                    thread_history,
+                    kwargs.get("event_files"),
+                )
             elif skill.name == "tone-of-voice":
                 result = await self._execute_tone_of_voice(skill, text, params, user_id)
             elif skill.name == "medhack":
                 result = await self._execute_medhack(skill, text, params, user_id, channel_id, thread_ts, thread_history)
+            elif skill.name == "luma-events":
+                result = await self._execute_luma_events(skill, text, params, user_id, channel_id, thread_ts)
             else:
                 # Generic LLM-based execution
                 result = await self._execute_with_llm(skill, text, params, user_id, thread_history)
@@ -1458,6 +1509,845 @@ Keep the response concise but informative."""
         ])
         
         return response.content
+
+    async def _execute_linear_meeting_actions(
+        self,
+        skill: Skill,
+        text: str,
+        params: dict,
+        user_id: str,
+        channel_id: Optional[str],
+        thread_ts: Optional[str],
+        thread_history: Optional[List[dict]] = None,
+        event_files: Optional[List[dict]] = None,
+    ) -> dict:
+        settings = get_settings()
+        source_result = await self._build_linear_meeting_source_result(
+            text=text,
+            params=params,
+            thread_history=thread_history,
+            event_files=event_files,
+            settings=settings,
+        )
+        transcript = source_result.combined_text()
+        if len(transcript.split()) < 8:
+            warning_suffix = self._format_linear_meeting_source_warnings(source_result.warnings)
+            return {
+                "message": (
+                    "Paste the meeting transcript or summary in this thread, then ask me to turn it into Linear tasks."
+                    + warning_suffix
+                )
+            }
+
+        ClientClass = skill.get_client_class("LinearMeetingActionsClient")
+        if ClientClass is None:
+            return {"message": "Linear meeting actions are missing their Linear client implementation."}
+
+        client = ClientClass()
+        try:
+            teams, users, projects, labels, recent_issues = await asyncio.gather(
+                client.list_teams(),
+                client.list_users(),
+                client.list_active_projects(),
+                client.list_issue_labels(),
+                client.list_recent_open_issues(),
+            )
+        except Exception as exc:
+            return {
+                "message": f"I couldn't read Linear context yet: {exc.__class__.__name__}: {exc}"
+            }
+
+        candidates = await self._extract_linear_meeting_candidates_from_sources(
+            sources=source_result.sources,
+            params=params,
+            users=users,
+            projects=projects,
+        )
+        if not candidates:
+            return {
+                "message": (
+                    "I couldn't find any concrete action items in those meeting notes."
+                    + self._format_linear_meeting_source_warnings(source_result.warnings)
+                )
+            }
+
+        auto_threshold = float(
+            getattr(settings, "LINEAR_MEETING_AUTO_CREATE_MIN_CONFIDENCE", 0.85) or 0.85
+        )
+        uncertain_threshold = float(
+            getattr(settings, "LINEAR_MEETING_UNCERTAIN_MIN_CONFIDENCE", 0.65) or 0.65
+        )
+        meeting_action_label_ids = [
+            str(label.get("id"))
+            for label in labels
+            if self._normalize_match_text(label.get("name")) == "meetingaction"
+        ]
+
+        created: list[dict[str, Any]] = []
+        review_needed: list[dict[str, Any]] = []
+        skipped: list[dict[str, Any]] = []
+        source = {
+            "channel_id": channel_id,
+            "thread_ts": thread_ts,
+            "requester_slack_id": user_id,
+        }
+
+        for raw_candidate in candidates[:20]:
+            candidate = self._normalize_linear_meeting_candidate(raw_candidate)
+            if not candidate.get("title"):
+                continue
+
+            owner_match = self._match_linear_meeting_owner(candidate.get("owner_hint"), users)
+            project_match = self._match_linear_meeting_project(
+                candidate,
+                projects,
+                owner_match.get("user"),
+                params.get("project_hint"),
+            )
+            team_match = self._match_linear_meeting_team(
+                project_match.get("project"),
+                teams,
+                params.get("team_hint") or candidate.get("team_hint"),
+                getattr(settings, "LINEAR_DEFAULT_TEAM", None),
+            )
+            duplicate = self._find_linear_meeting_duplicate(
+                candidate,
+                recent_issues,
+                project_match.get("project"),
+            )
+            decision, overall_confidence = self._linear_meeting_candidate_decision(
+                candidate=candidate,
+                owner_match=owner_match,
+                project_match=project_match,
+                team_match=team_match,
+                duplicate=duplicate,
+                auto_threshold=auto_threshold,
+                uncertain_threshold=uncertain_threshold,
+            )
+
+            issue_input = self._build_linear_meeting_issue_input(
+                candidate=candidate,
+                owner_match=owner_match,
+                project_match=project_match,
+                team_match=team_match,
+                label_ids=meeting_action_label_ids,
+                source=source,
+            )
+            display = self._build_linear_meeting_candidate_display(
+                candidate,
+                owner_match,
+                project_match,
+                team_match,
+                overall_confidence,
+            )
+
+            if decision == "duplicate":
+                skipped.append({
+                    **display,
+                    "reason": "Likely duplicate",
+                    "duplicate": duplicate,
+                })
+                continue
+
+            if decision == "create":
+                try:
+                    issue = await client.create_issue(**issue_input)
+                    created.append({**display, "issue": issue})
+                except Exception as exc:
+                    pending_id = self._remember_linear_meeting_pending_action(
+                        requested_by=user_id,
+                        issue_input=issue_input,
+                        display=display,
+                        reason=f"Linear create failed: {exc.__class__.__name__}: {exc}",
+                    )
+                    review_needed.append({**display, "pending_id": pending_id})
+                continue
+
+            if decision == "review":
+                pending_id = self._remember_linear_meeting_pending_action(
+                    requested_by=user_id,
+                    issue_input=issue_input,
+                    display=display,
+                    reason="Needs approval",
+                )
+                review_needed.append({**display, "pending_id": pending_id})
+                continue
+
+            skipped.append({**display, "reason": "Low confidence mapping"})
+
+        message = self._format_linear_meeting_result_message(created, review_needed, skipped)
+        message += self._format_linear_meeting_source_warnings(source_result.warnings)
+        blocks = (
+            self._build_linear_meeting_review_blocks(message, review_needed, user_id)
+            if review_needed
+            else None
+        )
+        return {
+            "message": message,
+            "blocks": blocks,
+            "data": {
+                "created_count": len(created),
+                "review_count": len(review_needed),
+                "skipped_count": len(skipped),
+            },
+        }
+
+    def _build_linear_meeting_transcript(
+        self,
+        text: str,
+        params: dict,
+        history: Optional[List[dict]] = None,
+    ) -> str:
+        explicit = str(params.get("transcript") or "").strip()
+        parts: list[str] = []
+        if explicit:
+            parts.append(explicit)
+
+        for message in history or []:
+            if message.get("is_bot") or message.get("bot_id"):
+                continue
+            message_text = str(message.get("text") or "").strip()
+            if not message_text:
+                continue
+            speaker = str(message.get("user") or "user").strip()
+            parts.append(f"{speaker}: {message_text}")
+
+        clean_text = str(text or "").strip()
+        if clean_text and all(clean_text not in part for part in parts):
+            parts.append(clean_text)
+
+        return "\n".join(dict.fromkeys(parts)).strip()
+
+    async def _build_linear_meeting_source_result(
+        self,
+        *,
+        text: str,
+        params: dict,
+        thread_history: Optional[List[dict]],
+        event_files: Optional[List[dict]],
+        settings: Any,
+    ) -> SourceParseResult:
+        image_parser = None
+        if getattr(settings, "OPENAI_API_KEY", None):
+            async def image_parser(image_bytes: bytes, mime_type: str, label: str) -> str:
+                prompt = (
+                    "Extract meeting transcript text or to-do/action items from this image. "
+                    "Preserve names, due dates, checkboxes, bullets, and project labels. "
+                    f"Return plain text only. Source label: {label}"
+                )
+                return await extract_text_from_image(
+                    image_bytes=image_bytes,
+                    mime_type=mime_type,
+                    prompt=prompt,
+                    model=getattr(settings, "OPENAI_VISION_MODEL", None),
+                )
+
+        return await parse_linear_meeting_sources(
+            text=text,
+            params=params,
+            thread_history=thread_history,
+            event_files=event_files,
+            image_parser=image_parser,
+        )
+
+    def _format_linear_meeting_source_warnings(self, warnings: list[str]) -> str:
+        if not warnings:
+            return ""
+        lines = ["", "", "Source notes:"]
+        for warning in warnings[:8]:
+            lines.append(f"- {warning}")
+        if len(warnings) > 8:
+            lines.append(f"- {len(warnings) - 8} more source note(s) omitted.")
+        return "\n".join(lines)
+
+    async def _extract_linear_meeting_candidates_from_sources(
+        self,
+        *,
+        sources: list[ParsedSource],
+        params: dict,
+        users: list[dict[str, Any]],
+        projects: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        candidates: list[dict[str, Any]] = []
+        for source in sources:
+            for chunk in source_text_chunks(source):
+                extracted = await self._extract_linear_meeting_candidates(
+                    transcript=chunk,
+                    params=params,
+                    users=users,
+                    projects=projects,
+                    source_label=source.label,
+                )
+                for item in extracted:
+                    item.setdefault("source_label", source.label)
+                    candidates.append(item)
+        return self._dedupe_linear_meeting_candidates(candidates)
+
+    async def _extract_linear_meeting_candidates(
+        self,
+        *,
+        transcript: str,
+        params: dict,
+        users: list[dict[str, Any]],
+        projects: list[dict[str, Any]],
+        source_label: Optional[str] = None,
+    ) -> list[dict[str, Any]]:
+        from ..utils import get_current_date
+
+        project_names = ", ".join(
+            str(project.get("name") or project.get("slugId") or "")
+            for project in projects[:40]
+            if project.get("name") or project.get("slugId")
+        )
+        user_names = ", ".join(
+            str(user.get("displayName") or user.get("name") or user.get("email") or "")
+            for user in users[:80]
+            if user.get("displayName") or user.get("name") or user.get("email")
+        )
+        prompt = f"""Extract concrete action items from the meeting notes.
+
+Current date: {get_current_date().isoformat()}
+Source label: {source_label or "Slack thread"}
+Project hint: {params.get("project_hint") or "none"}
+Team hint: {params.get("team_hint") or "none"}
+
+Known Linear projects: {project_names or "none loaded"}
+Known Linear users: {user_names or "none loaded"}
+
+Meeting notes:
+{transcript[:12000]}
+
+Return JSON only with this shape:
+{{
+  "action_items": [
+    {{
+      "title": "imperative issue title",
+      "description": "one or two sentence issue description",
+      "owner_hint": "person, Slack mention, or email",
+      "project_hint": "project name if clear",
+      "team_hint": "team if clear",
+      "due_date": "YYYY-MM-DD or null",
+      "priority": 3,
+      "evidence": "short source phrase from notes",
+      "source_label": "{source_label or "Slack thread"}",
+      "confidence": 0.0
+    }}
+  ]
+}}
+
+Only include actionable work someone agreed to do. Do not include decisions, FYIs, or vague follow-ups."""
+        response = await chat([
+            {"role": "system", "content": "You extract structured meeting action items. Return valid JSON only."},
+            {"role": "user", "content": prompt},
+        ])
+        content = response.content.strip()
+        if content.startswith("```"):
+            content = re.sub(r"^```\w*\n?", "", content)
+            content = re.sub(r"\n?```$", "", content)
+        try:
+            parsed = json.loads(content)
+        except json.JSONDecodeError:
+            return []
+        if isinstance(parsed, list):
+            return [item for item in parsed if isinstance(item, dict)]
+        items = parsed.get("action_items") if isinstance(parsed, dict) else []
+        return [item for item in items or [] if isinstance(item, dict)]
+
+    def _dedupe_linear_meeting_candidates(
+        self,
+        candidates: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        deduped: dict[str, dict[str, Any]] = {}
+        for candidate in candidates:
+            title = self._normalize_match_text(candidate.get("title") or candidate.get("task"))
+            owner = self._normalize_match_text(candidate.get("owner_hint") or candidate.get("owner"))
+            if not title:
+                continue
+            key = f"{title}:{owner}"
+            if key not in deduped:
+                deduped[key] = dict(candidate)
+                continue
+
+            existing = deduped[key]
+            try:
+                existing_confidence = float(existing.get("confidence", 0.0))
+                candidate_confidence = float(candidate.get("confidence", 0.0))
+            except (TypeError, ValueError):
+                existing_confidence = candidate_confidence = 0.0
+            if candidate_confidence > existing_confidence:
+                existing["confidence"] = candidate.get("confidence")
+
+            labels = {
+                str(existing.get("source_label") or "").strip(),
+                str(candidate.get("source_label") or "").strip(),
+            }
+            labels.discard("")
+            if labels:
+                existing["source_label"] = ", ".join(sorted(labels))
+
+            existing_evidence = str(existing.get("evidence") or "").strip()
+            candidate_evidence = str(candidate.get("evidence") or "").strip()
+            if candidate_evidence and candidate_evidence not in existing_evidence:
+                existing["evidence"] = (
+                    f"{existing_evidence}\n{candidate_evidence}".strip()
+                    if existing_evidence
+                    else candidate_evidence
+                )
+        return list(deduped.values())
+
+    def _normalize_linear_meeting_candidate(self, candidate: dict[str, Any]) -> dict[str, Any]:
+        title = str(candidate.get("title") or candidate.get("task") or "").strip()
+        description = str(candidate.get("description") or candidate.get("details") or "").strip()
+        owner_hint = str(candidate.get("owner_hint") or candidate.get("owner") or "").strip()
+        project_hint = str(candidate.get("project_hint") or candidate.get("project") or "").strip()
+        team_hint = str(candidate.get("team_hint") or candidate.get("team") or "").strip()
+        due_date = candidate.get("due_date") or candidate.get("dueDate")
+        due_date = str(due_date).strip() if due_date else None
+        if due_date and not re.match(r"^\d{4}-\d{2}-\d{2}$", due_date):
+            due_date = None
+        try:
+            priority = int(candidate.get("priority", 3))
+        except (TypeError, ValueError):
+            priority = 3
+        priority = min(max(priority, 0), 4)
+        try:
+            confidence = float(candidate.get("confidence", 0.0))
+        except (TypeError, ValueError):
+            confidence = 0.0
+        confidence = min(max(confidence, 0.0), 1.0)
+        evidence = str(candidate.get("evidence") or candidate.get("quote") or "").strip()
+        source_label = str(candidate.get("source_label") or candidate.get("source") or "").strip()
+        return {
+            "title": title[:180],
+            "description": description,
+            "owner_hint": owner_hint,
+            "project_hint": project_hint,
+            "team_hint": team_hint,
+            "due_date": due_date,
+            "priority": priority,
+            "evidence": evidence[:700],
+            "source_label": source_label[:300],
+            "confidence": confidence,
+        }
+
+    def _match_linear_meeting_owner(
+        self,
+        owner_hint: Optional[str],
+        users: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        hint = str(owner_hint or "").strip()
+        if not hint:
+            return {"user": None, "confidence": 0.0, "reason": "No owner hint"}
+
+        emails = set(re.findall(r"[\w.\-+]+@[\w.\-]+\.\w+", hint.lower()))
+        mention_match = re.search(r"<@([A-Z0-9]+)>", hint)
+        if mention_match:
+            try:
+                from ..slack_client import get_user_info
+
+                slack_info = get_user_info(mention_match.group(1))
+                slack_email = str(slack_info.get("email") or "").strip().lower()
+                if slack_email:
+                    emails.add(slack_email)
+            except Exception:
+                pass
+
+        for user in users:
+            email = str(user.get("email") or "").strip().lower()
+            if email and email in emails:
+                return {"user": user, "confidence": 0.98, "reason": "Matched owner by email"}
+
+        normalized_hint = self._normalize_match_text(hint)
+        best_user = None
+        best_score = 0.0
+        best_reason = "No user match"
+        for user in users:
+            names = [
+                user.get("displayName"),
+                user.get("name"),
+                user.get("email"),
+            ]
+            for name in names:
+                normalized_name = self._normalize_match_text(name)
+                if not normalized_name:
+                    continue
+                if normalized_hint == normalized_name:
+                    return {"user": user, "confidence": 0.92, "reason": "Matched owner by name"}
+                if normalized_name in normalized_hint or normalized_hint in normalized_name:
+                    score = 0.86
+                else:
+                    score = SequenceMatcher(None, normalized_hint, normalized_name).ratio()
+                if score > best_score:
+                    best_user = user
+                    best_score = score
+                    best_reason = "Matched owner by name similarity"
+
+        if best_user and best_score >= 0.82:
+            return {"user": best_user, "confidence": min(best_score, 0.84), "reason": best_reason}
+        return {"user": None, "confidence": 0.0, "reason": "No user match"}
+
+    def _match_linear_meeting_project(
+        self,
+        candidate: dict[str, Any],
+        projects: list[dict[str, Any]],
+        owner_user: Optional[dict[str, Any]],
+        explicit_project_hint: Optional[str] = None,
+    ) -> dict[str, Any]:
+        hint = str(explicit_project_hint or candidate.get("project_hint") or "").strip()
+        if hint:
+            normalized_hint = self._normalize_match_text(hint)
+            best_project = None
+            best_score = 0.0
+            for project in projects:
+                names = [project.get("name"), project.get("slugId")]
+                for name in names:
+                    normalized_name = self._normalize_match_text(name)
+                    if not normalized_name:
+                        continue
+                    if normalized_hint == normalized_name:
+                        return {
+                            "project": project,
+                            "confidence": 0.96,
+                            "reason": "Matched project by exact hint",
+                        }
+                    if normalized_name in normalized_hint or normalized_hint in normalized_name:
+                        score = 0.88
+                    else:
+                        score = SequenceMatcher(None, normalized_hint, normalized_name).ratio()
+                    if score > best_score:
+                        best_project = project
+                        best_score = score
+            if best_project and best_score >= 0.78:
+                return {
+                    "project": best_project,
+                    "confidence": min(best_score, 0.86),
+                    "reason": "Matched project by name similarity",
+                }
+
+        owner_id = str((owner_user or {}).get("id") or "")
+        owner_email = str((owner_user or {}).get("email") or "").strip().lower()
+        member_projects = []
+        if owner_id or owner_email:
+            for project in projects:
+                members = self._linear_connection_nodes(project.get("members"))
+                lead = project.get("lead")
+                participants = members + ([lead] if isinstance(lead, dict) else [])
+                for member in participants:
+                    if str(member.get("id") or "") == owner_id or (
+                        owner_email
+                        and str(member.get("email") or "").strip().lower() == owner_email
+                    ):
+                        member_projects.append(project)
+                        break
+        if len(member_projects) == 1:
+            return {
+                "project": member_projects[0],
+                "confidence": 0.7,
+                "reason": "Only active project found for owner",
+            }
+        return {"project": None, "confidence": 0.0, "reason": "No project match"}
+
+    def _match_linear_meeting_team(
+        self,
+        project: Optional[dict[str, Any]],
+        teams: list[dict[str, Any]],
+        team_hint: Optional[str],
+        default_team: Optional[str],
+    ) -> dict[str, Any]:
+        if project:
+            project_teams = self._linear_connection_nodes(project.get("teams"))
+            if project_teams:
+                return {
+                    "team": project_teams[0],
+                    "confidence": 0.96,
+                    "reason": "Using matched project's team",
+                }
+
+        hint = str(team_hint or "").strip()
+        if hint:
+            match = self._find_linear_team_by_hint(teams, hint)
+            if match:
+                return {"team": match, "confidence": 0.9, "reason": "Matched team by hint"}
+
+        if default_team:
+            match = self._find_linear_team_by_hint(teams, default_team)
+            if match:
+                return {
+                    "team": match,
+                    "confidence": 0.72,
+                    "reason": "Using configured default team",
+                }
+        return {"team": None, "confidence": 0.0, "reason": "No team match"}
+
+    def _find_linear_team_by_hint(
+        self,
+        teams: list[dict[str, Any]],
+        hint: str,
+    ) -> Optional[dict[str, Any]]:
+        normalized_hint = self._normalize_match_text(hint)
+        for team in teams:
+            values = [team.get("id"), team.get("key"), team.get("name")]
+            if any(self._normalize_match_text(value) == normalized_hint for value in values):
+                return team
+        for team in teams:
+            normalized_values = [
+                self._normalize_match_text(value)
+                for value in (team.get("key"), team.get("name"))
+            ]
+            if any(value and (value in normalized_hint or normalized_hint in value) for value in normalized_values):
+                return team
+        return None
+
+    def _find_linear_meeting_duplicate(
+        self,
+        candidate: dict[str, Any],
+        issues: list[dict[str, Any]],
+        project: Optional[dict[str, Any]] = None,
+    ) -> Optional[dict[str, Any]]:
+        title = self._normalize_match_text(candidate.get("title"))
+        if not title:
+            return None
+        project_id = str((project or {}).get("id") or "")
+        for issue in issues:
+            if project_id:
+                issue_project_id = str(((issue.get("project") or {}).get("id")) or "")
+                if issue_project_id and issue_project_id != project_id:
+                    continue
+            issue_title = self._normalize_match_text(issue.get("title"))
+            if not issue_title:
+                continue
+            if title == issue_title or title in issue_title or issue_title in title:
+                return issue
+            title_tokens = self._linear_meeting_duplicate_tokens(candidate.get("title"))
+            issue_tokens = self._linear_meeting_duplicate_tokens(issue.get("title"))
+            if title_tokens and issue_tokens:
+                overlap = len(title_tokens & issue_tokens) / min(len(title_tokens), len(issue_tokens))
+                if overlap >= 0.75:
+                    return issue
+            if SequenceMatcher(None, title, issue_title).ratio() >= 0.88:
+                return issue
+        return None
+
+    def _linear_meeting_candidate_decision(
+        self,
+        *,
+        candidate: dict[str, Any],
+        owner_match: dict[str, Any],
+        project_match: dict[str, Any],
+        team_match: dict[str, Any],
+        duplicate: Optional[dict[str, Any]],
+        auto_threshold: float,
+        uncertain_threshold: float,
+    ) -> tuple[str, float]:
+        if duplicate:
+            return "duplicate", 1.0
+        confidence_parts = [
+            float(candidate.get("confidence") or 0.0),
+            float(owner_match.get("confidence") or 0.0),
+            float(project_match.get("confidence") or 0.0),
+            float(team_match.get("confidence") or 0.0),
+        ]
+        overall = min(confidence_parts)
+        if overall >= auto_threshold:
+            return "create", overall
+        if overall >= uncertain_threshold:
+            return "review", overall
+        return "skip", overall
+
+    def _build_linear_meeting_issue_input(
+        self,
+        *,
+        candidate: dict[str, Any],
+        owner_match: dict[str, Any],
+        project_match: dict[str, Any],
+        team_match: dict[str, Any],
+        label_ids: list[str],
+        source: dict[str, Any],
+    ) -> dict[str, Any]:
+        team = team_match.get("team") or {}
+        owner = owner_match.get("user") or {}
+        project = project_match.get("project") or {}
+        return {
+            "title": candidate["title"],
+            "team_id": str(team.get("id") or ""),
+            "description": self._build_linear_meeting_issue_description(candidate, source),
+            "assignee_id": str(owner.get("id") or "") or None,
+            "project_id": str(project.get("id") or "") or None,
+            "priority": candidate.get("priority", 3),
+            "due_date": candidate.get("due_date"),
+            "label_ids": label_ids,
+        }
+
+    def _build_linear_meeting_issue_description(
+        self,
+        candidate: dict[str, Any],
+        source: dict[str, Any],
+    ) -> str:
+        lines = [
+            "### Meeting action",
+            candidate.get("description") or candidate.get("title") or "",
+            "",
+        ]
+        if candidate.get("evidence"):
+            lines.extend([
+                "### Evidence",
+                f"> {candidate['evidence']}",
+                "",
+            ])
+        source_lines = []
+        if candidate.get("source_label"):
+            source_lines.append(f"- Source document: `{candidate['source_label']}`")
+        if source.get("channel_id"):
+            source_lines.append(f"- Slack channel: `{source['channel_id']}`")
+        if source.get("thread_ts"):
+            source_lines.append(f"- Slack thread: `{source['thread_ts']}`")
+        if source.get("requester_slack_id"):
+            source_lines.append(f"- Requested by: `<@{source['requester_slack_id']}>`")
+        if source_lines:
+            lines.extend(["### Source", *source_lines, ""])
+        lines.append("_Generated by Roo from meeting notes._")
+        return "\n".join(line for line in lines if line is not None).strip()
+
+    def _build_linear_meeting_candidate_display(
+        self,
+        candidate: dict[str, Any],
+        owner_match: dict[str, Any],
+        project_match: dict[str, Any],
+        team_match: dict[str, Any],
+        confidence: float,
+    ) -> dict[str, Any]:
+        owner = owner_match.get("user") or {}
+        project = project_match.get("project") or {}
+        team = team_match.get("team") or {}
+        return {
+            "title": candidate.get("title") or "Untitled action",
+            "assignee": owner.get("displayName") or owner.get("name") or owner.get("email") or "Unresolved",
+            "project": project.get("name") or "Unresolved",
+            "team": team.get("key") or team.get("name") or "Unresolved",
+            "source": candidate.get("source_label") or "Slack thread",
+            "confidence": confidence,
+            "owner_reason": owner_match.get("reason"),
+            "project_reason": project_match.get("reason"),
+            "team_reason": team_match.get("reason"),
+        }
+
+    def _remember_linear_meeting_pending_action(
+        self,
+        *,
+        requested_by: str,
+        issue_input: dict[str, Any],
+        display: dict[str, Any],
+        reason: str,
+    ) -> str:
+        pending_id = str(uuid4())
+        LINEAR_MEETING_PENDING_ACTIONS[pending_id] = {
+            "requested_by": requested_by,
+            "issue_input": issue_input,
+            "display": display,
+            "reason": reason,
+            "created_at": datetime.utcnow().isoformat(),
+        }
+        return pending_id
+
+    def _format_linear_meeting_result_message(
+        self,
+        created: list[dict[str, Any]],
+        review_needed: list[dict[str, Any]],
+        skipped: list[dict[str, Any]],
+    ) -> str:
+        lines: list[str] = []
+        if created:
+            lines.append(f"Created {len(created)} Linear issue{'s' if len(created) != 1 else ''}:")
+            for item in created[:10]:
+                issue = item.get("issue") or {}
+                issue_label = issue.get("identifier") or issue.get("title") or item["title"]
+                if issue.get("url"):
+                    lines.append(f"- <{issue['url']}|{issue_label}> - {item['title']}")
+                else:
+                    lines.append(f"- {issue_label} - {item['title']}")
+        if review_needed:
+            if lines:
+                lines.append("")
+            lines.append(f"{len(review_needed)} action item{'s' if len(review_needed) != 1 else ''} need approval:")
+            for item in review_needed[:10]:
+                lines.append(
+                    f"- {item['title']} -> {item['project']} / {item['assignee']} "
+                    f"({item['confidence']:.0%}, {item.get('source', 'Slack thread')})"
+                )
+        if skipped:
+            if lines:
+                lines.append("")
+            lines.append(f"Skipped {len(skipped)} item{'s' if len(skipped) != 1 else ''}:")
+            for item in skipped[:8]:
+                duplicate = item.get("duplicate") or {}
+                if duplicate.get("url"):
+                    lines.append(f"- {item['title']} - {item['reason']} (<{duplicate['url']}|existing issue>)")
+                else:
+                    lines.append(f"- {item['title']} - {item['reason']}")
+        return "\n".join(lines) if lines else "No Linear issues were created from those meeting notes."
+
+    def _build_linear_meeting_review_blocks(
+        self,
+        message: str,
+        review_needed: list[dict[str, Any]],
+        user_id: str,
+    ) -> list[dict[str, Any]]:
+        blocks: list[dict[str, Any]] = [
+            {"type": "section", "text": {"type": "mrkdwn", "text": message[:3000]}}
+        ]
+        for item in review_needed[:8]:
+            pending_id = item["pending_id"]
+            summary = (
+                f"*{item['title']}*\n"
+                f"Project: `{item['project']}` | Assignee: `{item['assignee']}` | "
+                f"Confidence: `{item['confidence']:.0%}` | Source: `{item.get('source', 'Slack thread')}`"
+            )
+            value = json.dumps({"pending_id": pending_id, "requested_by": user_id})
+            blocks.extend([
+                {"type": "section", "text": {"type": "mrkdwn", "text": summary[:2500]}},
+                {
+                    "type": "actions",
+                    "block_id": f"linear_meeting_{pending_id[:8]}",
+                    "elements": [
+                        {
+                            "type": "button",
+                            "text": {"type": "plain_text", "text": "Approve"},
+                            "style": "primary",
+                            "action_id": "linear_meeting_approve",
+                            "value": value,
+                        },
+                        {
+                            "type": "button",
+                            "text": {"type": "plain_text", "text": "Reject"},
+                            "style": "danger",
+                            "action_id": "linear_meeting_reject",
+                            "value": value,
+                        },
+                    ],
+                },
+            ])
+        return blocks
+
+    def _linear_connection_nodes(self, value: Any) -> list[dict[str, Any]]:
+        if isinstance(value, dict):
+            nodes = value.get("nodes") or []
+            return [node for node in nodes if isinstance(node, dict)]
+        if isinstance(value, list):
+            return [node for node in value if isinstance(node, dict)]
+        return []
+
+    def _normalize_match_text(self, value: Any) -> str:
+        return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
+
+    def _linear_meeting_duplicate_tokens(self, value: Any) -> set[str]:
+        aliases = {
+            "doc": "documentation",
+            "docs": "documentation",
+        }
+        tokens = set()
+        for token in re.findall(r"[a-z0-9]+", str(value or "").lower()):
+            tokens.add(aliases.get(token, token))
+        return tokens
     
     async def _execute_connect_users(
         self,
@@ -1476,6 +2366,264 @@ Keep the response concise but informative."""
         # Note: Vector search is disabled until API endpoint is implemented
         # For now, fall back to LLM-based execution
         return await self._execute_with_llm(skill, text, params, user_id)
+
+    async def _execute_luma_events(
+        self,
+        skill: Skill,
+        text: str,
+        params: dict,
+        user_id: str,
+        channel_id: Optional[str],
+        thread_ts: Optional[str],
+    ) -> Any:
+        """Execute the Luma Events skill through mlai-backend."""
+        settings = get_settings()
+        if not getattr(settings, "MLAI_BACKEND_URL", None):
+            return (
+                "Luma attendee reports need mlai-backend to be configured. "
+                "Ask the team to set `MLAI_BACKEND_URL`."
+            )
+
+        from roo.clients.mlai_backend import MLAIBackendClient, MLAIBackendUnavailableError
+
+        backend_client = MLAIBackendClient(
+            base_url=settings.MLAI_BACKEND_URL,
+            api_key=settings.ROO_API_KEY or settings.MLAI_API_KEY,
+            internal_api_key=(
+                settings.INTERNAL_API_KEY
+                or settings.ROO_API_KEY
+                or settings.MLAI_API_KEY
+            ),
+        )
+
+        event_date = self._resolve_luma_event_date(params, text)
+        event_count = self._resolve_luma_event_count(params, text, default=1 if event_date else 3)
+        include_csv = self._luma_request_includes_csv(params, text)
+        approval_status = str(params.get("approval_status") or "approved").strip() or "approved"
+        if include_csv and not channel_id:
+            return "I need a Slack channel or DM to upload the Luma CSV files."
+
+        try:
+            report = await backend_client.get_luma_attendee_report(
+                user_id,
+                event_count=event_count,
+                event_date=event_date,
+                approval_status=approval_status,
+                include_csv=include_csv,
+            )
+        except MLAIBackendUnavailableError:
+            return "I'm having trouble reaching mlai-backend for Luma right now. Try again in a tick."
+        except httpx.HTTPStatusError as e:
+            status_code = e.response.status_code
+            detail = self._extract_luma_http_error_detail(e)
+            if status_code == 403:
+                return (
+                    "Sorry mate, you'll need to be a Points Admin with the `admin`, "
+                    "`committee`, or `partner` role to access Luma attendee data. 🔒"
+                )
+            if status_code == 503:
+                return detail or "Luma isn't configured in mlai-backend yet. Ask the team to set `LUMA_API_KEY` there."
+            if status_code == 429:
+                return detail or "Luma rate-limited the report. Try again in a minute."
+            return detail or f"mlai-backend returned HTTP {status_code} for the Luma report."
+
+        events = report.get("events") or []
+        if not events:
+            if event_date:
+                return f"I couldn't find an ended Luma event on {event_date}."
+            return "I couldn't find any ended Luma events on the configured MLAI calendar."
+
+        uploaded = []
+        if include_csv:
+            from ..slack_client import upload_file
+
+            for event in events:
+                csv_payload = event.get("csv") if isinstance(event, dict) else None
+                if not isinstance(csv_payload, dict):
+                    continue
+                filename = str(csv_payload.get("filename") or "luma-attendees.csv")
+                content_base64 = str(csv_payload.get("content_base64") or "")
+                try:
+                    csv_content = base64.b64decode(content_base64).decode("utf-8")
+                except Exception:
+                    return "mlai-backend returned a Luma CSV I couldn't decode. Ask the team to check the Luma report endpoint."
+                title = f"{event.get('event_name') or 'Luma event'} attendees"
+                upload_file(
+                    channel=channel_id,
+                    content=csv_content,
+                    filename=filename,
+                    title=title,
+                    thread_ts=thread_ts,
+                )
+                uploaded.append(filename)
+
+        message = self._format_luma_attendee_report(report, include_csv=include_csv, uploaded_filenames=uploaded)
+        return {
+            "message": message,
+            "data": {
+                "action": "luma_attendee_report",
+                "approval_status": approval_status,
+                "event_date": event_date,
+                "include_csv": include_csv,
+                "events": events,
+                "uploaded_filenames": uploaded,
+            },
+        }
+
+    def _resolve_luma_event_count(self, params: dict, text: str, default: int = 3) -> int:
+        raw_count = params.get("event_count") or params.get("limit")
+        if raw_count is None:
+            text_lower = text.lower()
+            if re.search(r"\blatest\s+(?:mlai\s+)?event\b", text_lower):
+                raw_count = 1
+            else:
+                count_match = re.search(
+                    r"\b(?:past|last|recent|latest)\s+(\d{1,2})\s+(?:mlai\s+)?events?\b",
+                    text_lower,
+                )
+                raw_count = count_match.group(1) if count_match else default
+        try:
+            count = int(raw_count)
+        except (TypeError, ValueError):
+            count = default
+        return max(1, min(count, 10))
+
+    def _luma_request_includes_csv(self, params: dict, text: str) -> bool:
+        raw_value = params.get("include_csv")
+        if raw_value is not None:
+            return str(raw_value).strip().lower() in {"1", "true", "yes", "on"}
+
+        text_lower = text.lower()
+        return bool(
+            re.search(r"\bcsvs?\b", text_lower)
+            or re.search(r"\bexport\b", text_lower)
+            or re.search(r"\bguest\s+list\b", text_lower)
+            or re.search(r"\battendee\s+list\b", text_lower)
+        )
+
+    def _resolve_luma_event_date(self, params: dict, text: str) -> Optional[str]:
+        raw_value = params.get("event_date") or params.get("date")
+        if raw_value:
+            raw_text = str(raw_value).strip()
+            iso_match = re.search(r"\b(20\d{2}-\d{2}-\d{2})\b", raw_text)
+            if iso_match:
+                return iso_match.group(1)
+
+        iso_match = re.search(r"\b(20\d{2}-\d{2}-\d{2})\b", text)
+        if iso_match:
+            return iso_match.group(1)
+
+        month_lookup = {
+            name.lower(): index
+            for index, names in enumerate(calendar.month_name)
+            for name in [names]
+            if name
+        }
+        month_lookup.update(
+            {
+                name.lower(): index
+                for index, names in enumerate(calendar.month_abbr)
+                for name in [names]
+                if name
+            }
+        )
+        month_pattern = "|".join(sorted(month_lookup, key=len, reverse=True))
+        text_lower = text.lower()
+        patterns = [
+            rf"\b({month_pattern})\s+(\d{{1,2}})(?:st|nd|rd|th)?(?:,?\s+(20\d{{2}}))?\b",
+            rf"\b(\d{{1,2}})(?:st|nd|rd|th)?\s+({month_pattern})(?:\s+(20\d{{2}}))?\b",
+        ]
+        today = date.today()
+        for index, pattern in enumerate(patterns):
+            match = re.search(pattern, text_lower)
+            if not match:
+                continue
+            if index == 0:
+                month_name, day_text, year_text = match.groups()
+            else:
+                day_text, month_name, year_text = match.groups()
+            month = month_lookup[month_name]
+            day = int(day_text)
+            year = int(year_text) if year_text else today.year
+            try:
+                resolved = date(year, month, day)
+            except ValueError:
+                return None
+            if not year_text and resolved > today:
+                try:
+                    resolved = date(year - 1, month, day)
+                except ValueError:
+                    return None
+            return resolved.isoformat()
+
+        return None
+
+    def _format_luma_attendee_report(
+        self,
+        report: dict,
+        *,
+        include_csv: bool,
+        uploaded_filenames: list[str],
+    ) -> str:
+        events = report.get("events") or []
+        total_guest_count = report.get("total_guest_count")
+        lines = ["*Luma attendee report*"]
+        if total_guest_count is not None:
+            lines.append(f"Total approved guests: {total_guest_count}")
+        for event in events:
+            event_name = event.get("event_name") or "Luma event"
+            start_label = self._format_luma_event_date(event.get("start_at"))
+            guest_count = int(event.get("guest_count") or 0)
+            checked_in_count = int(event.get("checked_in_count") or 0)
+            suffix = f" ({start_label})" if start_label else ""
+            lines.append(
+                f"• {event_name}{suffix}: {guest_count} approved guest"
+                f"{'s' if guest_count != 1 else ''}, {checked_in_count} checked in"
+            )
+        if include_csv:
+            if uploaded_filenames:
+                lines.append("")
+                lines.append(
+                    f"Uploaded {len(uploaded_filenames)} CSV file"
+                    f"{'s' if len(uploaded_filenames) != 1 else ''}: "
+                    + ", ".join(f"`{filename}`" for filename in uploaded_filenames)
+                )
+            else:
+                lines.append("")
+                lines.append("No CSV files were returned by mlai-backend.")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _format_luma_event_date(raw_value: Any) -> str:
+        if not raw_value:
+            return ""
+        try:
+            raw = str(raw_value).strip()
+            if raw.endswith("Z"):
+                raw = raw[:-1] + "+00:00"
+            parsed = datetime.fromisoformat(raw)
+        except ValueError:
+            return ""
+        return parsed.date().isoformat()
+
+    def _extract_luma_http_error_detail(self, exc: httpx.HTTPStatusError) -> str:
+        try:
+            payload = exc.response.json()
+        except ValueError:
+            return self._extract_http_error_detail(exc)
+        except Exception:
+            return ""
+
+        if isinstance(payload, dict):
+            for key in ("error", "detail", "message"):
+                value = payload.get(key)
+                if value:
+                    return str(value)
+        if exc.response.status_code >= 500:
+            return self._extract_http_error_detail(exc)
+        if payload in (None, "", [], {}):
+            return ""
+        return str(payload)
 
     async def _save_content_factory_pending_intent(
         self,
@@ -3918,10 +5066,10 @@ Keep the response concise but informative."""
     def _resolve_points_action(self, params: dict, text: str) -> str:
         """Resolve the intended points action from extracted params and raw text."""
         action = str(params.get("action", "") or "").lower().strip()
-        text_lower = text.lower()
+        text_lower = self._normalize_points_routing_text(text)
         explicit_points_request = "request" in text_lower and "point" in text_lower and "reward" not in text_lower
 
-        if self._is_points_topup_request(text_lower, action):
+        if action in {"topup_points", "top_up_points", "purchase_points", "buy_points"}:
             return "topup_points"
 
         management_action = self._resolve_points_admin_management_action(
@@ -3933,6 +5081,9 @@ Keep the response concise but informative."""
 
         if self._is_task_list_request(text, params):
             return "list_tasks"
+
+        if self._looks_like_points_topup_request(text):
+            return "topup_points"
 
         if explicit_points_request:
             return "request_points"
@@ -3946,12 +5097,24 @@ Keep the response concise but informative."""
             return "coworking_report"
         if action in ["report", "summary", "overview"] and "coworking" in text_lower:
             return "coworking_report"
+        if self._is_coworking_admin_checkin_request(text):
+            return "admin_checkin_coworking"
+        if action in [
+            "admin_checkin_coworking",
+            "coworking_checkin",
+            "checkin_coworking",
+            "check_in_coworking",
+        ]:
+            return "admin_checkin_coworking"
 
         if action == "book":
             action = "book_coworking"
         elif action in ["create", "task", "create_task"]:
             if params.get("task_title") or "create" in text_lower:
                 action = "create_task"
+
+        if action == "book_coworking" and self._coworking_target_mentions_present(text, params):
+            return "admin_checkin_coworking"
 
         if action and action != "task":
             return action
@@ -3960,6 +5123,8 @@ Keep the response concise but informative."""
             return "balance"
         if "history" in text_lower:
             return "history"
+        if self._looks_like_points_topup_request(text):
+            return "topup_points"
         if "request" in text_lower and "point" in text_lower and "reward" not in text_lower:
             return "request_points"
         if any(w in text_lower for w in ["tasks mine", "my tasks", "tasks review", "review tasks", "tasks all", "all tasks"]):
@@ -3982,6 +5147,16 @@ Keep the response concise but informative."""
                 "how many people",
                 "used the coworking",
                 "attendance",
+                "usage",
+                "compare",
+                "compared",
+                "comparison",
+                "busiest",
+                "quietest",
+                "trend",
+                "trends",
+                "recommendation",
+                "recommendations",
             ]
         ):
             return "coworking_report"
@@ -4007,8 +5182,6 @@ Keep the response concise but informative."""
             return "view_rate_card"
         if any(w in text_lower for w in ["rewards", "perks"]):
             return "list_rewards"
-        if self._is_points_topup_request(text_lower, action):
-            return "topup_points"
         if "reward" in text_lower and "request" in text_lower:
             return "request_reward"
         if "task" in text_lower and "create" in text_lower:
@@ -4023,23 +5196,114 @@ Keep the response concise but informative."""
             return "deduct_points"
         return action
 
-    def _is_points_topup_request(self, text_lower: str, action: str = "") -> bool:
-        if action in {"topup_points", "top_up_points", "purchase_points", "buy_points"}:
+    def _looks_like_points_topup_request(self, text: str) -> bool:
+        """Return True for member requests to buy fixed top-up Roo Points packs."""
+        text_lower = self._normalize_points_routing_text(text)
+        if re.search(r"\btop\s*up\b|\btopup\b|\btop-up\b", text_lower):
             return True
-        if "point" not in text_lower and "pts" not in text_lower:
-            return False
-        return any(
-            phrase in text_lower
-            for phrase in (
-                "top up",
-                "top-up",
-                "topup",
-                "buy",
-                "purchase",
-                "pay for",
-                "paid points",
+        if re.search(r"\b(?:buy|purchase)\b.*\b(?:roo\s+)?points?\b", text_lower):
+            return True
+        if re.search(r"\bpay\s+for\b.*\b(?:roo\s+)?points?\b", text_lower):
+            return True
+        if re.search(r"\bpaid\s+(?:roo\s+)?points?\b", text_lower):
+            return True
+        if re.search(r"\badd\b.*\b(?:roo\s+)?points?\b", text_lower):
+            return True
+        return bool(re.search(r"\bi\s+need\s+more\s+(?:roo\s+)?points?\b", text_lower))
+
+    def _resolve_topup_pack_id(self, text: str, params: dict) -> tuple[Optional[str], Optional[int]]:
+        """Resolve a top-up pack ID; return unsupported amount when a non-pack amount is present."""
+        pack_candidates = [
+            params.get("pack_id"),
+            params.get("pack"),
+            params.get("topup_pack"),
+        ]
+        for candidate in pack_candidates:
+            value = str(candidate or "").strip().lower()
+            if not value:
+                continue
+            value = value.replace("-", "_")
+            if value in ROO_TOPUP_PACKS:
+                return value, None
+            match = re.search(r"\b(\d+)\b", value)
+            if match:
+                amount = int(match.group(1))
+                return ROO_TOPUP_PACK_BY_POINTS.get(amount), amount
+
+        point_candidates = [
+            params.get("points_amount"),
+            params.get("points"),
+            params.get("amount"),
+        ]
+        for candidate in point_candidates:
+            if candidate in (None, ""):
+                continue
+            try:
+                amount = int(candidate)
+            except (TypeError, ValueError):
+                continue
+            return ROO_TOPUP_PACK_BY_POINTS.get(amount), amount
+
+        text_lower = self._normalize_points_routing_text(text)
+        exact_pack = re.search(r"\btopup[_\s-]*(5|10|25)\b", text_lower)
+        if exact_pack:
+            amount = int(exact_pack.group(1))
+            return ROO_TOPUP_PACK_BY_POINTS[amount], None
+
+        amount_match = re.search(r"\b(\d+)\b", text_lower)
+        if amount_match:
+            amount = int(amount_match.group(1))
+            return ROO_TOPUP_PACK_BY_POINTS.get(amount), amount
+
+        return None, None
+
+    def _topup_pack_list_message(self) -> str:
+        lines = ["Available Top-up Roo Points packs:"]
+        for pack_id in ("topup_5", "topup_10", "topup_25"):
+            pack = ROO_TOPUP_PACKS[pack_id]
+            lines.append(f"- {pack['label']} - {pack['price']}")
+        lines.append("")
+        lines.append(
+            "Top-up Roo Points are optional and do not count toward lifetime earned contribution."
+        )
+        return "\n".join(lines)
+
+    def _normalize_points_routing_text(self, text: str) -> str:
+        """Normalize common Slack typo variants before deterministic routing."""
+        text_lower = str(text or "").lower()
+        replacements = {
+            "coworkign": "coworking",
+            "cowokrking": "coworking",
+            "cowokring": "coworking",
+            "co working": "coworking",
+            "co-working": "coworking",
+            "peopel": "people",
+        }
+        for typo, replacement in replacements.items():
+            text_lower = text_lower.replace(typo, replacement)
+        return text_lower
+
+    def _is_coworking_admin_checkin_request(self, text: str) -> bool:
+        """Detect admin coworking check-in commands like `book <@U123> in today`."""
+        return bool(
+            re.search(
+                r"\b(?:check|book)\b.*<@[A-Z0-9]+>.*\bin\b",
+                str(text or ""),
+                re.IGNORECASE,
             )
         )
+
+    def _coworking_target_mentions_present(self, text: str, params: dict) -> bool:
+        """Return True when a coworking booking request contains a non-Roo target mention."""
+        if re.search(r"<@[A-Z0-9]+>", str(text or ""), re.IGNORECASE):
+            return True
+        for raw_target in list(params.get("target_users", []) or []) + [
+            params.get("target_user"),
+            params.get("target_slack_id"),
+        ]:
+            if raw_target not in (None, ""):
+                return True
+        return False
 
     def _extract_task_identifier(self, text: str, explicit_task_id=None) -> Optional[str]:
         """Extract either a numeric task id or a ROO task code from text."""
@@ -4230,6 +5494,25 @@ Keep the response concise but informative."""
         return (
             "Sorry mate, you'll need to be a Points Admin to generate coworking reports. 🔒"
         )
+
+    def _points_admin_role(self, admin_details: Optional[dict]) -> str:
+        if not isinstance(admin_details, dict):
+            return ""
+        return str(admin_details.get("role") or "").strip().lower()
+
+    def _is_full_points_admin_details(self, admin_details: Optional[dict]) -> bool:
+        return self._points_admin_role(admin_details) in FULL_POINTS_ADMIN_ROLES
+
+    def _can_generate_coworking_report_details(self, admin_details: Optional[dict]) -> bool:
+        return self._points_admin_role(admin_details) in COWORKING_REPORT_ROLES
+
+    def _full_points_admin_denial(self, admin_details: Optional[dict], action_label: str) -> str:
+        if self._points_admin_role(admin_details) == "partner":
+            return (
+                f"Sorry mate, partner admins can only generate coworking reports. "
+                f"You need a full Points Admin role to {action_label}. 🔒"
+            )
+        return f"Sorry mate, you'll need to be a full Points Admin to {action_label}. 🔒"
 
     def _is_points_admin_promotion_command(self, text: str) -> bool:
         """Detect commands that promote a tagged user to Points Admin."""
@@ -4462,6 +5745,15 @@ Keep the response concise but informative."""
             start = self._shift_months(today, -months) + timedelta(days=1)
             return start.isoformat(), today.isoformat(), None
 
+        if re.search(r"\blast\s+month\b", text_lower):
+            from ..utils import get_current_date
+
+            today = get_current_date()
+            first_this_month = today.replace(day=1)
+            end = first_this_month - timedelta(days=1)
+            start = end.replace(day=1)
+            return start.isoformat(), end.isoformat(), None
+
         start_date = params.get("start_date") or params.get("from_date")
         end_date = params.get("end_date") or params.get("to_date")
         iso_dates = re.findall(r"\b\d{4}-\d{2}-\d{2}\b", text)
@@ -4490,60 +5782,788 @@ Keep the response concise but informative."""
 
         return start.isoformat(), end.isoformat(), None
 
-    def _format_coworking_report(self, report: dict) -> str:
-        """Format a coworking booking report for Slack."""
+    def _coworking_report_flags(self, text: str) -> dict:
+        """Identify optional analysis behaviors requested by the user."""
+        text_lower = text.lower()
+        return {
+            "comparison_requested": bool(
+                re.search(
+                    r"\b(?:compare|compared|comparison|versus|vs\.?|prior|previous|week before|month before)\b",
+                    text_lower,
+                )
+            ),
+            "detail_requested": bool(re.search(r"\b(?:detail|detailed|breakdown|table)\b", text_lower)),
+            "raw_requested": bool(re.search(r"\b(?:raw|daily|day by day|each day)\b", text_lower)),
+            "busiest_requested": bool(re.search(r"\b(?:busiest|peak|highest|most used)\b", text_lower)),
+            "quietest_requested": bool(re.search(r"\b(?:quietest|lowest|least used)\b", text_lower)),
+            "trend_requested": bool(re.search(r"\b(?:trend|trends|pattern|patterns|changed|change)\b", text_lower)),
+            "recommendations_requested": bool(
+                re.search(r"\b(?:recommend|recommendation|recommendations|what should|what can we do)\b", text_lower)
+            ),
+        }
+
+    def _coworking_request_needs_llm_intent(self, text: str) -> bool:
+        """Return true when deterministic date parsing may need LLM help."""
+        text_lower = text.lower()
+        if re.search(r"\b\d{4}-\d{2}-\d{2}\b", text_lower):
+            return False
+        if any(
+            phrase in text_lower
+            for phrase in [
+                "this week",
+                "last week",
+                "last month",
+                "last 3 months",
+                "last 6 months",
+                "last year",
+                "last 12 months",
+            ]
+        ):
+            return False
+        return bool(
+            "coworking" in text_lower
+            and re.search(r"\b(?:from|between|since|until|during|for|compare|trend|busiest|quietest)\b", text_lower)
+        )
+
+    def _extract_json_object(self, content: str) -> dict:
+        """Parse a best-effort JSON object from an LLM response."""
+        content = str(content or "").strip()
+        if not content:
+            return {}
+        try:
+            parsed = json.loads(content)
+            return parsed if isinstance(parsed, dict) else {}
+        except json.JSONDecodeError:
+            pass
+
+        match = re.search(r"\{.*\}", content, re.DOTALL)
+        if not match:
+            return {}
+        try:
+            parsed = json.loads(match.group(0))
+            return parsed if isinstance(parsed, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+
+    def _coworking_report_llm_model(self) -> str:
+        try:
+            return get_settings().ROUTER_MODEL
+        except Exception:
+            return "gpt-5.4"
+
+    async def _extract_coworking_report_intent_with_llm(self, text: str, params: dict) -> dict:
+        """Use GPT-5.4 to extract date/comparison hints for flexible report requests."""
+        if not self._coworking_request_needs_llm_intent(text):
+            return {}
+
+        try:
+            response = await chat(
+                [
+                    {
+                        "role": "system",
+                        "content": (
+                            "Extract coworking report intent as strict JSON only. "
+                            "Use YYYY-MM-DD dates when the user states exact dates. "
+                            "If dates are ambiguous, omit them. Allowed keys: "
+                            "start_date, end_date, comparison_start_date, comparison_end_date, "
+                            "comparison_requested, focus, detail_requested, recommendations_requested."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": json.dumps(
+                            {
+                                "message": text,
+                                "existing_params": params,
+                                "timezone": "Australia/Melbourne",
+                            }
+                        ),
+                    },
+                ],
+                model=self._coworking_report_llm_model(),
+                max_tokens=320,
+                reasoning_effort="low",
+            )
+            return self._extract_json_object(response.content)
+        except Exception as exc:
+            print(f"⚠️ Coworking report intent extraction failed: {exc}")
+            return {}
+
+    def _resolve_coworking_report_range_from_intent(
+        self,
+        text: str,
+        params: dict,
+        llm_intent: dict,
+    ) -> tuple[Optional[str], Optional[str], Optional[str]]:
+        """Resolve a primary report range, falling back to LLM-extracted dates."""
+        start_date, end_date, error = self._resolve_coworking_report_range(text, params)
+        if not error:
+            return start_date, end_date, None
+
+        merged_params = {
+            **params,
+            "start_date": llm_intent.get("start_date") or params.get("start_date") or params.get("from_date"),
+            "end_date": llm_intent.get("end_date") or params.get("end_date") or params.get("to_date"),
+        }
+        if not merged_params.get("start_date") or not merged_params.get("end_date"):
+            return start_date, end_date, error
+        return self._resolve_coworking_report_range(text, merged_params)
+
+    def _resolve_coworking_comparison_range(
+        self,
+        text: str,
+        params: dict,
+        llm_intent: dict,
+        primary_start: str,
+        primary_end: str,
+    ) -> Optional[dict]:
+        """Resolve the comparison range for a coworking analysis request."""
+        flags = self._coworking_report_flags(text)
+        comparison_requested = (
+            flags["comparison_requested"]
+            or bool(params.get("compare") or params.get("comparison_requested"))
+            or bool(llm_intent.get("comparison_requested"))
+        )
+
+        explicit_start = (
+            params.get("comparison_start_date")
+            or params.get("compare_start_date")
+            or llm_intent.get("comparison_start_date")
+        )
+        explicit_end = (
+            params.get("comparison_end_date")
+            or params.get("compare_end_date")
+            or llm_intent.get("comparison_end_date")
+        )
+        if explicit_start and explicit_end:
+            try:
+                start = date.fromisoformat(str(explicit_start))
+                end = date.fromisoformat(str(explicit_end))
+            except ValueError:
+                return None
+            if end >= start and (end - start).days + 1 <= 366:
+                return {
+                    "label": "Comparison range",
+                    "start_date": start.isoformat(),
+                    "end_date": end.isoformat(),
+                }
+
+        if not comparison_requested:
+            return None
+
+        start = date.fromisoformat(primary_start)
+        end = date.fromisoformat(primary_end)
+        range_days = (end - start).days + 1
+        comparison_end = start - timedelta(days=1)
+        comparison_start = comparison_end - timedelta(days=range_days - 1)
+
+        text_lower = text.lower()
+        label = "Previous period"
+        if re.search(r"\b(?:week prior|prior week|previous week|week before)\b", text_lower):
+            label = "Week prior"
+        elif re.search(r"\b(?:month prior|previous month|month before)\b", text_lower):
+            label = "Month prior"
+
+        return {
+            "label": label,
+            "start_date": comparison_start.isoformat(),
+            "end_date": comparison_end.isoformat(),
+        }
+
+    def _format_coworking_days(self, days: list[dict], *, limit: int = 5) -> str:
+        if not days:
+            return "None"
+        shown = [
+            f"{day.get('date')} ({int(day.get('booked_users', 0))})"
+            for day in days[:limit]
+        ]
+        if len(days) > limit:
+            shown.append(f"+{len(days) - limit} more")
+        return ", ".join(shown)
+
+    def _summarize_coworking_report(self, report: dict) -> dict:
+        """Build deterministic analysis metrics from backend coworking report JSON."""
         report_range = report.get("range", {})
         totals = report.get("totals", {})
+        daily = [
+            {
+                "date": str(row.get("date") or ""),
+                "booked_users": int(row.get("booked_users", 0) or 0),
+            }
+            for row in report.get("daily", [])
+            if row.get("date")
+        ]
+
+        total_user_days = int(totals.get("booked_user_days", sum(row["booked_users"] for row in daily)) or 0)
+        range_days = int(totals.get("range_days", len(daily)) or len(daily) or 0)
+        active_days = int(totals.get("active_days", sum(1 for row in daily if row["booked_users"] > 0)) or 0)
+        average_per_day = totals.get("average_per_day")
+        if average_per_day is None:
+            average_per_day = round(total_user_days / range_days, 2) if range_days else 0
+        average_per_day = float(average_per_day or 0)
+
+        if daily:
+            max_users = max(row["booked_users"] for row in daily)
+            min_users = min(row["booked_users"] for row in daily)
+            busiest_days = [row for row in daily if row["booked_users"] == max_users and max_users > 0]
+            quietest_days = [row for row in daily if row["booked_users"] == min_users]
+        else:
+            busiest_days = []
+            quietest_days = []
+
+        day_of_week = {}
+        for row in daily:
+            try:
+                day = date.fromisoformat(row["date"])
+            except ValueError:
+                continue
+            day_name = calendar.day_name[day.weekday()]
+            bucket = day_of_week.setdefault(
+                day_name,
+                {"day": day_name, "booked_user_days": 0, "active_days": 0, "days": 0},
+            )
+            bucket["booked_user_days"] += row["booked_users"]
+            bucket["days"] += 1
+            if row["booked_users"] > 0:
+                bucket["active_days"] += 1
+
+        day_of_week_rows = []
+        for day_name in calendar.day_name:
+            bucket = day_of_week.get(day_name)
+            if not bucket:
+                continue
+            day_of_week_rows.append({
+                **bucket,
+                "average": round(bucket["booked_user_days"] / bucket["days"], 2) if bucket["days"] else 0,
+            })
+
+        top_days = sorted(daily, key=lambda row: (-row["booked_users"], row["date"]))[:5]
+        bottom_days = sorted(daily, key=lambda row: (row["booked_users"], row["date"]))[:5]
+
+        return {
+            "range": {
+                "start_date": report_range.get("start_date"),
+                "end_date": report_range.get("end_date"),
+            },
+            "booked_user_days": total_user_days,
+            "unique_users": int(totals.get("unique_users", 0) or 0),
+            "active_days": active_days,
+            "range_days": range_days,
+            "average_per_day": round(average_per_day, 2),
+            "busiest_days": busiest_days,
+            "quietest_days": quietest_days,
+            "top_days": top_days,
+            "bottom_days": bottom_days,
+            "day_of_week": day_of_week_rows,
+            "daily": daily,
+        }
+
+    def _percent_delta(self, current: float, previous: float) -> Optional[float]:
+        if previous == 0:
+            return None
+        return round(((current - previous) / previous) * 100, 1)
+
+    def _compare_coworking_summaries(self, primary: dict, comparison: dict) -> dict:
+        booked_delta = primary["booked_user_days"] - comparison["booked_user_days"]
+        average_delta = round(primary["average_per_day"] - comparison["average_per_day"], 2)
+        active_day_delta = primary["active_days"] - comparison["active_days"]
+        unique_user_delta = primary["unique_users"] - comparison["unique_users"]
+        return {
+            "booked_user_days_delta": booked_delta,
+            "booked_user_days_percent_delta": self._percent_delta(
+                primary["booked_user_days"],
+                comparison["booked_user_days"],
+            ),
+            "average_per_day_delta": average_delta,
+            "average_per_day_percent_delta": self._percent_delta(
+                primary["average_per_day"],
+                comparison["average_per_day"],
+            ),
+            "active_days_delta": active_day_delta,
+            "unique_users_delta": unique_user_delta,
+        }
+
+    def _format_coworking_delta(self, delta: float, percent_delta: Optional[float]) -> str:
+        if delta == 0:
+            return "unchanged"
+        direction = "up" if delta > 0 else "down"
+        amount = abs(delta)
+        amount_text = str(int(amount)) if float(amount).is_integer() else str(round(amount, 2))
+        if percent_delta is None:
+            return f"{direction} {amount_text} (prior was 0)"
+        return f"{direction} {amount_text} ({percent_delta:+.1f}%)"
+
+    def _format_coworking_range(self, summary: dict) -> str:
+        report_range = summary.get("range", {})
+        return f"{report_range.get('start_date')} to {report_range.get('end_date')}"
+
+    def _coworking_primary_label(self, text: str) -> str:
+        text_lower = text.lower()
+        if re.search(r"\blast\s+week\b", text_lower):
+            return "Last week"
+        if re.search(r"\bthis\s+week\b", text_lower):
+            return "This week"
+        if re.search(r"\blast\s+month\b", text_lower):
+            return "Last month"
+        if re.search(r"\blast\s+3\s+months?\b", text_lower):
+            return "Last 3 months"
+        if re.search(r"\blast\s+6\s+months?\b", text_lower):
+            return "Last 6 months"
+        if re.search(r"\b(?:last|past)\s+(?:1\s+)?years?\b", text_lower) or re.search(r"\blast\s+12\s+months?\b", text_lower):
+            return "Last year"
+        return "Selected range"
+
+    def _build_coworking_analysis_context(
+        self,
+        text: str,
+        primary_report: dict,
+        comparison_report: Optional[dict],
+        comparison_range: Optional[dict],
+    ) -> dict:
+        flags = self._coworking_report_flags(text)
+        primary_summary = self._summarize_coworking_report(primary_report)
+        comparison_summary = self._summarize_coworking_report(comparison_report) if comparison_report else None
+        comparison = (
+            self._compare_coworking_summaries(primary_summary, comparison_summary)
+            if comparison_summary
+            else None
+        )
+        return {
+            "question": text,
+            "source": "active coworking bookings, not door check-ins",
+            "flags": flags,
+            "primary": {
+                "label": self._coworking_primary_label(text),
+                "summary": primary_summary,
+                "report": primary_report,
+            },
+            "comparison": {
+                "label": (comparison_range or {}).get("label", "Previous period"),
+                "summary": comparison_summary,
+                "report": comparison_report,
+                "metrics": comparison,
+            } if comparison_summary else None,
+        }
+
+    def _coworking_direct_answer(self, context: dict) -> str:
+        primary = context["primary"]["summary"]
+        primary_label = context["primary"]["label"]
+        flags = context["flags"]
+        comparison = context.get("comparison")
+
+        if flags.get("busiest_requested") and primary["busiest_days"]:
+            return f"{primary_label}'s busiest day was {self._format_coworking_days(primary['busiest_days'])}."
+        if flags.get("quietest_requested") and primary["quietest_days"]:
+            return f"{primary_label}'s quietest day was {self._format_coworking_days(primary['quietest_days'])}."
+        if comparison and comparison.get("metrics"):
+            metrics = comparison["metrics"]
+            return (
+                f"{primary_label} had {primary['booked_user_days']} booked user-days, "
+                f"{self._format_coworking_delta(metrics['booked_user_days_delta'], metrics['booked_user_days_percent_delta'])} "
+                f"from {comparison['label'].lower()}."
+            )
+        return (
+            f"{primary_label} had {primary['booked_user_days']} booked user-days "
+            f"across {primary['active_days']} active days."
+        )
+
+    def _coworking_table(self, headers: list[str], rows: list[list[Any]]) -> str:
+        widths = [len(header) for header in headers]
+        string_rows = [[str(cell) for cell in row] for row in rows]
+        for row in string_rows:
+            for index, cell in enumerate(row):
+                widths[index] = max(widths[index], len(cell))
+        lines = [" ".join(header.ljust(widths[index]) for index, header in enumerate(headers))]
+        for row in string_rows:
+            lines.append(" ".join(cell.ljust(widths[index]) for index, cell in enumerate(row)))
+        return "```\n" + "\n".join(lines) + "\n```"
+
+    def _coworking_detail_sections(self, report: dict, summary: dict, flags: dict) -> list[str]:
+        range_days = summary.get("range_days", 0)
+        sections = []
         daily = report.get("daily", [])
         weekly = report.get("weekly", [])
         monthly = report.get("monthly", [])
 
-        busiest_days = totals.get("busiest_days") or []
-        if busiest_days:
-            busiest = ", ".join(
-                f"{day.get('date')} ({day.get('booked_users', 0)})"
-                for day in busiest_days[:5]
-            )
-            if len(busiest_days) > 5:
-                busiest += f", +{len(busiest_days) - 5} more"
-        else:
-            busiest = "None"
+        if flags.get("raw_requested") or range_days <= 14:
+            rows = [[row.get("date", ""), int(row.get("booked_users", 0) or 0)] for row in daily]
+            sections.extend(["*Daily*", self._coworking_table(["Date", "Users"], rows)])
+            return sections
 
-        monthly_lines = ["Month      User-days Active"]
-        for row in monthly:
-            monthly_lines.append(
-                f"{row.get('month', ''):<10} {int(row.get('booked_user_days', 0)):>9} {int(row.get('active_days', 0)):>6}"
-            )
+        if range_days <= 93:
+            weekly_rows = [
+                [
+                    row.get("week_start", ""),
+                    int(row.get("booked_user_days", 0) or 0),
+                    int(row.get("active_days", 0) or 0),
+                ]
+                for row in weekly
+            ]
+            monthly_rows = [
+                [
+                    row.get("month", ""),
+                    int(row.get("booked_user_days", 0) or 0),
+                    int(row.get("active_days", 0) or 0),
+                ]
+                for row in monthly
+            ]
+            sections.extend(["*Weekly*", self._coworking_table(["Week start", "User-days", "Active"], weekly_rows)])
+            sections.extend(["*Monthly*", self._coworking_table(["Month", "User-days", "Active"], monthly_rows)])
+            return sections
 
-        weekly_lines = ["Week start User-days Active"]
-        for row in weekly:
-            weekly_lines.append(
-                f"{row.get('week_start', ''):<10} {int(row.get('booked_user_days', 0)):>9} {int(row.get('active_days', 0)):>6}"
-            )
-
-        daily_lines = ["Date       Users"]
-        for row in daily:
-            daily_lines.append(f"{row.get('date', ''):<10} {int(row.get('booked_users', 0)):>5}")
-
-        return "\n".join([
-            "🏢 *Coworking report*",
-            f"Range: {report_range.get('start_date')} to {report_range.get('end_date')}",
-            "Source: Active coworking bookings",
-            "",
-            "*Summary*",
-            f"Booked user-days: {totals.get('booked_user_days', 0)}",
-            f"Unique users: {totals.get('unique_users', 0)}",
-            f"Active days: {totals.get('active_days', 0)} of {totals.get('range_days', 0)}",
-            f"Average per day: {totals.get('average_per_day', 0)}",
-            f"Busiest day: {busiest}",
-            "",
-            "*Monthly*",
-            "```\n" + "\n".join(monthly_lines) + "\n```",
-            "*Weekly*",
-            "```\n" + "\n".join(weekly_lines) + "\n```",
-            "*Daily*",
-            "```\n" + "\n".join(daily_lines) + "\n```",
+        monthly_rows = [
+            [
+                row.get("month", ""),
+                int(row.get("booked_user_days", 0) or 0),
+                int(row.get("active_days", 0) or 0),
+            ]
+            for row in monthly
+        ]
+        sections.extend(["*Monthly*", self._coworking_table(["Month", "User-days", "Active"], monthly_rows)])
+        sections.extend([
+            "*Highlights*",
+            f"Top days: {self._format_coworking_days(summary.get('top_days', []))}",
+            f"Quietest days: {self._format_coworking_days(summary.get('bottom_days', []))}",
         ])
+        return sections
+
+    def _format_coworking_analysis_fallback(self, context: dict) -> str:
+        primary = context["primary"]["summary"]
+        comparison = context.get("comparison")
+        lines = [
+            "🏢 *Coworking usage*",
+            f"Range: {self._format_coworking_range(primary)}",
+            "Source: Active coworking bookings (not door check-ins)",
+            "",
+            self._coworking_direct_answer(context),
+            "",
+            "*Measured facts*",
+            f"• Booked user-days: {primary['booked_user_days']}",
+            f"• Unique users: {primary['unique_users']}",
+            f"• Active days: {primary['active_days']} of {primary['range_days']}",
+            f"• Average per day: {primary['average_per_day']}",
+            f"• Busiest day: {self._format_coworking_days(primary['busiest_days'])}",
+        ]
+
+        if comparison and comparison.get("summary") and comparison.get("metrics"):
+            comparison_summary = comparison["summary"]
+            metrics = comparison["metrics"]
+            lines.extend([
+                "",
+                "*Comparison*",
+                f"• {comparison['label']}: {self._format_coworking_range(comparison_summary)}",
+                f"• Prior booked user-days: {comparison_summary['booked_user_days']}",
+                f"• Change: {self._format_coworking_delta(metrics['booked_user_days_delta'], metrics['booked_user_days_percent_delta'])}",
+                f"• Average/day change: {self._format_coworking_delta(metrics['average_per_day_delta'], metrics['average_per_day_percent_delta'])}",
+                f"• Active-day change: {metrics['active_days_delta']:+d}",
+            ])
+
+        if context["flags"].get("recommendations_requested") or context["flags"].get("trend_requested"):
+            lines.extend([
+                "",
+                "*Interpretation*",
+                "• This is based on bookings only. Use it as a directional usage signal, not door-swipe attendance.",
+            ])
+
+        lines.extend(["", *self._coworking_detail_sections(context["primary"]["report"], primary, context["flags"])])
+        return "\n".join(lines)
+
+    async def _generate_coworking_llm_response(self, context: dict) -> Optional[str]:
+        """Ask GPT-5.4 to turn bounded report data into a concise Slack answer."""
+        flags = context.get("flags", {})
+        if not (
+            context.get("comparison")
+            or flags.get("trend_requested")
+            or flags.get("recommendations_requested")
+        ):
+            return None
+
+        bounded_context = {
+            "question": context["question"],
+            "source": context["source"],
+            "primary": context["primary"],
+            "comparison": context.get("comparison"),
+            "instructions": {
+                "format": "Slack mrkdwn",
+                "style": "insight first, concise, practical",
+                "facts_rule": "Only use measured booking facts from this JSON for numeric claims.",
+                "interpretation_rule": "Broader explanations or suggestions must be labelled Interpretation or Recommendations.",
+            },
+        }
+
+        try:
+            response = await chat(
+                [
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are Roo, writing an MLAI coworking usage answer for Slack. "
+                            "Start with '*Coworking usage*'. State the exact range(s) and source. "
+                            "Answer the user's question directly first. Keep it concise. "
+                            "Use only the provided JSON for booking numbers. "
+                            "Do not invent attendance, names, emails, or causes. "
+                            "If you add broader advice, put it under '*Interpretation*' or '*Recommendations*'. "
+                            "Do not include large raw tables."
+                        ),
+                    },
+                    {"role": "user", "content": json.dumps(bounded_context, sort_keys=True)},
+                ],
+                model=self._coworking_report_llm_model(),
+                max_tokens=700,
+                reasoning_effort="low",
+            )
+            content = str(response.content or "").strip()
+            return content or None
+        except Exception as exc:
+            print(f"⚠️ Coworking report GPT response failed: {exc}")
+            return None
+
+    async def _format_coworking_analysis_response(self, context: dict) -> str:
+        llm_response = await self._generate_coworking_llm_response(context)
+        if not llm_response:
+            return self._format_coworking_analysis_fallback(context)
+
+        primary = context["primary"]["summary"]
+        detail_sections = self._coworking_detail_sections(context["primary"]["report"], primary, context["flags"])
+        if detail_sections:
+            return "\n".join([llm_response, "", *detail_sections])
+        return llm_response
+
+    def _format_coworking_report(self, report: dict) -> str:
+        """Format a coworking booking report for Slack."""
+        context = self._build_coworking_analysis_context("coworking report", report, None, None)
+        return self._format_coworking_analysis_fallback(context)
+
+    def _resolve_coworking_booking_date(
+        self,
+        params: dict,
+        text: str,
+        *,
+        default_to_today: bool,
+    ) -> Optional[str]:
+        """Resolve coworking booking/check-in date from params, text, or today's default."""
+        raw_date = str(params.get("date") or "").strip().strip(".,")
+
+        if not raw_date:
+            match = re.search(r"(\d{4}-\d{2}-\d{2})", str(text or ""))
+            if match:
+                raw_date = match.group(1)
+
+        text_lower = self._normalize_points_routing_text(text)
+        if not raw_date:
+            if re.search(r"\btomorrow\b", text_lower):
+                raw_date = "tomorrow"
+            elif re.search(r"\btoday\b", text_lower):
+                raw_date = "today"
+
+        if raw_date.lower() not in {"today", "tomorrow"} and (raw_date or not default_to_today):
+            return raw_date or None
+
+        from roo.utils import get_current_date
+        today = get_current_date()
+        if raw_date.lower() == "today":
+            return today.isoformat()
+        if raw_date.lower() == "tomorrow":
+            return (today + timedelta(days=1)).isoformat()
+        return today.isoformat()
+
+    def _extract_coworking_checkin_targets(
+        self,
+        text: str,
+        params: dict,
+        *,
+        bot_id: Optional[str],
+    ) -> list[str]:
+        """Extract target Slack IDs for admin coworking check-in."""
+        target_slack_ids: list[str] = []
+
+        for mentioned_user in re.findall(r"<@([A-Z0-9]+)>", str(text or ""), re.IGNORECASE):
+            if not bot_id or mentioned_user != bot_id:
+                target_slack_ids.append(mentioned_user)
+
+        if not target_slack_ids:
+            param_values: list[Any] = []
+            param_values.extend(params.get("target_users", []) or [])
+            param_values.extend(
+                [
+                    params.get("target_user"),
+                    params.get("target_slack_id"),
+                ]
+            )
+            for raw_target in param_values:
+                if raw_target in (None, ""):
+                    continue
+                cleaned = re.sub(r"[<@>]", "", str(raw_target)).strip()
+                if cleaned and (not bot_id or cleaned != bot_id):
+                    target_slack_ids.append(cleaned)
+
+        deduped: list[str] = []
+        for target in target_slack_ids:
+            if target not in deduped:
+                deduped.append(target)
+        return deduped
+
+    def _coworking_booking_already_queued_message(
+        self,
+        *,
+        booking_date: str,
+        target_user_id: str,
+        admin_checkin: bool,
+    ) -> str:
+        if admin_checkin:
+            return (
+                f"I already have a coworking check-in request for <@{target_user_id}> "
+                f"on **{booking_date}** queued or in progress. I'll confirm in this thread "
+                "when it completes."
+            )
+        return (
+            f"I already have your coworking booking request for **{booking_date}** "
+            "queued or in progress. I'll confirm in this thread when it completes."
+        )
+
+    def _coworking_booking_queued_for_retry_message(
+        self,
+        *,
+        booking_date: str,
+        target_user_id: str,
+        admin_checkin: bool,
+    ) -> str:
+        if admin_checkin:
+            return (
+                f"I got the coworking check-in request for <@{target_user_id}> on "
+                f"**{booking_date}**, but MLAI backend didn't confirm it yet. I've queued "
+                "it and will keep retrying automatically. I won't double-book the same day."
+            )
+        return self._coworking_booking_queued_message(booking_date)
+
+    def _format_coworking_booking_success(
+        self,
+        *,
+        booking_date: str,
+        target_user_id: str,
+        cost: int,
+        new_balance: Optional[int],
+        admin_checkin: bool,
+    ) -> str:
+        point_word = "point" if cost == 1 else "points"
+        if admin_checkin:
+            balance_line = f"\nTheir balance: {new_balance} pts" if new_balance is not None else ""
+            return (
+                f"You beauty! 🎉\n\n"
+                f"Checked <@{target_user_id}> in for **{booking_date}** at the coworking space.\n"
+                f"Cost: {cost} {point_word}{balance_line}"
+            )
+
+        balance_line = ""
+        if new_balance is not None:
+            balance_line = f" (Balance remaining: {new_balance} points)"
+
+        return (
+            f"You beauty! 🎉\n\n"
+            f"Booked you in for **{booking_date}** at the coworking space.\n"
+            f"Cost: {cost} {point_word}{balance_line}\n\n"
+            f"See you there, legend!"
+        )
+
+    async def _format_admin_coworking_bad_request(
+        self,
+        *,
+        client,
+        target_user_id: str,
+        exc: httpx.HTTPStatusError,
+    ) -> str:
+        error_detail = self._extract_http_error_detail(exc) or "Bad request"
+        balance_line = ""
+        if "balance" in error_detail.lower() or "insufficient" in error_detail.lower():
+            try:
+                balance_data = await client.get_balance(target_user_id)
+                current_balance = balance_data.get("balance", 0)
+                balance_line = f"\n\nTheir current balance is **{current_balance} points**."
+            except Exception:
+                pass
+        return f"🛑 I couldn't check <@{target_user_id}> in: {error_detail}{balance_line}"
+
+    async def _book_coworking_with_intent(
+        self,
+        *,
+        client,
+        target_user_id: str,
+        requested_by_user_id: str,
+        booking_date: str,
+        text: str,
+        channel_id: Optional[str],
+        thread_ts: Optional[str],
+        admin_checkin: bool,
+    ) -> str:
+        print(
+            "🏢 coworking_booking_execute "
+            f"requested_by_user_id={requested_by_user_id} target_user_id={target_user_id} "
+            f"booking_date={booking_date} admin_checkin={admin_checkin}"
+        )
+        try:
+            store = get_coworking_intent_store()
+            intent = store.record_intent(
+                slack_user_id=target_user_id,
+                requested_by_slack_id=requested_by_user_id,
+                booking_date=booking_date,
+                channel_id=channel_id,
+                thread_ts=thread_ts,
+                request_text=text,
+            )
+            leased_intent = store.reserve_for_processing(
+                int(intent["id"]),
+                owner=f"roo-sync-{uuid4().hex}",
+            )
+        except Exception as exc:
+            print(
+                "🏢 coworking_intent_persist_failed "
+                f"slack_user_id={target_user_id} requested_by={requested_by_user_id} "
+                f"booking_date={booking_date} exc_type={exc.__class__.__name__} exc={exc}"
+            )
+            return (
+                "I couldn't safely queue that coworking booking request just now, "
+                "so I didn't send it to MLAI backend. Please try again in a moment."
+            )
+
+        if not leased_intent:
+            return self._coworking_booking_already_queued_message(
+                booking_date=booking_date,
+                target_user_id=target_user_id,
+                admin_checkin=admin_checkin,
+            )
+
+        try:
+            result = await client.book_coworking(target_user_id, booking_date, channel_id)
+            store.mark_confirmed(int(leased_intent["id"]), backend_result=result)
+        except Exception as exc:
+            error = f"{exc.__class__.__name__}: {exc}"
+            if is_retryable_coworking_exception(exc):
+                store.mark_retryable_failure(int(leased_intent["id"]), error=error)
+                return self._coworking_booking_queued_for_retry_message(
+                    booking_date=booking_date,
+                    target_user_id=target_user_id,
+                    admin_checkin=admin_checkin,
+                )
+            store.mark_blocked(int(leased_intent["id"]), error=error)
+            raise
+
+        cost = result.get("points_cost", 1)
+        from roo.clients.mlai_backend import MLAIBackendUnavailableError
+
+        new_balance = None
+        try:
+            balance_data = await client.get_balance(target_user_id)
+            new_balance = balance_data.get("balance", 0)
+        except MLAIBackendUnavailableError:
+            pass
+
+        return self._format_coworking_booking_success(
+            booking_date=booking_date,
+            target_user_id=target_user_id,
+            cost=cost,
+            new_balance=new_balance,
+            admin_checkin=admin_checkin,
+        )
 
     async def _handle_points_action(
         self,
@@ -4562,6 +6582,46 @@ Keep the response concise but informative."""
         # Member Actions
         # =====================================================================
         
+        if action == "topup_points":
+            settings = get_settings()
+            if not getattr(settings, "ROO_POINTS_TOPUP_ENABLED", False):
+                return "Top-up checkout is not enabled yet. Ask the MLAI team to finish enabling Stripe top-ups first."
+
+            pack_id, unsupported_amount = self._resolve_topup_pack_id(text, params)
+            if not pack_id:
+                if unsupported_amount is None:
+                    return self._topup_pack_list_message()
+                return "I can only help with these fixed top-up packs right now: 5, 10, or 25 Top-up Roo Points."
+
+            purchase_from = {"source": "slack"}
+            if channel_id:
+                purchase_from["slack_channel_id"] = channel_id
+            if thread_ts:
+                purchase_from["slack_thread_ts"] = thread_ts
+
+            try:
+                purchase = await client.create_points_purchase(
+                    slack_user_id=user_id,
+                    pack_id=pack_id,
+                    purchase_from=purchase_from,
+                )
+            except httpx.HTTPStatusError as exc:
+                error_detail = self._extract_http_error_detail(exc)
+                detail = f" {error_detail}" if error_detail else ""
+                return f"I couldn't create that top-up checkout yet.{detail}"
+
+            checkout_url = str(purchase.get("frontend_checkout_page_url") or "").strip()
+            if not checkout_url:
+                return "I created the top-up request, but the checkout link was missing. Ask the MLAI team to check the points purchase API."
+
+            return (
+                "I created your Top-up Roo Points checkout. Continue here:\n"
+                f"{checkout_url}\n\n"
+                "Top-up Roo Points are MLAI community reward points. They are not money, "
+                "have no cash value, cannot be converted to cash, and cannot be sold or transferred. "
+                "They do not count toward lifetime earned contribution."
+            )
+
         if action == "balance":
             data = await client.get_balance(user_id)
             balance = data.get("balance", 0)
@@ -4704,39 +6764,6 @@ Keep the response concise but informative."""
                 "Please ask a Points Admin to use the existing manual award flow for now."
             )
 
-        elif action == "topup_points":
-            if not channel_id:
-                return "Roo Points top-ups need to start from Slack so I can keep the payment receipt in the right thread."
-
-            points = self._extract_points_request_amount(text, params.get("points"))
-            pack_by_points = {
-                5: "topup_5",
-                10: "topup_10",
-                25: "topup_25",
-            }
-            if points is None:
-                return "How many Roo Points would you like to top up? I can do 5, 10, or 25 points."
-            if points not in pack_by_points:
-                return "I can only create top-ups for 5, 10, or 25 Roo Points right now."
-
-            purchase = await client.create_points_purchase(
-                slack_user_id=user_id,
-                pack_id=pack_by_points[points],
-                slack_channel_id=channel_id,
-                slack_thread_ts=thread_ts,
-            )
-            checkout_url = purchase.get("frontend_checkout_page_url")
-            if not checkout_url:
-                return "I created the top-up request, but I couldn't get the checkout link back. Please try again."
-
-            return (
-                f"Top-up request created for *{points} Roo Points*.\n\n"
-                f"Pay here: {checkout_url}\n\n"
-                "Roo Points are an internal MLAI rewards system. They are not cash, "
-                "not transferable, and not redeemable for money. Purchased points do not "
-                "count toward lifetime earned contribution."
-            )
-
         elif action == "list_tasks":
             text_lower = text.lower()
             if "tasks quick" in text_lower or "quick tasks" in text_lower:
@@ -4840,15 +6867,86 @@ Keep the response concise but informative."""
             return f"Submitted! 📬 Task {display_id} is now pending approval.\n\nA reviewer will take a look soon. Legend! 🦘"
         
         elif action == "coworking_report":
-            if not await client.get_admin_details(user_id):
+            admin_details = await client.get_admin_details(user_id)
+            if not self._can_generate_coworking_report_details(admin_details):
                 return self._coworking_report_points_admin_denial()
 
-            start_date, end_date, error = self._resolve_coworking_report_range(text, params)
+            llm_intent = await self._extract_coworking_report_intent_with_llm(text, params)
+            start_date, end_date, error = self._resolve_coworking_report_range_from_intent(text, params, llm_intent)
             if error:
                 return error
 
             report = await client.get_coworking_report(user_id, start_date, end_date)
-            return self._format_coworking_report(report)
+            comparison_range = self._resolve_coworking_comparison_range(
+                text,
+                params,
+                llm_intent,
+                start_date,
+                end_date,
+            )
+            comparison_report = None
+            if comparison_range:
+                comparison_report = await client.get_coworking_report(
+                    user_id,
+                    comparison_range["start_date"],
+                    comparison_range["end_date"],
+                )
+
+            context = self._build_coworking_analysis_context(
+                text,
+                report,
+                comparison_report,
+                comparison_range,
+            )
+            return await self._format_coworking_analysis_response(context)
+
+        elif action == "admin_checkin_coworking":
+            from ..slack_client import get_bot_user_id
+            try:
+                bot_id = get_bot_user_id()
+            except Exception:
+                bot_id = None
+
+            target_slack_ids = self._extract_coworking_checkin_targets(
+                text,
+                params,
+                bot_id=bot_id,
+            )
+            if not target_slack_ids:
+                return "Who should I check in? Mention exactly one user, like `check @Jasmine in today`."
+            if len(target_slack_ids) != 1:
+                return "Tag exactly one user to check them in for coworking."
+
+            admin_details = await client.get_admin_details(user_id)
+            if not self._is_full_points_admin_details(admin_details):
+                return self._full_points_admin_denial(admin_details, "check people in for coworking")
+
+            target_user_id = target_slack_ids[0]
+            booking_date = self._resolve_coworking_booking_date(
+                params,
+                text,
+                default_to_today=True,
+            )
+
+            try:
+                return await self._book_coworking_with_intent(
+                    client=client,
+                    target_user_id=target_user_id,
+                    requested_by_user_id=user_id,
+                    booking_date=booking_date,
+                    text=text,
+                    channel_id=channel_id,
+                    thread_ts=thread_ts,
+                    admin_checkin=True,
+                )
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code == 400:
+                    return await self._format_admin_coworking_bad_request(
+                        client=client,
+                        target_user_id=target_user_id,
+                        exc=exc,
+                    )
+                raise
 
         elif action == "check_coworking":
             check_date = params.get("date")
@@ -4869,88 +6967,39 @@ Keep the response concise but informative."""
             
             lines.append("\nBook a day with \"coworking book <date>\"")
             return "\n".join(lines)
-        
+
         elif action == "book_coworking":
-            booking_date = params.get("date")
-            
-            # Normalize date aliases
-            if str(booking_date or "").lower() in {"today", "tomorrow"}:
-                from roo.utils import get_current_date
-                today = get_current_date()
-
-                if booking_date.lower() == "today":
-                    booking_date = today.isoformat()
-                elif booking_date.lower() == "tomorrow":
-                    booking_date = (today + timedelta(days=1)).isoformat()
-            
-            if not booking_date:
-                import re
-                match = re.search(r'(\d{4}-\d{2}-\d{2})', text)
-                if match:
-                    booking_date = match.group(1)
-                else:
-                    return "What date would you like to book? Use format YYYY-MM-DD (e.g., \"book 2025-12-20\")"
-            
+            from ..slack_client import get_bot_user_id
             try:
-                store = get_coworking_intent_store()
-                intent = store.record_intent(
-                    slack_user_id=user_id,
-                    booking_date=booking_date,
-                    channel_id=channel_id,
-                    thread_ts=thread_ts,
-                    request_text=text,
-                )
-                leased_intent = store.reserve_for_processing(
-                    int(intent["id"]),
-                    owner=f"roo-sync-{uuid4().hex}",
-                )
-            except Exception as exc:
-                print(
-                    "🏢 coworking_intent_persist_failed "
-                    f"slack_user_id={user_id} booking_date={booking_date} "
-                    f"exc_type={exc.__class__.__name__} exc={exc}"
-                )
+                bot_id = get_bot_user_id()
+            except Exception:
+                bot_id = None
+            target_slack_ids = self._extract_coworking_checkin_targets(
+                text,
+                params,
+                bot_id=bot_id,
+            )
+            if target_slack_ids:
                 return (
-                    "I couldn't safely queue your coworking booking request just now, "
-                    "so I didn't send it to MLAI backend. Please try again in a moment."
+                    "I saw a tagged user in that coworking booking request, so I didn't book you. "
+                    "Please retry as `book @user in today` or `check @user in today` so I can run "
+                    "the admin check-in flow."
                 )
 
-            if not leased_intent:
-                return (
-                    f"I already have your coworking booking request for **{booking_date}** "
-                    "queued or in progress. I'll confirm in this thread when it completes."
-                )
-
-            try:
-                result = await client.book_coworking(user_id, booking_date, channel_id)
-                store.mark_confirmed(int(leased_intent["id"]), backend_result=result)
-            except Exception as exc:
-                error = f"{exc.__class__.__name__}: {exc}"
-                if is_retryable_coworking_exception(exc):
-                    store.mark_retryable_failure(int(leased_intent["id"]), error=error)
-                    return self._coworking_booking_queued_message(booking_date)
-                store.mark_blocked(int(leased_intent["id"]), error=error)
-                raise
-
-            cost = result.get("points_cost", 1)
-            from roo.clients.mlai_backend import MLAIBackendUnavailableError
-
-            new_balance = None
-            try:
-                balance_data = await client.get_balance(user_id)
-                new_balance = balance_data.get("balance", 0)
-            except MLAIBackendUnavailableError:
-                pass
-
-            balance_line = ""
-            if new_balance is not None:
-                balance_line = f" (Balance remaining: {new_balance} points)"
-
-            return (
-                f"You beauty! 🎉\n\n"
-                f"Booked you in for **{booking_date}** at the coworking space.\n"
-                f"Cost: {cost} point{balance_line}\n\n"
-                f"See you there, legend!"
+            booking_date = self._resolve_coworking_booking_date(
+                params,
+                text,
+                default_to_today=True,
+            )
+            return await self._book_coworking_with_intent(
+                client=client,
+                target_user_id=user_id,
+                requested_by_user_id=user_id,
+                booking_date=booking_date,
+                text=text,
+                channel_id=channel_id,
+                thread_ts=thread_ts,
+                admin_checkin=False,
             )
         
         elif action == "cancel_coworking":
@@ -5151,16 +7200,15 @@ Keep the response concise but informative."""
             title = params.get("task_title") or params.get("title") or params.get("submission_text")
             points = params.get("points")
             description = params.get("description", "")
+            admin_details = await client.get_admin_details(user_id)
+
+            if not self._is_full_points_admin_details(admin_details):
+                return self._full_points_admin_denial(admin_details, "create tasks")
             
             # Default portfolio logic: Param > Admin's Portfolio > "events"
             portfolio = params.get("portfolio")
-            if not portfolio:
-                try:
-                    admin_details = await client.get_admin_details(user_id)
-                    if admin_details:
-                        portfolio = admin_details.get("portfolio")
-                except Exception as e:
-                    print(f"⚠️ Failed to lookup admin portfolio: {e}")
+            if not portfolio and admin_details:
+                portfolio = admin_details.get("portfolio")
             
             if not portfolio:
                 portfolio = "events" # Fallback if lookup fails
@@ -5211,6 +7259,10 @@ Keep the response concise but informative."""
             if not task_id:
                 return "Which task do you want to edit? Give me the task ID or code."
 
+            admin_details = await client.get_admin_details(user_id)
+            if not self._is_full_points_admin_details(admin_details):
+                return self._full_points_admin_denial(admin_details, "edit tasks")
+
             current_task = await client.get_task(task_id)
             updates = self._extract_task_edit_updates(params, text)
             if not updates:
@@ -5235,6 +7287,10 @@ Keep the response concise but informative."""
             task_id = self._extract_task_identifier(text, params.get("task_id"))
             if not task_id:
                 return "Which task do you want to cancel? Give me the task ID or code."
+
+            admin_details = await client.get_admin_details(user_id)
+            if not self._is_full_points_admin_details(admin_details):
+                return self._full_points_admin_denial(admin_details, "cancel tasks")
 
             reason = params.get("reason", "")
             result = await client.cancel_task(task_id, user_id, reason=reason)
@@ -5261,6 +7317,10 @@ Keep the response concise but informative."""
             if not task_id:
                 return "Which task are you approving? Give me the task ID or code (e.g., \"task approve 42\" or \"task approve ROO-0042\")"
 
+            admin_details = await client.get_admin_details(user_id)
+            if not self._is_full_points_admin_details(admin_details):
+                return self._full_points_admin_denial(admin_details, "approve tasks")
+
             result = await client.approve_task(task_id, user_id)
             points_awarded = result.get("points_awarded", 0)
             task = result.get("task", {})
@@ -5274,6 +7334,10 @@ Keep the response concise but informative."""
             
             if not task_id:
                 return "Which task are you rejecting? Give me the task ID or code."
+
+            admin_details = await client.get_admin_details(user_id)
+            if not self._is_full_points_admin_details(admin_details):
+                return self._full_points_admin_denial(admin_details, "reject tasks")
             
             result = await client.reject_task(task_id, user_id, reason)
             task = result.get("task", {})
@@ -5318,6 +7382,10 @@ Keep the response concise but informative."""
                     thread_ts=thread_ts,
                     skill=skill,
                 )
+
+            admin_details = await client.get_admin_details(user_id)
+            if not self._is_full_points_admin_details(admin_details):
+                return self._full_points_admin_denial(admin_details, "award points")
 
             # Early allowance check for award actions (before LLM/rate card lookup)
             if action in ["award_points", "award"]:
@@ -5486,7 +7554,7 @@ Keep the response concise but informative."""
         
         else:
             # Fall back to LLM for unrecognized actions
-            return await self._execute_with_llm(skill, text, params, user_id, thread_history)
+            return await self._execute_with_llm(skill, text, params, user_id, None)
 
     async def _execute_github_integration(
         self,

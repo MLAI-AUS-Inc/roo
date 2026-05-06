@@ -95,6 +95,55 @@ async def test_process_intent_confirms_existing_booking_and_notifies(tmp_path, m
 
 
 @pytest.mark.asyncio
+async def test_process_admin_checkin_intent_names_target_user_in_retry_notification(tmp_path, monkeypatch):
+    store = coworking.CoworkingBookingIntentStore(tmp_path / "intents.db")
+    intent = store.record_intent(
+        slack_user_id="UTARGET",
+        requested_by_slack_id="UADMIN",
+        booking_date="2026-04-22",
+        channel_id="C123",
+        thread_ts="111.222",
+        request_text="check <@UTARGET> in today",
+    )
+    leased = store.reserve_for_processing(intent["id"], owner="test-worker")
+    posted = []
+
+    class FakeClient:
+        async def get_my_bookings(self, slack_user_id):
+            assert slack_user_id == "UTARGET"
+            return [{"date": "2026-04-22", "status": "booked"}]
+
+        async def book_coworking(self, *args, **kwargs):
+            raise AssertionError("should not create a duplicate booking")
+
+    monkeypatch.setattr(
+        slack_client_module,
+        "post_message",
+        lambda **kwargs: posted.append(kwargs) or {"ts": "333.444"},
+    )
+
+    result = await coworking.process_coworking_booking_intent(
+        leased,
+        store=store,
+        client=FakeClient(),
+        notify=True,
+    )
+
+    assert result["status"] == "confirmed"
+    assert result["already_booked"] is True
+    assert posted == [
+        {
+            "channel": "C123",
+            "thread_ts": "111.222",
+            "text": (
+                "I retried the queued coworking check-in for <@UTARGET> "
+                "and confirmed 2026-04-22. They're booked."
+            ),
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_process_intent_keeps_retryable_backend_timeout_queued(tmp_path):
     store = coworking.CoworkingBookingIntentStore(tmp_path / "intents.db")
     intent = store.record_intent(

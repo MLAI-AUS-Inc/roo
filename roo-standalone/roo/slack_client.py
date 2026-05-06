@@ -5,6 +5,7 @@ Handles Slack API interactions including posting messages and user lookups.
 """
 from typing import Optional, Dict, Any
 from functools import lru_cache
+import httpx
 
 from .config import get_settings
 
@@ -87,6 +88,44 @@ def post_message(
         raise
 
 
+def upload_file(
+    channel: str,
+    content: str,
+    filename: str,
+    title: Optional[str] = None,
+    thread_ts: Optional[str] = None,
+    initial_comment: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Upload an in-memory text file to Slack.
+
+    Requires the Slack bot token to have the files:write scope.
+    """
+    client = get_slack_client()
+
+    try:
+        response = client.files_upload_v2(
+            channel=channel,
+            content=content,
+            filename=filename,
+            title=title or filename,
+            thread_ts=thread_ts,
+            initial_comment=initial_comment,
+        )
+
+        if response.get("ok"):
+            suffix = f" (thread: {thread_ts})" if thread_ts else ""
+            print(f"✅ File uploaded to {channel}{suffix}: {filename}")
+        else:
+            print(f"❌ Failed to upload file: {response}")
+
+        return response
+
+    except Exception as e:
+        print(f"❌ Slack file upload error: {e}")
+        raise
+
+
 def get_thread_messages(channel: str, thread_ts: str) -> list[dict]:
     """
     Retrieve all messages in a Slack thread for context.
@@ -115,7 +154,8 @@ def get_thread_messages(channel: str, thread_ts: str) -> list[dict]:
                     "text": msg.get("text", ""),
                     "ts": msg.get("ts", ""),
                     "bot_id": msg.get("bot_id"),
-                    "is_bot": bool(msg.get("bot_id"))
+                    "is_bot": bool(msg.get("bot_id")),
+                    "files": msg.get("files", []),
                 })
             print(f"📜 Retrieved {len(messages)} messages from thread")
             return messages
@@ -151,6 +191,63 @@ def get_message(channel: str, message_ts: str) -> Optional[Dict[str, Any]]:
     except Exception as e:
         print(f"❌ Slack message lookup error for {channel}:{message_ts}: {e}")
         return None
+
+
+def get_file_info(file_id: str) -> Dict[str, Any]:
+    """
+    Get full Slack file metadata.
+
+    Requires the Slack bot token to have the files:read scope.
+    """
+    client = get_slack_client()
+
+    try:
+        response = client.files_info(file=file_id)
+        if response.get("ok"):
+            return response.get("file", {})
+        error = response.get("error") or "unknown_error"
+        raise RuntimeError(f"Slack files.info failed: {error}")
+    except Exception as e:
+        print(f"❌ Slack file info error for {file_id}: {e}")
+        raise
+
+
+def download_file_bytes(file: Dict[str, Any]) -> bytes:
+    """
+    Download a private Slack file using the bot token.
+
+    Requires files:read and a file object with url_private_download/url_private.
+    If Slack Connect requires a metadata refresh, pass the file through files.info first.
+    """
+    resolved_file = dict(file or {})
+    file_id = str(resolved_file.get("id") or "").strip()
+    if resolved_file.get("file_access") == "check_file_info" and file_id:
+        resolved_file = get_file_info(file_id)
+
+    url = (
+        resolved_file.get("url_private_download")
+        or resolved_file.get("url_private")
+        or ""
+    )
+    if not url and file_id:
+        resolved_file = get_file_info(file_id)
+        url = (
+            resolved_file.get("url_private_download")
+            or resolved_file.get("url_private")
+            or ""
+        )
+
+    if not url:
+        raise ValueError("Slack file is missing url_private_download/url_private")
+
+    settings = get_settings()
+    response = httpx.get(
+        url,
+        headers={"Authorization": f"Bearer {settings.SLACK_BOT_TOKEN}"},
+        timeout=30.0,
+    )
+    response.raise_for_status()
+    return response.content
 
 
 @lru_cache(maxsize=100)

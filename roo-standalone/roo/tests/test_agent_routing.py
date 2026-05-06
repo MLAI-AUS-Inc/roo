@@ -44,11 +44,53 @@ def _make_agent() -> RooAgent:
         ),
         _make_skill(
             "mlai-points",
-            ["points", "balance", "coworking", "book", "task", "tasks", "reward", "rewards"],
+            [
+                "points",
+                "balance",
+                "coworking",
+                "book",
+                "task",
+                "tasks",
+                "reward",
+                "rewards",
+                "topup",
+                "top-up",
+                "top up",
+                "buy points",
+                "buy roo points",
+                "add points",
+                "add roo points",
+            ],
+        ),
+        _make_skill(
+            "linear-meeting-actions",
+            [
+                "meeting actions",
+                "meeting action items",
+                "meeting notes to linear",
+                "meeting summary to linear",
+                "transcript to linear",
+                "linear tasks from meeting",
+                "create linear tickets from transcript",
+                "extract action items",
+                "sync meeting notes to linear",
+            ],
         ),
         _make_skill(
             "github-integration",
             ["connect github", "github integration", "reconnect github", "github auth"],
+        ),
+        _make_skill(
+            "luma-events",
+            [
+                "luma",
+                "attendees",
+                "guest list",
+                "csv",
+                "csv documents",
+                "past csv documents",
+                "mlai events",
+            ],
         ),
     ]
     agent.skill_executor = SimpleNamespace()
@@ -76,6 +118,33 @@ def test_points_request_still_routes_to_points():
     assert skill.name == "mlai-points"
 
 
+def test_linear_meeting_tasks_route_to_linear_meeting_actions():
+    agent = _make_agent()
+
+    for text in [
+        "turn this meeting summary into Linear tasks",
+        "extract action items from this transcript and add them to Linear",
+        "sync meeting notes to Linear project Alpha",
+        "send this PDF to Linear as tasks",
+        "create Linear issues from this image",
+    ]:
+        skill = agent._select_skill_from_triggers(text)
+        assert skill is not None
+        assert skill.name == "linear-meeting-actions"
+
+
+def test_linear_file_context_routes_short_attached_file_request():
+    agent = _make_agent()
+
+    skill = agent._select_skill_from_triggers(
+        "send this to Linear as tasks",
+        has_file_context=True,
+    )
+
+    assert skill is not None
+    assert skill.name == "linear-meeting-actions"
+
+
 def test_request_points_phrase_routes_to_points():
     agent = _make_agent()
 
@@ -83,6 +152,49 @@ def test_request_points_phrase_routes_to_points():
 
     assert skill is not None
     assert skill.name == "mlai-points"
+
+
+def test_topup_phrases_route_to_points():
+    agent = _make_agent()
+
+    for text in [
+        "/roo topup",
+        "top up Roo Points",
+        "buy 10 roo points",
+        "add roo points",
+        "I need more points",
+    ]:
+        skill = agent._select_skill_from_triggers(text)
+        assert skill is not None
+        assert skill.name == "mlai-points"
+
+
+def test_coworking_booking_shortcuts_route_to_points():
+    agent = _make_agent()
+
+    for text in [
+        "book me in",
+        "book me in today",
+        "check <@U123ABC> in today",
+        "book <@U123ABC> in today",
+        "also book <@U123ABC> in today",
+    ]:
+        skill = agent._select_skill_from_triggers(text)
+        assert skill is not None
+        assert skill.name == "mlai-points"
+
+
+def test_luma_attendee_csv_phrase_routes_to_luma_events():
+    agent = _make_agent()
+
+    for text in [
+        "can you give me past csv documents for the past 3 MLAI events",
+        "give me a report for how many people registered for the april 29 event",
+        "how many registrations were there for the 2026-04-29 event",
+    ]:
+        skill = agent._select_skill_from_triggers(text)
+        assert skill is not None
+        assert skill.name == "luma-events"
 
 
 def test_coworking_report_wording_routes_to_points():
@@ -94,6 +206,10 @@ def test_coworking_report_wording_routes_to_points():
         "coworking overview from 2026-01-01 to 2026-03-31",
         "how many people used the coworking space this week",
         "give me a report for how many people used the coworking space last week",
+        "Roo how many peopel used the coworkign space last week and how does that usage compare to the week prior?",
+        "which day was busiest for coworking last month",
+        "how did coworking usage last week compare to the week prior",
+        "show coworking trends for the last 3 months and recommendations",
     ]:
         skill = agent._select_skill_from_triggers(text)
         assert skill is not None

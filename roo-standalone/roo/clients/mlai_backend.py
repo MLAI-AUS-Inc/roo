@@ -13,6 +13,7 @@ import httpx
 from ..config import get_settings
 
 CONTENT_FACTORY_REQUEST_SOURCE = "roo_slackbot"
+FULL_POINTS_ADMIN_ROLES = {"admin", "committee", "portfolio_lead"}
 
 
 class MLAIBackendUnavailableError(RuntimeError):
@@ -1092,6 +1093,37 @@ class MLAIBackendClient:
         self._raise_for_status_or_backend_unavailable(response)
         return response.json()
 
+    async def get_luma_attendee_report(
+        self,
+        slack_user_id: str,
+        *,
+        event_count: int = 3,
+        event_date: Optional[str] = None,
+        approval_status: str = "approved",
+        include_csv: bool = False,
+    ) -> dict:
+        """Get Luma attendee summaries and optional CSV payloads from mlai-backend."""
+        params = {
+            "slack_user_id": self._clean_slack_id(slack_user_id),
+            "event_count": event_count,
+            "approval_status": approval_status,
+            "include_csv": "true" if include_csv else "false",
+        }
+        if event_date:
+            params["event_date"] = event_date
+
+        response = await self._request(
+            "GET",
+            "/api/v1/integrations/luma/attendee-report",
+            params=params,
+            timeout=30.0,
+            transport_retries=1,
+            retry_backoff_seconds=0.25,
+            circuit_breaker=True,
+        )
+        self._raise_for_status_or_backend_unavailable(response)
+        return response.json()
+
     async def book_coworking(self, slack_user_id: str, booking_date: str, slack_channel_id: Optional[str] = None) -> dict:
         """Book a coworking day."""
         try:
@@ -1592,13 +1624,16 @@ class MLAIBackendClient:
             return []
 
     async def is_admin(self, slack_user_id: str) -> bool:
-        """Check if a user is a Points Admin (with caching)."""
+        """Check if a user is a full Points Admin (with caching)."""
         if slack_user_id in self._admin_cache:
             return self._admin_cache[slack_user_id]
         
         try:
             details = await self.get_admin_details(slack_user_id)
-            is_admin = details is not None
+            is_admin = (
+                isinstance(details, dict)
+                and str(details.get("role") or "").strip().lower() in FULL_POINTS_ADMIN_ROLES
+            )
             self._admin_cache[slack_user_id] = is_admin
             return is_admin
         except Exception:
@@ -2052,22 +2087,19 @@ class MLAIBackendClient:
     async def create_points_purchase(
         self,
         slack_user_id: str,
-        pack_id: str,
-        slack_channel_id: Optional[str] = None,
-        slack_thread_ts: Optional[str] = None,
+        pack_id: Optional[str] = None,
+        points_amount: Optional[int] = None,
+        purchase_from: Optional[dict] = None,
     ) -> dict:
         """Create a pending Roo Points top-up purchase."""
-        purchase_from = {"source": "slack"}
-        if slack_channel_id:
-            purchase_from["slack_channel_id"] = slack_channel_id
-        if slack_thread_ts:
-            purchase_from["slack_thread_ts"] = slack_thread_ts
-
         payload = {
             "slack_user_id": self._clean_slack_id(slack_user_id),
-            "pack_id": pack_id,
-            "purchase_from": purchase_from,
+            "purchase_from": {"source": "slack", **(purchase_from or {})},
         }
+        if pack_id:
+            payload["pack_id"] = pack_id
+        if points_amount is not None:
+            payload["points_amount"] = points_amount
 
         response = await self._request(
             "POST",
@@ -2247,18 +2279,21 @@ class MLAIBackendClient:
         admin_slack_id: str,
         target_slack_id: str,
         points: int,
-        reason: str
+        reason: str,
+        idempotency_key: Optional[str] = None,
     ) -> dict:
         """System award points (bypasses client-side admin checks)."""
         payload = {
-            "admin_slack_id": admin_slack_id,
+            "created_by_slack_id": admin_slack_id,
             "target_slack_id": self._clean_slack_id(target_slack_id),
             "points": points,
             "reason": reason,
         }
+        if idempotency_key:
+            payload["idempotency_key"] = str(idempotency_key)
         response = await self._request(
             "POST",
-            f"{self._points_base}/admin/award/",
+            f"{self._points_base}/system/award/",
             json=payload,
             timeout=15.0,
             circuit_breaker=True,

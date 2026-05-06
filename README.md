@@ -45,7 +45,14 @@ See `skills/connect_users.md` for an example.
 
 ## Environment Variables
 
-Copy `.env.example` to `.env` and configure:
+Copy `roo-standalone/.env.example` to `roo-standalone/.env` and configure:
 - `DATABASE_URL` - PostgreSQL connection
 - `SLACK_BOT_TOKEN` - Slack bot token
 - `OPENAI_API_KEY` - For LLM and embeddings
+- `MLAI_BACKEND_URL` - Backend API URL for points, admin lookup, and Luma attendee reports
+- `ROO_API_KEY`/`MLAI_API_KEY`/`INTERNAL_API_KEY` - Backend auth key for Roo-to-mlai-backend calls
+
+For daily jobs, the recommended production setup is:
+- `mlai-backend` owns the 7am Melbourne scheduler and Slack posting
+- Roo keeps `JOBS_SCHEDULER_ENABLED=false`
+- Roo only needs `JOBS_API_URL` and `JOBS_TRIGGER_TOKEN` if you want it to trigger backend jobs manually in the future

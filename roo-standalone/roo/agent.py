@@ -141,6 +141,7 @@ class RooAgent:
             thread_history,
             channel_id,
             thread_ts,
+            has_file_context=bool(kwargs.get("event_files")),
         )
 
         if skill:
@@ -350,10 +351,16 @@ class RooAgent:
         return any(re.search(pattern, text) for pattern in patterns)
 
     def _looks_like_points_request(self, text: str) -> bool:
+        text = self._normalize_points_routing_text(text)
         patterns = (
             r'\bpoints?\b',
+            r'\btop\s*up\b',
+            r'\btopup\b',
+            r'\btop-up\b',
             r'\bbalance\b',
             r'\bcoworking\b',
+            r'\bbook\s+me\s+in\b',
+            r'\bcheck\b.*<@[a-z0-9]+>.*\bin\b',
             r'\brewards?\b',
             r'\bclaim\s+task\b',
             r'\bcreate\s+(?:a\s+)?task\b',
@@ -361,6 +368,48 @@ class RooAgent:
             r'\bworth\s+\d+\s+points?\b',
         )
         return any(re.search(pattern, text) for pattern in patterns)
+
+    def _normalize_points_routing_text(self, text: str) -> str:
+        """Normalize common typos before points-skill routing checks."""
+        text_lower = str(text or "").lower()
+        replacements = {
+            "coworkign": "coworking",
+            "cowokrking": "coworking",
+            "cowokring": "coworking",
+            "co working": "coworking",
+            "co-working": "coworking",
+        }
+        for typo, replacement in replacements.items():
+            text_lower = text_lower.replace(typo, replacement)
+        return text_lower
+
+    def _looks_like_luma_request(self, text: str) -> bool:
+        patterns = (
+            r'\bluma\b',
+            r'\battendees?\b',
+            r'\bguest\s+lists?\b',
+            r'\bguests?\b.*\bcsv\b',
+            r'\bcsv\b.*\bguests?\b',
+            r'\bcsv\b.*\bmlai\s+events?\b',
+            r'\bmlai\s+events?\b.*\bcsv\b',
+            r'\bpast\s+csv\s+documents?\b',
+            r'\bregistered\b.*\bevents?\b',
+            r'\bregistrations?\b.*\bevents?\b',
+        )
+        return any(re.search(pattern, text) for pattern in patterns)
+
+    def _looks_like_linear_meeting_request(self, text: str, has_file_context: bool = False) -> bool:
+        has_linear = bool(re.search(r'\blinear\b', text))
+        has_meeting_source = bool(
+            re.search(
+                r'\b(meeting|transcript|summary|notes?|action\s+items?|to-?dos?|file|pdf|docx?|document|image|screenshot)\b',
+                text,
+            )
+        ) or has_file_context
+        has_creation_intent = bool(
+            re.search(r'\b(extract|sync|turn|send|create|add|tickets?|issues?|tasks?)\b', text)
+        )
+        return has_linear and has_meeting_source and has_creation_intent
 
     def _looks_like_content_follow_up(self, text: str) -> bool:
         patterns = (
@@ -389,6 +438,7 @@ class RooAgent:
         self,
         text: str,
         thread_context: Optional[Dict[str, Any]] = None,
+        has_file_context: bool = False,
     ) -> Optional[Skill]:
         routing_intent = self._get_routing_intent(text, thread_context)
         if routing_intent:
@@ -396,9 +446,21 @@ class RooAgent:
 
         text_lower = text.lower().strip()
         content_skill = self._get_skill_by_name("content-factory")
+        luma_skill = self._get_skill_by_name("luma-events")
+        points_skill = self._get_skill_by_name("mlai-points")
+        linear_meeting_skill = self._get_skill_by_name("linear-meeting-actions")
+
+        if luma_skill and self._looks_like_luma_request(text_lower):
+            return luma_skill
 
         if content_skill and self._looks_like_content_request(text_lower):
             return content_skill
+
+        if linear_meeting_skill and self._looks_like_linear_meeting_request(text_lower, has_file_context):
+            return linear_meeting_skill
+
+        if points_skill and self._looks_like_points_request(text_lower):
+            return points_skill
 
         if (
             thread_context
@@ -618,6 +680,7 @@ class RooAgent:
         history: List[dict] = None,
         channel_id: Optional[str] = None,
         thread_ts: Optional[str] = None,
+        has_file_context: bool = False,
     ) -> Optional[Skill]:
         """Use LLM to decide which skill to use."""
         if not self.skills:
@@ -628,7 +691,12 @@ class RooAgent:
         if routing_intent:
             return routing_intent["skill"]
 
-        trigger_skill = self._select_skill_from_triggers(text, thread_context)
+        has_slack_files = has_file_context or any(message.get("files") for message in history or [])
+        trigger_skill = self._select_skill_from_triggers(
+            text,
+            thread_context,
+            has_file_context=has_slack_files,
+        )
         if trigger_skill:
             return trigger_skill
 
@@ -683,7 +751,9 @@ User message: "{text}"
 Routing rules:
 - Prefer content-factory for domain-backed repo scans, article/blog writing, SEO research, content planning, scaffolding blog/article pages, and requests like "scan the domain mlai.au" or "scan the repo for the domain mlai.au".
 - Prefer github-integration for GitHub auth, reconnecting GitHub, or account/integration management.
+- Prefer linear-meeting-actions for requests to turn Slack meeting notes, summaries, transcripts, action items, or attached files into Linear issues/tasks/tickets.
 - Prefer mlai-points for points, rewards, coworking, and task management.
+- Prefer luma-events for Luma registration counts, attendee reports, guest lists, CSV documents, and recent/past MLAI event attendee CSVs.
 
 Examples:
 - "please research the best article for me to write" -> content-factory
@@ -691,7 +761,12 @@ Examples:
 - "scan the domain woofya.com.au" -> content-factory
 - "reconnect github for woofya.com.au" -> github-integration
 - "write me an article about how to build an ai agent harness for long-running specific tasks" -> content-factory
+- "turn this meeting summary into Linear tasks" -> linear-meeting-actions
+- "extract action items from this transcript and add them to Linear" -> linear-meeting-actions
+- "send this attached PDF to Linear as tasks" -> linear-meeting-actions
 - "create a task called fix docs worth 5 points" -> mlai-points
+- "give me CSVs for the past 3 MLAI events" -> luma-events
+- "how many people registered for the april 29 event" -> luma-events
 
 Respond with ONLY the skill name (e.g., "connect_users" or "none"):"""
 

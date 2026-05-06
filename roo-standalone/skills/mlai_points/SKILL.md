@@ -10,6 +10,16 @@ trigger_keywords:
   - tasks
   - reward
   - rewards
+  - topup
+  - top-up
+  - top up
+  - buy points
+  - buy roo points
+  - purchase points
+  - purchase roo points
+  - pay for points
+  - add points
+  - add roo points
 ---
 
 # MLAI Points System Skill
@@ -25,9 +35,11 @@ This skill enables Roo to interact with the MLAI Points System via API, allowing
 - Submit completed work for approval
 - Unclaim a task before any submission exists
 - Book and cancel coworking days
+- Points Admins can check another member in for coworking from Slack
 - View rewards catalog and request redemptions
+- Buy fixed packs of Top-up Roo Points through MLAI checkout
 
-### Admin Actions (requires PointsAdmin role)
+### Full Admin Actions (requires `admin`, `committee`, or `portfolio_lead` role)
 - Create new tasks with point values
 - Edit supported task fields
 - Cancel/archive tasks while preserving history
@@ -41,11 +53,13 @@ This skill enables Roo to interact with the MLAI Points System via API, allowing
 - `unclaim` is only allowed before any submission exists
 - Approval awards points once, on final acceptance
 
+### Partner Actions (report-only)
+- Generate coworking usage reports for date ranges and standard lookback windows
+
 ### Super Admin Actions (restricted to Slack user `U05QPB483K9`)
 - Promote one tagged user to Points Admin
 - Revoke one tagged user's Points Admin access
 - Change one tagged Points Admin's weekly allowance
-- Generate coworking usage reports for date ranges and standard lookback windows
 
 ### Admin Weekly Allowance
 
@@ -63,7 +77,8 @@ Example responses:
 
 ## Parameters
 
-- **action**: The action to perform (required) - e.g., "balance", "request_points", "topup_points", "book_coworking", "coworking_report", "claim_task", "submit_task", "award_points", "create_task"
+- **action**: The action to perform (required) - e.g., "balance", "request_points", "topup_points", "book_coworking", "admin_checkin_coworking", "coworking_report", "claim_task", "submit_task", "award_points", "create_task"
+- **pack_id**: Top-up pack ID for `topup_points`; one of `topup_5`, `topup_10`, or `topup_25`
 - **task_id**: Task ID number or task code (for example `42` or `ROO-0042`) for task-related actions
 - **date**: Date for coworking bookings (YYYY-MM-DD format)
 - **start_date**: Start date for coworking reports (YYYY-MM-DD format)
@@ -101,8 +116,8 @@ Parse user messages to identify the action and parameters:
 | Pattern | Action | Example |
 |---------|--------|---------|
 | `points`, `balance` | balance | "What's my points balance?", "@Roo points" |
+| `topup`, `top up Roo Points`, `buy <n> Roo Points`, `purchase <n> Roo Points`, `pay for Roo Points`, `add Roo Points`, `I need more points` | topup_points | "@Roo buy 10 Roo Points" |
 | `request <n> points for <reason>` | request_points | "Request 5 points for helping at the event" |
-| `top up <n> points`, `buy <n> points` | topup_points | "Buy 10 Roo Points", "Top up 5 points" |
 | `points earn` | list_tasks | "How do I earn points?", "@Roo points earn" |
 | `tasks`, `tasks open` | list_tasks | "What can I claim right now?" |
 | `tasks mine` | list_tasks | "Show me my tasks" |
@@ -116,9 +131,13 @@ Parse user messages to identify the action and parameters:
 | `coworking report <start> <end>` | coworking_report | "Coworking report 2026-01-01 2026-03-31" |
 | `coworking report this week` | coworking_report | "How many people used the coworking space this week?" |
 | `coworking report last week` | coworking_report | "How many people used the coworking space last week?" |
+| `coworking compare ...` | coworking_report | "How did coworking usage last week compare to the week prior?" |
+| `coworking busiest/quietest ...` | coworking_report | "Which day was busiest for coworking last month?" |
+| `coworking trends/recommendations ...` | coworking_report | "Show coworking trends for the last 3 months and recommendations" |
 | `coworking report last 3/6 months` | coworking_report | "Coworking report last 3 months" |
 | `coworking report last year` | coworking_report | "Coworking report last year" |
-| `coworking book <date/today>` | book_coworking | "Book me in for today", "@Roo coworking book today" |
+| `coworking book <date/today>` | book_coworking | "Book me in", "Book me in for today", "@Roo coworking book" |
+| `check/book <@USER> in <date/today>` | admin_checkin_coworking | (Admin) "Check <@U123> in", "Book <@U123> in today" |
 | `coworking cancel <date>` | cancel_coworking | "Cancel my booking for Friday", "@Roo coworking cancel" |
 | `rewards`, `points rewards` | list_rewards | "What rewards are available?", "@Roo points rewards" |
 | `reward request <code>` | request_reward | "I want to get the HOTDESK_DAY reward" |
@@ -150,24 +169,35 @@ Parse the user's message to determine which action they want:
 - Extract any IDs, dates, or amounts mentioned
 - Accept both numeric task ids and `ROO-xxxx` task codes
 - Treat `request ... points for ...` as `request_points`, not `award_points`
-- Treat `buy/top up/purchase ... points` as `topup_points`, not `request_points`
 - For admin actions, verify the Slack mention format
+- Treat coworking booking requests without a date as a booking for today
+- For admin coworking check-ins, require exactly one tagged Slack user and book that user, not the admin
 - For super admin actions, require exactly one tagged Slack user, never fall through into `award_points`, and require a positive numeric allowance when changing allowance
 
 ### Step 2: Permission Check
-For admin-only actions (create, edit, cancel, approve, reject, award):
+For full admin-only actions (create, edit, cancel, approve, reject, award):
 - The API will validate the requester's Slack ID
+- Partner admins are not full admins and must be denied for point-mutating actions
 - If 403 returned, respond with friendly denial
+
+For admin coworking check-ins:
+- Roo must fail fast unless the requester is a full Points Admin
+- Partner admins are report-only and cannot check people in
+- The target user is the single non-Roo Slack mention in the message
+- The booking date defaults to today when omitted
+- The coworking booking must be created for the target user's Slack ID so the target user's points are deducted
 
 For super admin actions (promote admin, revoke admin, change allowance):
 - Roo must fail fast unless the requester Slack ID is `U05QPB483K9`
 - The backend must still validate the requester for defense in depth
 
 For coworking report actions:
-- Roo must fail fast unless the requester is a Points Admin
+- Roo must fail fast unless the requester is a full Points Admin or report-only partner
 - Count only active bookings (`status=booked`), not cancelled bookings
 - Support exact inclusive date ranges and presets: this week, last week, last 3 months, last 6 months, last year
-- Format the response as a concise Slack report with summary, monthly, weekly, and daily counts
+- Format the response insight-first, with compact detail tables only when useful or requested
+- For comparison/trend/recommendation questions, compute report metrics deterministically from backend JSON, then use GPT-5.4 only to explain the bounded numbers
+- Label broader suggestions as interpretation or recommendations, never as measured attendance facts
 - The backend must still validate the requester for defense in depth
 
 ### Step 3: Execute via API
@@ -178,9 +208,21 @@ Call the appropriate MLAIBackendClient method with extracted parameters.
 ### Step 4: Format Response
 Generate friendly response with relevant information:
 - Balance: Show points count and encourage engagement
+- Top-up: Show only fixed pack prices or the MLAI checkout link; never show a price-per-point value
 - Tasks: Format as a short list with task code, points, and portfolio
 - Bookings: Confirm date and show remaining balance
 - Errors: Explain what went wrong and suggest alternatives
+
+## Top-up Roo Points
+
+Allowed fixed packs:
+- `topup_5`: 5 Top-up Roo Points - A$19.99
+- `topup_10`: 10 Top-up Roo Points - A$36.99
+- `topup_25`: 25 Top-up Roo Points - A$63.99
+
+Top-up Roo Points are MLAI's internal community reward points. They are not money, have no cash value, cannot be converted to cash, and cannot be sold or transferred. The price of Top-up Roo Points does not represent a monetary value for Roo Points.
+
+Top-up Roo Points are optional and do not count toward lifetime earned contribution.
 
 ## Response Style
 

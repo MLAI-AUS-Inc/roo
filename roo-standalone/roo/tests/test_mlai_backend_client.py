@@ -192,10 +192,13 @@ async def test_create_points_purchase_sends_slack_origin(monkeypatch):
     monkeypatch.setattr(client, "_request", fake_request)
 
     result = await client.create_points_purchase(
-        "<@U123>",
-        "topup_10",
-        slack_channel_id="C123",
-        slack_thread_ts="111.222",
+        slack_user_id="<@U123>",
+        pack_id="topup_10",
+        purchase_from={
+            "source": "slack",
+            "slack_channel_id": "C123",
+            "slack_thread_ts": "111.222",
+        },
     )
 
     assert captured["method"] == "POST"
@@ -210,6 +213,27 @@ async def test_create_points_purchase_sends_slack_origin(monkeypatch):
         },
     }
     assert result["frontend_checkout_page_url"] == "https://mlai.test/roo/topup/purchase-123"
+
+
+@pytest.mark.asyncio
+async def test_create_points_purchase_503_raises_backend_unavailable(monkeypatch):
+    async def fake_request(method, endpoint, **kwargs):
+        request = httpx.Request(method, f"https://backend.test{endpoint}")
+        return httpx.Response(
+            503,
+            request=request,
+            json={"message": "Points purchase checkout is temporarily unavailable."},
+        )
+
+    client = MLAIBackendClient(
+        base_url="https://backend.test",
+        api_key="roo-api-key",
+        internal_api_key="roo-api-key",
+    )
+    monkeypatch.setattr(client, "_request", fake_request)
+
+    with pytest.raises(MLAIBackendUnavailableError, match="Points purchase checkout is temporarily unavailable"):
+        await client.create_points_purchase("<@U123>", pack_id="topup_10")
 
 
 @pytest.mark.asyncio
@@ -236,6 +260,22 @@ async def test_get_coworking_report_503_raises_backend_unavailable(monkeypatch):
 
     with pytest.raises(MLAIBackendUnavailableError, match="Points subsystem is temporarily unavailable"):
         await client.get_coworking_report("U123", "2026-01-01", "2026-01-31")
+
+
+@pytest.mark.asyncio
+async def test_is_admin_excludes_report_only_partner(monkeypatch):
+    client = MLAIBackendClient(
+        base_url="https://backend.test",
+        api_key="roo-api-key",
+        internal_api_key="roo-api-key",
+    )
+
+    async def fake_get_admin_details(slack_user_id):
+        return {"slack_user_id": slack_user_id, "role": "partner"}
+
+    monkeypatch.setattr(client, "get_admin_details", fake_get_admin_details)
+
+    assert await client.is_admin("UPARTNER") is False
 
 
 @pytest.mark.asyncio
