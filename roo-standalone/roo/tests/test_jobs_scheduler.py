@@ -134,9 +134,11 @@ async def test_handle_mention_manual_jobs_trigger_for_admin(monkeypatch):
     assert len(posts) == 1
     assert posts[0]["channel"] == "C123"
     assert posts[0]["thread_ts"] == "1234.5678"
-    assert "Triggered the daily jobs run." in posts[0]["text"]
+    assert "Queued the daily jobs run." in posts[0]["text"]
     assert "`2026-05-07-be9541ac`" in posts[0]["text"]
-    assert "<https://api.mlai.au/api/v1/jobs/runs/2026-05-07-be9541ac|Open run status>" in posts[0]["text"]
+    assert "This usually takes a few minutes." in posts[0]["text"]
+    assert "final jobs roundup separately" in posts[0]["text"]
+    assert "Open run status" not in posts[0]["text"]
 
 
 @pytest.mark.asyncio

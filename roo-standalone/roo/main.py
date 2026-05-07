@@ -1412,19 +1412,17 @@ async def _maybe_handle_manual_jobs_trigger(event: dict[str, Any]) -> bool:
 
     run_id = data.get("run_id") or "unknown"
     status = data.get("status") or "queued"
-    status_url = _build_jobs_status_url(settings.JOBS_API_URL, data.get("status_url"))
-    full_list_url = data.get("full_list_url")
     lines = [
-        "Triggered the daily jobs run.",
+        "Queued the daily jobs run.",
         f"Run ID: `{run_id}`",
-        f"Status: `{status}`",
-        f"Slack posting: `{'on' if settings.JOBS_POST_TO_SLACK else 'off'}`",
-        f"Notion posting: `{'on' if settings.JOBS_POST_TO_NOTION else 'off'}`",
     ]
-    if status_url:
-        lines.append(f"Status page: <{status_url}|Open run status>")
-    if full_list_url:
-        lines.append(f"Jobs page: <{full_list_url}|Open daily jobs page>")
+    if status and status != "queued":
+        lines.append(f"Current status: `{status}`")
+    lines.append("This usually takes a few minutes.")
+    if settings.JOBS_POST_TO_SLACK:
+        lines.append("If matches are found, the backend will post the final jobs roundup separately when the run finishes.")
+    else:
+        lines.append("Slack posting is off for this run, so this message is only confirming the trigger.")
     post_message(channel=channel_id, thread_ts=thread_ts, text="\n".join(lines))
     return True
 
