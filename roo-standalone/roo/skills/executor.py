@@ -1553,8 +1553,9 @@ Keep the response concise but informative."""
                 client.list_recent_open_issues(),
             )
         except Exception as exc:
+            detail = str(exc).strip() or exc.__class__.__name__
             return {
-                "message": f"I couldn't read Linear context yet: {exc.__class__.__name__}: {exc}"
+                "message": f"I couldn't read Linear context yet: {detail}"
             }
 
         candidates = await self._extract_linear_meeting_candidates_from_sources(

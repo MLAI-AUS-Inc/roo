@@ -260,7 +260,7 @@ async def test_linear_client_create_issue_calls_backend(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_linear_client_backend_error_surfaces_detail(monkeypatch):
+async def test_linear_client_backend_error_surfaces_detail(monkeypatch, capsys):
     module_path = (
         Path(__file__).resolve().parents[2]
         / "skills"
@@ -273,12 +273,13 @@ async def test_linear_client_backend_error_surfaces_detail(monkeypatch):
     spec.loader.exec_module(module)
 
     class FakeResponse:
-        status_code = 503
+        status_code = 502
 
         def json(self):
             return {
-                "detail": "Backend Linear meeting actions are not configured. Set LINEAR_API_KEY on mlai-backend.",
-                "code": "linear_not_configured",
+                "detail": 'Cannot query field "state" on type "Project".',
+                "code": "linear_graphql_error",
+                "operation": "LinearProjects",
             }
 
     class FakeBackend:
@@ -291,8 +292,77 @@ async def test_linear_client_backend_error_surfaces_detail(monkeypatch):
     monkeypatch.setattr(module, "MLAIBackendClient", FakeBackend)
 
     client = module.LinearMeetingActionsClient(base_url="https://backend.test", api_key="roo-key")
-    with pytest.raises(RuntimeError, match="mlai-backend"):
+    with pytest.raises(RuntimeError, match="LinearProjects"):
         await client.list_teams()
+    captured = capsys.readouterr()
+    assert "Linear meeting backend error" in captured.out
+    assert 'Cannot query field "state"' in captured.out
+
+
+@pytest.mark.asyncio
+async def test_linear_meeting_executor_surfaces_backend_context_detail(monkeypatch):
+    executor = SkillExecutor()
+
+    async def fake_source_result(**kwargs):
+        return SourceParseResult(
+            sources=[
+                ParsedSource(
+                    label="Slack thread",
+                    text="Sam will update onboarding docs in Alpha after the meeting.",
+                    kind="slack",
+                )
+            ]
+        )
+
+    class FailingClient:
+        async def list_teams(self):
+            raise RuntimeError(
+                'Cannot query field "state" on type "Project". '
+                "(linear_graphql_error; LinearProjects)"
+            )
+
+        async def list_users(self):
+            return []
+
+        async def list_active_projects(self):
+            return []
+
+        async def list_issue_labels(self):
+            return []
+
+        async def list_recent_open_issues(self):
+            return []
+
+    class FakeSkill:
+        def get_client_class(self, name):
+            assert name == "LinearMeetingActionsClient"
+            return FailingClient
+
+    monkeypatch.setattr(
+        executor_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            LINEAR_DEFAULT_TEAM=None,
+            LINEAR_MEETING_AUTO_CREATE_MIN_CONFIDENCE=0.85,
+            LINEAR_MEETING_UNCERTAIN_MIN_CONFIDENCE=0.65,
+        ),
+    )
+    monkeypatch.setattr(executor, "_build_linear_meeting_source_result", fake_source_result)
+
+    result = await executor._execute_linear_meeting_actions(
+        skill=FakeSkill(),
+        text="turn this meeting summary into Linear tasks",
+        params={},
+        user_id="U1",
+        channel_id="C1",
+        thread_ts="1.1",
+        thread_history=[],
+        event_files=[],
+    )
+
+    assert 'Cannot query field "state"' in result["message"]
+    assert "LinearProjects" in result["message"]
+    assert "RuntimeError:" not in result["message"]
 
 
 @pytest.mark.asyncio

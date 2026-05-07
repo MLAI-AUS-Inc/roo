@@ -51,7 +51,13 @@ class LinearMeetingActionsClient:
             raise RuntimeError(str(exc)) from exc
 
         if response.status_code >= 400:
-            raise RuntimeError(self._backend_error_message(response))
+            message = self._backend_error_message(response)
+            print(
+                "⚠️ Linear meeting backend error "
+                f"status={response.status_code} endpoint={endpoint} "
+                f"body={self._backend_response_body(response)}"
+            )
+            raise RuntimeError(message)
         try:
             data = response.json()
         except ValueError as exc:
@@ -130,11 +136,22 @@ class LinearMeetingActionsClient:
         if isinstance(payload, dict):
             detail = payload.get("detail") or payload.get("message") or payload.get("error")
             code = payload.get("code")
-            if detail and code:
-                return f"{detail} ({code})"
+            operation = payload.get("operation")
+            suffix_parts = [str(value) for value in (code, operation) if value]
+            if detail and suffix_parts:
+                return f"{detail} ({'; '.join(suffix_parts)})"
             if detail:
                 return str(detail)
         return f"mlai-backend Linear meeting actions request failed with HTTP {response.status_code}."
+
+    @staticmethod
+    def _backend_response_body(response: httpx.Response) -> str:
+        try:
+            payload = response.json()
+        except ValueError:
+            text = str(getattr(response, "text", "") or "").strip()
+            return text[:1000]
+        return repr(payload)[:1000]
 
 
 def _dict_list(value: Any) -> list[dict[str, Any]]:
