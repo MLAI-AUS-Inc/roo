@@ -1289,6 +1289,10 @@ def _build_jobs_status_url(base_api_url: str, status_url: Optional[str]) -> Opti
         return None
     if cleaned_status_url.startswith("http://") or cleaned_status_url.startswith("https://"):
         return cleaned_status_url
+    if cleaned_status_url.startswith("/"):
+        parsed_base = urlparse(base_api_url)
+        if parsed_base.scheme and parsed_base.netloc:
+            return f"{parsed_base.scheme}://{parsed_base.netloc}{cleaned_status_url}"
     return urljoin(base_api_url.rstrip("/") + "/", cleaned_status_url.lstrip("/"))
 
 
