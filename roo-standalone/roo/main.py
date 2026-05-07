@@ -15,7 +15,7 @@ from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from datetime import date
 from typing import Any, Optional
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 from uuid import uuid4
 import httpx
 
@@ -81,6 +81,19 @@ def _looks_like_linear_meeting_file_request(text: str, has_files: bool = False) 
     ) or has_files
     has_action = bool(re.search(r"\b(send|sync|turn|extract|create|add|tasks?|tickets?|issues?)\b", text_lower))
     return has_linear and has_source and has_action
+
+
+def _is_manual_jobs_trigger_request(text: str) -> bool:
+    normalized = " ".join(str(text or "").strip().lower().split())
+    if not normalized:
+        return False
+
+    patterns = (
+        r"\b(?:run|trigger|start)\b(?:\s+the)?\s+(?:daily\s+)?(?:ai\s+and\s+startup\s+)?jobs(?:\s+scrape)?(?:\s+now)?\b",
+        r"\b(?:scrape|collect|fetch)\b(?:\s+the)?\s+(?:daily\s+)?(?:ai\s+and\s+startup\s+)?jobs(?:\s+now)?\b",
+        r"\b(?:post|publish)\b(?:\s+the)?\s+(?:daily|today(?:'s)?)\s+(?:ai\s+and\s+startup\s+)?jobs(?:\s+now)?\b",
+    )
+    return any(re.search(pattern, normalized) for pattern in patterns)
 
 
 def _app_mention_event_key(payload: dict[str, Any], event: dict[str, Any]) -> Optional[str]:
@@ -1270,14 +1283,48 @@ async def _medhack_daily_case_loop():
         await asyncio.sleep(sleep_seconds)
 
 
-def _validate_jobs_scheduler_settings(settings: Settings) -> None:
+def _build_jobs_status_url(base_api_url: str, status_url: Optional[str]) -> Optional[str]:
+    cleaned_status_url = str(status_url or "").strip()
+    if not cleaned_status_url:
+        return None
+    if cleaned_status_url.startswith("http://") or cleaned_status_url.startswith("https://"):
+        return cleaned_status_url
+    return urljoin(base_api_url.rstrip("/") + "/", cleaned_status_url.lstrip("/"))
+
+
+def _build_jobs_trigger_payload(settings: Settings) -> dict[str, Any]:
+    return {
+        "collect_live": settings.JOBS_COLLECT_LIVE,
+        "post_to_slack": settings.JOBS_POST_TO_SLACK,
+        "post_to_notion": settings.JOBS_POST_TO_NOTION,
+        "max_pages": settings.JOBS_MAX_PAGES,
+        "per_keyword_limit": settings.JOBS_PER_KEYWORD_LIMIT,
+    }
+
+
+def _make_mlai_backend_client():
+    from .clients.mlai_backend import MLAIBackendClient
+
+    settings = get_settings()
+    return MLAIBackendClient(
+        base_url=settings.MLAI_BACKEND_URL,
+        api_key=settings.ROO_API_KEY or settings.MLAI_API_KEY,
+        internal_api_key=settings.INTERNAL_API_KEY or settings.ROO_API_KEY or settings.MLAI_API_KEY,
+    )
+
+
+def _validate_jobs_trigger_settings(settings: Settings) -> None:
     if not settings.JOBS_API_URL:
-        raise ValueError("JOBS_API_URL must be configured when JOBS_SCHEDULER_ENABLED=true")
+        raise ValueError("JOBS_API_URL must be configured for Roo jobs triggers")
     parsed = urlparse(settings.JOBS_API_URL)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise ValueError("JOBS_API_URL must be a valid http(s) URL when JOBS_SCHEDULER_ENABLED=true")
+        raise ValueError("JOBS_API_URL must be a valid http(s) URL for Roo jobs triggers")
     if not settings.JOBS_TRIGGER_TOKEN or not settings.JOBS_TRIGGER_TOKEN.strip():
-        raise ValueError("JOBS_TRIGGER_TOKEN must be configured when JOBS_SCHEDULER_ENABLED=true")
+        raise ValueError("JOBS_TRIGGER_TOKEN must be configured for Roo jobs triggers")
+
+
+def _validate_jobs_scheduler_settings(settings: Settings) -> None:
+    _validate_jobs_trigger_settings(settings)
     if not 0 <= settings.JOBS_SCHEDULE_HOUR <= 23:
         raise ValueError("JOBS_SCHEDULE_HOUR must be between 0 and 23")
     if not 0 <= settings.JOBS_SCHEDULE_MINUTE <= 59:
@@ -1290,35 +1337,92 @@ def _validate_jobs_scheduler_settings(settings: Settings) -> None:
         raise ValueError("JOBS_FAILURE_STOP_AFTER_DAYS must be at least 1")
 
 
-async def _trigger_jobs_daily_run() -> bool:
+async def _trigger_jobs_daily_run_request() -> dict[str, Any]:
     settings = get_settings()
+    _validate_jobs_trigger_settings(settings)
     url = settings.JOBS_API_URL.rstrip("/") + "/jobs/daily-run"
     headers: dict[str, str] = {}
     if settings.JOBS_TRIGGER_TOKEN:
         headers["X-API-Key"] = settings.JOBS_TRIGGER_TOKEN
 
-    payload = {
-        "collect_live": settings.JOBS_COLLECT_LIVE,
-        "post_to_slack": settings.JOBS_POST_TO_SLACK,
-        "post_to_notion": settings.JOBS_POST_TO_NOTION,
-        "max_pages": settings.JOBS_MAX_PAGES,
-        "per_keyword_limit": settings.JOBS_PER_KEYWORD_LIMIT,
-    }
+    payload = _build_jobs_trigger_payload(settings)
 
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        response = await client.post(url, json=payload, headers=headers)
+        response.raise_for_status()
+        return response.json()
+
+
+async def _trigger_jobs_daily_run() -> bool:
+    settings = get_settings()
     try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            response = await client.post(url, json=payload, headers=headers)
-            response.raise_for_status()
-            data = response.json()
-            print(
-                "Jobs scheduler triggered daily run "
-                f"run_id={data.get('run_id')} status={data.get('status')} "
-                f"status_url={data.get('status_url')}"
-            )
-            return True
+        data = await _trigger_jobs_daily_run_request()
+        print(
+            "Jobs scheduler triggered daily run "
+            f"run_id={data.get('run_id')} status={data.get('status')} "
+            f"status_url={_build_jobs_status_url(settings.JOBS_API_URL, data.get('status_url'))}"
+        )
+        return True
     except Exception as exc:
         print(f"Jobs scheduler trigger failed: {exc}")
         return False
+
+
+async def _maybe_handle_manual_jobs_trigger(event: dict[str, Any]) -> bool:
+    user_id = str(event.get("user") or "").strip()
+    text = str(event.get("text") or "")
+    channel_id = str(event.get("channel") or "").strip()
+    thread_ts = event.get("thread_ts") or event.get("ts")
+    if not user_id or not channel_id or not thread_ts or not _is_manual_jobs_trigger_request(text):
+        return False
+
+    try:
+        client = _make_mlai_backend_client()
+        if not await client.is_admin(user_id):
+            post_message(
+                channel=channel_id,
+                thread_ts=thread_ts,
+                text="Sorry mate, only Points Admins can run the daily jobs scrape manually.",
+            )
+            return True
+    except Exception as exc:
+        print(f"⚠️ Manual jobs admin check failed for {user_id}: {exc}")
+        post_message(
+            channel=channel_id,
+            thread_ts=thread_ts,
+            text="I couldn't verify your admin access with the backend just now, so I didn't trigger the jobs run.",
+        )
+        return True
+
+    settings = get_settings()
+    try:
+        data = await _trigger_jobs_daily_run_request()
+    except Exception as exc:
+        print(f"⚠️ Manual jobs trigger failed for {user_id}: {exc}")
+        post_message(
+            channel=channel_id,
+            thread_ts=thread_ts,
+            text=f"I couldn't trigger the daily jobs run: {exc}",
+        )
+        return True
+
+    run_id = data.get("run_id") or "unknown"
+    status = data.get("status") or "queued"
+    status_url = _build_jobs_status_url(settings.JOBS_API_URL, data.get("status_url"))
+    full_list_url = data.get("full_list_url")
+    lines = [
+        "Triggered the daily jobs run.",
+        f"Run ID: `{run_id}`",
+        f"Status: `{status}`",
+        f"Slack posting: `{'on' if settings.JOBS_POST_TO_SLACK else 'off'}`",
+        f"Notion posting: `{'on' if settings.JOBS_POST_TO_NOTION else 'off'}`",
+    ]
+    if status_url:
+        lines.append(f"Status page: <{status_url}|Open run status>")
+    if full_list_url:
+        lines.append(f"Jobs page: <{full_list_url}|Open daily jobs page>")
+    post_message(channel=channel_id, thread_ts=thread_ts, text="\n".join(lines))
+    return True
 
 
 async def _jobs_daily_run_loop() -> None:
@@ -1698,6 +1802,9 @@ async def _handle_mention(event: dict):
         
         print(f"\n🦘 ROO MENTION: from {user_id} in {channel_id}")
         print(f"   Text: {text[:100]}...")
+
+        if await _maybe_handle_manual_jobs_trigger(event):
+            return
         
         agent = get_agent()
         result = await agent.handle_mention(
