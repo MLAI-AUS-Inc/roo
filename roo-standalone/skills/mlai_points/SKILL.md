@@ -15,6 +15,9 @@ trigger_keywords:
   - top up
   - buy points
   - buy roo points
+  - purchase points
+  - purchase roo points
+  - pay for points
   - add points
   - add roo points
 ---
@@ -74,7 +77,7 @@ Example responses:
 
 ## Parameters
 
-- **action**: The action to perform (required) - e.g., "balance", "request_points", "book_coworking", "admin_checkin_coworking", "coworking_report", "claim_task", "submit_task", "award_points", "create_task"
+- **action**: The action to perform (required) - e.g., "balance", "request_points", "topup_points", "book_coworking", "admin_checkin_coworking", "coworking_report", "claim_task", "submit_task", "award_points", "create_task"
 - **pack_id**: Top-up pack ID for `topup_points`; one of `topup_5`, `topup_10`, or `topup_25`
 - **task_id**: Task ID number or task code (for example `42` or `ROO-0042`) for task-related actions
 - **date**: Date for coworking bookings (YYYY-MM-DD format)
@@ -113,7 +116,7 @@ Parse user messages to identify the action and parameters:
 | Pattern | Action | Example |
 |---------|--------|---------|
 | `points`, `balance` | balance | "What's my points balance?", "@Roo points" |
-| `topup`, `top up Roo Points`, `buy <n> Roo Points`, `add Roo Points`, `I need more points` | topup_points | "@Roo buy 10 Roo Points" |
+| `topup`, `top up Roo Points`, `buy <n> Roo Points`, `purchase <n> Roo Points`, `pay for Roo Points`, `add Roo Points`, `I need more points` | topup_points | "@Roo buy 10 Roo Points" |
 | `request <n> points for <reason>` | request_points | "Request 5 points for helping at the event" |
 | `points earn` | list_tasks | "How do I earn points?", "@Roo points earn" |
 | `tasks`, `tasks open` | list_tasks | "What can I claim right now?" |

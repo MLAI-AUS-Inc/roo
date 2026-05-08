@@ -5386,6 +5386,9 @@ Extracted action candidates:
         text_lower = self._normalize_points_routing_text(text)
         explicit_points_request = "request" in text_lower and "point" in text_lower and "reward" not in text_lower
 
+        if action in {"topup_points", "top_up_points", "purchase_points", "buy_points"}:
+            return "topup_points"
+
         management_action = self._resolve_points_admin_management_action(
             text,
             explicit_action=action,
@@ -5515,7 +5518,11 @@ Extracted action candidates:
         text_lower = self._normalize_points_routing_text(text)
         if re.search(r"\btop\s*up\b|\btopup\b|\btop-up\b", text_lower):
             return True
-        if re.search(r"\bbuy\b.*\b(?:roo\s+)?points?\b", text_lower):
+        if re.search(r"\b(?:buy|purchase)\b.*\b(?:roo\s+)?points?\b", text_lower):
+            return True
+        if re.search(r"\bpay\s+for\b.*\b(?:roo\s+)?points?\b", text_lower):
+            return True
+        if re.search(r"\bpaid\s+(?:roo\s+)?points?\b", text_lower):
             return True
         if re.search(r"\badd\b.*\b(?:roo\s+)?points?\b", text_lower):
             return True
@@ -6928,7 +6935,8 @@ Extracted action candidates:
                 "I created your Top-up Roo Points checkout. Continue here:\n"
                 f"{checkout_url}\n\n"
                 "Top-up Roo Points are MLAI community reward points. They are not money, "
-                "have no cash value, cannot be converted to cash, and cannot be sold or transferred."
+                "have no cash value, cannot be converted to cash, and cannot be sold or transferred. "
+                "They do not count toward lifetime earned contribution."
             )
 
         if action == "balance":

@@ -284,10 +284,20 @@ def test_resolve_points_action_maps_topup_phrases():
         "/roo topup",
         "top up Roo Points",
         "buy 10 roo points",
+        "purchase 25 Roo Points",
+        "pay for 5 points",
+        "paid Roo Points",
         "add roo points",
         "I need more points",
     ]:
         assert executor._resolve_points_action({}, text) == "topup_points"
+
+
+def test_resolve_points_action_maps_topup_action_aliases():
+    executor = SkillExecutor()
+
+    for action in ["topup_points", "top_up_points", "purchase_points", "buy_points"]:
+        assert executor._resolve_points_action({"action": action}, "points") == "topup_points"
 
 
 def test_request_points_phrase_does_not_map_to_topup():
@@ -654,6 +664,7 @@ async def test_topup_points_valid_pack_creates_purchase(monkeypatch):
     assert "https://mlai.au/roo/topup/purchase-uuid" in result
     assert "not money" in result
     assert "no cash value" in result
+    assert "do not count toward lifetime earned contribution" in result
     assert client.created == {
         "slack_user_id": "U123",
         "pack_id": "topup_10",

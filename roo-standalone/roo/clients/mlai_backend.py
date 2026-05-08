@@ -2108,7 +2108,7 @@ class MLAIBackendClient:
             timeout=10.0,
             circuit_breaker=True,
         )
-        response.raise_for_status()
+        self._raise_for_status_or_backend_unavailable(response)
         return response.json()
 
     async def attach_points_request_slack_summary(
