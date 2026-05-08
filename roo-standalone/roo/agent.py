@@ -584,11 +584,9 @@ class RooAgent:
             
             if action == "balance":
                 data = await client.get_balance(user_id)
-                msg = (
-                    f"G'day mate! Here's your points summary:\n\n"
-                    f"💰 **Current Balance:** {data.get('balance', 0)} points\n"
-                    f"📈 **Lifetime Earned:** {data.get('lifetime_earned', 0)} points\n"
-                    f"Nice work! Check out `@Roo tasks` to get more! 🦘"
+                msg = self.skill_executor._format_points_balance_summary(
+                    data,
+                    tasks_command="@Roo tasks",
                 )
                 
             elif action == "list_tasks":
@@ -605,14 +603,14 @@ class RooAgent:
             
             elif action == "list_rewards":
                 rewards = await client.list_rewards(user_id)
-                if not rewards:
-                    msg = "No rewards available right now."
-                else:
-                    lines = ["🎁 **Rewards Menu:**\n"]
-                    for r in rewards:
-                        lines.append(f"• **{r['code']}** - {r['name']} ({r['cost_points']} pts)")
-                    lines.append("\nAsk me to `buy a sticker` or similar to redeem!")
-                    msg = "\n".join(lines)
+                balance_summary = await self.skill_executor._get_points_balance_summary_for_rewards(
+                    client,
+                    user_id,
+                )
+                msg = self.skill_executor._format_rewards_catalog(
+                    rewards,
+                    balance_summary=balance_summary,
+                )
             
             elif action == "book_coworking":
                 booking_date = kwargs.get("date")

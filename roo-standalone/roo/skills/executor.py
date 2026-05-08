@@ -5977,6 +5977,134 @@ Extracted action candidates:
             return ""
         return str(payload)
 
+    def _is_topup_balance_cap_error(self, error_detail: str) -> bool:
+        detail = error_detail.lower()
+        return (
+            "100-point" in detail
+            and "balance cap" in detail
+            and ("top-up" in detail or "topup" in detail or "purchase" in detail)
+        )
+
+    def _format_points_balance_summary(self, data: dict, tasks_command: str = "tasks") -> str:
+        balance = data.get("balance", 0)
+        earned = data.get("lifetime_earned", 0)
+        spent = data.get("lifetime_spent", 0)
+        purchased = 0
+        for key in (
+            "lifetime_purchased",
+            "lifetime_purchased_points",
+            "lifetime_points_purchased",
+            "points_purchased",
+            "purchased_points",
+            "lifetime_topup_points",
+        ):
+            if data.get(key) is not None:
+                purchased = data.get(key)
+                break
+
+        return (
+            f"G'day mate! Here's your points summary:\n\n"
+            f"💰 **Current Balance:** {balance} points\n"
+            f"📈 **Lifetime Earned:** {earned} points\n"
+            f"📉 **Lifetime Spent:** {spent} points\n"
+            f"🛒 **Lifetime Purchased:** {purchased} points\n\n"
+            f"Nice work! Check out `{tasks_command}` to earn more 🦘"
+        )
+
+    async def _get_points_balance_summary_for_rewards(self, client, user_id: str) -> Optional[dict]:
+        try:
+            return await client.get_balance(user_id)
+        except Exception as exc:
+            print(f"⚠️ Failed to fetch Roo points balance for rewards catalog: {exc!r}")
+            return None
+
+    def _format_rewards_catalog(
+        self,
+        rewards: list[dict],
+        balance_summary: Optional[dict] = None,
+    ) -> str:
+        def sort_key(reward: dict) -> tuple[int, str]:
+            try:
+                cost = int(reward.get("cost_points", 0) or 0)
+            except (TypeError, ValueError):
+                cost = 0
+            return cost, str(reward.get("code", ""))
+
+        balance_summary = balance_summary or {}
+        user_balance = balance_summary.get("balance")
+        if user_balance is None:
+            user_balance = next(
+                (
+                    reward.get("user_balance")
+                    for reward in rewards
+                    if reward.get("user_balance") is not None
+                ),
+                None,
+            )
+        lifetime_earned = balance_summary.get("lifetime_earned")
+
+        lines = ["🎁 **Available Roo Rewards**"]
+        if user_balance is not None:
+            lines.append(f"Your balance: **{user_balance} points**")
+        if lifetime_earned is not None:
+            lines.append(f"Lifetime earned: **{lifetime_earned} points**")
+        lines.append("")
+
+        if not rewards:
+            lines.append("No redeemable rewards are available at the moment.")
+        for reward in sorted(rewards, key=sort_key):
+            code = str(reward.get("code", "") or "").strip()
+            name = str(reward.get("name", "") or code or "Reward").strip()
+            cost = reward.get("cost_points", 0)
+            point_word = "point" if cost == 1 else "points"
+            lines.append(f"• **{name}** (`{code}`) - {cost} {point_word}")
+
+            details = []
+            description = str(reward.get("description", "") or "").strip()
+            if description:
+                details.append(description)
+
+            stock_remaining = reward.get("stock_remaining")
+            if stock_remaining is not None:
+                details.append(f"{stock_remaining} left")
+
+            fulfillment = str(reward.get("fulfillment", "") or "").lower()
+            if fulfillment == "auto":
+                details.append("instant redemption")
+            elif fulfillment == "manual":
+                details.append("admin approval")
+
+            can_afford = reward.get("can_afford")
+            if can_afford is True:
+                details.append("you can redeem this now")
+            elif can_afford is False and user_balance is not None:
+                try:
+                    shortfall = max(0, int(cost) - int(user_balance))
+                except (TypeError, ValueError):
+                    shortfall = 0
+                if shortfall:
+                    details.append(f"need {shortfall} more points")
+
+            if details:
+                lines.append(f"  _{'; '.join(details)}_")
+
+        lines.extend(
+            (
+                "",
+                "**Other ways to use Roo Points**",
+                "• SEO article generation costs 4 Roo Points.",
+                "• MLAI sometimes auctions merch, cool items, or experiences for a variable Roo Points bid. Highest bidder wins.",
+                "",
+                "**How lifetime earned Roo Points matter**",
+                "• Bounties and paid work generally go to members with the highest lifetime earned Roo Points.",
+                "• To be voted into the MLAI committee, you need at least 100 lifetime earned Roo Points.",
+                "",
+                "Request one with `reward request <CODE>`.",
+                "For coworking, `coworking book YYYY-MM-DD` is usually the quickest path.",
+            )
+        )
+        return "\n".join(lines)
+
     def _points_request_queue_error_message(self) -> str:
         """User-facing fallback when Roo cannot queue a points request for emoji approval."""
         return (
@@ -6921,9 +7049,15 @@ Extracted action candidates:
                     slack_user_id=user_id,
                     pack_id=pack_id,
                     purchase_from=purchase_from,
-                )
+            )
             except httpx.HTTPStatusError as exc:
                 error_detail = self._extract_http_error_detail(exc)
+                if self._is_topup_balance_cap_error(error_detail):
+                    return (
+                        "You've already got heaps of Roo Points, so you can't top up right now. "
+                        "This top-up would put you over the 100-point spendable balance cap. "
+                        "Use some points first, then try again."
+                    )
                 detail = f" {error_detail}" if error_detail else ""
                 return f"I couldn't create that top-up checkout yet.{detail}"
 
@@ -6941,17 +7075,7 @@ Extracted action candidates:
 
         if action == "balance":
             data = await client.get_balance(user_id)
-            balance = data.get("balance", 0)
-            earned = data.get("lifetime_earned", 0)
-            spent = data.get("lifetime_spent", 0)
-            
-            return (
-                f"G'day mate! Here's your points summary:\n\n"
-                f"💰 **Current Balance:** {balance} points\n"
-                f"📈 **Lifetime Earned:** {earned} points\n"
-                f"📉 **Lifetime Spent:** {spent} points\n\n"
-                f"Nice work! Check out `tasks` to earn more 🦘"
-            )
+            return self._format_points_balance_summary(data, tasks_command="tasks")
         
         elif action == "history":
             limit = params.get("limit", 10)
@@ -7352,19 +7476,8 @@ Extracted action candidates:
         
         elif action == "list_rewards":
             rewards = await client.list_rewards(user_id)
-            
-            if not rewards:
-                return "No rewards available at the moment. Check back soon! 🦘"
-            
-            lines = ["🎁 **Available Rewards:**\n"]
-            for reward in rewards:
-                code = reward.get("code", "")
-                name = reward.get("name", "")
-                cost = reward.get("cost_points", 0)
-                lines.append(f"• **{code}** - {name} ({cost} pts)")
-            
-            lines.append("\nRequest a reward with \"reward request <CODE>\"")
-            return "\n".join(lines)
+            balance_summary = await self._get_points_balance_summary_for_rewards(client, user_id)
+            return self._format_rewards_catalog(rewards, balance_summary=balance_summary)
         
         elif action == "request_reward":
             reward_code = params.get("reward_code", "").upper()

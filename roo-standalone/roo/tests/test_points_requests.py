@@ -92,6 +92,33 @@ class FakeTopupPurchaseClient:
         return self.response
 
 
+class FakeBalanceClient:
+    def __init__(self, response):
+        self.response = response
+
+    async def get_balance(self, slack_user_id):
+        return self.response
+
+
+class FakeRewardsClient:
+    def __init__(self, rewards, balance_response=None, balance_error=None):
+        self.rewards = rewards
+        self.balance_response = balance_response
+        self.balance_error = balance_error
+        self.list_rewards_user_id = None
+        self.balance_user_id = None
+
+    async def list_rewards(self, slack_user_id=None):
+        self.list_rewards_user_id = slack_user_id
+        return self.rewards
+
+    async def get_balance(self, slack_user_id):
+        self.balance_user_id = slack_user_id
+        if self.balance_error:
+            raise self.balance_error
+        return self.balance_response or {"balance": 12, "lifetime_earned": 42}
+
+
 class FailingTopupPurchaseClient(FakeTopupPurchaseClient):
     async def create_points_purchase(
         self,
@@ -114,6 +141,26 @@ class FailingTopupPurchaseClient(FakeTopupPurchaseClient):
             400,
             request=request,
             json={"error": "Top-up purchases are not available for this account."},
+        )
+        raise httpx.HTTPStatusError("bad request", request=request, response=response)
+
+
+class BalanceCapTopupPurchaseClient(FakeTopupPurchaseClient):
+    async def create_points_purchase(
+        self,
+        slack_user_id,
+        pack_id=None,
+        points_amount=None,
+        purchase_from=None,
+    ):
+        request = httpx.Request(
+            "POST",
+            "https://backend.test/api/v1/points/purchases/",
+        )
+        response = httpx.Response(
+            400,
+            request=request,
+            json={"error": "Top-up purchase would exceed the 100-point spendable balance cap"},
         )
         raise httpx.HTTPStatusError("bad request", request=request, response=response)
 
@@ -562,6 +609,138 @@ async def test_request_points_rejected_in_dm():
 
 
 @pytest.mark.asyncio
+async def test_balance_summary_includes_lifetime_purchased():
+    executor = SkillExecutor()
+
+    result = await executor._handle_points_action(
+        client=FakeBalanceClient(
+            {
+                "balance": 15,
+                "lifetime_earned": 42,
+                "lifetime_spent": 27,
+                "lifetime_purchased": 10,
+            }
+        ),
+        action="balance",
+        params={},
+        text="points",
+        user_id="U123",
+        channel_id="C123",
+        thread_ts="111.222",
+        skill=SimpleNamespace(name="mlai-points"),
+    )
+
+    assert "Current Balance:** 15 points" in result
+    assert "Lifetime Earned:** 42 points" in result
+    assert "Lifetime Spent:** 27 points" in result
+    assert "Lifetime Purchased:** 10 points" in result
+
+
+@pytest.mark.asyncio
+async def test_list_rewards_response_includes_catalog_context():
+    executor = SkillExecutor()
+    client = FakeRewardsClient(
+        [
+            {
+                "code": "WORKSHOP_FREE",
+                "name": "Free Workshop Ticket",
+                "description": "Events (Limited Stock)",
+                "cost_points": 42,
+                "fulfillment": "manual",
+                "stock_remaining": 5,
+                "can_afford": False,
+                "user_balance": 12,
+            },
+            {
+                "code": "STICKER",
+                "name": "Sticker",
+                "description": "Merch",
+                "cost_points": 1,
+                "fulfillment": "manual",
+                "stock_remaining": None,
+                "can_afford": True,
+                "user_balance": 12,
+            },
+            {
+                "code": "COWORKING_DAY",
+                "name": "1 Day Hot-desk",
+                "description": "Coworking",
+                "cost_points": 4,
+                "fulfillment": "auto",
+                "stock_remaining": None,
+                "can_afford": True,
+                "user_balance": 12,
+            },
+        ]
+    )
+
+    result = await executor._handle_points_action(
+        client=client,
+        action="list_rewards",
+        params={},
+        text="rewards",
+        user_id="U123",
+        channel_id="C123",
+        thread_ts="111.222",
+        skill=SimpleNamespace(name="mlai-points"),
+    )
+
+    assert client.list_rewards_user_id == "U123"
+    assert client.balance_user_id == "U123"
+    assert "Your balance: **12 points**" in result
+    assert "Lifetime earned: **42 points**" in result
+    assert "**Sticker** (`STICKER`) - 1 point" in result
+    assert "Merch; admin approval; you can redeem this now" in result
+    assert "**1 Day Hot-desk** (`COWORKING_DAY`) - 4 points" in result
+    assert "Coworking; instant redemption; you can redeem this now" in result
+    assert "**Free Workshop Ticket** (`WORKSHOP_FREE`) - 42 points" in result
+    assert "Events (Limited Stock); 5 left; admin approval; need 30 more points" in result
+    assert "SEO article generation costs 4 Roo Points" in result
+    assert "variable Roo Points bid" in result
+    assert "Bounties and paid work generally go to members with the highest lifetime earned Roo Points" in result
+    assert "MLAI committee" in result
+    assert "at least 100 lifetime earned Roo Points" in result
+    assert "reward request <CODE>" in result
+
+
+@pytest.mark.asyncio
+async def test_list_rewards_still_renders_when_balance_lookup_fails():
+    executor = SkillExecutor()
+    client = FakeRewardsClient(
+        [
+            {
+                "code": "EVENT_TICKET",
+                "name": "Free Community Event Ticket",
+                "description": "Events",
+                "cost_points": 6,
+                "fulfillment": "manual",
+                "stock_remaining": None,
+                "can_afford": True,
+                "user_balance": 10,
+            },
+        ],
+        balance_error=RuntimeError("balance timeout"),
+    )
+
+    result = await executor._handle_points_action(
+        client=client,
+        action="list_rewards",
+        params={},
+        text="rewards",
+        user_id="U123",
+        channel_id="C123",
+        thread_ts="111.222",
+        skill=SimpleNamespace(name="mlai-points"),
+    )
+
+    assert client.balance_user_id == "U123"
+    assert "Your balance: **10 points**" in result
+    assert "Free Community Event Ticket" in result
+    assert "SEO article generation costs 4 Roo Points" in result
+    assert "Bounties and paid work" in result
+
+
+@pytest.mark.asyncio
 async def test_topup_points_disabled_returns_feature_message(monkeypatch):
     executor = SkillExecutor()
     client = FakeTopupPurchaseClient()
@@ -700,6 +879,32 @@ async def test_topup_points_backend_error_is_friendly(monkeypatch):
 
     assert "couldn't create that top-up checkout" in result
     assert "Top-up purchases are not available" in result
+
+
+@pytest.mark.asyncio
+async def test_topup_points_balance_cap_message_is_clear(monkeypatch):
+    executor = SkillExecutor()
+
+    monkeypatch.setattr(
+        executor_module,
+        "get_settings",
+        lambda: SimpleNamespace(ROO_POINTS_TOPUP_ENABLED=True),
+    )
+
+    result = await executor._handle_points_action(
+        client=BalanceCapTopupPurchaseClient(),
+        action="topup_points",
+        params={"points": 5},
+        text="topup 5 points",
+        user_id="U123",
+        channel_id="C123",
+        thread_ts="111.222",
+        skill=SimpleNamespace(name="mlai-points"),
+    )
+
+    assert "heaps of Roo Points" in result
+    assert "100-point spendable balance cap" in result
+    assert "Use some points first" in result
 
 
 @pytest.mark.asyncio

@@ -241,8 +241,34 @@ G'day mate! Here's your points summary:
 💰 **Current Balance:** 15 points
 📈 **Lifetime Earned:** 42 points
 📉 **Lifetime Spent:** 27 points
+🛒 **Lifetime Purchased:** 10 points
 
 Nice work! Check out "@Roo tasks" to earn more 🦘
+```
+
+### Rewards Catalog
+```
+🎁 **Available Roo Rewards**
+Your balance: **12 points**
+Lifetime earned: **42 points**
+
+• **Sticker** (`STICKER`) - 1 point
+  _Merch; admin approval; you can redeem this now_
+• **1 Day Hot-desk** (`COWORKING_DAY`) - 4 points
+  _Coworking; instant redemption; you can redeem this now_
+• **Free Workshop Ticket** (`WORKSHOP_FREE`) - 42 points
+  _Events (Limited Stock); 5 left; admin approval; need 30 more points_
+
+**Other ways to use Roo Points**
+• SEO article generation costs 4 Roo Points.
+• MLAI sometimes auctions merch, cool items, or experiences for a variable Roo Points bid. Highest bidder wins.
+
+**How lifetime earned Roo Points matter**
+• Bounties and paid work generally go to members with the highest lifetime earned Roo Points.
+• To be voted into the MLAI committee, you need at least 100 lifetime earned Roo Points.
+
+Request one with `reward request <CODE>`.
+For coworking, `coworking book YYYY-MM-DD` is usually the quickest path.
 ```
 
 ### Task List
