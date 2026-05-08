@@ -100,6 +100,35 @@ def test_linear_meeting_duplicate_detection_uses_similar_open_issue_title():
     assert duplicate["identifier"] == "ENG-12"
 
 
+def test_linear_meeting_candidate_dedupe_merges_semantic_duplicates():
+    executor = SkillExecutor()
+
+    candidates = executor._dedupe_linear_meeting_candidates(
+        [
+            {
+                "title": "Recruit technical talent for the bounty pool",
+                "owner_hint": "Sonia",
+                "confidence": 0.72,
+                "source_label": "notes.pdf",
+            },
+            {
+                "title": "Start building the vetted tech talent pool",
+                "owner_hint": "Sonia",
+                "confidence": 0.8,
+                "source_label": "notes.pdf page 4",
+            },
+            {
+                "title": "Post a project update in Linear",
+                "confidence": 0.9,
+            },
+        ]
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0]["confidence"] == pytest.approx(0.8)
+    assert "notes.pdf" in candidates[0]["source_label"]
+
+
 def test_linear_meeting_decision_thresholds():
     executor = SkillExecutor()
     candidate = {"confidence": 0.9}
@@ -256,6 +285,54 @@ async def test_linear_client_create_issue_calls_backend(monkeypatch):
         "priority": 2,
         "due_date": "2026-05-08",
         "label_ids": ["label-1"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_linear_client_create_project_update_calls_backend(monkeypatch):
+    module_path = (
+        Path(__file__).resolve().parents[2]
+        / "skills"
+        / "linear_meeting_actions"
+        / "client.py"
+    )
+    spec = importlib.util.spec_from_file_location("linear_meeting_actions_client_project_update_test", module_path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+
+    class FakeResponse:
+        status_code = 201
+
+        def json(self):
+            return {"id": "update-1", "url": "https://linear.test/update-1"}
+
+    calls = []
+
+    class FakeBackend:
+        def __init__(self, **kwargs):
+            pass
+
+        async def _request(self, method, endpoint, **kwargs):
+            calls.append((method, endpoint, kwargs))
+            return FakeResponse()
+
+    monkeypatch.setattr(module, "MLAIBackendClient", FakeBackend)
+
+    client = module.LinearMeetingActionsClient(base_url="https://backend.test", api_key="roo-key")
+    project_update = await client.create_project_update(
+        project_id="project-1",
+        body="Meeting update",
+        health="onTrack",
+    )
+
+    assert project_update["id"] == "update-1"
+    assert calls[0][0] == "POST"
+    assert calls[0][1] == "/api/v1/integrations/linear/project-updates"
+    assert calls[0][2]["json"] == {
+        "project_id": "project-1",
+        "body": "Meeting update",
+        "health": "onTrack",
     }
 
 
@@ -504,3 +581,109 @@ async def test_linear_meeting_executor_creates_issue_from_parsed_file_source(mon
     assert created_inputs[0]["project_id"] == "project-1"
     assert created_inputs[0]["label_ids"] == ["label-1"]
     assert "meeting.pdf page 3" in created_inputs[0]["description"]
+
+
+@pytest.mark.asyncio
+async def test_linear_meeting_executor_creates_project_update_when_requested(monkeypatch):
+    executor = SkillExecutor()
+    created_updates = []
+
+    async def fake_source_result(**kwargs):
+        return SourceParseResult(
+            sources=[
+                ParsedSource(
+                    label="Bounty_Venture Studio kick off call - notes.pdf",
+                    text="Sonia will validate the bounty model with VCs. Sam will share the recording.",
+                    kind="pdf",
+                )
+            ],
+            files_seen=1,
+            files_parsed=1,
+        )
+
+    async def fake_candidates_from_sources(**kwargs):
+        return [
+            {
+                "title": "Validate the bounty model with VCs",
+                "owner_hint": "Sonia",
+                "project_hint": "Bounties / Venture Studio",
+                "confidence": 0.8,
+            }
+        ]
+
+    team = {"id": "team-1", "key": "MLA", "name": "MLAI"}
+    user = {"id": "user-1", "name": "Sonia", "displayName": "sonia1", "email": "sonia@example.com"}
+    project = {
+        "id": "project-1",
+        "name": "Bounties / Venture Studio",
+        "teams": {"nodes": [team]},
+        "members": {"nodes": [user]},
+    }
+
+    class FakeClient:
+        async def list_teams(self):
+            return [team]
+
+        async def list_users(self):
+            return [user]
+
+        async def list_active_projects(self):
+            return [project]
+
+        async def list_issue_labels(self):
+            return []
+
+        async def list_recent_open_issues(self):
+            return []
+
+        async def create_project_update(self, **kwargs):
+            created_updates.append(kwargs)
+            return {
+                "id": "update-1",
+                "url": "https://linear.app/acme/project-update/update-1",
+                "project": {"name": "Bounties / Venture Studio"},
+            }
+
+        async def create_issue(self, **kwargs):
+            return {"identifier": "MLA-1", "title": kwargs["title"]}
+
+    class FakeSkill:
+        def get_client_class(self, name):
+            assert name == "LinearMeetingActionsClient"
+            return FakeClient
+
+    monkeypatch.setattr(
+        executor_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            LINEAR_DEFAULT_TEAM=None,
+            LINEAR_MEETING_AUTO_CREATE_MIN_CONFIDENCE=0.85,
+            LINEAR_MEETING_UNCERTAIN_MIN_CONFIDENCE=0.65,
+            LINEAR_MEETING_LLM_MODEL="gpt-5.5",
+            LINEAR_MEETING_LLM_REASONING_EFFORT="low",
+        ),
+    )
+    monkeypatch.setattr(executor, "_build_linear_meeting_source_result", fake_source_result)
+    monkeypatch.setattr(executor, "_extract_linear_meeting_candidates_from_sources", fake_candidates_from_sources)
+    async def fake_project_update_input(**kwargs):
+        return {
+            "project_id": "project-1",
+            "body": "Meeting update",
+            "health": "onTrack",
+        }
+
+    monkeypatch.setattr(executor, "_build_linear_meeting_project_update_input", fake_project_update_input)
+
+    result = await executor._execute_linear_meeting_actions(
+        skill=FakeSkill(),
+        text="Please do a project update in Linear and extract to-dos",
+        params={},
+        user_id="U1",
+        channel_id="C1",
+        thread_ts="1.1",
+        thread_history=[],
+        event_files=[{"id": "F1", "name": "Bounty_Venture Studio kick off call - notes.pdf"}],
+    )
+
+    assert created_updates == [{"project_id": "project-1", "body": "Meeting update", "health": "onTrack"}]
+    assert "Created Linear project update" in result["message"]

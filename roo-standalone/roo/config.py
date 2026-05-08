@@ -46,6 +46,8 @@ class Settings(BaseSettings):
     SKILLS_DIR: str = "skills"
     TIMEZONE: str = "Australia/Melbourne"
     ROUTER_MODEL: str = "gpt-5.4"
+    LINEAR_MEETING_LLM_MODEL: str = "gpt-5.5"
+    LINEAR_MEETING_LLM_REASONING_EFFORT: str = "low"
     LINEAR_MEETING_AUTO_CREATE_MIN_CONFIDENCE: float = 0.85
     LINEAR_MEETING_UNCERTAIN_MIN_CONFIDENCE: float = 0.65
     COWORKING_INTENTS_DB_PATH: str = "data/coworking_booking_intents.db"

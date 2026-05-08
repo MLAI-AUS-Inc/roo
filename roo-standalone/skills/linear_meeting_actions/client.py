@@ -10,6 +10,7 @@ from roo.clients.mlai_backend import MLAIBackendClient, MLAIBackendUnavailableEr
 
 LINEAR_MEETING_CONTEXT_ENDPOINT = "/api/v1/integrations/linear/meeting-context"
 LINEAR_MEETING_ISSUES_ENDPOINT = "/api/v1/integrations/linear/issues"
+LINEAR_MEETING_PROJECT_UPDATES_ENDPOINT = "/api/v1/integrations/linear/project-updates"
 
 
 class LinearMeetingActionsClient:
@@ -124,6 +125,24 @@ class LinearMeetingActionsClient:
             "POST",
             LINEAR_MEETING_ISSUES_ENDPOINT,
             payload=payload,
+            timeout=30.0,
+        )
+
+    async def create_project_update(
+        self,
+        *,
+        project_id: str,
+        body: str,
+        health: str = "onTrack",
+    ) -> dict[str, Any]:
+        return await self._request_json(
+            "POST",
+            LINEAR_MEETING_PROJECT_UPDATES_ENDPOINT,
+            payload={
+                "project_id": project_id,
+                "body": body,
+                "health": health,
+            },
             timeout=30.0,
         )
 

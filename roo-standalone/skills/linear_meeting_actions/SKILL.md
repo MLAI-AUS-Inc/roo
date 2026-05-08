@@ -1,6 +1,6 @@
 ---
 name: linear-meeting-actions
-description: Extract action items from Slack meeting transcripts, summaries, files, PDFs, DOCX documents, or images and create correctly assigned Linear issues
+description: Extract action items from Slack meeting transcripts, summaries, files, PDFs, DOCX documents, or images, create Linear project updates, and create correctly assigned Linear issues
 trigger_keywords:
   - meeting actions
   - meeting action items
@@ -31,6 +31,7 @@ This skill turns pasted Slack meeting transcripts, summaries, supported Slack fi
 ## Capabilities
 
 - Parse Slack message/thread text and supported attached files for concrete to-do items.
+- Create a Linear project update when the request explicitly asks for a project update and Roo can confidently match the project.
 - Download and parse `.pdf`, `.docx`, `.txt`, `.md`, `.csv`, `.png`, `.jpg`, `.jpeg`, `.webp`, and non-animated `.gif` files from the current Slack thread.
 - Inspect Linear teams, users, active projects, project members, labels, and recent open issues.
 - Assign new issues to the best matching Linear user.
@@ -56,11 +57,12 @@ This skill turns pasted Slack meeting transcripts, summaries, supported Slack fi
    - Issue labels
    - Recent open issues for duplicate detection
 3. Extract concrete action items into structured candidates with title, description, owner hint, project hint, due date, priority, evidence, source label, and confidence.
-4. Match owners by Slack mention/email first, then Linear user email, then display/name similarity.
-5. Match projects by explicit project hint, name/slug similarity, and project membership context.
-6. Create only high-confidence, non-duplicate candidates.
-7. Present uncertain candidates in Slack with Approve and Reject buttons.
-8. Report created issues, skipped duplicates, and unresolved items clearly.
+4. If a project update was requested, create one for the matched Linear project.
+5. Match owners by Slack mention/email first, then Linear user email, then display/name similarity.
+6. Match projects by explicit project hint, name/slug similarity, and project membership context.
+7. Create only high-confidence, non-duplicate candidates.
+8. Present uncertain candidates in Slack with Approve and Reject buttons.
+9. Report created project updates, created issues, skipped duplicates, and unresolved items clearly.
 
 ## Creation Rules
 

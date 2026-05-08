@@ -70,6 +70,33 @@ def test_slack_file_info_and_download(monkeypatch):
     assert request["headers"] == {"Authorization": "Bearer xoxb-test"}
 
 
+def test_slack_file_download_reports_missing_files_read_scope(monkeypatch):
+    class FakeSlackClient:
+        def files_info(self, file):
+            raise Exception("missing_scope needed=files:read")
+
+    class FakeResponse:
+        status_code = 302
+        content = b""
+        headers = {"location": "https://mlai-aus.slack.com/?redir=%2Ffiles-pri%2Ffile"}
+
+        def raise_for_status(self):
+            return None
+
+    monkeypatch.setattr(slack_client, "get_slack_client", lambda: FakeSlackClient())
+    monkeypatch.setattr(slack_client, "get_settings", lambda: SimpleNamespace(SLACK_BOT_TOKEN="xoxb-test"))
+    monkeypatch.setattr(slack_client.httpx, "get", lambda *args, **kwargs: FakeResponse())
+
+    with pytest.raises(RuntimeError, match="files:read"):
+        slack_client.download_file_bytes(
+            {
+                "id": "F1",
+                "name": "meeting.pdf",
+                "url_private_download": "https://files.slack.test/meeting.pdf",
+            }
+        )
+
+
 @pytest.mark.asyncio
 async def test_parse_text_markdown_and_csv_sources(monkeypatch):
     downloads = {
