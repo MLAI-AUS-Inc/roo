@@ -9,6 +9,8 @@ import httpx
 
 from .config import get_settings
 
+SLACK_FILES_READ_SCOPE = "files:read"
+
 
 # Lazy-loaded Slack client
 _slack_client = None
@@ -241,13 +243,47 @@ def download_file_bytes(file: Dict[str, Any]) -> bytes:
         raise ValueError("Slack file is missing url_private_download/url_private")
 
     settings = get_settings()
-    response = httpx.get(
-        url,
-        headers={"Authorization": f"Bearer {settings.SLACK_BOT_TOKEN}"},
-        timeout=30.0,
-    )
-    response.raise_for_status()
+    try:
+        response = httpx.get(
+            url,
+            headers={"Authorization": f"Bearer {settings.SLACK_BOT_TOKEN}"},
+            timeout=30.0,
+        )
+        if _looks_like_slack_file_auth_redirect(response):
+            _raise_slack_file_download_permission_error(file_id, response)
+        response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        response = exc.response
+        if _looks_like_slack_file_auth_redirect(response):
+            _raise_slack_file_download_permission_error(file_id, response)
+        raise
     return response.content
+
+
+def _looks_like_slack_file_auth_redirect(response: httpx.Response) -> bool:
+    if getattr(response, "status_code", 200) not in {301, 302, 303, 307, 308}:
+        return False
+    location = str(response.headers.get("location") or "").lower()
+    return "slack.com" in location and "redir=" in location
+
+
+def _raise_slack_file_download_permission_error(file_id: str, response: httpx.Response) -> None:
+    location = str(response.headers.get("location") or "").strip()
+    scope_hint = ""
+    if file_id:
+        try:
+            get_file_info(file_id)
+        except Exception as exc:
+            text = str(exc)
+            if "missing_scope" in text and SLACK_FILES_READ_SCOPE in text:
+                scope_hint = f" Slack reported missing `{SLACK_FILES_READ_SCOPE}`."
+    raise RuntimeError(
+        "Slack redirected the private file download instead of returning file bytes."
+        f"{scope_hint} Add the `{SLACK_FILES_READ_SCOPE}` bot scope to the Roo Slack app, "
+        "reinstall it to the workspace, update `SLACK_BOT_TOKEN` if Slack rotates it, "
+        "and restart Roo."
+        + (f" Redirect location: {location}" if location else "")
+    )
 
 
 @lru_cache(maxsize=100)
