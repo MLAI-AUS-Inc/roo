@@ -1746,7 +1746,7 @@ async def test_explicit_research_request_starts_generation(monkeypatch):
 async def test_content_factory_blocks_when_user_has_insufficient_points(monkeypatch):
     executor = SkillExecutor()
     _patch_content_factory(monkeypatch)
-    FakeContentFactoryClient.balance_by_user["U999FREE"] = 5
+    FakeContentFactoryClient.balance_by_user["U999FREE"] = 3
     monkeypatch.setattr(executor_module, "post_message", lambda *args, **kwargs: {"ts": "111.222"})
 
     result = await executor._execute_content_factory(
@@ -1758,8 +1758,8 @@ async def test_content_factory_blocks_when_user_has_insufficient_points(monkeypa
         thread_ts="111.222",
     )
 
-    assert "Creating an article costs 6 Roo points" in result
-    assert "currently have 5" in result
+    assert "Creating an article costs 4 Roo points" in result
+    assert "currently have 3" in result
     assert FakeContentFactoryClient.last_instance.trigger_calls == []
     assert FakeContentFactoryClient.last_instance.balance_checks == ["U999FREE"]
 
