@@ -1815,6 +1815,7 @@ async def _handle_mention(event: dict):
             channel_id=channel_id,
             thread_ts=thread_ts,
             param_overrides=param_overrides if isinstance(param_overrides, dict) else None,
+            current_message_ts=event.get("ts"),
             event_files=event_files,
         )
         

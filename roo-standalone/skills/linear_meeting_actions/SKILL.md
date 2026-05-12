@@ -31,6 +31,7 @@ This skill turns pasted Slack meeting transcripts, summaries, supported Slack fi
 ## Capabilities
 
 - Parse Slack message/thread text and supported attached files for concrete to-do items.
+- Draft a review-only Linear issue from a discussion thread when the user asks to add "this" or "the thread" to Linear.
 - Create a Linear project update when the request explicitly asks for a project update and Roo can confidently match the project.
 - Download and parse `.pdf`, `.docx`, `.txt`, `.md`, `.csv`, `.png`, `.jpg`, `.jpeg`, `.webp`, and non-animated `.gif` files from the current Slack thread.
 - Inspect Linear teams, users, active projects, project members, labels, and recent open issues.
@@ -58,16 +59,18 @@ This skill turns pasted Slack meeting transcripts, summaries, supported Slack fi
    - Recent open issues for duplicate detection
 3. Extract concrete action items into structured candidates with title, description, owner hint, project hint, due date, priority, evidence, source label, and confidence.
 4. If a project update was requested, create one for the matched Linear project.
-5. Match owners by Slack mention/email first, then Linear user email, then display/name similarity.
-6. Match projects by explicit project hint, name/slug similarity, and project membership context.
-7. Create only high-confidence, non-duplicate candidates.
-8. Present uncertain candidates in Slack with Approve and Reject buttons.
-9. Report created project updates, created issues, skipped duplicates, and unresolved items clearly.
+5. If no concrete action item is found but the user asked to add the thread context to Linear, draft one contextual issue and require Slack approval before creation.
+6. Match owners by Slack mention/email first, then Linear user email, then display/name similarity.
+7. Match projects by explicit project hint, name/slug similarity, and project membership context.
+8. Create only high-confidence, non-duplicate concrete candidates.
+9. Present uncertain or contextual candidates in Slack with Approve and Reject buttons.
+10. Report created project updates, created issues, skipped duplicates, and unresolved items clearly.
 
 ## Creation Rules
 
 - Do not create an issue without a matched Linear team.
 - Do not auto-create an issue without a high-confidence assignee and project.
+- Do not auto-create contextual discussion-thread issues; always request Slack approval first.
 - Apply the `meeting-action` label if it already exists. If it does not exist, create the issue without labels.
 - Issue descriptions must include the meeting context, evidence snippet, Slack source identifiers when available, and a note that Roo generated the issue from meeting notes.
 

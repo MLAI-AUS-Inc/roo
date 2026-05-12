@@ -128,6 +128,10 @@ class RooAgent:
                 thread_history = raw_history[-10:] if raw_history else []
             except Exception as e:
                 print(f"⚠️ Failed to fetch thread history: {e}")
+        has_prior_thread_context = self._has_prior_slack_thread_context(
+            thread_history,
+            current_message_ts=kwargs.get("current_message_ts"),
+        )
 
         # 1. Try Fast Path (Direct Command Execution)
         fast_result = await self._try_fast_path(clean_text, user_id, channel_id, thread_ts)
@@ -142,6 +146,7 @@ class RooAgent:
             channel_id,
             thread_ts,
             has_file_context=bool(kwargs.get("event_files")),
+            has_thread_context=has_prior_thread_context,
         )
 
         if skill:
@@ -398,7 +403,36 @@ class RooAgent:
         )
         return any(re.search(pattern, text) for pattern in patterns)
 
-    def _looks_like_linear_meeting_request(self, text: str, has_file_context: bool = False) -> bool:
+    def _has_prior_slack_thread_context(
+        self,
+        history: Optional[List[dict]],
+        current_message_ts: Optional[str] = None,
+    ) -> bool:
+        current_ts = str(current_message_ts or "").strip()
+        for message in history or []:
+            if message.get("is_bot") or message.get("bot_id"):
+                continue
+            if current_ts and str(message.get("ts") or "").strip() == current_ts:
+                continue
+            if str(message.get("text") or "").strip() or message.get("files"):
+                return True
+        return False
+
+    def _looks_like_linear_thread_reference_request(self, text: str) -> bool:
+        if not re.search(r'\blinear\b', text):
+            return False
+        reference = r'(?:this|that|above|thread|conversation|message|discussion)'
+        return bool(
+            re.search(rf'\b(?:add|put|send|sync|create)\b.*\b{reference}\b.*\blinear\b', text)
+            or re.search(rf'\blinear\b.*\b(?:add|put|send|sync|create)\b.*\b{reference}\b', text)
+        )
+
+    def _looks_like_linear_meeting_request(
+        self,
+        text: str,
+        has_file_context: bool = False,
+        has_thread_context: bool = False,
+    ) -> bool:
         has_linear = bool(re.search(r'\blinear\b', text))
         has_meeting_source = bool(
             re.search(
@@ -407,9 +441,15 @@ class RooAgent:
             )
         ) or has_file_context
         has_creation_intent = bool(
-            re.search(r'\b(extract|sync|turn|send|create|add|tickets?|issues?|tasks?)\b', text)
+            re.search(r'\b(extract|sync|turn|send|put|create|add|tickets?|issues?|tasks?)\b', text)
         )
-        return has_linear and has_meeting_source and has_creation_intent
+        if has_linear and has_meeting_source and has_creation_intent:
+            return True
+        return (
+            has_creation_intent
+            and (has_file_context or has_thread_context)
+            and self._looks_like_linear_thread_reference_request(text)
+        )
 
     def _looks_like_content_follow_up(self, text: str) -> bool:
         patterns = (
@@ -439,6 +479,7 @@ class RooAgent:
         text: str,
         thread_context: Optional[Dict[str, Any]] = None,
         has_file_context: bool = False,
+        has_thread_context: bool = False,
     ) -> Optional[Skill]:
         routing_intent = self._get_routing_intent(text, thread_context)
         if routing_intent:
@@ -456,11 +497,15 @@ class RooAgent:
         if content_skill and self._looks_like_content_request(text_lower):
             return content_skill
 
-        if linear_meeting_skill and self._looks_like_linear_meeting_request(text_lower, has_file_context):
-            return linear_meeting_skill
-
         if points_skill and self._looks_like_points_request(text_lower):
             return points_skill
+
+        if linear_meeting_skill and self._looks_like_linear_meeting_request(
+            text_lower,
+            has_file_context,
+            has_thread_context,
+        ):
+            return linear_meeting_skill
 
         if (
             thread_context
@@ -679,6 +724,7 @@ class RooAgent:
         channel_id: Optional[str] = None,
         thread_ts: Optional[str] = None,
         has_file_context: bool = False,
+        has_thread_context: bool = False,
     ) -> Optional[Skill]:
         """Use LLM to decide which skill to use."""
         if not self.skills:
@@ -694,6 +740,7 @@ class RooAgent:
             text,
             thread_context,
             has_file_context=has_slack_files,
+            has_thread_context=has_thread_context,
         )
         if trigger_skill:
             return trigger_skill
