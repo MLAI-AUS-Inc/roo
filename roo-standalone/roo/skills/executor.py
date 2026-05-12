@@ -162,6 +162,7 @@ class SkillExecutor:
                     thread_ts,
                     thread_history,
                     kwargs.get("event_files"),
+                    kwargs.get("current_message_ts"),
                 )
             elif skill.name == "tone-of-voice":
                 result = await self._execute_tone_of_voice(skill, text, params, user_id)
@@ -1520,14 +1521,19 @@ Keep the response concise but informative."""
         thread_ts: Optional[str],
         thread_history: Optional[List[dict]] = None,
         event_files: Optional[List[dict]] = None,
+        current_message_ts: Optional[str] = None,
     ) -> dict:
         settings = get_settings()
+        params = self._apply_linear_meeting_project_hint_prepass(text, params)
+        thread_reference_request = self._is_linear_thread_reference_request(text, params)
         source_result = await self._build_linear_meeting_source_result(
             text=text,
             params=params,
             thread_history=thread_history,
             event_files=event_files,
             settings=settings,
+            current_message_ts=current_message_ts,
+            exclude_current_message=thread_reference_request,
         )
         transcript = source_result.combined_text()
         if len(transcript.split()) < 8:
@@ -1565,6 +1571,17 @@ Keep the response concise but informative."""
             projects=projects,
         )
         project_update_requested = self._linear_meeting_project_update_requested(text, params)
+        contextual_review_mode = False
+        if not candidates and thread_reference_request and not project_update_requested:
+            contextual_candidate = await self._extract_linear_thread_context_candidate(
+                sources=source_result.sources,
+                params=params,
+                users=users,
+                projects=projects,
+            )
+            if contextual_candidate:
+                candidates = [contextual_candidate]
+                contextual_review_mode = True
         if not candidates and not project_update_requested:
             return {
                 "message": (
@@ -1623,6 +1640,8 @@ Keep the response concise but informative."""
 
         for raw_candidate in candidates[:20]:
             candidate = self._normalize_linear_meeting_candidate(raw_candidate)
+            if raw_candidate.get("contextual_review_only"):
+                candidate["contextual_review_only"] = True
             if not candidate.get("title"):
                 continue
 
@@ -1653,6 +1672,8 @@ Keep the response concise but informative."""
                 auto_threshold=auto_threshold,
                 uncertain_threshold=uncertain_threshold,
             )
+            if candidate.get("contextual_review_only") and decision == "create":
+                decision = "review"
 
             issue_input = self._build_linear_meeting_issue_input(
                 candidate=candidate,
@@ -1702,7 +1723,15 @@ Keep the response concise but informative."""
                 review_needed.append({**display, "pending_id": pending_id})
                 continue
 
-            skipped.append({**display, "reason": "Low confidence mapping"})
+            skip_reason = "Low confidence mapping"
+            if candidate.get("contextual_review_only"):
+                if float(owner_match.get("confidence") or 0.0) < uncertain_threshold:
+                    skip_reason = "Assignee unclear; mention who should own this and I can add it to Linear."
+                elif float(project_match.get("confidence") or 0.0) < uncertain_threshold:
+                    skip_reason = "Project unclear; mention the Linear project and I can add it."
+                elif float(team_match.get("confidence") or 0.0) < uncertain_threshold:
+                    skip_reason = "Linear team unclear; mention the team and I can add it."
+            skipped.append({**display, "reason": skip_reason})
 
         message = self._format_linear_meeting_result_message(
             created,
@@ -1710,6 +1739,7 @@ Keep the response concise but informative."""
             skipped,
             project_update=project_update,
             project_update_error=project_update_error,
+            contextual_review_mode=contextual_review_mode,
         )
         message += self._format_linear_meeting_source_warnings(source_result.warnings)
         blocks = (
@@ -1761,6 +1791,8 @@ Keep the response concise but informative."""
         thread_history: Optional[List[dict]],
         event_files: Optional[List[dict]],
         settings: Any,
+        current_message_ts: Optional[str] = None,
+        exclude_current_message: bool = False,
     ) -> SourceParseResult:
         image_parser = None
         if getattr(settings, "OPENAI_API_KEY", None):
@@ -1783,6 +1815,8 @@ Keep the response concise but informative."""
             thread_history=thread_history,
             event_files=event_files,
             image_parser=image_parser,
+            current_message_ts=current_message_ts,
+            exclude_current_message=exclude_current_message,
         )
 
     def _format_linear_meeting_source_warnings(self, warnings: list[str]) -> str:
@@ -1794,6 +1828,143 @@ Keep the response concise but informative."""
         if len(warnings) > 8:
             lines.append(f"- {len(warnings) - 8} more source note(s) omitted.")
         return "\n".join(lines)
+
+    def _apply_linear_meeting_project_hint_prepass(
+        self,
+        text: str,
+        params: dict,
+    ) -> dict:
+        if params.get("project_hint"):
+            return params
+        project_hint = self._extract_linear_meeting_project_hint_from_text(text)
+        if not project_hint:
+            return params
+        return {**params, "project_hint": project_hint}
+
+    def _extract_linear_meeting_project_hint_from_text(self, text: str) -> Optional[str]:
+        value = str(text or "").strip()
+        quoted_patterns = (
+            r'\blinear\s+project\s+(?:called|named)\s+["“]([^"”]+)["”]',
+            r'\bproject\s+(?:called|named)\s+["“]([^"”]+)["”]',
+        )
+        for pattern in quoted_patterns:
+            match = re.search(pattern, value, flags=re.IGNORECASE)
+            if match:
+                return self._clean_linear_meeting_project_hint(match.group(1))
+
+        unquoted_patterns = (
+            r'\bproject\s+(?:called|named)\s+([A-Za-z0-9][A-Za-z0-9 _/&-]{1,80}?)(?=\s+(?:and|with|please|from|as)\b|[.!?,;]|$)',
+            r'\bto\s+(?:the\s+)?linear\s+project\s+([A-Za-z0-9][A-Za-z0-9 _/&-]{1,80}?)(?=\s+(?:and|with|please|from|as)\b|[.!?,;]|$)',
+        )
+        for pattern in unquoted_patterns:
+            match = re.search(pattern, value, flags=re.IGNORECASE)
+            if match:
+                return self._clean_linear_meeting_project_hint(match.group(1))
+        return None
+
+    @staticmethod
+    def _clean_linear_meeting_project_hint(value: str) -> Optional[str]:
+        cleaned = str(value or "").strip(" \t\n\r'\"“”`")
+        return cleaned or None
+
+    def _is_linear_thread_reference_request(self, text: str, params: dict[str, Any]) -> bool:
+        normalized = str(text or "").lower()
+        if "linear" not in normalized:
+            return False
+        if self._normalize_match_text(params.get("action")) in {"threadreference", "addthread", "addthis"}:
+            return True
+        reference = r'(?:this|that|above|thread|conversation|message|discussion)'
+        return bool(
+            re.search(rf'\b(?:add|put|send|sync|create)\b.*\b{reference}\b.*\blinear\b', normalized)
+            or re.search(rf'\blinear\b.*\b(?:add|put|send|sync|create)\b.*\b{reference}\b', normalized)
+        )
+
+    async def _extract_linear_thread_context_candidate(
+        self,
+        *,
+        sources: list[ParsedSource],
+        params: dict,
+        users: list[dict[str, Any]],
+        projects: list[dict[str, Any]],
+    ) -> Optional[dict[str, Any]]:
+        source_excerpt = "\n\n".join(
+            chunk
+            for source in sources
+            for chunk in source_text_chunks(source, max_chars=5000)[:1]
+        )[:12000]
+        if len(source_excerpt.split()) < 8:
+            return None
+
+        project_names = ", ".join(
+            str(project.get("name") or project.get("slugId") or "")
+            for project in projects[:40]
+            if project.get("name") or project.get("slugId")
+        )
+        user_names = ", ".join(
+            str(user.get("displayName") or user.get("name") or user.get("email") or "")
+            for user in users[:80]
+            if user.get("displayName") or user.get("name") or user.get("email")
+        )
+        prompt = f"""Draft exactly one possible Linear issue from the referenced Slack thread.
+
+This is not a formal meeting transcript. The user asked Roo to add the thread context to Linear, so infer the likely follow-up item from the prior conversation only.
+
+Rules:
+- Return null if the thread is too vague to turn into one useful Linear issue.
+- Do not create a task called "add this to Linear" or similar.
+- For a discussion or decision, write the issue as a concrete follow-up such as "Decide ..." or "Confirm ...".
+- Infer the owner from direct address, mentions, and conversational responsibility. Prefer an exact Slack mention token like <@U123> when present.
+- Use the explicit project hint if present.
+
+Project hint: {params.get("project_hint") or "none"}
+Known Linear projects: {project_names or "none loaded"}
+Known Linear users: {user_names or "none loaded"}
+
+Referenced Slack thread:
+{source_excerpt}
+
+Return JSON only with this shape:
+{{
+  "issue": {{
+    "title": "imperative issue title",
+    "description": "one or two sentence issue description",
+    "owner_hint": "person, Slack mention, or email",
+    "project_hint": "project name if clear",
+    "team_hint": "team if clear",
+    "evidence": "short phrase from the thread",
+    "source_label": "Slack thread",
+    "confidence": 0.0
+  }}
+}}"""
+        settings = get_settings()
+        response = await chat(
+            [
+                {"role": "system", "content": "You draft one review-only Linear issue from Slack context. Return valid JSON only."},
+                {"role": "user", "content": prompt},
+            ],
+            model=getattr(settings, "LINEAR_MEETING_LLM_MODEL", "gpt-5.5"),
+            reasoning_effort=getattr(settings, "LINEAR_MEETING_LLM_REASONING_EFFORT", "low"),
+        )
+        content = response.content.strip()
+        if content.startswith("```"):
+            content = re.sub(r"^```\w*\n?", "", content)
+            content = re.sub(r"\n?```$", "", content)
+        try:
+            parsed = json.loads(content)
+        except json.JSONDecodeError:
+            return None
+        issue = parsed.get("issue") if isinstance(parsed, dict) else None
+        if not isinstance(issue, dict):
+            return None
+        candidate = self._normalize_linear_meeting_candidate(issue)
+        if not candidate.get("title"):
+            return None
+        if params.get("project_hint") and not candidate.get("project_hint"):
+            candidate["project_hint"] = str(params["project_hint"])
+        candidate["contextual_review_only"] = True
+        candidate["source_label"] = candidate.get("source_label") or "Slack thread"
+        candidate["priority"] = candidate.get("priority", 3)
+        return candidate
 
     async def _extract_linear_meeting_candidates_from_sources(
         self,
@@ -2524,6 +2695,7 @@ Extracted action candidates:
             "project": project.get("name") or "Unresolved",
             "team": team.get("key") or team.get("name") or "Unresolved",
             "source": candidate.get("source_label") or "Slack thread",
+            "evidence": candidate.get("evidence") or "",
             "confidence": confidence,
             "owner_reason": owner_match.get("reason"),
             "project_reason": project_match.get("reason"),
@@ -2556,6 +2728,7 @@ Extracted action candidates:
         *,
         project_update: Optional[dict[str, Any]] = None,
         project_update_error: Optional[str] = None,
+        contextual_review_mode: bool = False,
     ) -> str:
         lines: list[str] = []
         if project_update:
@@ -2570,6 +2743,11 @@ Extracted action candidates:
                 lines.append(f"Created Linear project update: {project_update_label}")
         elif project_update_error:
             lines.append(project_update_error)
+
+        if contextual_review_mode and review_needed:
+            if lines:
+                lines.append("")
+            lines.append("I found a possible Linear issue from this thread. Please review before I create it.")
 
         if created:
             if lines:
@@ -2619,6 +2797,8 @@ Extracted action candidates:
                 f"Project: `{item['project']}` | Assignee: `{item['assignee']}` | "
                 f"Confidence: `{item['confidence']:.0%}` | Source: `{item.get('source', 'Slack thread')}`"
             )
+            if item.get("evidence"):
+                summary += f"\nEvidence: “{item['evidence']}”"
             value = json.dumps({"pending_id": pending_id, "requested_by": user_id})
             blocks.extend([
                 {"type": "section", "text": {"type": "mrkdwn", "text": summary[:2500]}},

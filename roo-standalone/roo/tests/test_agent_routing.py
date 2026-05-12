@@ -145,6 +145,30 @@ def test_linear_file_context_routes_short_attached_file_request():
     assert skill.name == "linear-meeting-actions"
 
 
+def test_linear_thread_reference_routes_when_thread_context_exists():
+    agent = _make_agent()
+
+    for text in [
+        '@Roo add this to the Linear project called "BITGET EVENT"',
+        "add this thread to Linear project BITGET EVENT",
+        "put the above in Linear project called BITGET EVENT",
+    ]:
+        skill = agent._select_skill_from_triggers(
+            text,
+            has_thread_context=True,
+        )
+        assert skill is not None
+        assert skill.name == "linear-meeting-actions"
+
+
+def test_linear_thread_reference_does_not_route_without_context():
+    agent = _make_agent()
+
+    skill = agent._select_skill_from_triggers("add this to Linear")
+
+    assert skill is None
+
+
 def test_request_points_phrase_routes_to_points():
     agent = _make_agent()
 

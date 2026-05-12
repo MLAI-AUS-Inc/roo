@@ -73,3 +73,17 @@ def test_linear_file_context_routes_short_attached_file_request():
 
     assert skill is not None
     assert skill.name == "linear-meeting-actions"
+
+
+def test_linear_thread_reference_routes_only_with_context():
+    agent = _make_agent()
+
+    assert agent._select_skill_from_triggers("add this to Linear") is None
+
+    skill = agent._select_skill_from_triggers(
+        '@Roo add this to the Linear project called "BITGET EVENT"',
+        has_thread_context=True,
+    )
+
+    assert skill is not None
+    assert skill.name == "linear-meeting-actions"
