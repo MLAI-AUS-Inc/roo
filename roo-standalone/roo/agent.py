@@ -443,6 +443,8 @@ class RooAgent:
         has_creation_intent = bool(
             re.search(r'\b(extract|sync|turn|send|put|create|add|do|write|post|generate|summari[sz]e|tickets?|issues?|tasks?)\b', text)
         )
+        if self._looks_like_linear_direct_issue_request(text):
+            return True
         if self._looks_like_linear_project_update_request(text, has_file_context):
             return True
         if has_linear and has_meeting_source and has_creation_intent:
@@ -463,6 +465,26 @@ class RooAgent:
             re.search(r'\b(linear|meeting|transcript|summary|notes?|file|pdf|docx?|document|image|screenshot)\b', text)
         )
         return has_update_intent and has_source_context
+
+    def _looks_like_linear_direct_issue_request(self, text: str) -> bool:
+        if not re.search(r'\blinear\b', text):
+            return False
+        if re.search(r'\b(points?|rewards?|coworking|allowance|worth\s+\d+\s+points?)\b', text):
+            return False
+        if re.search(r'\bproject\s+updates?\b', text):
+            return False
+        has_creation_intent = bool(re.search(r'\b(create|add|open|file|make)\b', text))
+        has_issue_noun = bool(
+            re.search(r'\b(?:to\s*do\s+items?|todo\s+items?|tasks?|issues?|tickets?)\b', text)
+        )
+        has_linear_project = bool(
+            re.search(
+                r'\blinear\s+project\b|\bproject\s+(?:called|named)\b|'
+                r'\blinear\s+(?:tasks?|issues?|tickets?|to\s*do\s+items?)\s+(?:in|to|under)\b',
+                text,
+            )
+        )
+        return has_creation_intent and has_issue_noun and has_linear_project
 
     def _looks_like_content_follow_up(self, text: str) -> bool:
         patterns = (

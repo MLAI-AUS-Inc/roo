@@ -130,6 +130,9 @@ def test_linear_meeting_tasks_route_to_linear_meeting_actions():
         "create a project update from this PDF",
         "summarize this meeting as a Linear project update",
         "do a project update in Linear",
+        "create a to do item in the linear project 'venture studio' assign to Sonia",
+        "create an issue in Linear project Venture Studio assigned to <@U123>",
+        "add a Linear task to Venture Studio for Sonia",
     ]:
         skill = agent._select_skill_from_triggers(text)
         assert skill is not None

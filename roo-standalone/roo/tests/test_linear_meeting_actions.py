@@ -66,6 +66,36 @@ def test_linear_meeting_owner_matches_name_fallback():
     assert match["confidence"] >= 0.9
 
 
+def test_linear_meeting_owner_matches_unique_plain_first_name():
+    executor = SkillExecutor()
+
+    match = executor._match_linear_meeting_owner(
+        "Sonia",
+        [
+            {"id": "lin-user-1", "name": "Sonia Kaurah", "displayName": "sonia1", "email": "sonia@example.com"},
+            {"id": "lin-user-2", "name": "Sam Donegan", "displayName": "Sam", "email": "sam@example.com"},
+        ],
+    )
+
+    assert match["user"]["id"] == "lin-user-1"
+    assert match["confidence"] >= 0.9
+
+
+def test_linear_meeting_owner_reports_ambiguous_plain_name():
+    executor = SkillExecutor()
+
+    match = executor._match_linear_meeting_owner(
+        "Sonia",
+        [
+            {"id": "lin-user-1", "name": "Sonia Kaurah", "displayName": "sonia1", "email": "sonia@example.com"},
+            {"id": "lin-user-2", "name": "Sonia Lee", "displayName": "sonia2", "email": "sonia.lee@example.com"},
+        ],
+    )
+
+    assert match["user"] is None
+    assert "Ambiguous" in match["reason"]
+
+
 def test_linear_meeting_project_matches_explicit_hint():
     executor = SkillExecutor()
 
@@ -81,15 +111,66 @@ def test_linear_meeting_project_matches_explicit_hint():
     assert match["confidence"] >= 0.9
 
 
-def test_linear_meeting_project_hint_prepass_extracts_named_project():
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ('@Roo add this to the Linear project called “BITGET EVENT”', "BITGET EVENT"),
+        ("create a to do item in the linear project 'venture studio' assign to Sonia", "venture studio"),
+        ('create an issue in Linear project "Venture Studio" assigned to <@U123>', "Venture Studio"),
+        ("add a Linear task to Linear project Venture Studio for Sonia", "Venture Studio"),
+        ("sync this to project called BITGET EVENT please", "BITGET EVENT"),
+    ],
+)
+def test_linear_meeting_project_hint_prepass_extracts_project_forms(text, expected):
     executor = SkillExecutor()
 
-    params = executor._apply_linear_meeting_project_hint_prepass(
-        '@Roo add this to the Linear project called “BITGET EVENT”',
-        {},
+    params = executor._apply_linear_meeting_project_hint_prepass(text, {})
+
+    assert params["project_hint"] == expected
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("create a Linear issue in project Alpha assign to Sonia", "Sonia"),
+        ("create a Linear issue in project Alpha assigned to Sonia Kaurah", "Sonia Kaurah"),
+        ("create an issue in Linear project Alpha assigned to <@U123>", "<@U123>"),
+        ("add a Linear task to project Alpha for Sonia", "Sonia"),
+    ],
+)
+def test_linear_meeting_owner_hint_prepass_extracts_assignment_forms(text, expected):
+    executor = SkillExecutor()
+
+    params = executor._apply_linear_meeting_owner_hint_prepass(text, {})
+
+    assert params["owner_hint"] == expected
+
+
+def test_linear_direct_issue_body_uses_command_work_not_linear_meta_instruction():
+    executor = SkillExecutor()
+
+    body = executor._extract_linear_direct_issue_body(
+        "create a to do item in the linear project 'venture studio' to rebrand and change the name of this project. assign to Sonia",
+        {"project_hint": "venture studio", "owner_hint": "Sonia"},
     )
 
-    assert params["project_hint"] == "BITGET EVENT"
+    assert body == "rebrand and change the name of this project"
+
+
+def test_linear_direct_issue_project_hint_can_be_inferred_from_known_project():
+    executor = SkillExecutor()
+
+    project_hint = executor._infer_linear_direct_project_hint_from_known_projects(
+        "add a Linear task to Venture Studio to rename it for Sonia",
+        [{"id": "project-1", "name": "Venture Studio", "slugId": "venture-studio"}],
+    )
+    body = executor._extract_linear_direct_issue_body(
+        "add a Linear task to Venture Studio to rename it for Sonia",
+        {"project_hint": project_hint, "owner_hint": "Sonia"},
+    )
+
+    assert project_hint == "Venture Studio"
+    assert body == "rename it"
 
 
 @pytest.mark.asyncio
@@ -627,6 +708,271 @@ async def test_linear_meeting_executor_creates_issue_from_parsed_file_source(mon
     assert created_inputs[0]["project_id"] == "project-1"
     assert created_inputs[0]["label_ids"] == ["label-1"]
     assert "meeting.pdf page 3" in created_inputs[0]["description"]
+
+
+@pytest.mark.asyncio
+async def test_linear_direct_issue_command_creates_immediately(monkeypatch):
+    executor = SkillExecutor()
+    created_inputs = []
+
+    async def fake_chat(messages, **kwargs):
+        prompt = messages[-1]["content"]
+        assert "directly asking Roo to create Linear issue" in prompt
+        return SimpleNamespace(
+            content=json.dumps(
+                {
+                    "issues": [
+                        {
+                            "title": "Rebrand and rename the Venture Studio project",
+                            "description": "Rebrand and rename the project because Venture Studio is confusing and does not describe the offering.",
+                            "owner_hint": "Sonia",
+                            "project_hint": "venture studio",
+                            "evidence": "rebrand and change the name",
+                            "source_label": "Slack command",
+                            "confidence": 0.96,
+                        }
+                    ]
+                }
+            )
+        )
+
+    async def fail_meeting_extraction(**kwargs):
+        raise AssertionError("direct issue commands should not use meeting transcript extraction")
+
+    team = {"id": "team-1", "key": "MLA", "name": "MLAI"}
+    user = {"id": "user-1", "name": "Sonia Kaurah", "displayName": "sonia1", "email": "sonia@example.com"}
+    project = {
+        "id": "project-1",
+        "name": "Venture Studio",
+        "slugId": "venture-studio",
+        "teams": {"nodes": [team]},
+        "members": {"nodes": [user]},
+    }
+
+    class FakeClient:
+        async def list_teams(self):
+            return [team]
+
+        async def list_users(self):
+            return [user]
+
+        async def list_active_projects(self):
+            return [project]
+
+        async def list_issue_labels(self):
+            return []
+
+        async def list_recent_open_issues(self):
+            return []
+
+        async def create_issue(self, **kwargs):
+            created_inputs.append(kwargs)
+            return {"identifier": "MLA-123", "title": kwargs["title"], "url": "https://linear.test/MLA-123"}
+
+    class FakeSkill:
+        def get_client_class(self, name):
+            assert name == "LinearMeetingActionsClient"
+            return FakeClient
+
+    monkeypatch.setattr(executor_module, "chat", fake_chat)
+    monkeypatch.setattr(executor, "_extract_linear_meeting_candidates_from_sources", fail_meeting_extraction)
+    monkeypatch.setattr(
+        executor_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            OPENAI_API_KEY=None,
+            LINEAR_DEFAULT_TEAM=None,
+            LINEAR_MEETING_AUTO_CREATE_MIN_CONFIDENCE=0.85,
+            LINEAR_MEETING_UNCERTAIN_MIN_CONFIDENCE=0.65,
+            LINEAR_MEETING_LLM_MODEL="gpt-5.5",
+            LINEAR_MEETING_LLM_REASONING_EFFORT="low",
+        ),
+    )
+
+    result = await executor._execute_linear_meeting_actions(
+        skill=FakeSkill(),
+        text=(
+            "create a to do item in the linear project 'venture studio' to rebrand and change "
+            "the name of this project as the name 'venture studio' is confusing and doesnt "
+            "describe the offering. assign to Sonia"
+        ),
+        params={},
+        user_id="U1",
+        channel_id="C1",
+        thread_ts="1.1",
+        thread_history=[],
+    )
+
+    assert result["data"]["created_count"] == 1
+    assert created_inputs[0]["title"] == "Rebrand and rename the Venture Studio project"
+    assert created_inputs[0]["assignee_id"] == "user-1"
+    assert created_inputs[0]["project_id"] == "project-1"
+    assert created_inputs[0]["team_id"] == "team-1"
+    assert "Slack command" in created_inputs[0]["description"]
+
+
+@pytest.mark.asyncio
+async def test_linear_direct_issue_command_reports_ambiguous_project(monkeypatch):
+    executor = SkillExecutor()
+    created_inputs = []
+
+    async def fake_chat(messages, **kwargs):
+        return SimpleNamespace(
+            content=json.dumps(
+                {
+                    "issues": [
+                        {
+                            "title": "Rename Venture Studio",
+                            "description": "Rename the Venture Studio project.",
+                            "owner_hint": "Sonia",
+                            "project_hint": "venture studio",
+                            "confidence": 0.96,
+                        }
+                    ]
+                }
+            )
+        )
+
+    team = {"id": "team-1", "key": "MLA", "name": "MLAI"}
+    user = {"id": "user-1", "name": "Sonia Kaurah", "displayName": "sonia1", "email": "sonia@example.com"}
+    projects = [
+        {"id": "project-1", "name": "Venture Studio", "slugId": "venture-studio-a", "teams": {"nodes": [team]}},
+        {"id": "project-2", "name": "Venture Studio", "slugId": "venture-studio-b", "teams": {"nodes": [team]}},
+    ]
+
+    class FakeClient:
+        async def list_teams(self):
+            return [team]
+
+        async def list_users(self):
+            return [user]
+
+        async def list_active_projects(self):
+            return projects
+
+        async def list_issue_labels(self):
+            return []
+
+        async def list_recent_open_issues(self):
+            return []
+
+        async def create_issue(self, **kwargs):
+            created_inputs.append(kwargs)
+            return {"identifier": "MLA-123"}
+
+    class FakeSkill:
+        def get_client_class(self, name):
+            return FakeClient
+
+    monkeypatch.setattr(executor_module, "chat", fake_chat)
+    monkeypatch.setattr(
+        executor_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            OPENAI_API_KEY=None,
+            LINEAR_DEFAULT_TEAM=None,
+            LINEAR_MEETING_AUTO_CREATE_MIN_CONFIDENCE=0.85,
+            LINEAR_MEETING_UNCERTAIN_MIN_CONFIDENCE=0.65,
+            LINEAR_MEETING_LLM_MODEL="gpt-5.5",
+            LINEAR_MEETING_LLM_REASONING_EFFORT="low",
+        ),
+    )
+
+    result = await executor._execute_linear_meeting_actions(
+        skill=FakeSkill(),
+        text="create a to do item in the linear project 'venture studio' to rename it. assign to Sonia",
+        params={},
+        user_id="U1",
+        channel_id="C1",
+        thread_ts="1.1",
+        thread_history=[],
+    )
+
+    assert created_inputs == []
+    assert "Project unclear: multiple Linear projects matched" in result["message"]
+    assert "project: Unresolved; assignee: sonia1" in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_linear_direct_issue_command_reports_ambiguous_assignee(monkeypatch):
+    executor = SkillExecutor()
+    created_inputs = []
+
+    async def fake_chat(messages, **kwargs):
+        return SimpleNamespace(
+            content=json.dumps(
+                {
+                    "issues": [
+                        {
+                            "title": "Rename Venture Studio",
+                            "description": "Rename the Venture Studio project.",
+                            "owner_hint": "Sonia",
+                            "project_hint": "venture studio",
+                            "confidence": 0.96,
+                        }
+                    ]
+                }
+            )
+        )
+
+    team = {"id": "team-1", "key": "MLA", "name": "MLAI"}
+    users = [
+        {"id": "user-1", "name": "Sonia Kaurah", "displayName": "sonia1", "email": "sonia@example.com"},
+        {"id": "user-2", "name": "Sonia Lee", "displayName": "sonia2", "email": "sonia.lee@example.com"},
+    ]
+    project = {"id": "project-1", "name": "Venture Studio", "slugId": "venture-studio", "teams": {"nodes": [team]}}
+
+    class FakeClient:
+        async def list_teams(self):
+            return [team]
+
+        async def list_users(self):
+            return users
+
+        async def list_active_projects(self):
+            return [project]
+
+        async def list_issue_labels(self):
+            return []
+
+        async def list_recent_open_issues(self):
+            return []
+
+        async def create_issue(self, **kwargs):
+            created_inputs.append(kwargs)
+            return {"identifier": "MLA-123"}
+
+    class FakeSkill:
+        def get_client_class(self, name):
+            return FakeClient
+
+    monkeypatch.setattr(executor_module, "chat", fake_chat)
+    monkeypatch.setattr(
+        executor_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            OPENAI_API_KEY=None,
+            LINEAR_DEFAULT_TEAM=None,
+            LINEAR_MEETING_AUTO_CREATE_MIN_CONFIDENCE=0.85,
+            LINEAR_MEETING_UNCERTAIN_MIN_CONFIDENCE=0.65,
+            LINEAR_MEETING_LLM_MODEL="gpt-5.5",
+            LINEAR_MEETING_LLM_REASONING_EFFORT="low",
+        ),
+    )
+
+    result = await executor._execute_linear_meeting_actions(
+        skill=FakeSkill(),
+        text="create a to do item in the linear project 'venture studio' to rename it. assign to Sonia",
+        params={},
+        user_id="U1",
+        channel_id="C1",
+        thread_ts="1.1",
+        thread_history=[],
+    )
+
+    assert created_inputs == []
+    assert "Assignee unclear: multiple Linear users matched" in result["message"]
+    assert "project: Venture Studio; assignee: Unresolved" in result["message"]
 
 
 @pytest.mark.asyncio
