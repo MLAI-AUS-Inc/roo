@@ -33,6 +33,7 @@ This skill turns pasted Slack meeting transcripts, summaries, supported Slack fi
 - Parse Slack message/thread text and supported attached files for concrete to-do items.
 - Draft a review-only Linear issue from a discussion thread when the user asks to add "this" or "the thread" to Linear.
 - Create a Linear project update when the request explicitly asks for a project update and Roo can confidently match the project.
+- Use the latest Linear project update and recent project issues as context for concise PDF/transcript-derived project updates.
 - Download and parse `.pdf`, `.docx`, `.txt`, `.md`, `.csv`, `.png`, `.jpg`, `.jpeg`, `.webp`, and non-animated `.gif` files from the current Slack thread.
 - Inspect Linear teams, users, active projects, project members, labels, and recent open issues.
 - Assign new issues to the best matching Linear user.
@@ -55,10 +56,11 @@ This skill turns pasted Slack meeting transcripts, summaries, supported Slack fi
    - Teams
    - Users
    - Active projects with teams and members
+   - Latest project update for each active project when available
    - Issue labels
    - Recent open issues for duplicate detection
 3. Extract concrete action items into structured candidates with title, description, owner hint, project hint, due date, priority, evidence, source label, and confidence.
-4. If a project update was requested, create one for the matched Linear project.
+4. If a project update was requested, summarize all parsed source chunks, compare against the latest project update context, and create a concise Linear project update for the matched project.
 5. If no concrete action item is found but the user asked to add the thread context to Linear, draft one contextual issue and require Slack approval before creation.
 6. Match owners by Slack mention/email first, then Linear user email, then display/name similarity.
 7. Match projects by explicit project hint, name/slug similarity, and project membership context.
@@ -71,6 +73,7 @@ This skill turns pasted Slack meeting transcripts, summaries, supported Slack fi
 - Do not create an issue without a matched Linear team.
 - Do not auto-create an issue without a high-confidence assignee and project.
 - Do not auto-create contextual discussion-thread issues; always request Slack approval first.
+- Project updates are created immediately when explicitly requested and the project match is confident.
 - Apply the `meeting-action` label if it already exists. If it does not exist, create the issue without labels.
 - Issue descriptions must include the meeting context, evidence snippet, Slack source identifiers when available, and a note that Roo generated the issue from meeting notes.
 
