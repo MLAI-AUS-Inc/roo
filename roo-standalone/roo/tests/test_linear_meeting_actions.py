@@ -633,6 +633,7 @@ async def test_linear_meeting_executor_creates_issue_from_parsed_file_source(mon
 async def test_linear_meeting_executor_creates_project_update_when_requested(monkeypatch):
     executor = SkillExecutor()
     created_updates = []
+    created_issues = []
 
     async def fake_source_result(**kwargs):
         return SourceParseResult(
@@ -653,7 +654,7 @@ async def test_linear_meeting_executor_creates_project_update_when_requested(mon
                 "title": "Validate the bounty model with VCs",
                 "owner_hint": "Sonia",
                 "project_hint": "Bounties / Venture Studio",
-                "confidence": 0.8,
+                "confidence": 0.95,
             }
         ]
 
@@ -662,6 +663,12 @@ async def test_linear_meeting_executor_creates_project_update_when_requested(mon
     project = {
         "id": "project-1",
         "name": "Bounties / Venture Studio",
+        "lastUpdate": {
+            "id": "update-0",
+            "body": "Previous update",
+            "health": "atRisk",
+            "createdAt": "2026-05-01T00:00:00Z",
+        },
         "teams": {"nodes": [team]},
         "members": {"nodes": [user]},
     }
@@ -680,7 +687,7 @@ async def test_linear_meeting_executor_creates_project_update_when_requested(mon
             return []
 
         async def list_recent_open_issues(self):
-            return []
+            return [{"id": "issue-1", "identifier": "MLA-1", "title": "Existing project issue", "project": {"id": "project-1"}}]
 
         async def create_project_update(self, **kwargs):
             created_updates.append(kwargs)
@@ -691,6 +698,7 @@ async def test_linear_meeting_executor_creates_project_update_when_requested(mon
             }
 
         async def create_issue(self, **kwargs):
+            created_issues.append(kwargs)
             return {"identifier": "MLA-1", "title": kwargs["title"]}
 
     class FakeSkill:
@@ -712,6 +720,8 @@ async def test_linear_meeting_executor_creates_project_update_when_requested(mon
     monkeypatch.setattr(executor, "_build_linear_meeting_source_result", fake_source_result)
     monkeypatch.setattr(executor, "_extract_linear_meeting_candidates_from_sources", fake_candidates_from_sources)
     async def fake_project_update_input(**kwargs):
+        assert kwargs["recent_issues"][0]["identifier"] == "MLA-1"
+        assert kwargs["project"]["lastUpdate"]["id"] == "update-0"
         return {
             "project_id": "project-1",
             "body": "Meeting update",
@@ -732,7 +742,144 @@ async def test_linear_meeting_executor_creates_project_update_when_requested(mon
     )
 
     assert created_updates == [{"project_id": "project-1", "body": "Meeting update", "health": "onTrack"}]
+    assert created_issues[0]["title"] == "Validate the bounty model with VCs"
     assert "Created Linear project update" in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_linear_project_update_writer_uses_chunk_summaries_last_update_and_recent_issues(monkeypatch):
+    executor = SkillExecutor()
+    prompts = []
+
+    async def fake_chat(messages, **kwargs):
+        prompt = messages[-1]["content"]
+        prompts.append(prompt)
+        if prompt.startswith("Summarize this meeting-notes chunk"):
+            return SimpleNamespace(content="- Work done\n- Finished partner outreach.\n- Decisions\n- Keep launch scope tight.")
+        return SimpleNamespace(
+            content=json.dumps(
+                {
+                    "body": "## Summary\nPartner outreach moved forward.\n\n## Work done since last update\nFinished outreach.\n\n## Decisions made\nKeep launch scope tight.\n\n## Risks / open questions\nNone noted.\n\n## Next steps\nConfirm launch comms.",
+                    "health": "atRisk",
+                }
+            )
+        )
+
+    monkeypatch.setattr(executor_module, "chat", fake_chat)
+
+    project = {
+        "id": "project-1",
+        "name": "BITGET EVENT",
+        "lastUpdate": {
+            "id": "update-1",
+            "body": "Previous update body: venue was still open.",
+            "health": "onTrack",
+            "createdAt": "2026-05-01T00:00:00Z",
+            "user": {"displayName": "Yana"},
+        },
+    }
+    result = await executor._build_linear_meeting_project_update_input(
+        sources=[
+            ParsedSource(label="meeting.pdf page 1", text="The team finished partner outreach.", kind="pdf"),
+            ParsedSource(label="meeting.pdf page 2", text="Decision: keep launch scope tight.", kind="pdf"),
+        ],
+        params={},
+        project=project,
+        candidates=[{"title": "Confirm launch comms", "owner_hint": "Yana"}],
+        recent_issues=[
+            {
+                "identifier": "MKT-7",
+                "title": "Prepare launch comms",
+                "project": {"id": "project-1"},
+                "state": {"name": "In Progress"},
+                "assignee": {"displayName": "Yana"},
+            }
+        ],
+        settings=SimpleNamespace(LINEAR_MEETING_LLM_MODEL="gpt-5.5", LINEAR_MEETING_LLM_REASONING_EFFORT="low"),
+    )
+
+    assert result["project_id"] == "project-1"
+    assert result["health"] == "atRisk"
+    assert result["body"].endswith("_Generated by Roo from Slack meeting notes._")
+    assert len(prompts) == 3
+    final_prompt = prompts[-1]
+    assert "Previous update body" in final_prompt
+    assert "MKT-7: Prepare launch comms" in final_prompt
+    assert "Finished partner outreach" in final_prompt
+    assert "Confirm launch comms" in final_prompt
+
+
+@pytest.mark.asyncio
+async def test_linear_project_update_skips_when_project_match_low_confidence(monkeypatch):
+    executor = SkillExecutor()
+    created_updates = []
+
+    async def fake_source_result(**kwargs):
+        return SourceParseResult(
+            sources=[
+                ParsedSource(
+                    label="meeting.pdf",
+                    text="The team discussed event positioning and follow-up work.",
+                    kind="pdf",
+                )
+            ],
+            files_seen=1,
+            files_parsed=1,
+        )
+
+    async def no_candidates(**kwargs):
+        return []
+
+    class FakeClient:
+        async def list_teams(self):
+            return [{"id": "team-1", "key": "MKT", "name": "Marketing"}]
+
+        async def list_users(self):
+            return []
+
+        async def list_active_projects(self):
+            return [{"id": "project-1", "name": "Unrelated Product", "teams": {"nodes": [{"id": "team-1"}]}}]
+
+        async def list_issue_labels(self):
+            return []
+
+        async def list_recent_open_issues(self):
+            return []
+
+        async def create_project_update(self, **kwargs):
+            created_updates.append(kwargs)
+            return {"id": "update-1"}
+
+    class FakeSkill:
+        def get_client_class(self, name):
+            assert name == "LinearMeetingActionsClient"
+            return FakeClient
+
+    monkeypatch.setattr(
+        executor_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            LINEAR_DEFAULT_TEAM=None,
+            LINEAR_MEETING_AUTO_CREATE_MIN_CONFIDENCE=0.85,
+            LINEAR_MEETING_UNCERTAIN_MIN_CONFIDENCE=0.65,
+        ),
+    )
+    monkeypatch.setattr(executor, "_build_linear_meeting_source_result", fake_source_result)
+    monkeypatch.setattr(executor, "_extract_linear_meeting_candidates_from_sources", no_candidates)
+
+    result = await executor._execute_linear_meeting_actions(
+        skill=FakeSkill(),
+        text="create a project update from this PDF",
+        params={},
+        user_id="U1",
+        channel_id="C1",
+        thread_ts="1.1",
+        thread_history=[],
+        event_files=[{"id": "F1", "name": "meeting.pdf"}],
+    )
+
+    assert created_updates == []
+    assert "could not confidently match the Linear project" in result["message"]
 
 
 @pytest.mark.asyncio

@@ -127,6 +127,9 @@ def test_linear_meeting_tasks_route_to_linear_meeting_actions():
         "sync meeting notes to Linear project Alpha",
         "send this PDF to Linear as tasks",
         "create Linear issues from this image",
+        "create a project update from this PDF",
+        "summarize this meeting as a Linear project update",
+        "do a project update in Linear",
     ]:
         skill = agent._select_skill_from_triggers(text)
         assert skill is not None

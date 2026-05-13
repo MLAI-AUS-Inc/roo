@@ -441,8 +441,10 @@ class RooAgent:
             )
         ) or has_file_context
         has_creation_intent = bool(
-            re.search(r'\b(extract|sync|turn|send|put|create|add|tickets?|issues?|tasks?)\b', text)
+            re.search(r'\b(extract|sync|turn|send|put|create|add|do|write|post|generate|summari[sz]e|tickets?|issues?|tasks?)\b', text)
         )
+        if self._looks_like_linear_project_update_request(text, has_file_context):
+            return True
         if has_linear and has_meeting_source and has_creation_intent:
             return True
         return (
@@ -450,6 +452,17 @@ class RooAgent:
             and (has_file_context or has_thread_context)
             and self._looks_like_linear_thread_reference_request(text)
         )
+
+    def _looks_like_linear_project_update_request(self, text: str, has_file_context: bool = False) -> bool:
+        if not re.search(r'\bproject\s+updates?\b', text):
+            return False
+        has_update_intent = bool(
+            re.search(r'\b(create|do|write|post|generate|draft|summari[sz]e|make)\b', text)
+        )
+        has_source_context = has_file_context or bool(
+            re.search(r'\b(linear|meeting|transcript|summary|notes?|file|pdf|docx?|document|image|screenshot)\b', text)
+        )
+        return has_update_intent and has_source_context
 
     def _looks_like_content_follow_up(self, text: str) -> bool:
         patterns = (
