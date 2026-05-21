@@ -55,6 +55,36 @@ WRITE_PATTERNS = (
 CONTENT_TARGET_PATTERN = re.compile(
     r"\b(?:repo(?:sitory)?|codebase|domain|site|website|project|app)\b"
 )
+AGENDA_ADD_PATTERNS = (
+    r"\badd\s+(?:this\s+|that\s+|it\s+)?(?:to\s+(?:the\s+)?(?:committee\s+|meeting\s+)?agenda)\b",
+    r"\bput\s+(?:this\s+|that\s+|it\s+)?on\s+(?:the\s+)?(?:committee\s+|meeting\s+)?agenda\b",
+    r"\b(?:committee|meeting)\s+agenda\b",
+    r"\bagenda\s+item\b",
+    r"\b(?:raise|bring|discuss)\b.*\b(?:at|in)\s+(?:the\s+)?(?:next\s+)?(?:committee\s+)?meeting\b",
+    r"\b(?:add|put|create)\b.*\bagenda\b",
+)
+AGENDA_COMPLETE_PATTERNS = (
+    r"\bagenda\s+(?:complete|completed|done|resolved|finished)\b",
+    r"\bmark\b.*\bagenda\b.*\b(?:complete|completed|done|resolved|finished)\b",
+    r"\b(?:complete|completed|done|resolved|finished)\b.*\bagenda\s+item\b",
+    r"\bclose\s+(?:this\s+|that\s+|the\s+)?agenda\s+item\b",
+    r"\bagenda\s+item\b.*\bclosed?\b",
+)
+AGENDA_REMOVE_PATTERNS = (
+    r"\bremove\s+(?:this\s+|that\s+|the\s+)?agenda\s+item\b",
+    r"\bdelete\s+(?:this\s+|that\s+|the\s+)?agenda\s+item\b",
+    r"\bdrop\s+(?:this\s+|that\s+|the\s+)?agenda\s+item\b",
+    r"\bagenda\s+item\b.*\bremoved?\b",
+)
+AGENDA_CLEANUP_PATTERNS = (
+    r"\bagenda\s+cleanup\b",
+    r"\bclean(?:\s+|-)?up\s+(?:the\s+)?(?:completed\s+)?agenda\b",
+    r"\bremove\s+(?:all\s+)?completed\s+agenda\s+items?\b",
+    r"\bclear\s+(?:out\s+)?(?:the\s+)?completed\s+agenda\s+items?\b",
+    r"\barchive\s+(?:the\s+)?completed\s+agenda\s+items?\b",
+    r"\bpurge\s+(?:the\s+)?completed\s+agenda\b",
+)
+
 GITHUB_AUTH_PATTERNS = (
     r"\bgithub\s+integration\b",
     r"\b(?:re-?connect|connect|authori[sz]e|link|install|fix)\b.*\bgithub\b",
@@ -184,6 +214,21 @@ def parse_routing_intent(
     )
     domain = explicit_domain or (thread_domain if references_thread_domain else None)
     action = detect_content_action(normalized)
+
+    if any(re.search(pattern, text_lower) for pattern in AGENDA_CLEANUP_PATTERNS):
+        return {"skill_name": "committee-agenda", "params": {"action": "cleanup"}}
+
+    if any(re.search(pattern, text_lower) for pattern in AGENDA_REMOVE_PATTERNS):
+        return {
+            "skill_name": "committee-agenda",
+            "params": {"action": "complete", "remove": True},
+        }
+
+    if any(re.search(pattern, text_lower) for pattern in AGENDA_COMPLETE_PATTERNS):
+        return {"skill_name": "committee-agenda", "params": {"action": "complete"}}
+
+    if any(re.search(pattern, text_lower) for pattern in AGENDA_ADD_PATTERNS):
+        return {"skill_name": "committee-agenda", "params": {"action": "add"}}
 
     if any(re.search(pattern, text_lower) for pattern in GITHUB_AUTH_PATTERNS):
         params: Dict[str, Any] = {}

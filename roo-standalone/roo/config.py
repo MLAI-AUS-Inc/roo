@@ -75,6 +75,11 @@ class Settings(BaseSettings):
     JOBS_RETRY_DELAY_SECONDS: int = 300
     JOBS_FAILURE_STOP_AFTER_DAYS: int = 3
 
+    # Committee meeting agenda
+    COMMITTEE_AGENDA_CHANNEL_ID: Optional[str] = None
+    COMMITTEE_AGENDA_CHANNEL_NAME: str = "committee-agenda"
+    COMMITTEE_AGENDA_SECOND_EMOJI: str = "+1"
+
     @property
     def default_llm_provider(self) -> str:
         """Determine default LLM provider based on available keys."""

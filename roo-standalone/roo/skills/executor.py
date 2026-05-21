@@ -170,6 +170,17 @@ class SkillExecutor:
                 result = await self._execute_medhack(skill, text, params, user_id, channel_id, thread_ts, thread_history)
             elif skill.name == "luma-events":
                 result = await self._execute_luma_events(skill, text, params, user_id, channel_id, thread_ts)
+            elif skill.name == "committee-agenda":
+                result = await self._execute_committee_agenda(
+                    skill,
+                    text,
+                    params,
+                    user_id,
+                    channel_id,
+                    thread_ts,
+                    thread_history,
+                    kwargs.get("current_message_ts"),
+                )
             else:
                 # Generic LLM-based execution
                 result = await self._execute_with_llm(skill, text, params, user_id, thread_history)
@@ -4400,6 +4411,194 @@ Chunk {index} source: {label}
             }
         ]
     
+    async def _execute_committee_agenda(
+        self,
+        skill: Skill,
+        text: str,
+        params: dict,
+        user_id: str,
+        channel_id: Optional[str],
+        thread_ts: Optional[str],
+        thread_history: Optional[List[dict]],
+        current_message_ts: Optional[str],
+    ) -> Any:
+        """Handle add / complete / cleanup actions for the agenda skill."""
+        client_class = skill.get_client_class("CommitteeAgendaClient")
+        if client_class is None:
+            return (
+                "The committee-agenda skill is missing its implementation. "
+                "Ask an admin to check `skills/committee_agenda/client.py`."
+            )
+        agenda_client = client_class()
+        action = str(params.get("action") or "add").strip().lower()
+
+        if action in {"complete", "remove"}:
+            return await self._execute_committee_agenda_complete(
+                agenda_client,
+                params,
+                user_id,
+                channel_id,
+                thread_ts,
+                remove=bool(params.get("remove")) or action == "remove",
+            )
+
+        if action == "cleanup":
+            return await self._execute_committee_agenda_cleanup(
+                agenda_client, params, user_id
+            )
+
+        title = str(params.get("title") or "").strip()
+        description = str(params.get("description") or "").strip()
+        if not title:
+            inferred_title, inferred_description = self._infer_agenda_fields(
+                text, thread_history, current_message_ts
+            )
+            title = title or inferred_title
+            if not description:
+                description = inferred_description
+
+        if not title:
+            return (
+                "I couldn't figure out a title for the agenda item. "
+                "Try `@Roo add to agenda: <short topic>` and I'll take it from there."
+            )
+
+        source_message_ts = current_message_ts or thread_ts
+        result = agenda_client.submit_item(
+            title=title,
+            description=description,
+            urgency=str(params.get("urgency") or "normal"),
+            proposer_user_id=user_id,
+            source_channel_id=channel_id,
+            source_message_ts=source_message_ts,
+        )
+        return result.message
+
+    async def _execute_committee_agenda_complete(
+        self,
+        agenda_client: Any,
+        params: dict,
+        user_id: str,
+        channel_id: Optional[str],
+        thread_ts: Optional[str],
+        *,
+        remove: bool,
+    ) -> str:
+        denial = await self._committee_agenda_admin_denial(
+            user_id, "close or remove agenda items"
+        )
+        if denial:
+            return denial
+
+        if not thread_ts:
+            return (
+                "To close or remove an agenda item, reply in its thread in the "
+                "committee agenda channel and tag me with `@Roo agenda complete`."
+            )
+
+        result = agenda_client.complete_item(
+            item_channel_id=channel_id,
+            item_ts=thread_ts,
+            completed_by_user_id=user_id,
+            remove=remove,
+            reason=str(params.get("reason") or ""),
+        )
+        return result.message
+
+    async def _execute_committee_agenda_cleanup(
+        self,
+        agenda_client: Any,
+        params: dict,
+        user_id: str,
+    ) -> str:
+        denial = await self._committee_agenda_admin_denial(
+            user_id, "clean up completed agenda items"
+        )
+        if denial:
+            return denial
+
+        try:
+            limit = int(params.get("limit") or 200)
+        except (TypeError, ValueError):
+            limit = 200
+        result = agenda_client.cleanup_completed_items(
+            initiator_user_id=user_id,
+            limit=max(1, min(limit, 1000)),
+        )
+        return result.message
+
+    async def _committee_agenda_admin_denial(
+        self, user_id: str, action_label: str
+    ) -> Optional[str]:
+        """Return a denial string if user isn't a committee admin, else None."""
+        try:
+            from ..clients.mlai_backend import MLAIBackendClient
+
+            backend = MLAIBackendClient()
+            admin_details = await backend.get_admin_details(user_id)
+        except Exception as exc:
+            print(f"⚠️ Failed to resolve admin details for {user_id}: {exc}")
+            return (
+                "I couldn't verify your committee permissions just now. "
+                "Try again in a moment, or ping an admin."
+            )
+        if self._is_full_points_admin_details(admin_details):
+            return None
+        return (
+            f"Sorry mate, only committee admins can {action_label}. "
+            "If you reckon you should have access, have a chat with the committee. 🔒"
+        )
+
+    @staticmethod
+    def _infer_agenda_fields(
+        text: str,
+        thread_history: Optional[List[dict]],
+        current_message_ts: Optional[str],
+    ) -> tuple[str, str]:
+        """Pull a title (and optional description) from the user's text + thread."""
+        cleaned = re.sub(
+            r"^\s*(?:hey\s+)?(?:@?roo[,:\s]*)?",
+            "",
+            str(text or ""),
+            flags=re.IGNORECASE,
+        ).strip()
+        cleaned = re.sub(
+            r"^(?:please\s+)?(?:can\s+you\s+)?(?:also\s+)?",
+            "",
+            cleaned,
+            flags=re.IGNORECASE,
+        ).strip()
+        cleaned = re.sub(
+            r"^(?:add|put|create|raise|bring\s+up|discuss)\b\s*"
+            r"(?:this\s+|that\s+|it\s+)?"
+            r"(?:to\s+(?:the\s+)?(?:committee\s+|meeting\s+)?agenda|"
+            r"on\s+(?:the\s+)?(?:committee\s+|meeting\s+)?agenda|"
+            r"as\s+(?:an\s+)?agenda\s+item|"
+            r"at\s+(?:the\s+)?(?:next\s+)?(?:committee\s+)?meeting)\b\s*[:\-]?\s*",
+            "",
+            cleaned,
+            flags=re.IGNORECASE,
+        ).strip(" :;-")
+        cleaned = re.sub(r"\bagenda\s+item\b\s*[:\-]?\s*", "", cleaned, flags=re.IGNORECASE).strip()
+
+        title = cleaned
+        description = ""
+        if not title and thread_history:
+            current_ts = str(current_message_ts or "").strip()
+            for msg in thread_history:
+                if msg.get("is_bot") or msg.get("bot_id"):
+                    continue
+                if current_ts and str(msg.get("ts") or "").strip() == current_ts:
+                    continue
+                msg_text = str(msg.get("text") or "").strip()
+                if msg_text:
+                    title = msg_text
+                    break
+        if title and len(title) > 120:
+            description = title
+            title = title[:117].rstrip() + "…"
+        return title, description
+
     async def _execute_content_factory(
         self,
         skill: Skill,
