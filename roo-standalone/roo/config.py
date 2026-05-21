@@ -67,6 +67,7 @@ class Settings(BaseSettings):
     JOBS_SCHEDULE_MINUTE: int = 0
     JOBS_COLLECT_LIVE: bool = True
     JOBS_POST_TO_SLACK: bool = False
+    JOBS_SLACK_CHANNEL: Optional[str] = None
     JOBS_POST_TO_NOTION: bool = True
     JOBS_MAX_PAGES: Optional[int] = 1
     JOBS_PER_KEYWORD_LIMIT: Optional[int] = 5

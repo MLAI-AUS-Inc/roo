@@ -1297,13 +1297,16 @@ def _build_jobs_status_url(base_api_url: str, status_url: Optional[str]) -> Opti
 
 
 def _build_jobs_trigger_payload(settings: Settings) -> dict[str, Any]:
-    return {
+    payload: dict[str, Any] = {
         "collect_live": settings.JOBS_COLLECT_LIVE,
         "post_to_slack": settings.JOBS_POST_TO_SLACK,
         "post_to_notion": settings.JOBS_POST_TO_NOTION,
         "max_pages": settings.JOBS_MAX_PAGES,
         "per_keyword_limit": settings.JOBS_PER_KEYWORD_LIMIT,
     }
+    if settings.JOBS_SLACK_CHANNEL:
+        payload["slack_channel"] = settings.JOBS_SLACK_CHANNEL
+    return payload
 
 
 def _make_mlai_backend_client():
@@ -1339,6 +1342,8 @@ def _validate_jobs_scheduler_settings(settings: Settings) -> None:
         raise ValueError("JOBS_RETRY_DELAY_SECONDS must be at least 1")
     if settings.JOBS_FAILURE_STOP_AFTER_DAYS < 1:
         raise ValueError("JOBS_FAILURE_STOP_AFTER_DAYS must be at least 1")
+    if settings.JOBS_POST_TO_SLACK and not settings.JOBS_SLACK_CHANNEL:
+        print("Warning: JOBS_POST_TO_SLACK is enabled but JOBS_SLACK_CHANNEL is not set; backend default channel will be used")
 
 
 async def _trigger_jobs_daily_run_request() -> dict[str, Any]:
