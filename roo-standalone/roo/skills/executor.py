@@ -6123,6 +6123,20 @@ Chunk {index} source: {label}
             return "request_points"
 
         if action in [
+            "coworking_leaderboard",
+            "leaderboard",
+            "coworking_championship",
+            "coworking_championships",
+            "championship",
+            "championships",
+            "coworking_ranking",
+            "ranking",
+        ]:
+            return "coworking_leaderboard"
+        if self._is_coworking_leaderboard_request(text, params):
+            return "coworking_leaderboard"
+
+        if action in [
             "coworking_report",
             "report_coworking",
             "coworking_summary",
@@ -7496,6 +7510,143 @@ Chunk {index} source: {label}
         context = self._build_coworking_analysis_context("coworking report", report, None, None)
         return self._format_coworking_analysis_fallback(context)
 
+    def _is_coworking_leaderboard_request(self, text: str, params: dict) -> bool:
+        """Detect public coworking leaderboard / MLAI Championships requests."""
+        text_lower = self._normalize_points_routing_text(text)
+
+        if re.search(r"\bmlai\s+championships?\b", text_lower):
+            return True
+        if re.search(r"\bchampionships?\b", text_lower) and "coworking" in text_lower:
+            return True
+        if re.search(r"\bleaderboard\b", text_lower) and "coworking" in text_lower:
+            return True
+        if re.search(
+            r"\bwho(?:'s|s|\s+is|\s+has|'s\s+been|s\s+been|\s+been|\s+came|\s+came\s+in|\s+came\s+in\s+the|\s+coming\s+in)\b.*\b(?:most|the\s+most)\b",
+            text_lower,
+        ):
+            return True
+        if re.search(r"\bwho\s+came\s+in\b", text_lower):
+            return True
+        if re.search(r"\bwho(?:'s|s|\s+is|\s+has|'s\s+been|s\s+been)\s+(?:been\s+)?coming\s+in\b", text_lower):
+            return True
+        if re.search(r"\bmost\s+active\b", text_lower) and "coworking" in text_lower:
+            return True
+        if re.search(r"\btop\s+(?:\d{1,3}\s+)?members?\b", text_lower) and any(
+            word in text_lower for word in ("coworking", "week", "month")
+        ):
+            return True
+        return False
+
+    def _parse_leaderboard_limit(self, text: str, params: dict, *, default: int = 5, cap: int = 25) -> int:
+        """Parse leaderboard size from params or text (clamps to 1..cap)."""
+        raw_limit = params.get("limit") or params.get("top")
+        if raw_limit is not None:
+            try:
+                limit = int(raw_limit)
+                return max(1, min(cap, limit))
+            except (TypeError, ValueError):
+                pass
+
+        match = re.search(r"\btop\s+(\d{1,3})\b", str(text or "").lower())
+        if match:
+            limit = int(match.group(1))
+            return max(1, min(cap, limit))
+        return default
+
+    def _coworking_leaderboard_label(self, text: str, start_date: str, end_date: str) -> str:
+        """Friendly label for the leaderboard range header."""
+        text_lower = text.lower()
+        if re.search(r"\blast\s+week\b", text_lower):
+            return "last week"
+        if re.search(r"\bthis\s+week\b", text_lower):
+            return "this week"
+        if re.search(r"\blast\s+month\b", text_lower):
+            return "last month"
+        if re.search(r"\blast\s+3\s+months?\b", text_lower):
+            return "last 3 months"
+        if re.search(r"\blast\s+6\s+months?\b", text_lower):
+            return "last 6 months"
+        if re.search(r"\b(?:last|past)\s+(?:1\s+)?years?\b", text_lower) or re.search(
+            r"\blast\s+12\s+months?\b",
+            text_lower,
+        ):
+            return "last year"
+        if re.search(r"\blast\s+7\s+days?\b", text_lower):
+            return "last 7 days"
+        return f"{start_date} → {end_date}"
+
+    def _format_coworking_leaderboard(self, report: dict, range_label: str, limit: int) -> str:
+        """Render the MLAI Championships coworking leaderboard for Slack.
+
+        Uses standard competition ranking: ties share the lower index's rank/medal,
+        and the next rank is skipped accordingly (e.g., 5, 4, 4, 4 -> 🥇, 🥈, 🥈, 4.).
+        """
+        report_range = report.get("range") or {}
+        totals = report.get("totals") or {}
+        start_date = report_range.get("start_date") or ""
+        end_date = report_range.get("end_date") or ""
+
+        users = list(report.get("users") or [])
+        header = f"🏆 MLAI Championships — {range_label}"
+        range_line = f"Range: {start_date} to {end_date}"
+
+        if not users:
+            return (
+                f"{header}\n"
+                f"{range_line}\n\n"
+                "No coworking bookings in that range yet — be the first to claim the title! 🏆"
+            )
+
+        cleaned = []
+        for entry in users:
+            slack_id = str(entry.get("slack_user_id") or entry.get("user_id") or "").strip()
+            if not slack_id:
+                continue
+            slack_id = re.sub(r"[<@>]", "", slack_id)
+            try:
+                count = int(entry.get("booking_count", 0) or 0)
+            except (TypeError, ValueError):
+                count = 0
+            cleaned.append((slack_id, count))
+
+        if not cleaned:
+            return (
+                f"{header}\n"
+                f"{range_line}\n\n"
+                "No coworking bookings in that range yet — be the first to claim the title! 🏆"
+            )
+
+        cleaned.sort(key=lambda item: (-item[1], item[0]))
+        capped_limit = max(1, min(25, int(limit or 5)))
+        shown = cleaned[:capped_limit]
+
+        medals = {1: "🥇", 2: "🥈", 3: "🥉"}
+        rows: list[str] = []
+        rank = 0
+        previous_count: Optional[int] = None
+        for index, (slack_id, count) in enumerate(shown, start=1):
+            if previous_count is None or count != previous_count:
+                rank = index
+            previous_count = count
+            day_word = "day" if count == 1 else "days"
+            if rank in medals:
+                rows.append(f"{medals[rank]} <@{slack_id}>  {count} {day_word}")
+            else:
+                rows.append(f"{rank:>2}. <@{slack_id}>  {count} {day_word}")
+
+        unique_users = int(totals.get("unique_users", len(cleaned)) or 0)
+        booked_user_days = int(
+            totals.get("booked_user_days", sum(count for _, count in cleaned)) or 0
+        )
+        member_word = "member" if unique_users == 1 else "members"
+        day_word = "user-day" if booked_user_days == 1 else "user-days"
+        footer = (
+            f"🎉 {unique_users} {member_word} showed up across "
+            f"{booked_user_days} {day_word} — keep it up!"
+        )
+
+        return "\n".join([header, range_line, "", *rows, "", footer])
+
     def _resolve_coworking_booking_date(
         self,
         params: dict,
@@ -8057,6 +8208,34 @@ Chunk {index} source: {label}
                 comparison_range,
             )
             return await self._format_coworking_analysis_response(context)
+
+        elif action == "coworking_leaderboard":
+            from ..clients.mlai_backend import MLAIBackendUnavailableError
+
+            start_date, end_date, error = self._resolve_coworking_report_range(text, params)
+            if error:
+                from ..utils import get_current_date
+
+                today = get_current_date()
+                start_date = (today - timedelta(days=6)).isoformat()
+                end_date = today.isoformat()
+
+            try:
+                report = await client.get_coworking_report(
+                    user_id,
+                    start_date,
+                    end_date,
+                    include_users=True,
+                )
+            except MLAIBackendUnavailableError:
+                return (
+                    "The MLAI Championships leaderboard isn't available right now — "
+                    "the points backend is taking a quick breather. Try again in a moment."
+                )
+
+            range_label = self._coworking_leaderboard_label(text, start_date, end_date)
+            limit = self._parse_leaderboard_limit(text, params)
+            return self._format_coworking_leaderboard(report, range_label, limit)
 
         elif action == "admin_checkin_coworking":
             from ..slack_client import get_bot_user_id

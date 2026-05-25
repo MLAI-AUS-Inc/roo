@@ -371,6 +371,12 @@ class RooAgent:
             r'\bcreate\s+(?:a\s+)?task\b',
             r'\btask\s+create\b',
             r'\bworth\s+\d+\s+points?\b',
+            r'\bmlai\s+championships?\b',
+            r'\bleaderboard\b',
+            r'\bwho\s+came\s+in\b',
+            r"\bwho(?:'s|s)?\s+been\s+in\b",
+            r'\btop\s+(?:\d{1,3}\s+)?members?\b',
+            r'\bmost\s+active\b',
         )
         return any(re.search(pattern, text) for pattern in patterns)
 

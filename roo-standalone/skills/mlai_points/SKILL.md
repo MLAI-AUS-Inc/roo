@@ -20,6 +20,10 @@ trigger_keywords:
   - pay for points
   - add points
   - add roo points
+  - leaderboard
+  - championship
+  - championships
+  - mlai championships
 ---
 
 # MLAI Points System Skill

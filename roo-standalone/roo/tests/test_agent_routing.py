@@ -227,6 +227,25 @@ def test_luma_attendee_csv_phrase_routes_to_luma_events():
         assert skill.name == "luma-events"
 
 
+def test_coworking_leaderboard_phrases_route_to_points():
+    agent = _make_agent()
+
+    for text in [
+        "MLAI championships this week",
+        "mlai championship last week",
+        "coworking leaderboard",
+        "leaderboard for coworking",
+        "who came in the most last week",
+        "who's been in the most this month",
+        "top 10 members this month",
+        "top members this week",
+        "most active coworking this week",
+    ]:
+        skill = agent._select_skill_from_triggers(text)
+        assert skill is not None, f"no skill matched for: {text!r}"
+        assert skill.name == "mlai-points", f"wrong skill for {text!r}: {skill.name}"
+
+
 def test_coworking_report_wording_routes_to_points():
     agent = _make_agent()
 

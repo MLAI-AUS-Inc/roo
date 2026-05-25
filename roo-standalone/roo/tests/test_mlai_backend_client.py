@@ -167,6 +167,73 @@ async def test_get_coworking_report_uses_canonical_endpoint(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_get_coworking_report_include_users_sets_query_flag(monkeypatch):
+    captured = {}
+
+    async def fake_request(method, endpoint, **kwargs):
+        captured["method"] = method
+        captured["endpoint"] = endpoint
+        captured["params"] = kwargs["params"]
+        request = httpx.Request(method, f"https://backend.test{endpoint}")
+        return httpx.Response(
+            200,
+            request=request,
+            json={
+                "totals": {"booked_user_days": 3, "unique_users": 2},
+                "users": [
+                    {"slack_user_id": "U123", "booking_count": 2},
+                    {"slack_user_id": "U456", "booking_count": 1},
+                ],
+            },
+        )
+
+    client = MLAIBackendClient(
+        base_url="https://backend.test",
+        api_key="roo-api-key",
+        internal_api_key="roo-api-key",
+    )
+    monkeypatch.setattr(client, "_request", fake_request)
+
+    result = await client.get_coworking_report(
+        "<@U123>",
+        "2026-01-01",
+        "2026-01-31",
+        include_users=True,
+    )
+
+    assert captured["method"] == "GET"
+    assert captured["endpoint"] == "/api/v1/points/coworking/report/"
+    assert captured["params"] == {
+        "slack_user_id": "U123",
+        "start_date": "2026-01-01",
+        "end_date": "2026-01-31",
+        "include_users": "true",
+    }
+    assert result["users"][0]["slack_user_id"] == "U123"
+
+
+@pytest.mark.asyncio
+async def test_get_coworking_report_omits_include_users_flag_by_default(monkeypatch):
+    captured = {}
+
+    async def fake_request(method, endpoint, **kwargs):
+        captured["params"] = kwargs["params"]
+        request = httpx.Request(method, f"https://backend.test{endpoint}")
+        return httpx.Response(200, request=request, json={"totals": {}})
+
+    client = MLAIBackendClient(
+        base_url="https://backend.test",
+        api_key="roo-api-key",
+        internal_api_key="roo-api-key",
+    )
+    monkeypatch.setattr(client, "_request", fake_request)
+
+    await client.get_coworking_report("U123", "2026-01-01", "2026-01-31")
+
+    assert "include_users" not in captured["params"]
+
+
+@pytest.mark.asyncio
 async def test_create_points_purchase_sends_slack_origin(monkeypatch):
     captured = {}
 
