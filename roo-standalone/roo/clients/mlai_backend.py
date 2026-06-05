@@ -2519,4 +2519,46 @@ class MLAIBackendClient:
             print(f"⚠️ MedHack create announcement error: {e}")
             return None
 
+    async def generic_hackathon_create_announcement(
+        self,
+        slug: str,
+        title: str,
+        body: str,
+        requester_slack_id: str,
+        author_slack_id: Optional[str] = None,
+    ) -> Optional[dict]:
+        """Create an announcement on a generic hackathon website (e.g. Watt The Hack).
+
+        Args:
+            slug: Hackathon slug (e.g. "watt-the-hack")
+            title: Announcement title
+            body: Announcement body text
+            requester_slack_id: Slack ID of the human requesting the announcement.
+                The backend authorises this against Django superusers.
+            author_slack_id: Slack ID to attribute as the author (Roo's bot id).
+
+        Returns:
+            Response dict on success (201), an error dict with ``status_code`` on
+            a non-201 response, or None on a transport error.
+        """
+        try:
+            response = await self._request(
+                "POST",
+                f"/api/v1/hackathons/{slug}/app/announcements/",
+                json={
+                    "title": title,
+                    "body": body,
+                    "requester_slack_id": requester_slack_id,
+                    "slack_user_id": author_slack_id,
+                },
+                timeout=10.0,
+                circuit_breaker=True,
+            )
+            if response.status_code == 201:
+                return response.json()
+            return {"status_code": response.status_code, "detail": response.text}
+        except Exception as e:
+            print(f"⚠️ Generic hackathon create announcement error: {e}")
+            return None
+
     # End of MLAIBackendClient
