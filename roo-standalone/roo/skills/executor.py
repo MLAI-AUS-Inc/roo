@@ -168,6 +168,8 @@ class SkillExecutor:
                 result = await self._execute_tone_of_voice(skill, text, params, user_id)
             elif skill.name == "medhack":
                 result = await self._execute_medhack(skill, text, params, user_id, channel_id, thread_ts, thread_history)
+            elif skill.name == "watt-the-hack":
+                result = await self._execute_watt_the_hack(skill, text, params, user_id, channel_id, thread_ts, thread_history)
             elif skill.name == "luma-events":
                 result = await self._execute_luma_events(skill, text, params, user_id, channel_id, thread_ts)
             else:
@@ -882,6 +884,110 @@ Original text:
             # The MedHack client will handle missing users gracefully with local fallback
             print(f"⚠️ Failed to register user {user_id}: {e}")
             print(f"   MedHack will continue with local JSON fallback")
+
+    async def _execute_watt_the_hack(
+        self,
+        skill: Skill,
+        text: str,
+        params: dict,
+        user_id: str,
+        channel_id: Optional[str] = None,
+        thread_ts: Optional[str] = None,
+        thread_history: Optional[List[dict]] = None,
+    ) -> str:
+        """Execute the Watt The Hack skill: publish announcements to the site.
+
+        Authorisation is delegated to the backend — only Slack users who map to
+        an MLAI Django superuser may publish. Announcements are authored by Roo
+        (the bot identity), matching the MedHack behaviour.
+        """
+        import json
+        import re
+
+        # Channel restriction: this skill only operates in the Watt channel.
+        if skill.exclusive_channels and channel_id:
+            from ..slack_client import get_channel_name
+            channel_name = get_channel_name(channel_id)
+            if channel_name and channel_name not in skill.exclusive_channels:
+                channels_list = ", ".join(f"#*{ch}*" for ch in skill.exclusive_channels)
+                return f"The Watt The Hack skill is only available in {channels_list}."
+
+        text_lower = text.lower()
+        announce_keywords = ["announce", "announcement", "post announcement", "create announcement"]
+        is_announcement = any(k in text_lower for k in announce_keywords)
+
+        if not is_announcement:
+            # Not an announcement request — fall back to a general LLM answer.
+            return await self._execute_with_llm(skill, text, params, user_id, thread_history)
+
+        # Use an LLM to extract a clear title and body from the request.
+        extract_prompt = f"""Extract the announcement title and body from this message.
+The user wants to create an announcement for the Watt The Hack hackathon website.
+
+User message: "{text}"
+
+Return ONLY valid JSON with two keys: "title" and "body".
+If you cannot determine a clear title or body from the message, set the missing field to null.
+
+Example: {{"title": "Lunch is served", "body": "Pizza is in the atrium at 1pm."}}
+
+JSON:"""
+        openai_client = get_llm_client("openai")
+        extract_response = await openai_client.chat([
+            {"role": "system", "content": "You extract structured data from text. Return valid JSON only."},
+            {"role": "user", "content": extract_prompt}
+        ], model="gpt-4o-mini", max_tokens=1024)
+
+        try:
+            content = extract_response.content.strip()
+            if content.startswith("```"):
+                content = re.sub(r'^```\w*\n?', '', content)
+                content = re.sub(r'\n?```$', '', content)
+            extracted = json.loads(content)
+        except json.JSONDecodeError:
+            extracted = {}
+
+        ann_title = extracted.get("title")
+        ann_body = extracted.get("body")
+
+        if not ann_title or not ann_body:
+            return (
+                f"<@{user_id}> I need both a *title* and *body* for the announcement. "
+                f"Try something like:\n"
+                f"_\"Post an announcement titled 'Lunch is served' with body 'Pizza is in the atrium at 1pm.'\"_"
+            )
+
+        # Publish via the backend. The requesting human (user_id) is checked
+        # against Django superusers; authorship is attributed to Roo's bot id so
+        # the website shows Roo as the author.
+        from ..clients.mlai_backend import MLAIBackendClient
+        from ..slack_client import get_bot_user_id
+        backend = MLAIBackendClient()
+        bot_id = get_bot_user_id()
+        result = await backend.generic_hackathon_create_announcement(
+            slug="watt-the-hack",
+            title=ann_title,
+            body=ann_body,
+            requester_slack_id=user_id,
+            author_slack_id=bot_id,
+        )
+
+        if result is None:
+            return f"<@{user_id}> Something went wrong creating the announcement. Please try again later."
+
+        status_code = result.get("status_code")
+        if status_code == 400:
+            return f"<@{user_id}> The announcement couldn't be created — {result.get('detail', 'something is missing')}."
+        if status_code in (401, 403):
+            return (
+                f"<@{user_id}> Sorry, only MLAI superusers can post announcements "
+                f"to the Watt The Hack site."
+            )
+        if status_code is not None:
+            return f"<@{user_id}> Unexpected error (HTTP {status_code}): {result.get('detail', 'unknown')}"
+
+        # Success — the framework posts this confirmation back in-thread.
+        return f"Announcement *\"{ann_title}\"* has been posted to the Watt The Hack website."
 
     async def _execute_medhack(
         self,
