@@ -917,8 +917,38 @@ Original text:
         is_announcement = any(k in text_lower for k in announce_keywords)
 
         if not is_announcement:
-            # Not an announcement request — fall back to a general LLM answer.
-            return await self._execute_with_llm(skill, text, params, user_id, thread_history)
+            # Event Q&A: answer questions about Watt The Hack from the skill's
+            # knowledge base. Falls back to the generic skill content only if the
+            # knowledge file is missing.
+            knowledge = ""
+            try:
+                knowledge_file = skill.path / "knowledge.md"
+                if knowledge_file.exists():
+                    knowledge = knowledge_file.read_text(encoding="utf-8")
+            except Exception as e:
+                print(f"⚠️ Watt The Hack: failed to load knowledge.md: {e}")
+
+            if not knowledge:
+                return await self._execute_with_llm(skill, text, params, user_id, thread_history)
+
+            qa_system_prompt = (
+                "You are Roo, the friendly assistant for the Watt The Hack hackathon, "
+                "answering questions in the #watt-the-hack Slack channel.\n\n"
+                "Answer the user's question using ONLY the Watt The Hack information below. "
+                "Be concise, warm and helpful, and use simple Slack-friendly formatting. "
+                "If the answer is not in the information, say you're not sure and suggest they "
+                "check watt-the-hack.com or ask an organiser — do NOT invent facts, dates, "
+                "prizes, names, times or venues.\n\n"
+                "=== WATT THE HACK INFORMATION ===\n"
+                f"{knowledge}\n"
+                "=== END INFORMATION ==="
+            )
+            openai_client = get_llm_client("openai")
+            qa_response = await openai_client.chat([
+                {"role": "system", "content": qa_system_prompt},
+                {"role": "user", "content": text},
+            ], model="gpt-4o-mini", max_tokens=700)
+            return qa_response.content.strip()
 
         # Use an LLM to extract a clear title and body from the request.
         extract_prompt = f"""Extract the announcement title and body from this message.
