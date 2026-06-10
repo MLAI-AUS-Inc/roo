@@ -364,6 +364,8 @@ class RooAgent:
             r'\btop-up\b',
             r'\bbalance\b',
             r'\bcoworking\b',
+            r'\boffice\b.*\b(?:attendance|attended|usage|used|report|summary)\b',
+            r'\b(?:attendance|attended|usage|used)\b.*\boffice\b',
             r'\bbook\s+me\s+in\b',
             r'\bcheck\b.*<@[a-z0-9]+>.*\bin\b',
             r'\brewards?\b',
@@ -486,6 +488,37 @@ class RooAgent:
         )
         return has_creation_intent and has_issue_noun and has_linear_project
 
+    def _looks_like_data_query_request(self, text: str) -> bool:
+        if re.search(r'\b(?:data|database|db)\s+(?:catalog|resources?|tables?|schema)\b', text):
+            return True
+        if re.search(r'\b(?:what|which|show|list)\b.*\b(?:tables?|resources?)\b.*\b(?:query|available|access)\b', text):
+            return True
+
+        has_query_intent = bool(
+            re.search(
+                r'\b(?:how\s+many|count|show|list|which|what|query|find|search|give\s+me|display|report)\b',
+                text,
+            )
+        )
+        if not has_query_intent:
+            return False
+
+        data_subject_patterns = (
+            r'\bvibe\s*raising\b',
+            r'\bstartup\s+(?:updates?|drafts?|profiles?|bindings?|metrics?|events?)\b',
+            r'\bmonthly\s+update\s+drafts?\b',
+            r'\bupdates?\s+drafts?\b',
+            r'\bcontent\s+factory\s+(?:jobs?|runs?|steps?|attempts?|articles?)\b',
+            r'\blinear\s+(?:issues?|projects?|project\s+updates?)\b',
+            r'\bgmail\s+(?:messages?|threads?|attachments?)\b',
+            r'\bslack\s+(?:messages?|threads?|channel\s+selections?)\b',
+            r'\bgithub\s+integrations?\b',
+            r'\bfinancial\s+(?:records?|accounts?)\b',
+            r'\borganizations?\b',
+            r'\bstartup\s+data\b',
+        )
+        return any(re.search(pattern, text) for pattern in data_subject_patterns)
+
     def _looks_like_content_follow_up(self, text: str) -> bool:
         patterns = (
             r'\bwrite\b',
@@ -525,6 +558,7 @@ class RooAgent:
         luma_skill = self._get_skill_by_name("luma-events")
         points_skill = self._get_skill_by_name("mlai-points")
         linear_meeting_skill = self._get_skill_by_name("linear-meeting-actions")
+        data_query_skill = self._get_skill_by_name("mlai-data-query")
 
         if luma_skill and self._looks_like_luma_request(text_lower):
             return luma_skill
@@ -541,6 +575,9 @@ class RooAgent:
             has_thread_context,
         ):
             return linear_meeting_skill
+
+        if data_query_skill and self._looks_like_data_query_request(text_lower):
+            return data_query_skill
 
         if (
             thread_context

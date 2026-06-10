@@ -167,6 +167,61 @@ async def test_get_coworking_report_uses_canonical_endpoint(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_get_data_catalog_uses_canonical_endpoint(monkeypatch):
+    captured = {}
+
+    async def fake_request(method, endpoint, **kwargs):
+        captured["method"] = method
+        captured["endpoint"] = endpoint
+        request = httpx.Request(method, f"https://backend.test{endpoint}")
+        return httpx.Response(200, request=request, json={"resources": [{"key": "vibe_raising_companies"}]})
+
+    client = MLAIBackendClient(
+        base_url="https://backend.test",
+        api_key="roo-api-key",
+        internal_api_key="roo-api-key",
+    )
+    monkeypatch.setattr(client, "_request", fake_request)
+
+    result = await client.get_data_catalog()
+
+    assert result == {"resources": [{"key": "vibe_raising_companies"}]}
+    assert captured["method"] == "GET"
+    assert captured["endpoint"] == "/api/v1/data/catalog/"
+
+
+@pytest.mark.asyncio
+async def test_query_data_uses_canonical_endpoint_and_payload(monkeypatch):
+    captured = {}
+    payload = {
+        "requester_slack_id": "U123",
+        "resource": "content_factory_jobs",
+        "operation": "count",
+    }
+
+    async def fake_request(method, endpoint, **kwargs):
+        captured["method"] = method
+        captured["endpoint"] = endpoint
+        captured["json"] = kwargs["json"]
+        request = httpx.Request(method, f"https://backend.test{endpoint}")
+        return httpx.Response(200, request=request, json={"resource": "content_factory_jobs", "rows": [{"count": 2}]})
+
+    client = MLAIBackendClient(
+        base_url="https://backend.test",
+        api_key="roo-api-key",
+        internal_api_key="roo-api-key",
+    )
+    monkeypatch.setattr(client, "_request", fake_request)
+
+    result = await client.query_data(payload)
+
+    assert result == {"resource": "content_factory_jobs", "rows": [{"count": 2}]}
+    assert captured["method"] == "POST"
+    assert captured["endpoint"] == "/api/v1/data/query/"
+    assert captured["json"] == payload
+
+
+@pytest.mark.asyncio
 async def test_create_points_purchase_sends_slack_origin(monkeypatch):
     captured = {}
 

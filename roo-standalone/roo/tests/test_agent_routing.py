@@ -92,6 +92,19 @@ def _make_agent() -> RooAgent:
                 "mlai events",
             ],
         ),
+        _make_skill(
+            "mlai-data-query",
+            [
+                "data catalog",
+                "database catalog",
+                "query data",
+                "vibe raising companies",
+                "startup update drafts",
+                "content factory jobs",
+                "linear issues",
+                "gmail messages",
+            ],
+        ),
     ]
     agent.skill_executor = SimpleNamespace()
     agent._thread_skill_context = {}
@@ -235,6 +248,7 @@ def test_coworking_report_wording_routes_to_points():
         "coworking summary last 6 months",
         "coworking overview from 2026-01-01 to 2026-03-31",
         "how many people used the coworking space this week",
+        "how many people attended the office this week",
         "give me a report for how many people used the coworking space last week",
         "Roo how many peopel used the coworkign space last week and how does that usage compare to the week prior?",
         "which day was busiest for coworking last month",
@@ -244,6 +258,51 @@ def test_coworking_report_wording_routes_to_points():
         skill = agent._select_skill_from_triggers(text)
         assert skill is not None
         assert skill.name == "mlai-points"
+
+
+def test_data_catalog_request_routes_to_data_query():
+    agent = _make_agent()
+
+    skill = agent._select_skill_from_triggers("what data resources can Roo query?")
+
+    assert skill is not None
+    assert skill.name == "mlai-data-query"
+
+
+def test_vibe_raising_data_request_routes_to_data_query():
+    agent = _make_agent()
+
+    skill = agent._select_skill_from_triggers("how many Vibe Raising companies do we have?")
+
+    assert skill is not None
+    assert skill.name == "mlai-data-query"
+
+
+def test_content_factory_job_state_request_routes_to_data_query():
+    agent = _make_agent()
+
+    skill = agent._select_skill_from_triggers("which content factory jobs failed last week?")
+
+    assert skill is not None
+    assert skill.name == "mlai-data-query"
+
+
+def test_startup_update_drafts_request_routes_to_data_query():
+    agent = _make_agent()
+
+    skill = agent._select_skill_from_triggers("show startup update drafts for my company")
+
+    assert skill is not None
+    assert skill.name == "mlai-data-query"
+
+
+def test_synced_linear_issue_read_request_routes_to_data_query():
+    agent = _make_agent()
+
+    skill = agent._select_skill_from_triggers("show Linear issues synced for this startup")
+
+    assert skill is not None
+    assert skill.name == "mlai-data-query"
 
 
 def test_promote_points_admin_phrase_routes_to_points():

@@ -3220,6 +3220,13 @@ def test_resolve_points_action_detects_coworking_report_wording():
     assert (
         executor._resolve_points_action(
             {},
+            "how many people attended the office this week",
+        )
+        == "coworking_report"
+    )
+    assert (
+        executor._resolve_points_action(
+            {},
             "give me a report for how many people used the coworking space last week",
         )
         == "coworking_report"
