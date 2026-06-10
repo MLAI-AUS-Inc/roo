@@ -6192,14 +6192,21 @@ Chunk {index} source: {label}
             return detail or "The data query failed. Please try again in a moment."
 
     def _data_query_catalog_requested(self, text: str, params: dict) -> bool:
-        action = str(params.get("action") or "").lower().strip()
-        if action in {"catalog", "list_resources", "schema"}:
-            return True
         text_lower = str(text or "").lower()
-        return bool(
+        raw_catalog_request = bool(
             re.search(r'\b(?:data|database|db)\s+(?:catalog|resources?|tables?|schema)\b', text_lower)
             or re.search(r'\b(?:what|which|show|list)\b.*\b(?:tables?|resources?)\b.*\b(?:query|available|access)\b', text_lower)
         )
+        if raw_catalog_request:
+            return True
+
+        action = str(params.get("action") or "").lower().strip()
+        if action not in {"catalog", "list_resources", "schema"}:
+            return False
+
+        # The generic LLM extractor can mistake "how many X do we have?" for a
+        # catalog request. If the raw text points at a known resource, query it.
+        return not bool(self._infer_data_query_resource(text_lower, params))
 
     def _build_data_query_payload(self, text: str, params: dict, user_id: str) -> dict:
         text_lower = str(text or "").lower()
@@ -6242,20 +6249,19 @@ Chunk {index} source: {label}
         return payload
 
     def _infer_data_query_operation(self, text_lower: str, params: dict) -> str:
-        operation = str(params.get("operation") or "").lower().strip()
-        if operation in {"list", "count", "aggregate"}:
-            return operation
         if re.search(r'\b(?:how\s+many|count|number\s+of|total\s+number)\b', text_lower):
             return "count"
         if re.search(r'\b(?:group\s+by|break\s+down|breakdown|by\s+status|by\s+state|by\s+month)\b', text_lower):
             return "aggregate"
+        if re.search(r'\b(?:show|list|which|what|query|find|search|give\s+me|display|report)\b', text_lower):
+            return "list"
+
+        operation = str(params.get("operation") or "").lower().strip()
+        if operation in {"list", "count", "aggregate"}:
+            return operation
         return "list"
 
     def _infer_data_query_resource(self, text_lower: str, params: dict) -> str:
-        explicit = str(params.get("resource") or params.get("table") or "").strip().lower()
-        if explicit:
-            return re.sub(r'[^a-z0-9_]+', '_', explicit).strip("_")
-
         resource_patterns = (
             ("vibe_raising_companies", (r'\bvibe\s*raising\b.*\bcompan', r'\bcompan(?:y|ies)\b.*\bvibe\s*raising\b')),
             ("vibe_raising_profiles", (r'\bvibe\s*raising\b.*\bprofiles?\b', r'\bfounder\s+profiles?\b')),
@@ -6288,6 +6294,10 @@ Chunk {index} source: {label}
         for resource, patterns in resource_patterns:
             if any(re.search(pattern, text_lower) for pattern in patterns):
                 return resource
+
+        explicit = str(params.get("resource") or params.get("table") or "").strip().lower()
+        if explicit:
+            return re.sub(r'[^a-z0-9_]+', '_', explicit).strip("_")
         return ""
 
     def _infer_data_query_filters(self, text_lower: str, resource: str) -> list[dict]:
