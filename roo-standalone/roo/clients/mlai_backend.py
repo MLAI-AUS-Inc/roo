@@ -47,6 +47,7 @@ class MLAIBackendClient:
         )
         self.base_url = self.base_url.rstrip('/') if self.base_url else ""
         self._points_base = "/api/v1/points"
+        self._data_base = "/api/v1/data"
         self._admin_cache: Dict[str, bool] = {}
 
     def _backend_key(self) -> str:
@@ -1117,6 +1118,33 @@ class MLAIBackendClient:
             "/api/v1/integrations/luma/attendee-report",
             params=params,
             timeout=30.0,
+            transport_retries=1,
+            retry_backoff_seconds=0.25,
+            circuit_breaker=True,
+        )
+        self._raise_for_status_or_backend_unavailable(response)
+        return response.json()
+
+    async def get_data_catalog(self) -> dict:
+        """Get Roo's curated read-only data resource catalog."""
+        response = await self._request(
+            "GET",
+            f"{self._data_base}/catalog/",
+            timeout=15.0,
+            transport_retries=1,
+            retry_backoff_seconds=0.25,
+            circuit_breaker=True,
+        )
+        self._raise_for_status_or_backend_unavailable(response)
+        return response.json()
+
+    async def query_data(self, payload: dict) -> dict:
+        """Query a curated read-only data resource through mlai-backend."""
+        response = await self._request(
+            "POST",
+            f"{self._data_base}/query/",
+            json=payload,
+            timeout=35.0,
             transport_retries=1,
             retry_backoff_seconds=0.25,
             circuit_breaker=True,
