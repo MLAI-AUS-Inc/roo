@@ -120,6 +120,32 @@ async def test_data_query_vibe_raising_count_payload(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_data_query_specific_count_beats_bad_catalog_param(monkeypatch):
+    _reset_fake_client()
+    executor = SkillExecutor()
+    monkeypatch.setattr(executor_module, "get_settings", lambda: _settings())
+    monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeDataBackendClient)
+
+    result = await executor._execute_mlai_data_query(
+        skill=SimpleNamespace(name="mlai-data-query"),
+        text="how many Vibe Raising companies do we have?",
+        params={"action": "catalog"},
+        user_id="U123",
+    )
+
+    assert FakeDataBackendClient.catalog_calls == 0
+    assert FakeDataBackendClient.queries == [
+        {
+            "requester_slack_id": "U123",
+            "resource": "vibe_raising_companies",
+            "operation": "count",
+            "offset": 0,
+        }
+    ]
+    assert "`vibe_raising_companies` count: 3" in result["message"]
+
+
+@pytest.mark.asyncio
 async def test_data_query_content_factory_failed_jobs_payload(monkeypatch):
     _reset_fake_client()
     FakeDataBackendClient.query_response = {
@@ -170,6 +196,45 @@ async def test_data_query_content_factory_failed_jobs_payload(monkeypatch):
     assert payload["limit"] == 20
     assert "job-1" in result["message"]
     assert "generation failed" in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_data_query_raw_text_beats_bad_resource_and_operation_params(monkeypatch):
+    _reset_fake_client()
+    FakeDataBackendClient.query_response = {
+        "resource": "content_factory_jobs",
+        "rows": [
+            {
+                "job_id": "job-1",
+                "domain": "mlai.au",
+                "status": "error",
+                "selected_keyword": "ai grants",
+                "article_url": "",
+                "pr_url": "",
+                "error_message": "generation failed",
+                "created_at": "2026-06-10T01:00:00Z",
+            }
+        ],
+        "returned_count": 1,
+        "limit": 20,
+        "offset": 0,
+        "has_more": False,
+    }
+    executor = SkillExecutor()
+    monkeypatch.setattr(executor_module, "get_settings", lambda: _settings())
+    monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeDataBackendClient)
+
+    await executor._execute_mlai_data_query(
+        skill=SimpleNamespace(name="mlai-data-query"),
+        text="which content factory jobs failed last week?",
+        params={"resource": "gmail_messages", "operation": "count"},
+        user_id="UADMIN",
+    )
+
+    payload = FakeDataBackendClient.queries[0]
+    assert payload["resource"] == "content_factory_jobs"
+    assert payload["operation"] == "list"
+    assert payload["filters"] == [{"field": "status", "operator": "eq", "value": "error"}]
 
 
 @pytest.mark.asyncio
