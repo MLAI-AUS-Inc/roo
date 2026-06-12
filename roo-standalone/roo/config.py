@@ -46,6 +46,11 @@ class Settings(BaseSettings):
     SKILLS_DIR: str = "skills"
     TIMEZONE: str = "Australia/Melbourne"
     ROUTER_MODEL: str = "gpt-5.4"
+    # Router v2 (LLM tool-calling over the SKILL.md catalog):
+    #   off    -> legacy funnel only
+    #   shadow -> legacy decides; v2 runs after the fact and logs disagreements
+    #   on     -> v2 decides (fast path + delegation parsing stay in front)
+    ROUTER_V2: str = "off"
     LINEAR_MEETING_AUTO_CREATE_MIN_CONFIDENCE: float = 0.85
     LINEAR_MEETING_UNCERTAIN_MIN_CONFIDENCE: float = 0.65
     COWORKING_INTENTS_DB_PATH: str = "data/coworking_booking_intents.db"

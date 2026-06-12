@@ -18,7 +18,7 @@ import frontmatter
 class Skill:
     """
     A skill definition loaded from a SKILL.md file.
-    
+
     Skills follow the Anthropic Agent Skills pattern:
     - Each skill is a directory containing SKILL.md
     - SKILL.md has YAML frontmatter (name, description) and markdown body
@@ -33,9 +33,18 @@ class Skill:
     parameters: List[dict] = field(default_factory=list)
     priority_channels: List[str] = field(default_factory=list)
     exclusive_channels: List[str] = field(default_factory=list)
+    # Router v2 metadata (single source of truth for LLM routing):
+    # routing: {use_when, avoid_when, examples: [{text, action?}],
+    #           negative_examples: [{text, instead}]}
+    routing: Dict[str, Any] = field(default_factory=dict)
+    # actions: [{name, description, params: {param_name: {type, description}}}]
+    actions: List[Dict[str, Any]] = field(default_factory=list)
 
     # Loaded implementation module (if any)
     _module: Optional[Any] = field(default=None, repr=False)
+
+    def action_names(self) -> List[str]:
+        return [str(action.get("name")) for action in self.actions if action.get("name")]
     
     def __repr__(self):
         return f"Skill(name='{self.name}', path='{self.path.name}')"
@@ -144,6 +153,8 @@ def load_skill_from_directory(skill_dir: Path) -> Optional[Skill]:
         parameters=parameters,
         priority_channels=post.metadata.get("priority_channels", []),
         exclusive_channels=post.metadata.get("exclusive_channels", []),
+        routing=_validate_routing(name, post.metadata.get("routing")),
+        actions=_validate_actions(name, post.metadata.get("actions")),
     )
 
     # Load implementation module if present
@@ -183,6 +194,47 @@ def load_skill_file(file_path: Path) -> Optional[Skill]:
         priority_channels=post.metadata.get("priority_channels", []),
         exclusive_channels=post.metadata.get("exclusive_channels", []),
     )
+
+
+def _validate_routing(skill_name: str, raw: Any) -> Dict[str, Any]:
+    """Validate the SKILL.md `routing:` block; raise loudly on malformed data."""
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ValueError(f"{skill_name}: routing must be a mapping, got {type(raw).__name__}")
+    for key in ("use_when", "avoid_when"):
+        if key in raw and not isinstance(raw[key], str):
+            raise ValueError(f"{skill_name}: routing.{key} must be a string")
+    for key in ("examples", "negative_examples"):
+        entries = raw.get(key) or []
+        if not isinstance(entries, list):
+            raise ValueError(f"{skill_name}: routing.{key} must be a list")
+        for entry in entries:
+            if not isinstance(entry, dict) or not entry.get("text"):
+                raise ValueError(
+                    f"{skill_name}: every routing.{key} entry needs a 'text' field: {entry!r}"
+                )
+    return raw
+
+
+def _validate_actions(skill_name: str, raw: Any) -> List[Dict[str, Any]]:
+    """Validate the SKILL.md `actions:` block; raise loudly on malformed data."""
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise ValueError(f"{skill_name}: actions must be a list, got {type(raw).__name__}")
+    seen = set()
+    for action in raw:
+        if not isinstance(action, dict) or not action.get("name"):
+            raise ValueError(f"{skill_name}: every action needs a 'name': {action!r}")
+        name = str(action["name"])
+        if name in seen:
+            raise ValueError(f"{skill_name}: duplicate action name '{name}'")
+        seen.add(name)
+        params = action.get("params") or {}
+        if not isinstance(params, dict):
+            raise ValueError(f"{skill_name}: action '{name}' params must be a mapping")
+    return raw
 
 
 def _load_module_from_file(file_path: Path, module_name: str):

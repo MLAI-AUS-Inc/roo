@@ -167,6 +167,8 @@ class SkillExecutor:
                 result = await self._execute_tone_of_voice(skill, text, params, user_id)
             elif skill.name == "medhack":
                 result = await self._execute_medhack(skill, text, params, user_id, channel_id, thread_ts, thread_history)
+            elif skill.name == "watt-the-hack":
+                result = await self._execute_watt_the_hack(skill, text, params, user_id, channel_id, thread_ts, thread_history)
             elif skill.name == "luma-events":
                 result = await self._execute_luma_events(skill, text, params, user_id, channel_id, thread_ts)
             else:
@@ -882,6 +884,110 @@ Original text:
             print(f"⚠️ Failed to register user {user_id}: {e}")
             print(f"   MedHack will continue with local JSON fallback")
 
+    async def _execute_watt_the_hack(
+        self,
+        skill: Skill,
+        text: str,
+        params: dict,
+        user_id: str,
+        channel_id: Optional[str] = None,
+        thread_ts: Optional[str] = None,
+        thread_history: Optional[List[dict]] = None,
+    ) -> str:
+        """Execute the Watt The Hack skill: publish announcements to the site.
+
+        Authorisation is delegated to the backend — only Slack users who map to
+        an MLAI Django superuser may publish. Announcements are authored by Roo
+        (the bot identity), matching the MedHack behaviour.
+        """
+        import json
+        import re
+
+        # Channel restriction: this skill only operates in the Watt channel.
+        if skill.exclusive_channels and channel_id:
+            from ..slack_client import get_channel_name
+            channel_name = get_channel_name(channel_id)
+            if channel_name and channel_name not in skill.exclusive_channels:
+                channels_list = ", ".join(f"#*{ch}*" for ch in skill.exclusive_channels)
+                return f"The Watt The Hack skill is only available in {channels_list}."
+
+        text_lower = text.lower()
+        announce_keywords = ["announce", "announcement", "post announcement", "create announcement"]
+        is_announcement = any(k in text_lower for k in announce_keywords)
+
+        if not is_announcement:
+            # Not an announcement request — fall back to a general LLM answer.
+            return await self._execute_with_llm(skill, text, params, user_id, thread_history)
+
+        # Use an LLM to extract a clear title and body from the request.
+        extract_prompt = f"""Extract the announcement title and body from this message.
+The user wants to create an announcement for the Watt The Hack hackathon website.
+
+User message: "{text}"
+
+Return ONLY valid JSON with two keys: "title" and "body".
+If you cannot determine a clear title or body from the message, set the missing field to null.
+
+Example: {{"title": "Lunch is served", "body": "Pizza is in the atrium at 1pm."}}
+
+JSON:"""
+        openai_client = get_llm_client("openai")
+        extract_response = await openai_client.chat([
+            {"role": "system", "content": "You extract structured data from text. Return valid JSON only."},
+            {"role": "user", "content": extract_prompt}
+        ], model="gpt-4o-mini", max_tokens=1024)
+
+        try:
+            content = extract_response.content.strip()
+            if content.startswith("```"):
+                content = re.sub(r'^```\w*\n?', '', content)
+                content = re.sub(r'\n?```$', '', content)
+            extracted = json.loads(content)
+        except json.JSONDecodeError:
+            extracted = {}
+
+        ann_title = extracted.get("title")
+        ann_body = extracted.get("body")
+
+        if not ann_title or not ann_body:
+            return (
+                f"<@{user_id}> I need both a *title* and *body* for the announcement. "
+                f"Try something like:\n"
+                f"_\"Post an announcement titled 'Lunch is served' with body 'Pizza is in the atrium at 1pm.'\"_"
+            )
+
+        # Publish via the backend. The requesting human (user_id) is checked
+        # against Django superusers; authorship is attributed to Roo's bot id so
+        # the website shows Roo as the author.
+        from ..clients.mlai_backend import MLAIBackendClient
+        from ..slack_client import get_bot_user_id
+        backend = MLAIBackendClient()
+        bot_id = get_bot_user_id()
+        result = await backend.generic_hackathon_create_announcement(
+            slug="watt-the-hack",
+            title=ann_title,
+            body=ann_body,
+            requester_slack_id=user_id,
+            author_slack_id=bot_id,
+        )
+
+        if result is None:
+            return f"<@{user_id}> Something went wrong creating the announcement. Please try again later."
+
+        status_code = result.get("status_code")
+        if status_code == 400:
+            return f"<@{user_id}> The announcement couldn't be created — {result.get('detail', 'something is missing')}."
+        if status_code in (401, 403):
+            return (
+                f"<@{user_id}> Sorry, only MLAI superusers can post announcements "
+                f"to the Watt The Hack site."
+            )
+        if status_code is not None:
+            return f"<@{user_id}> Unexpected error (HTTP {status_code}): {result.get('detail', 'unknown')}"
+
+        # Success — the framework posts this confirmation back in-thread.
+        return f"Announcement *\"{ann_title}\"* has been posted to the Watt The Hack website."
+
     async def _execute_medhack(
         self,
         skill: Skill,
@@ -1522,11 +1628,6 @@ Keep the response concise but informative."""
         event_files: Optional[List[dict]] = None,
     ) -> dict:
         settings = get_settings()
-        if not getattr(settings, "LINEAR_API_KEY", None):
-            return {
-                "message": "Linear meeting actions are not configured yet. Set `LINEAR_API_KEY` for Roo first."
-            }
-
         source_result = await self._build_linear_meeting_source_result(
             text=text,
             params=params,
@@ -1548,7 +1649,7 @@ Keep the response concise but informative."""
         if ClientClass is None:
             return {"message": "Linear meeting actions are missing their Linear client implementation."}
 
-        client = ClientClass(api_key=settings.LINEAR_API_KEY)
+        client = ClientClass()
         try:
             teams, users, projects, labels, recent_issues = await asyncio.gather(
                 client.list_teams(),
@@ -1558,8 +1659,9 @@ Keep the response concise but informative."""
                 client.list_recent_open_issues(),
             )
         except Exception as exc:
+            detail = str(exc).strip() or exc.__class__.__name__
             return {
-                "message": f"I couldn't read Linear context yet: {exc.__class__.__name__}: {exc}"
+                "message": f"I couldn't read Linear context yet: {detail}"
             }
 
         candidates = await self._extract_linear_meeting_candidates_from_sources(
@@ -5658,6 +5760,134 @@ Only include actionable work someone agreed to do. Do not include decisions, FYI
             return ""
         return str(payload)
 
+    def _is_topup_balance_cap_error(self, error_detail: str) -> bool:
+        detail = error_detail.lower()
+        return (
+            "100-point" in detail
+            and "balance cap" in detail
+            and ("top-up" in detail or "topup" in detail or "purchase" in detail)
+        )
+
+    def _format_points_balance_summary(self, data: dict, tasks_command: str = "tasks") -> str:
+        balance = data.get("balance", 0)
+        earned = data.get("lifetime_earned", 0)
+        spent = data.get("lifetime_spent", 0)
+        purchased = 0
+        for key in (
+            "lifetime_purchased",
+            "lifetime_purchased_points",
+            "lifetime_points_purchased",
+            "points_purchased",
+            "purchased_points",
+            "lifetime_topup_points",
+        ):
+            if data.get(key) is not None:
+                purchased = data.get(key)
+                break
+
+        return (
+            f"G'day mate! Here's your points summary:\n\n"
+            f"💰 **Current Balance:** {balance} points\n"
+            f"📈 **Lifetime Earned:** {earned} points\n"
+            f"📉 **Lifetime Spent:** {spent} points\n"
+            f"🛒 **Lifetime Purchased:** {purchased} points\n\n"
+            f"Nice work! Check out `{tasks_command}` to earn more 🦘"
+        )
+
+    async def _get_points_balance_summary_for_rewards(self, client, user_id: str) -> Optional[dict]:
+        try:
+            return await client.get_balance(user_id)
+        except Exception as exc:
+            print(f"⚠️ Failed to fetch Roo points balance for rewards catalog: {exc!r}")
+            return None
+
+    def _format_rewards_catalog(
+        self,
+        rewards: list[dict],
+        balance_summary: Optional[dict] = None,
+    ) -> str:
+        def sort_key(reward: dict) -> tuple[int, str]:
+            try:
+                cost = int(reward.get("cost_points", 0) or 0)
+            except (TypeError, ValueError):
+                cost = 0
+            return cost, str(reward.get("code", ""))
+
+        balance_summary = balance_summary or {}
+        user_balance = balance_summary.get("balance")
+        if user_balance is None:
+            user_balance = next(
+                (
+                    reward.get("user_balance")
+                    for reward in rewards
+                    if reward.get("user_balance") is not None
+                ),
+                None,
+            )
+        lifetime_earned = balance_summary.get("lifetime_earned")
+
+        lines = ["🎁 **Available Roo Rewards**"]
+        if user_balance is not None:
+            lines.append(f"Your balance: **{user_balance} points**")
+        if lifetime_earned is not None:
+            lines.append(f"Lifetime earned: **{lifetime_earned} points**")
+        lines.append("")
+
+        if not rewards:
+            lines.append("No redeemable rewards are available at the moment.")
+        for reward in sorted(rewards, key=sort_key):
+            code = str(reward.get("code", "") or "").strip()
+            name = str(reward.get("name", "") or code or "Reward").strip()
+            cost = reward.get("cost_points", 0)
+            point_word = "point" if cost == 1 else "points"
+            lines.append(f"• **{name}** (`{code}`) - {cost} {point_word}")
+
+            details = []
+            description = str(reward.get("description", "") or "").strip()
+            if description:
+                details.append(description)
+
+            stock_remaining = reward.get("stock_remaining")
+            if stock_remaining is not None:
+                details.append(f"{stock_remaining} left")
+
+            fulfillment = str(reward.get("fulfillment", "") or "").lower()
+            if fulfillment == "auto":
+                details.append("instant redemption")
+            elif fulfillment == "manual":
+                details.append("admin approval")
+
+            can_afford = reward.get("can_afford")
+            if can_afford is True:
+                details.append("you can redeem this now")
+            elif can_afford is False and user_balance is not None:
+                try:
+                    shortfall = max(0, int(cost) - int(user_balance))
+                except (TypeError, ValueError):
+                    shortfall = 0
+                if shortfall:
+                    details.append(f"need {shortfall} more points")
+
+            if details:
+                lines.append(f"  _{'; '.join(details)}_")
+
+        lines.extend(
+            (
+                "",
+                "**Other ways to use Roo Points**",
+                "• SEO article generation costs 4 Roo Points.",
+                "• MLAI sometimes auctions merch, cool items, or experiences for a variable Roo Points bid. Highest bidder wins.",
+                "",
+                "**How lifetime earned Roo Points matter**",
+                "• Bounties and paid work generally go to members with the highest lifetime earned Roo Points.",
+                "• To be voted into the MLAI committee, you need at least 100 lifetime earned Roo Points.",
+                "",
+                "Request one with `reward request <CODE>`.",
+                "For coworking, `coworking book YYYY-MM-DD` is usually the quickest path.",
+            )
+        )
+        return "\n".join(lines)
+
     def _points_request_queue_error_message(self) -> str:
         """User-facing fallback when Roo cannot queue a points request for emoji approval."""
         return (
@@ -6605,6 +6835,12 @@ Only include actionable work someone agreed to do. Do not include decisions, FYI
                 )
             except httpx.HTTPStatusError as exc:
                 error_detail = self._extract_http_error_detail(exc)
+                if self._is_topup_balance_cap_error(error_detail):
+                    return (
+                        "You've already got heaps of Roo Points, so you can't top up right now. "
+                        "This top-up would put you over the 100-point spendable balance cap. "
+                        "Use some points first, then try again."
+                    )
                 detail = f" {error_detail}" if error_detail else ""
                 return f"I couldn't create that top-up checkout yet.{detail}"
 
@@ -6621,17 +6857,7 @@ Only include actionable work someone agreed to do. Do not include decisions, FYI
 
         if action == "balance":
             data = await client.get_balance(user_id)
-            balance = data.get("balance", 0)
-            earned = data.get("lifetime_earned", 0)
-            spent = data.get("lifetime_spent", 0)
-            
-            return (
-                f"G'day mate! Here's your points summary:\n\n"
-                f"💰 **Current Balance:** {balance} points\n"
-                f"📈 **Lifetime Earned:** {earned} points\n"
-                f"📉 **Lifetime Spent:** {spent} points\n\n"
-                f"Nice work! Check out `tasks` to earn more 🦘"
-            )
+            return self._format_points_balance_summary(data, tasks_command="tasks")
         
         elif action == "history":
             limit = params.get("limit", 10)
@@ -7032,19 +7258,8 @@ Only include actionable work someone agreed to do. Do not include decisions, FYI
         
         elif action == "list_rewards":
             rewards = await client.list_rewards(user_id)
-            
-            if not rewards:
-                return "No rewards available at the moment. Check back soon! 🦘"
-            
-            lines = ["🎁 **Available Rewards:**\n"]
-            for reward in rewards:
-                code = reward.get("code", "")
-                name = reward.get("name", "")
-                cost = reward.get("cost_points", 0)
-                lines.append(f"• **{code}** - {name} ({cost} pts)")
-            
-            lines.append("\nRequest a reward with \"reward request <CODE>\"")
-            return "\n".join(lines)
+            balance_summary = await self._get_points_balance_summary_for_rewards(client, user_id)
+            return self._format_rewards_catalog(rewards, balance_summary=balance_summary)
         
         elif action == "request_reward":
             reward_code = params.get("reward_code", "").upper()

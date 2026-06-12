@@ -1,0 +1,1060 @@
+{
+  "mode": "deterministic",
+  "generated_at": "2026-06-12T00:10:59.327281+00:00",
+  "counts": {
+    "misroute": 13,
+    "fallthrough": 32,
+    "ok-fallthrough": 19,
+    "correct": 110
+  },
+  "action": {
+    "checked": 36,
+    "correct": 35
+  },
+  "cases": {
+    "audit-anyone-ai-research": {
+      "verdict": "fallthrough",
+      "layer": "llm-fallthrough",
+      "skill": null,
+      "action": null
+    },
+    "audit-medical-imaging": {
+      "verdict": "misroute",
+      "layer": "keywords",
+      "skill": "medhack",
+      "action": null
+    },
+    "audit-sponsorship-contact": {
+      "verdict": "fallthrough",
+      "layer": "llm-fallthrough",
+      "skill": null,
+      "action": null
+    },
+    "audit-summarise-article": {
+      "verdict": "misroute",
+      "layer": "intent-regex",
+      "skill": "content-factory",
+      "action": "write"
+    },
+    "audit-blog-post-opinion": {
+      "verdict": "misroute",
+      "layer": "intent-regex",
+      "skill": "content-factory",
+      "action": "write"
+    },
+    "audit-analyse-proposal": {
+      "verdict": "misroute",
+      "layer": "intent-regex",
+      "skill": "content-factory",
+      "action": "scan"
+    },
+    "audit-inspect-csv": {
+      "verdict": "misroute",
+      "layer": "keywords",
+      "skill": "luma-events",
+      "action": null
+    },
+    "audit-book-coworking-tomorrow": {
+      "verdict": "correct",
+      "layer": "looks-like-points",
+      "skill": "mlai-points",
+      "action": null
+    },
+    "audit-book-meeting-room": {
+      "verdict": "ok-fallthrough",
+      "layer": "llm-fallthrough",
+      "skill": null,
+      "action": null
+    },
+    "audit-linear-login-bug": {
+      "verdict": "misroute",
+      "layer": "keywords",
+      "skill": "mlai-points",
+      "action": null
+    },
+    "audit-linear-ticket-thread": {
+      "verdict": "fallthrough",
+      "layer": "llm-fallthrough",
+      "skill": null,
+      "action": null
+    },
+    "audit-how-earn-points": {
+      "verdict": "correct",
+      "layer": "looks-like-points",
+      "skill": "mlai-points",
+      "action": null
+    },
+    "audit-whats-my-balance": {
+      "verdict": "correct",
+      "layer": "looks-like-points",
+      "skill": "mlai-points",
+      "action": null
+    },
+    "audit-balance-question-mark": {
+      "verdict": "correct",
+      "layer": "looks-like-points",
+      "skill": "mlai-points",
+      "action": null
+    },
+    "audit-rewrite-tone": {
+      "verdict": "fallthrough",
+      "layer": "llm-fallthrough",
+      "skill": null,
+      "action": null
+    },
+    "audit-announce-watt-channel": {
+      "verdict": "fallthrough",
+      "layer": "llm-fallthrough",
+      "skill": null,
+      "action": null
+    },
+    "audit-announce-medhack-channel": {
+      "verdict": "fallthrough",
+      "layer": "llm-fallthrough",
+      "skill": null,
+      "action": null
+    },
+    "audit-announce-general-channel": {
+      "verdict": "ok-fallthrough",
+      "layer": "llm-fallthrough",
+      "skill": null,
+      "action": null
+    },
+    "audit-luma-registered-count": {
+      "verdict": "correct",
+      "layer": "looks-like-luma",
+      "skill": "luma-events",
+      "action": null
+    },
+    "audit-luma-export-attendees": {
+      "verdict": "correct",
+      "layer": "looks-like-luma",
+      "skill": "luma-events",
+      "action": null
+    },
+    "audit-write-medhack-article": {
+      "verdict": "correct",
+      "layer": "intent-regex",
+      "skill": "content-factory",
+      "action": "write"
+    },
+    "audit-connect-blog-writer": {
+      "verdict": "misroute",
+      "layer": "intent-regex",
+      "skill": "content-factory",
+      "action": "write"
+    },
+    "audit-open-tasks-question": {
+      "verdict": "correct",
+      "layer": "keywords",
+      "skill": "mlai-points",
+      "action": null
+    },
+    "audit-scan-repo-mlai": {
+      "verdict": "correct",
+      "layer": "intent-regex",
+      "skill": "content-factory",
+      "action": "scan"
+    },
+    "audit-research-paper-thoughts": {
+      "verdict": "misroute",
+      "layer": "intent-regex",
+      "skill": "content-factory",
+      "action": null
+    },
+    "audit-ecg-teammate": {
+      "verdict": "misroute",
+      "layer": "keywords",
+      "skill": "medhack",
+      "action": null
+    },
+    "audit-meetup-topic": {
+      "verdict": "misroute",
+      "layer": "looks-like-content",
+      "skill": "content-factory",
+      "action": null
+    },
+    "audit-patient-data-workshop": {
+      "verdict": "misroute",
+      "layer": "keywords",
+      "skill": "medhack",
+      "action": null
+    },
+    "audit-summarise-thread": {
+      "verdict": "ok-fallthrough",
+      "layer": "llm-fallthrough",
+      "skill": null,
+      "action": null
+    },
+    "audit-research-linkedin-timing": {
+      "verdict": "ok-fallthrough",
+      "layer": "llm-fallthrough",
+      "skill": null,
+      "action": null
+    },
+    "fast-points": {
+      "verdict": "correct",
+      "layer": "fast",
+      "skill": "mlai-points",
+      "action": "balance"
+    },
+    "fast-balance": {
+      "verdict": "correct",
+      "layer": "fast",
+      "skill": "mlai-points",
+      "action": "balance"
+    },
+    "fast-my-points": {
+      "verdict": "correct",
+      "layer": "fast",
+      "skill": "mlai-points",
+      "action": "balance"
+    },
+    "fast-tasks": {
+      "verdict": "correct",
+      "layer": "fast",
+      "skill": "mlai-points",
+      "action": "list_tasks"
+    },
+    "fast-my-tasks": {
+      "verdict": "correct",
+      "layer": "fast",
+      "skill": "mlai-points",
+      "action": "list_tasks"
+    },
+    "fast-open-tasks": {
+      "verdict": "correct",
+      "layer": "fast",
+      "skill": "mlai-points",
+      "action": "list_tasks"
+    },
+    "fast-earn-points": {
+      "verdict": "correct",
+      "layer": "fast",
+      "skill": "mlai-points",
+      "action": "list_tasks"
+    },
+    "fast-rewards": {
+      "verdict": "correct",
+      "layer": "fast",
+      "skill": "mlai-points",
+      "action": "list_rewards"
+    },
+    "fast-coworking-book-today": {
+      "verdict": "correct",
+      "layer": "fast",
+      "skill": "mlai-points",
+      "action": "book_coworking"
+    },
+    "fast-coworking-cancel": {
+      "verdict": "correct",
+      "layer": "fast",
+      "skill": "mlai-points",
+      "action": "cancel_coworking"
+    },
+    "blessed-write-article-harness": {
+      "verdict": "correct",
+      "layer": "intent-regex",
+      "skill": "content-factory",
+      "action": "write"
+    },
+    "blessed-scan-domain": {
+      "verdict": "correct",
+      "layer": "intent-regex",
+      "skill": "content-factory",
+      "action": "scan"
+    },
+    "blessed-scan-repo-for-domain": {
+      "verdict": "correct",
+      "layer": "intent-regex",
+      "skill": "content-factory",
+      "action": "scan"
+    },
+    "blessed-thread-write-follow-up": {
+      "verdict": "correct",
+      "layer": "intent-regex",
+      "skill": "content-factory",
+      "action": null
+    },
+    "blessed-thread-scan-follow-up": {
+      "verdict": "correct",
+      "layer": "intent-regex",
+      "skill": "content-factory",
+      "action": "scan"
+    },
+    "blessed-thread-publish-pr": {
+      "verdict": "correct",
+      "layer": "intent-regex",
+      "skill": "content-factory",
+      "action": "publish_pr"
+    },
+    "blessed-thread-publish-bundle-pr": {
+      "verdict": "correct",
+      "layer": "intent-regex",
+      "skill": "content-factory",
+      "action": "publish_pr"
+    },
+    "blessed-thread-turn-bundle-into-pr": {
+      "verdict": "correct",
+      "layer": "intent-regex",
+      "skill": "content-factory",
+      "action": "publish_pr"
+    },
+    "blessed-thread-open-draft-pr": {
+      "verdict": "correct",
+      "layer": "intent-regex",
+      "skill": "content-factory",
+      "action": "publish_pr"
+    },
+    "blessed-thread-push-bundle-to-pr": {
+      "verdict": "correct",
+      "layer": "intent-regex",
+      "skill": "content-factory",
+      "action": "publish_pr"
+    },
+    "blessed-thread-push-article-to-pr": {
+      "verdict": "correct",
+      "layer": "intent-regex",
+      "skill": "content-factory",
+      "action": "publish_pr"
+    },
+    "blessed-github-reconnect": {
+      "verdict": "correct",
+      "layer": "intent-regex",
+      "skill": "github-integration",
+      "action": "reconnect"
+    },
+    "blessed-github-authenticate-with": {
+      "verdict": "correct",
+      "layer": "intent-regex",
+      "skill": "github-integration",
+      "action": "reconnect"
+    },
+    "blessed-github-authenticate": {
+      "verdict": "correct",
+      "layer": "intent-regex",
+      "skill": "github-integration",
+      "action": "reconnect"
+    },
+    "blessed-github-connect-again": {
+      "verdict": "correct",
+      "layer": "intent-regex",
+      "skill": "github-integration",
+      "action": "reconnect"
+    },
+    "blessed-linear-meeting-summary": {
+      "verdict": "correct",
+      "layer": "looks-like-linear",
+      "skill": "linear-meeting-actions",
+      "action": null
+    },
+    "blessed-linear-transcript-actions": {
+      "verdict": "correct",
+      "layer": "looks-like-linear",
+      "skill": "linear-meeting-actions",
+      "action": null
+    },
+    "blessed-linear-sync-notes": {
+      "verdict": "correct",
+      "layer": "looks-like-linear",
+      "skill": "linear-meeting-actions",
+      "action": null
+    },
+    "blessed-linear-pdf": {
+      "verdict": "correct",
+      "layer": "looks-like-linear",
+      "skill": "linear-meeting-actions",
+      "action": null
+    },
+    "blessed-linear-image": {
+      "verdict": "correct",
+      "layer": "looks-like-linear",
+      "skill": "linear-meeting-actions",
+      "action": null
+    },
+    "blessed-linear-attached-file": {
+      "verdict": "correct",
+      "layer": "looks-like-linear",
+      "skill": "linear-meeting-actions",
+      "action": null
+    },
+    "blessed-points-create-task": {
+      "verdict": "correct",
+      "layer": "looks-like-points",
+      "skill": "mlai-points",
+      "action": null
+    },
+    "blessed-points-request": {
+      "verdict": "correct",
+      "layer": "looks-like-points",
+      "skill": "mlai-points",
+      "action": null
+    },
+    "blessed-points-topup-slash": {
+      "verdict": "correct",
+      "layer": "looks-like-points",
+      "skill": "mlai-points",
+      "action": null
+    },
+    "blessed-points-topup-phrase": {
+      "verdict": "correct",
+      "layer": "looks-like-points",
+      "skill": "mlai-points",
+      "action": null
+    },
+    "blessed-points-buy-roo-points": {
+      "verdict": "correct",
+      "layer": "looks-like-points",
+      "skill": "mlai-points",
+      "action": null
+    },
+    "blessed-points-add-roo-points": {
+      "verdict": "correct",
+      "layer": "looks-like-points",
+      "skill": "mlai-points",
+      "action": null
+    },
+    "blessed-points-need-more": {
+      "verdict": "correct",
+      "layer": "looks-like-points",
+      "skill": "mlai-points",
+      "action": null
+    },
+    "blessed-coworking-book-me-in": {
+      "verdict": "correct",
+      "layer": "looks-like-points",
+      "skill": "mlai-points",
+      "action": null
+    },
+    "blessed-coworking-book-me-in-today": {
+      "verdict": "correct",
+      "layer": "looks-like-points",
+      "skill": "mlai-points",
+      "action": null
+    },
+    "blessed-coworking-checkin-mention": {
+      "verdict": "correct",
+      "layer": "looks-like-points",
+      "skill": "mlai-points",
+      "action": null
+    },
+    "blessed-coworking-book-mention": {
+      "verdict": "correct",
+      "layer": "keywords",
+      "skill": "mlai-points",
+      "action": null
+    },
+    "blessed-coworking-report-3-months": {
+      "verdict": "correct",
+      "layer": "looks-like-points",
+      "skill": "mlai-points",
+      "action": null
+    },
+    "blessed-coworking-summary-6-months": {
+      "verdict": "correct",
+      "layer": "looks-like-points",
+      "skill": "mlai-points",
+      "action": null
+    },
+    "blessed-coworking-usage-week": {
+      "verdict": "correct",
+      "layer": "looks-like-points",
+      "skill": "mlai-points",
+      "action": null
+    },
+    "blessed-coworking-usage-typo": {
+      "verdict": "correct",
+      "layer": "looks-like-points",
+      "skill": "mlai-points",
+      "action": null
+    },
+    "blessed-coworking-busiest-day": {
+      "verdict": "correct",
+      "layer": "looks-like-points",
+      "skill": "mlai-points",
+      "action": null
+    },
+    "blessed-coworking-trends": {
+      "verdict": "correct",
+      "layer": "looks-like-points",
+      "skill": "mlai-points",
+      "action": null
+    },
+    "blessed-points-promote-admin": {
+      "verdict": "correct",
+      "layer": "looks-like-points",
+      "skill": "mlai-points",
+      "action": null
+    },
+    "blessed-points-allowance": {
+      "verdict": "correct",
+      "layer": "looks-like-points",
+      "skill": "mlai-points",
+      "action": null
+    },
+    "blessed-points-allowance-natural": {
+      "verdict": "correct",
+      "layer": "looks-like-points",
+      "skill": "mlai-points",
+      "action": null
+    },
+    "blessed-points-revoke-admin": {
+      "verdict": "correct",
+      "layer": "looks-like-points",
+      "skill": "mlai-points",
+      "action": null
+    },
+    "blessed-luma-past-csv": {
+      "verdict": "correct",
+      "layer": "looks-like-luma",
+      "skill": "luma-events",
+      "action": null
+    },
+    "blessed-luma-registered-report": {
+      "verdict": "correct",
+      "layer": "looks-like-luma",
+      "skill": "luma-events",
+      "action": null
+    },
+    "blessed-luma-registrations-date": {
+      "verdict": "correct",
+      "layer": "looks-like-luma",
+      "skill": "luma-events",
+      "action": null
+    },
+    "para-connect-rl": {
+      "verdict": "fallthrough",
+      "layer": "llm-fallthrough",
+      "skill": null,
+      "action": null
+    },
+    "para-connect-cv": {
+      "verdict": "fallthrough",
+      "layer": "llm-fallthrough",
+      "skill": null,
+      "action": null
+    },
+    "para-connect-agents": {
+      "verdict": "fallthrough",
+      "layer": "llm-fallthrough",
+      "skill": null,
+      "action": null
+    },
+    "para-connect-mentor": {
+      "verdict": "fallthrough",
+      "layer": "llm-fallthrough",
+      "skill": null,
+      "action": null
+    },
+    "para-connect-healthcare": {
+      "verdict": "fallthrough",
+      "layer": "llm-fallthrough",
+      "skill": null,
+      "action": null
+    },
+    "para-connect-edge": {
+      "verdict": "fallthrough",
+      "layer": "llm-fallthrough",
+      "skill": null,
+      "action": null
+    },
+    "para-connect-robotics": {
+      "verdict": "fallthrough",
+      "layer": "llm-fallthrough",
+      "skill": null,
+      "action": null
+    },
+    "para-connect-cofounder": {
+      "verdict": "fallthrough",
+      "layer": "llm-fallthrough",
+      "skill": null,
+      "action": null
+    },
+    "para-connect-nlp": {
+      "verdict": "fallthrough",
+      "layer": "llm-fallthrough",
+      "skill": null,
+      "action": null
+    },
+    "para-connect-evals": {
+      "verdict": "fallthrough",
+      "layer": "llm-fallthrough",
+      "skill": null,
+      "action": null
+    },
+    "para-content-write-prompting": {
+      "verdict": "correct",
+      "layer": "intent-regex",
+      "skill": "content-factory",
+      "action": "write"
+    },
+    "para-content-draft-blog": {
+      "verdict": "correct",
+      "layer": "intent-regex",
+      "skill": "content-factory",
+      "action": "write"
+    },
+    "para-content-generate": {
+      "verdict": "correct",
+      "layer": "intent-regex",
+      "skill": "content-factory",
+      "action": "write"
+    },
+    "para-content-what-next": {
+      "verdict": "correct",
+      "layer": "intent-regex",
+      "skill": "content-factory",
+      "action": null
+    },
+    "para-content-suggest-topic": {
+      "verdict": "correct",
+      "layer": "intent-regex",
+      "skill": "content-factory",
+      "action": null
+    },
+    "para-content-keywords-target": {
+      "verdict": "fallthrough",
+      "layer": "llm-fallthrough",
+      "skill": null,
+      "action": null
+    },
+    "para-content-rescan": {
+      "verdict": "correct",
+      "layer": "intent-regex",
+      "skill": "content-factory",
+      "action": "scan"
+    },
+    "para-content-setup-blog": {
+      "verdict": "correct",
+      "layer": "intent-regex",
+      "skill": "content-factory",
+      "action": "write"
+    },
+    "para-content-scaffold": {
+      "verdict": "correct",
+      "layer": "intent-regex",
+      "skill": "content-factory",
+      "action": "scaffold"
+    },
+    "para-content-seo-audit": {
+      "verdict": "correct",
+      "layer": "looks-like-content",
+      "skill": "content-factory",
+      "action": null
+    },
+    "para-points-how-many": {
+      "verdict": "correct",
+      "layer": "looks-like-points",
+      "skill": "mlai-points",
+      "action": null
+    },
+    "para-points-spend-on": {
+      "verdict": "correct",
+      "layer": "looks-like-points",
+      "skill": "mlai-points",
+      "action": null
+    },
+    "para-points-rewards-shop": {
+      "verdict": "correct",
+      "layer": "looks-like-points",
+      "skill": "mlai-points",
+      "action": null
+    },
+    "para-points-claim-docs-task": {
+      "verdict": "correct",
+      "layer": "keywords",
+      "skill": "mlai-points",
+      "action": null
+    },
+    "para-points-book-friday": {
+      "verdict": "correct",
+      "layer": "looks-like-points",
+      "skill": "mlai-points",
+      "action": null
+    },
+    "para-points-cancel-tomorrow": {
+      "verdict": "correct",
+      "layer": "looks-like-points",
+      "skill": "mlai-points",
+      "action": null
+    },
+    "para-points-space-monday": {
+      "verdict": "correct",
+      "layer": "looks-like-points",
+      "skill": "mlai-points",
+      "action": null
+    },
+    "para-points-award": {
+      "verdict": "correct",
+      "layer": "looks-like-points",
+      "skill": "mlai-points",
+      "action": null
+    },
+    "para-points-history": {
+      "verdict": "correct",
+      "layer": "looks-like-points",
+      "skill": "mlai-points",
+      "action": null
+    },
+    "para-points-coworking-may": {
+      "verdict": "correct",
+      "layer": "looks-like-points",
+      "skill": "mlai-points",
+      "action": null
+    },
+    "para-points-make-admin": {
+      "verdict": "correct",
+      "layer": "looks-like-points",
+      "skill": "mlai-points",
+      "action": null
+    },
+    "para-points-buy-pack": {
+      "verdict": "correct",
+      "layer": "looks-like-points",
+      "skill": "mlai-points",
+      "action": null
+    },
+    "para-luma-signed-up": {
+      "verdict": "fallthrough",
+      "layer": "llm-fallthrough",
+      "skill": null,
+      "action": null
+    },
+    "para-luma-guest-list": {
+      "verdict": "correct",
+      "layer": "looks-like-luma",
+      "skill": "luma-events",
+      "action": null
+    },
+    "para-luma-attendee-csv": {
+      "verdict": "correct",
+      "layer": "looks-like-luma",
+      "skill": "luma-events",
+      "action": null
+    },
+    "para-luma-who-registered": {
+      "verdict": "correct",
+      "layer": "keywords",
+      "skill": "luma-events",
+      "action": null
+    },
+    "para-luma-export-two-events": {
+      "verdict": "correct",
+      "layer": "looks-like-luma",
+      "skill": "luma-events",
+      "action": null
+    },
+    "para-luma-numbers": {
+      "verdict": "correct",
+      "layer": "looks-like-luma",
+      "skill": "luma-events",
+      "action": null
+    },
+    "para-luma-how-many-came": {
+      "verdict": "fallthrough",
+      "layer": "llm-fallthrough",
+      "skill": null,
+      "action": null
+    },
+    "para-luma-signup-csv": {
+      "verdict": "correct",
+      "layer": "keywords",
+      "skill": "luma-events",
+      "action": null
+    },
+    "para-github-broken": {
+      "verdict": "correct",
+      "layer": "intent-regex",
+      "skill": "github-integration",
+      "action": "reconnect"
+    },
+    "para-github-reauthorise": {
+      "verdict": "fallthrough",
+      "layer": "llm-fallthrough",
+      "skill": null,
+      "action": null
+    },
+    "para-github-link": {
+      "verdict": "correct",
+      "layer": "intent-regex",
+      "skill": "github-integration",
+      "action": "reconnect"
+    },
+    "para-github-setup-again": {
+      "verdict": "correct",
+      "layer": "intent-regex",
+      "skill": "github-integration",
+      "action": "reconnect"
+    },
+    "para-github-cant-see-repo": {
+      "verdict": "fallthrough",
+      "layer": "llm-fallthrough",
+      "skill": null,
+      "action": null
+    },
+    "para-github-authorize-domain": {
+      "verdict": "correct",
+      "layer": "intent-regex",
+      "skill": "github-integration",
+      "action": "reconnect"
+    },
+    "para-linear-standup": {
+      "verdict": "correct",
+      "layer": "looks-like-linear",
+      "skill": "linear-meeting-actions",
+      "action": null
+    },
+    "para-linear-push-items": {
+      "verdict": "fallthrough",
+      "layer": "llm-fallthrough",
+      "skill": null,
+      "action": null
+    },
+    "para-linear-issues-from-summary": {
+      "verdict": "correct",
+      "layer": "looks-like-linear",
+      "skill": "linear-meeting-actions",
+      "action": null
+    },
+    "para-linear-retro-followups": {
+      "verdict": "fallthrough",
+      "layer": "llm-fallthrough",
+      "skill": null,
+      "action": null
+    },
+    "para-linear-attached-doc": {
+      "verdict": "correct",
+      "layer": "looks-like-linear",
+      "skill": "linear-meeting-actions",
+      "action": null
+    },
+    "para-linear-add-this": {
+      "verdict": "correct",
+      "layer": "looks-like-linear",
+      "skill": "linear-meeting-actions",
+      "action": null
+    },
+    "para-linear-raise-issue": {
+      "verdict": "fallthrough",
+      "layer": "llm-fallthrough",
+      "skill": null,
+      "action": null
+    },
+    "para-linear-sync-team-meeting": {
+      "verdict": "correct",
+      "layer": "looks-like-linear",
+      "skill": "linear-meeting-actions",
+      "action": null
+    },
+    "para-tone-sound-like-mlai": {
+      "verdict": "fallthrough",
+      "layer": "llm-fallthrough",
+      "skill": null,
+      "action": null
+    },
+    "para-tone-brand-voice": {
+      "verdict": "fallthrough",
+      "layer": "llm-fallthrough",
+      "skill": null,
+      "action": null
+    },
+    "para-tone-redo-mlai-tone": {
+      "verdict": "correct",
+      "layer": "keywords",
+      "skill": "tone-of-voice",
+      "action": null
+    },
+    "para-tone-rephrase-our-tone": {
+      "verdict": "correct",
+      "layer": "keywords",
+      "skill": "tone-of-voice",
+      "action": null
+    },
+    "para-tone-friendlier": {
+      "verdict": "fallthrough",
+      "layer": "llm-fallthrough",
+      "skill": null,
+      "action": null
+    },
+    "para-medhack-kickoff": {
+      "verdict": "correct",
+      "layer": "keywords",
+      "skill": "medhack",
+      "action": null
+    },
+    "para-medhack-clinical-case": {
+      "verdict": "correct",
+      "layer": "keywords",
+      "skill": "medhack",
+      "action": null
+    },
+    "para-medhack-guess": {
+      "verdict": "correct",
+      "layer": "keywords",
+      "skill": "medhack",
+      "action": null
+    },
+    "para-medhack-ecg": {
+      "verdict": "correct",
+      "layer": "keywords",
+      "skill": "medhack",
+      "action": null
+    },
+    "para-medhack-announce-lunch": {
+      "verdict": "fallthrough",
+      "layer": "llm-fallthrough",
+      "skill": null,
+      "action": null
+    },
+    "para-watt-judging": {
+      "verdict": "fallthrough",
+      "layer": "llm-fallthrough",
+      "skill": null,
+      "action": null
+    },
+    "para-watt-pizza": {
+      "verdict": "fallthrough",
+      "layer": "llm-fallthrough",
+      "skill": null,
+      "action": null
+    },
+    "para-watt-final-demo": {
+      "verdict": "correct",
+      "layer": "keywords",
+      "skill": "watt-the-hack",
+      "action": null
+    },
+    "para-watt-wifi": {
+      "verdict": "fallthrough",
+      "layer": "llm-fallthrough",
+      "skill": null,
+      "action": null
+    },
+    "para-none-summarise-thread": {
+      "verdict": "ok-fallthrough",
+      "layer": "llm-fallthrough",
+      "skill": null,
+      "action": null
+    },
+    "para-none-startup-idea": {
+      "verdict": "ok-fallthrough",
+      "layer": "llm-fallthrough",
+      "skill": null,
+      "action": null
+    },
+    "para-none-thanks": {
+      "verdict": "ok-fallthrough",
+      "layer": "llm-fallthrough",
+      "skill": null,
+      "action": null
+    },
+    "para-none-what-can-you-do": {
+      "verdict": "ok-fallthrough",
+      "layer": "llm-fallthrough",
+      "skill": null,
+      "action": null
+    },
+    "para-none-translate": {
+      "verdict": "ok-fallthrough",
+      "layer": "llm-fallthrough",
+      "skill": null,
+      "action": null
+    },
+    "para-none-wifi": {
+      "verdict": "ok-fallthrough",
+      "layer": "llm-fallthrough",
+      "skill": null,
+      "action": null
+    },
+    "para-none-remind-discussion": {
+      "verdict": "ok-fallthrough",
+      "layer": "llm-fallthrough",
+      "skill": null,
+      "action": null
+    },
+    "para-none-office-holiday": {
+      "verdict": "ok-fallthrough",
+      "layer": "llm-fallthrough",
+      "skill": null,
+      "action": null
+    },
+    "para-none-vector-db": {
+      "verdict": "ok-fallthrough",
+      "layer": "llm-fallthrough",
+      "skill": null,
+      "action": null
+    },
+    "para-none-rag-vs-finetune": {
+      "verdict": "ok-fallthrough",
+      "layer": "llm-fallthrough",
+      "skill": null,
+      "action": null
+    },
+    "para-none-fix-typo": {
+      "verdict": "ok-fallthrough",
+      "layer": "llm-fallthrough",
+      "skill": null,
+      "action": null
+    },
+    "para-none-footy": {
+      "verdict": "ok-fallthrough",
+      "layer": "llm-fallthrough",
+      "skill": null,
+      "action": null
+    },
+    "trap-claim-reward": {
+      "verdict": "correct",
+      "layer": "looks-like-points",
+      "skill": "mlai-points",
+      "action": null
+    },
+    "trap-medhack-meeting": {
+      "verdict": "misroute",
+      "layer": "keywords",
+      "skill": "medhack",
+      "action": null
+    },
+    "trap-linear-howto": {
+      "verdict": "ok-fallthrough",
+      "layer": "llm-fallthrough",
+      "skill": null,
+      "action": null
+    },
+    "trap-earn-promotion": {
+      "verdict": "ok-fallthrough",
+      "layer": "llm-fallthrough",
+      "skill": null,
+      "action": null
+    },
+    "trap-scan-pdf": {
+      "verdict": "ok-fallthrough",
+      "layer": "llm-fallthrough",
+      "skill": null,
+      "action": null
+    },
+    "trap-book-club": {
+      "verdict": "misroute",
+      "layer": "keywords",
+      "skill": "mlai-points",
+      "action": null
+    },
+    "thread-points-interrupt": {
+      "verdict": "correct",
+      "layer": "looks-like-points",
+      "skill": "mlai-points",
+      "action": null
+    },
+    "thread-content-go-ahead": {
+      "verdict": "correct",
+      "layer": "intent-regex",
+      "skill": "content-factory",
+      "action": null
+    },
+    "thread-points-do-it": {
+      "verdict": "fallthrough",
+      "layer": "llm-fallthrough",
+      "skill": null,
+      "action": null
+    }
+  }
+}

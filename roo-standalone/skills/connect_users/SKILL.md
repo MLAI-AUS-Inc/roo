@@ -1,6 +1,29 @@
 ---
 name: connect-users
 description: Find community members with relevant expertise using vector search
+routing:
+  use_when: >
+    The user wants to FIND, MEET, or BE INTRODUCED to community members by
+    expertise, interest, or background: "anyone who…", "who knows…", "connect
+    me with…", "looking for a mentor/teammate/cofounder in…".
+  avoid_when: >
+    Connecting SERVICES or integrations (github-integration). Questions about a
+    topic itself rather than about people ("explain X" is chat).
+  examples:
+    - {text: "do you know anyone in AI research?", action: search}
+    - {text: "anyone in the community working with medical imaging?", action: search}
+    - {text: "connect me with someone who writes blog content", action: search}
+    - {text: "my ecg project needs a teammate, anyone interested in medical AI?", action: search}
+    - {text: "looking for a mentor in data engineering, any suggestions?", action: search}
+  negative_examples:
+    - {text: "connect github again for mlai.au", instead: github-integration}
+    - {text: "explain what a vector database is", instead: respond_in_chat}
+actions:
+  - name: search
+    description: Search the community for members matching an expertise/interest query.
+    params:
+      query: {type: string, description: "The expertise or topic to search for."}
+      limit: {type: integer, description: "Max suggestions (default 5)."}
 ---
 
 # Connect Users Skill

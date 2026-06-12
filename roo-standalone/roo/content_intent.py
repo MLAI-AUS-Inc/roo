@@ -15,24 +15,26 @@ TRAILING_DELEGATION_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# Scan/analyse requests must name an explicit target (repo, codebase, domain,
+# site, or a literal domain name). Bare verbs like "analyse this proposal" or
+# "inspect the CSV" are NOT content scans — they fall through to the LLM router.
 SCAN_PATTERNS = (
-    r"^(?:please\s+)?(?:re-?scan|scan|analy[sz]e|inspect)\b",
-    r"\b(?:can|could|would)\s+you\s+(?:re-?scan|scan|analy[sz]e|inspect)\b",
-    r"\b(?:re-?scan|scan|analy[sz]e|inspect)\s+(?:the\s+)?(?:repo(?:sitory)?|codebase|domain|site|website|project)\b",
+    r"\b(?:re-?scan|scan|analy[sz]e|inspect)\s+(?:the\s+|my\s+|our\s+)?(?:repo(?:sitory)?|codebase|domain|site|website)\b",
     r"\b(?:re-?scan|scan|analy[sz]e|inspect)\s+(?:the\s+)?repo\s+for\s+(?:the\s+)?domain\b",
     r"\b(?:re-?scan|scan|analy[sz]e|inspect)\s+(?:https?://)?[a-z0-9][a-z0-9.-]+\.[a-z]{2,}\b",
 )
 SCAFFOLD_PATTERNS = (
     r"\bscaffold\b",
-    r"\bcreate\s+(?:the\s+)?articles?\b",
+    r"\bcreate\s+(?:the\s+|a\s+|an\s+|my\s+|our\s+)?articles?\b",
     r"\barticles?\s+directory\b",
     r"\barticles?\s+page\b",
-    r"\bset\s+up\s+(?:the\s+)?(?:articles?|blog)\b",
-    r"\bcreate\s+(?:the\s+)?blog\s+page\b",
-    r"\badd\s+(?:the\s+)?blog\b",
+    r"\bset\s+up\s+(?:the\s+|a\s+|an\s+|my\s+|our\s+)?(?:articles?|blog)\b",
+    r"\bcreate\s+(?:the\s+|a\s+|an\s+|my\s+|our\s+)?blog\s+page\b",
+    r"\badd\s+(?:the\s+|a\s+|an\s+|my\s+|our\s+)?blog\b",
 )
 RESEARCH_PATTERNS = (
-    r"\bresearch\b.*\b(article|topic|keyword|blog(?:\s+post)?)\b",
+    # "(?!\s+papers?)" keeps noun usages like "research paper on X" out.
+    r"\bresearch\b(?!\s+papers?\b).*\b(article|topic|keyword|blog(?:\s+post)?)\b",
     r"\bdiscover\b.*\b(topic|topics|article|keyword|keywords|blog(?:\s+post)?)\b",
     r"\b(?:best|next)\s+article\s+to\s+write\b",
     r"\bwhat\s+should\s+i\s+write\b",
@@ -46,14 +48,16 @@ PUBLISH_PR_PATTERNS = (
     r"\bturn\b.*\b(?:article|bundle|draft|post)\b.*\binto\s+a\s+p\.?r\.?\b",
     r"\bopen\b.*\b(?:a\s+)?(?:draft\s+)?p\.?r\.?\b",
 )
+# Writing requires verb + object ("write/draft/generate ... article/blog/content").
+# A bare mention of "article" or "blog" is vocabulary, not intent — "summarise
+# this article" must NOT route here.
 WRITE_PATTERNS = (
     r"\bwrite\b.*\b(article|blog(?:\s+post)?|content)\b",
     r"\bgenerate\b.*\b(article|blog(?:\s+post)?|content)\b",
-    r"\barticle\b",
-    r"\bblog(?:\s+post)?\b",
+    r"\bdraft\b.*\b(article|blog(?:\s+post)?)\b",
 )
 CONTENT_TARGET_PATTERN = re.compile(
-    r"\b(?:repo(?:sitory)?|codebase|domain|site|website|project|app)\b"
+    r"\b(?:repo(?:sitory)?|codebase|domain|site|website)\b"
 )
 GITHUB_AUTH_PATTERNS = (
     r"\bgithub\s+integration\b",

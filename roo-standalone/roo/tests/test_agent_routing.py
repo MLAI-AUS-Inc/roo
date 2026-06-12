@@ -29,6 +29,10 @@ def _make_skill(name: str, trigger_keywords: list[str]) -> Skill:
 
 
 def _make_agent() -> RooAgent:
+    # Keyword lists mirror the real skills/*/SKILL.md frontmatter (post the
+    # 2026-06 pruning of bare generic nouns). The dataset-level guard against
+    # fixture/manifest drift is roo/tests/test_routing_eval_gate.py, which
+    # loads the real SKILL.md files.
     agent = object.__new__(RooAgent)
     agent.skills = [
         _make_skill(
@@ -38,7 +42,6 @@ def _make_agent() -> RooAgent:
                 "write an article",
                 "write article",
                 "research the best article",
-                "blog post",
                 "target keyword",
             ],
         ),
@@ -48,9 +51,6 @@ def _make_agent() -> RooAgent:
                 "points",
                 "balance",
                 "coworking",
-                "book",
-                "task",
-                "tasks",
                 "reward",
                 "rewards",
                 "topup",
@@ -60,6 +60,10 @@ def _make_agent() -> RooAgent:
                 "buy roo points",
                 "add points",
                 "add roo points",
+                "claim a task",
+                "claim task",
+                "open tasks",
+                "my tasks",
             ],
         ),
         _make_skill(
@@ -84,12 +88,15 @@ def _make_agent() -> RooAgent:
             "luma-events",
             [
                 "luma",
-                "attendees",
                 "guest list",
-                "csv",
-                "csv documents",
+                "attendee list",
+                "attendee csv",
+                "attendee report",
+                "export guests",
+                "export attendees",
                 "past csv documents",
                 "mlai events",
+                "recent events",
             ],
         ),
     ]
@@ -695,4 +702,4 @@ def test_llm_router_uses_gpt_5_4(monkeypatch):
     assert skill is not None
     assert skill.name == "content-factory"
     assert captured["model"] == "gpt-5.4"
-    assert captured["reasoning_effort"] == "low"
+    assert captured["reasoning_effort"] == "medium"

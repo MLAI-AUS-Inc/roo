@@ -1,0 +1,140 @@
+# The 28 probe cases from ROUTING_AUDIT.md / routing_probe.py, labelled with
+# what the user actually wanted. Cases tagged `misroute-guard` were routed to
+# the WRONG skill deterministically (before any LLM) at audit time (2026-06-11).
+#
+# Gate: no `misroute-guard` case may ever be deterministically misrouted again.
+# Falling through to the LLM router is acceptable for these; deciding wrongly
+# without the LLM is not.
+
+- id: audit-anyone-ai-research
+  text: "do you know anyone in AI research?"
+  expect: {skill: connect-users}
+  tags: [audit, paraphrase]
+- id: audit-medical-imaging
+  text: "anyone in the community working with medical imaging?"
+  channel: general
+  expect: {skill: connect-users}
+  tags: [audit, misroute-guard]
+- id: audit-sponsorship-contact
+  text: "who should I talk to about hackathon sponsorship announcements?"
+  channel: general
+  expect: {skill: connect-users}
+  tags: [audit, misroute-guard]
+- id: audit-summarise-article
+  text: "can you summarise this article for me?"
+  expect: {skill: none}
+  tags: [audit, misroute-guard]
+- id: audit-blog-post-opinion
+  text: "what did you think of the blog post I shared yesterday?"
+  expect: {skill: none}
+  tags: [audit, misroute-guard]
+- id: audit-analyse-proposal
+  text: "please analyse this project proposal"
+  expect: {skill: none}
+  tags: [audit, misroute-guard]
+- id: audit-inspect-csv
+  text: "can you inspect the CSV I uploaded and tell me the columns?"
+  files: true
+  expect: {skill: none}
+  tags: [audit, misroute-guard]
+- id: audit-book-coworking-tomorrow
+  text: "book me in for coworking tomorrow"
+  expect: {skill: mlai-points, action: book_coworking}
+  tags: [audit]
+- id: audit-book-meeting-room
+  text: "can you book a meeting room for the medhack judges?"
+  channel: general
+  expect: {skill: none}
+  tags: [audit, misroute-guard]
+- id: audit-linear-login-bug
+  text: "add a task to linear to fix the login bug"
+  expect: {skill: linear-meeting-actions}
+  tags: [audit, misroute-guard]
+- id: audit-linear-ticket-thread
+  text: "create a linear ticket from this thread"
+  expect: {skill: linear-meeting-actions}
+  tags: [audit]
+- id: audit-how-earn-points
+  text: "how do I earn points?"
+  expect: {skill: mlai-points}
+  tags: [audit]
+- id: audit-whats-my-balance
+  text: "whats my balance"
+  expect: {skill: mlai-points, action: balance}
+  tags: [audit]
+- id: audit-balance-question-mark
+  text: "balance?"
+  expect: {skill: mlai-points, action: balance}
+  tags: [audit]
+- id: audit-rewrite-tone
+  text: "rewrite this announcement in our tone of voice"
+  expect: {skill: tone-of-voice}
+  tags: [audit]
+- id: audit-announce-watt-channel
+  text: "announce the workshop tomorrow"
+  channel: watt-the-hack
+  expect: {skill: watt-the-hack, action: announce}
+  tags: [audit, channel]
+- id: audit-announce-medhack-channel
+  text: "announce the workshop tomorrow"
+  channel: medhack-frontiers
+  expect: {skill: medhack}
+  tags: [audit, channel]
+- id: audit-announce-general-channel
+  text: "announce the workshop tomorrow"
+  channel: general
+  expect: {skill: none}
+  tags: [audit, channel]
+- id: audit-luma-registered-count
+  text: "how many people registered for the AI safety event?"
+  expect: {skill: luma-events}
+  tags: [audit]
+- id: audit-luma-export-attendees
+  text: "export the attendee list as a csv"
+  expect: {skill: luma-events}
+  tags: [audit]
+- id: audit-write-medhack-article
+  text: "can you write an article about our medhack winners for the blog?"
+  expect: {skill: content-factory, action: write}
+  tags: [audit]
+- id: audit-connect-blog-writer
+  text: "connect me with someone who writes blog content"
+  expect: {skill: connect-users}
+  tags: [audit, misroute-guard]
+- id: audit-open-tasks-question
+  text: "what tasks are open?"
+  expect: {skill: mlai-points, action: list_tasks}
+  tags: [audit]
+- id: audit-scan-repo-mlai
+  text: "scan the repo for the domain mlai.au"
+  expect:
+    skill: content-factory
+    action: scan
+    params_subset: {domain: mlai.au}
+  tags: [audit]
+- id: audit-research-paper-thoughts
+  text: "I read a research paper on keyword extraction, thoughts?"
+  expect: {skill: none}
+  tags: [audit, misroute-guard]
+- id: audit-ecg-teammate
+  text: "my ecg project needs a teammate, anyone interested in medical AI?"
+  channel: general
+  expect: {skill: connect-users}
+  tags: [audit, misroute-guard]
+- id: audit-meetup-topic
+  text: "what's the topic for this week's meetup?"
+  expect: {skill: none}
+  tags: [audit, misroute-guard]
+- id: audit-patient-data-workshop
+  text: "can you check who's coming to the patient-data workshop?"
+  channel: general
+  expect: {skill: luma-events}
+  tags: [audit, misroute-guard]
+- id: audit-summarise-thread
+  text: "write a summary of this thread"
+  expect: {skill: none}
+  tags: [audit]
+- id: audit-research-linkedin-timing
+  text: "research the best time to post on linkedin"
+  expect: {skill: none}
+  tags: [audit]

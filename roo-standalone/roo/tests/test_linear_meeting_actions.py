@@ -1,3 +1,4 @@
+import asyncio
 import importlib.util
 import sys
 from pathlib import Path
@@ -143,7 +144,7 @@ def test_linear_meeting_decision_thresholds():
 
 
 @pytest.mark.asyncio
-async def test_linear_client_raises_on_graphql_errors(monkeypatch):
+async def test_linear_client_reads_context_from_backend(monkeypatch):
     module_path = (
         Path(__file__).resolve().parents[2]
         / "skills"
@@ -156,27 +157,212 @@ async def test_linear_client_raises_on_graphql_errors(monkeypatch):
     spec.loader.exec_module(module)
 
     class FakeResponse:
-        def raise_for_status(self):
-            return None
+        status_code = 200
 
         def json(self):
-            return {"errors": [{"message": "bad query"}]}
+            return {
+                "teams": [{"id": "team-1"}],
+                "users": [{"id": "user-1"}],
+                "projects": [{"id": "project-1"}],
+                "labels": [{"id": "label-1"}],
+                "recentIssues": [{"id": "issue-1"}],
+            }
 
-    class FakeAsyncClient:
-        async def __aenter__(self):
-            return self
+    calls = []
 
-        async def __aexit__(self, exc_type, exc, tb):
-            return None
+    class FakeBackend:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
 
-        async def post(self, *args, **kwargs):
+        async def _request(self, method, endpoint, **kwargs):
+            calls.append((method, endpoint, kwargs))
             return FakeResponse()
 
-    monkeypatch.setattr(module.httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(module, "MLAIBackendClient", FakeBackend)
 
-    client = module.LinearMeetingActionsClient(api_key="lin_api_key")
-    with pytest.raises(RuntimeError, match="bad query"):
-        await client._graphql("query { viewer { id } }")
+    client = module.LinearMeetingActionsClient(base_url="https://backend.test", api_key="roo-key")
+    teams, users, projects, labels, recent_issues = await asyncio.gather(
+        client.list_teams(),
+        client.list_users(),
+        client.list_active_projects(),
+        client.list_issue_labels(),
+        client.list_recent_open_issues(),
+    )
+
+    assert teams == [{"id": "team-1"}]
+    assert users == [{"id": "user-1"}]
+    assert projects == [{"id": "project-1"}]
+    assert labels == [{"id": "label-1"}]
+    assert recent_issues == [{"id": "issue-1"}]
+    assert len(calls) == 1
+    assert calls[0][0] == "GET"
+    assert calls[0][1] == "/api/v1/integrations/linear/meeting-context"
+    assert calls[0][2]["use_admin_headers"] is True
+
+
+@pytest.mark.asyncio
+async def test_linear_client_create_issue_calls_backend(monkeypatch):
+    module_path = (
+        Path(__file__).resolve().parents[2]
+        / "skills"
+        / "linear_meeting_actions"
+        / "client.py"
+    )
+    spec = importlib.util.spec_from_file_location("linear_meeting_actions_client_create_test", module_path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+
+    class FakeResponse:
+        status_code = 201
+
+        def json(self):
+            return {"identifier": "ENG-123", "title": "Update onboarding docs"}
+
+    calls = []
+
+    class FakeBackend:
+        def __init__(self, **kwargs):
+            pass
+
+        async def _request(self, method, endpoint, **kwargs):
+            calls.append((method, endpoint, kwargs))
+            return FakeResponse()
+
+    monkeypatch.setattr(module, "MLAIBackendClient", FakeBackend)
+
+    client = module.LinearMeetingActionsClient(base_url="https://backend.test", api_key="roo-key")
+    issue = await client.create_issue(
+        title="Update onboarding docs",
+        team_id="team-1",
+        description="Meeting task",
+        assignee_id="user-1",
+        project_id="project-1",
+        priority=2,
+        due_date="2026-05-08",
+        label_ids=["label-1"],
+    )
+
+    assert issue["identifier"] == "ENG-123"
+    assert calls[0][0] == "POST"
+    assert calls[0][1] == "/api/v1/integrations/linear/issues"
+    assert calls[0][2]["use_admin_headers"] is True
+    assert calls[0][2]["json"] == {
+        "title": "Update onboarding docs",
+        "team_id": "team-1",
+        "description": "Meeting task",
+        "assignee_id": "user-1",
+        "project_id": "project-1",
+        "priority": 2,
+        "due_date": "2026-05-08",
+        "label_ids": ["label-1"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_linear_client_backend_error_surfaces_detail(monkeypatch, capsys):
+    module_path = (
+        Path(__file__).resolve().parents[2]
+        / "skills"
+        / "linear_meeting_actions"
+        / "client.py"
+    )
+    spec = importlib.util.spec_from_file_location("linear_meeting_actions_client_error_test", module_path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+
+    class FakeResponse:
+        status_code = 502
+
+        def json(self):
+            return {
+                "detail": 'Cannot query field "state" on type "Project".',
+                "code": "linear_graphql_error",
+                "operation": "LinearProjects",
+            }
+
+    class FakeBackend:
+        def __init__(self, **kwargs):
+            pass
+
+        async def _request(self, method, endpoint, **kwargs):
+            return FakeResponse()
+
+    monkeypatch.setattr(module, "MLAIBackendClient", FakeBackend)
+
+    client = module.LinearMeetingActionsClient(base_url="https://backend.test", api_key="roo-key")
+    with pytest.raises(RuntimeError, match="LinearProjects"):
+        await client.list_teams()
+    captured = capsys.readouterr()
+    assert "Linear meeting backend error" in captured.out
+    assert 'Cannot query field "state"' in captured.out
+
+
+@pytest.mark.asyncio
+async def test_linear_meeting_executor_surfaces_backend_context_detail(monkeypatch):
+    executor = SkillExecutor()
+
+    async def fake_source_result(**kwargs):
+        return SourceParseResult(
+            sources=[
+                ParsedSource(
+                    label="Slack thread",
+                    text="Sam will update onboarding docs in Alpha after the meeting.",
+                    kind="slack",
+                )
+            ]
+        )
+
+    class FailingClient:
+        async def list_teams(self):
+            raise RuntimeError(
+                'Cannot query field "state" on type "Project". '
+                "(linear_graphql_error; LinearProjects)"
+            )
+
+        async def list_users(self):
+            return []
+
+        async def list_active_projects(self):
+            return []
+
+        async def list_issue_labels(self):
+            return []
+
+        async def list_recent_open_issues(self):
+            return []
+
+    class FakeSkill:
+        def get_client_class(self, name):
+            assert name == "LinearMeetingActionsClient"
+            return FailingClient
+
+    monkeypatch.setattr(
+        executor_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            LINEAR_DEFAULT_TEAM=None,
+            LINEAR_MEETING_AUTO_CREATE_MIN_CONFIDENCE=0.85,
+            LINEAR_MEETING_UNCERTAIN_MIN_CONFIDENCE=0.65,
+        ),
+    )
+    monkeypatch.setattr(executor, "_build_linear_meeting_source_result", fake_source_result)
+
+    result = await executor._execute_linear_meeting_actions(
+        skill=FakeSkill(),
+        text="turn this meeting summary into Linear tasks",
+        params={},
+        user_id="U1",
+        channel_id="C1",
+        thread_ts="1.1",
+        thread_history=[],
+        event_files=[],
+    )
+
+    assert 'Cannot query field "state"' in result["message"]
+    assert "LinearProjects" in result["message"]
+    assert "RuntimeError:" not in result["message"]
 
 
 @pytest.mark.asyncio
@@ -253,8 +439,8 @@ async def test_linear_meeting_executor_creates_issue_from_parsed_file_source(mon
     }
 
     class FakeClient:
-        def __init__(self, api_key):
-            assert api_key == "lin_api_key"
+        def __init__(self):
+            pass
 
         async def list_teams(self):
             return [team]
@@ -288,7 +474,6 @@ async def test_linear_meeting_executor_creates_issue_from_parsed_file_source(mon
         executor_module,
         "get_settings",
         lambda: SimpleNamespace(
-            LINEAR_API_KEY="lin_api_key",
             LINEAR_DEFAULT_TEAM=None,
             LINEAR_MEETING_AUTO_CREATE_MIN_CONFIDENCE=0.85,
             LINEAR_MEETING_UNCERTAIN_MIN_CONFIDENCE=0.65,

@@ -1,10 +1,35 @@
 ---
 name: tone-of-voice
 description: Rewrite text using the MLAI organisation tone of voice
+# Keep keywords high-precision: bare "tone"/"rewrite"/"rephrase" collide with
+# unrelated requests; less specific phrasings go through the LLM router.
 trigger_keywords:
-  - tone
-  - rewrite
-  - rephrase
+  - tone of voice
+  - our tone
+  - mlai tone
+  - brand voice
+  - in our voice
+  - rewrite this in
+  - rephrase this in
+routing:
+  use_when: >
+    The user has existing text they want rewritten, rephrased, or polished in MLAI's
+    tone of voice / brand voice ("make this sound like us/mlai").
+  avoid_when: >
+    Writing NEW articles or blog content (content-factory). Translations, summaries,
+    or typo fixes with no MLAI-voice intent (chat).
+  examples:
+    - {text: "rewrite this announcement in our tone of voice", action: rewrite}
+    - {text: "can you make this sound more like mlai?", action: rewrite}
+    - {text: "polish this message to match our brand voice", action: rewrite}
+  negative_examples:
+    - {text: "write me an article about prompt engineering", instead: content-factory}
+    - {text: "translate this message to spanish", instead: respond_in_chat}
+actions:
+  - name: rewrite
+    description: Rewrite the provided text (or the message/thread content) in MLAI's tone of voice.
+    params:
+      text: {type: string, description: "The text to rewrite, if quoted in the message."}
 ---
 
 # Tone of Voice Skill

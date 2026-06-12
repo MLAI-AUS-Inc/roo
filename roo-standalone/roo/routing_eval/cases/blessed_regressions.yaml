@@ -1,0 +1,265 @@
+# Blessed regression corpus: every phrasing here is asserted by the existing
+# unit tests (roo/tests/test_agent_routing.py) or the fast path, and routed
+# deterministically (no LLM) at the time the eval set was created.
+#
+# Gate: every case tagged `blessed` MUST stay deterministically correct.
+# If you intentionally change routing for one of these, update the case AND
+# the corresponding unit test in the same PR.
+
+# --- fast path (exact commands) ---
+- id: fast-points
+  text: "points"
+  expect: {skill: mlai-points, action: balance}
+  tags: [blessed, fast-path]
+- id: fast-balance
+  text: "balance"
+  expect: {skill: mlai-points, action: balance}
+  tags: [blessed, fast-path]
+- id: fast-my-points
+  text: "my points"
+  expect: {skill: mlai-points, action: balance}
+  tags: [blessed, fast-path]
+- id: fast-tasks
+  text: "tasks"
+  expect: {skill: mlai-points, action: list_tasks}
+  tags: [blessed, fast-path]
+- id: fast-my-tasks
+  text: "my tasks"
+  expect: {skill: mlai-points, action: list_tasks}
+  tags: [blessed, fast-path]
+- id: fast-open-tasks
+  text: "open tasks"
+  expect: {skill: mlai-points, action: list_tasks}
+  tags: [blessed, fast-path]
+- id: fast-earn-points
+  text: "earn points"
+  expect: {skill: mlai-points, action: list_tasks}
+  tags: [blessed, fast-path]
+- id: fast-rewards
+  text: "rewards"
+  expect: {skill: mlai-points, action: list_rewards}
+  tags: [blessed, fast-path]
+- id: fast-coworking-book-today
+  text: "coworking book today"
+  expect: {skill: mlai-points, action: book_coworking}
+  tags: [blessed, fast-path]
+- id: fast-coworking-cancel
+  text: "coworking cancel"
+  expect: {skill: mlai-points, action: cancel_coworking}
+  tags: [blessed, fast-path]
+
+# --- content-factory ---
+- id: blessed-write-article-harness
+  text: "write me an article about 'How to build an ai agent harness for long-running specific tasks'"
+  expect: {skill: content-factory, action: write}
+  tags: [blessed]
+- id: blessed-scan-domain
+  text: "scan the domain woofya.com.au"
+  expect:
+    skill: content-factory
+    action: scan
+    params_subset: {domain: woofya.com.au}
+  tags: [blessed]
+- id: blessed-scan-repo-for-domain
+  text: "scan the repo for the domain woofya.com.au"
+  expect:
+    skill: content-factory
+    action: scan
+    params_subset: {domain: woofya.com.au}
+  tags: [blessed]
+- id: blessed-thread-write-follow-up
+  text: "write it for my domain"
+  thread: {last_skill: content-factory, domain: mlai.au, workflow: research}
+  expect:
+    skill: content-factory
+    params_subset: {domain: mlai.au}
+  tags: [blessed, thread]
+- id: blessed-thread-scan-follow-up
+  text: "scan it"
+  thread: {last_skill: content-factory, domain: woofya.com.au, workflow: scan}
+  expect:
+    skill: content-factory
+    action: scan
+    params_subset: {domain: woofya.com.au}
+  tags: [blessed, thread]
+- id: blessed-thread-publish-pr
+  text: "publish this article as a PR"
+  thread: {last_skill: content-factory, domain: birdpsychology.com.au, workflow: write, job_id: job-content-123}
+  expect:
+    skill: content-factory
+    action: publish_pr
+    params_subset: {job_id: job-content-123}
+  tags: [blessed, thread]
+- id: blessed-thread-publish-bundle-pr
+  text: "publish this bundle as a PR"
+  thread: {last_skill: content-factory, domain: birdpsychology.com.au, workflow: write, job_id: job-content-123}
+  expect: {skill: content-factory, action: publish_pr}
+  tags: [blessed, thread]
+- id: blessed-thread-turn-bundle-into-pr
+  text: "turn this bundle into a PR"
+  thread: {last_skill: content-factory, domain: birdpsychology.com.au, workflow: write, job_id: job-content-123}
+  expect: {skill: content-factory, action: publish_pr}
+  tags: [blessed, thread]
+- id: blessed-thread-open-draft-pr
+  text: "open a draft PR for this bundle"
+  thread: {last_skill: content-factory, domain: birdpsychology.com.au, workflow: write, job_id: job-content-123}
+  expect: {skill: content-factory, action: publish_pr}
+  tags: [blessed, thread]
+- id: blessed-thread-push-bundle-to-pr
+  text: "push this bundle to PR"
+  thread: {last_skill: content-factory, domain: birdpsychology.com.au, workflow: write, job_id: job-content-123}
+  expect: {skill: content-factory, action: publish_pr}
+  tags: [blessed, thread]
+- id: blessed-thread-push-article-to-pr
+  text: "push this article to PR"
+  thread: {last_skill: content-factory, domain: birdpsychology.com.au, workflow: write, job_id: job-content-123}
+  expect: {skill: content-factory, action: publish_pr}
+  tags: [blessed, thread]
+
+# --- github-integration ---
+- id: blessed-github-reconnect
+  text: "reconnect to github for mlai.au"
+  expect:
+    skill: github-integration
+    action: reconnect
+    params_subset: {domain: mlai.au}
+  tags: [blessed]
+- id: blessed-github-authenticate-with
+  text: "authenticate with github for mlai.au"
+  expect: {skill: github-integration, action: reconnect}
+  tags: [blessed]
+- id: blessed-github-authenticate
+  text: "authenticate github for mlai.au"
+  expect: {skill: github-integration, action: reconnect}
+  tags: [blessed]
+- id: blessed-github-connect-again
+  text: "connect github again for mlai.au"
+  expect: {skill: github-integration, action: reconnect}
+  tags: [blessed]
+
+# --- linear-meeting-actions ---
+- id: blessed-linear-meeting-summary
+  text: "turn this meeting summary into Linear tasks"
+  expect: {skill: linear-meeting-actions}
+  tags: [blessed]
+- id: blessed-linear-transcript-actions
+  text: "extract action items from this transcript and add them to Linear"
+  expect: {skill: linear-meeting-actions}
+  tags: [blessed]
+- id: blessed-linear-sync-notes
+  text: "sync meeting notes to Linear project Alpha"
+  expect: {skill: linear-meeting-actions}
+  tags: [blessed]
+- id: blessed-linear-pdf
+  text: "send this PDF to Linear as tasks"
+  expect: {skill: linear-meeting-actions}
+  tags: [blessed]
+- id: blessed-linear-image
+  text: "create Linear issues from this image"
+  expect: {skill: linear-meeting-actions}
+  tags: [blessed]
+- id: blessed-linear-attached-file
+  text: "send this to Linear as tasks"
+  files: true
+  expect: {skill: linear-meeting-actions}
+  tags: [blessed, files]
+
+# --- mlai-points ---
+- id: blessed-points-create-task
+  text: "create a task called 'Fix docs' worth 5 points"
+  expect: {skill: mlai-points, action: create_task}
+  tags: [blessed]
+- id: blessed-points-request
+  text: "request 5 points for helping at the event"
+  expect: {skill: mlai-points, action: request_points}
+  tags: [blessed]
+- id: blessed-points-topup-slash
+  text: "/roo topup"
+  expect: {skill: mlai-points, action: topup_points}
+  tags: [blessed]
+- id: blessed-points-topup-phrase
+  text: "top up Roo Points"
+  expect: {skill: mlai-points, action: topup_points}
+  tags: [blessed]
+- id: blessed-points-buy-roo-points
+  text: "buy 10 roo points"
+  expect: {skill: mlai-points, action: topup_points}
+  tags: [blessed]
+- id: blessed-points-add-roo-points
+  text: "add roo points"
+  expect: {skill: mlai-points, action: topup_points}
+  tags: [blessed]
+- id: blessed-points-need-more
+  text: "I need more points"
+  expect: {skill: mlai-points, action: topup_points}
+  tags: [blessed]
+- id: blessed-coworking-book-me-in
+  text: "book me in"
+  expect: {skill: mlai-points, action: book_coworking}
+  tags: [blessed]
+- id: blessed-coworking-book-me-in-today
+  text: "book me in today"
+  expect: {skill: mlai-points, action: book_coworking}
+  tags: [blessed]
+- id: blessed-coworking-checkin-mention
+  text: "check <@U123ABC> in today"
+  expect: {skill: mlai-points, action: admin_checkin_coworking}
+  tags: [blessed]
+- id: blessed-coworking-book-mention
+  text: "book <@U123ABC> in today"
+  expect: {skill: mlai-points, action: admin_checkin_coworking}
+  tags: [blessed]
+- id: blessed-coworking-report-3-months
+  text: "coworking report last 3 months"
+  expect: {skill: mlai-points, action: coworking_report}
+  tags: [blessed]
+- id: blessed-coworking-summary-6-months
+  text: "coworking summary last 6 months"
+  expect: {skill: mlai-points, action: coworking_report}
+  tags: [blessed]
+- id: blessed-coworking-usage-week
+  text: "how many people used the coworking space this week"
+  expect: {skill: mlai-points, action: coworking_report}
+  tags: [blessed]
+- id: blessed-coworking-usage-typo
+  text: "Roo how many peopel used the coworkign space last week and how does that usage compare to the week prior?"
+  expect: {skill: mlai-points, action: coworking_report}
+  tags: [blessed, typo]
+- id: blessed-coworking-busiest-day
+  text: "which day was busiest for coworking last month"
+  expect: {skill: mlai-points, action: coworking_report}
+  tags: [blessed]
+- id: blessed-coworking-trends
+  text: "show coworking trends for the last 3 months and recommendations"
+  expect: {skill: mlai-points, action: coworking_report}
+  tags: [blessed]
+- id: blessed-points-promote-admin
+  text: "promote <@U123ABC> to roo points admin"
+  expect: {skill: mlai-points, action: promote_points_admin}
+  tags: [blessed]
+- id: blessed-points-allowance
+  text: "change <@U123ABC> weekly points allowance to 150"
+  expect: {skill: mlai-points, action: set_points_admin_allowance}
+  tags: [blessed]
+- id: blessed-points-allowance-natural
+  text: "increase the number of points <@U123ABC> can give out weekly to 48"
+  expect: {skill: mlai-points, action: set_points_admin_allowance}
+  tags: [blessed]
+- id: blessed-points-revoke-admin
+  text: "remove <@U123ABC> as roo points admin"
+  expect: {skill: mlai-points, action: revoke_points_admin}
+  tags: [blessed]
+
+# --- luma-events ---
+- id: blessed-luma-past-csv
+  text: "can you give me past csv documents for the past 3 MLAI events"
+  expect: {skill: luma-events}
+  tags: [blessed]
+- id: blessed-luma-registered-report
+  text: "give me a report for how many people registered for the april 29 event"
+  expect: {skill: luma-events}
+  tags: [blessed]
+- id: blessed-luma-registrations-date
+  text: "how many registrations were there for the 2026-04-29 event"
+  expect: {skill: luma-events}
+  tags: [blessed]

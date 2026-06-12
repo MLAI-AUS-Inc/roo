@@ -4,9 +4,12 @@ Roo Agent - Core Orchestration Layer
 The agent receives user messages, selects appropriate skills,
 and executes them to generate responses.
 """
+import asyncio
+import json
 import re
+import time
 from datetime import datetime, timedelta, timezone
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 from pathlib import Path
 
 from .config import get_settings
@@ -22,7 +25,9 @@ from .skills.executor import SkillExecutor
 from .slack_client import get_thread_messages
 
 
-THREAD_CONTEXT_TTL = timedelta(hours=2)
+# How long a thread stays "sticky" to the last-used skill. Kept short: one
+# misroute pinned a thread for 2 hours before this was reduced (2026-06).
+THREAD_CONTEXT_TTL = timedelta(minutes=30)
 CONTENT_FACTORY_DELEGATION_ADMIN_SLACK_ID = "U05QPB483K9"
 
 
@@ -76,6 +81,7 @@ class RooAgent:
             Dict with 'message', 'skill_used', and optional 'data'
         """
         # Clean the message
+        routing_started_at = time.monotonic()
         clean_text = self._clean_mention(text)
         thread_context = self._get_thread_context(channel_id, thread_ts)
         stripped_text, delegation = extract_content_factory_delegation(clean_text)
@@ -133,15 +139,83 @@ class RooAgent:
         fast_result = await self._try_fast_path(clean_text, user_id, channel_id, thread_ts)
         if fast_result:
             print(f"⚡ Fast Path matched!")
+            self._log_routing_decision(
+                text=clean_text,
+                channel_id=channel_id,
+                thread_ts=thread_ts,
+                layer="fast",
+                skill_name="mlai-points",
+                action=(fast_result.get("data") or {}).get("action"),
+                started_at=routing_started_at,
+            )
             return fast_result
-        
-        # 2. Select appropriate skill (LLM Routing)
-        skill = routing_intent["skill"] if routing_intent else await self._select_skill(
-            clean_text,
-            thread_history,
-            channel_id,
-            thread_ts,
-            has_file_context=bool(kwargs.get("event_files")),
+
+        # 2. Select appropriate skill
+        router_mode = self._router_v2_mode()
+        v2_decision = None
+
+        if router_mode == "on":
+            # Router v2 decides (fast path and delegation parsing stayed in front).
+            v2_decision = await self._route_v2(
+                clean_text, thread_history, channel_id, thread_ts, kwargs.get("event_files")
+            )
+            if v2_decision.is_clarification:
+                self._log_routing_decision(
+                    text=clean_text,
+                    channel_id=channel_id,
+                    thread_ts=thread_ts,
+                    layer="v2-clarify",
+                    skill_name=None,
+                    started_at=routing_started_at,
+                )
+                return {
+                    "message": v2_decision.clarification,
+                    "skill_used": None,
+                    "data": {"router": "v2", "clarification": True},
+                }
+            skill = self._get_skill_by_name(v2_decision.skill) if v2_decision.skill else None
+            selection_layer = "v2" if v2_decision.source == "router" else "v2-error"
+        elif routing_intent:
+            skill, selection_layer = routing_intent["skill"], "intent-regex"
+        else:
+            skill, selection_layer = await self._select_skill_detail(
+                clean_text,
+                thread_history,
+                channel_id,
+                thread_ts,
+                has_file_context=bool(kwargs.get("event_files")),
+            )
+
+        if router_mode == "shadow":
+            try:
+                asyncio.create_task(
+                    self._shadow_route_v2(
+                        clean_text,
+                        thread_history,
+                        channel_id,
+                        thread_ts,
+                        kwargs.get("event_files"),
+                        skill.name if skill else None,
+                        selection_layer,
+                    )
+                )
+            except RuntimeError:
+                pass  # no running event loop (sync contexts)
+
+        log_action = (routing_intent or {}).get("params", {}).get("action")
+        log_params = (routing_intent or {}).get("params")
+        if v2_decision is not None:
+            log_action = v2_decision.action
+            log_params = v2_decision.params
+        self._log_routing_decision(
+            text=clean_text,
+            channel_id=channel_id,
+            thread_ts=thread_ts,
+            layer=selection_layer,
+            skill_name=skill.name if skill else None,
+            action=log_action,
+            params=log_params,
+            started_at=routing_started_at,
         )
 
         if skill:
@@ -163,7 +237,12 @@ class RooAgent:
                 ),
             )
             effective_param_overrides = dict(param_overrides or {})
-            if routing_intent and skill.name == routing_intent["skill"].name:
+            if v2_decision is not None and v2_decision.skill == skill.name:
+                effective_param_overrides = {
+                    **self._v2_param_overrides(v2_decision, thread_context),
+                    **effective_param_overrides,
+                }
+            elif routing_intent and skill.name == routing_intent["skill"].name:
                 effective_param_overrides = {
                     **routing_intent.get("params", {}),
                     **effective_param_overrides,
@@ -337,15 +416,154 @@ class RooAgent:
             "params": dict(route.get("params") or {}),
         }
 
+    def _log_routing_decision(
+        self,
+        *,
+        text: str,
+        channel_id: Optional[str],
+        thread_ts: Optional[str],
+        layer: Optional[str],
+        skill_name: Optional[str],
+        action: Optional[str] = None,
+        params: Optional[Dict[str, Any]] = None,
+        started_at: Optional[float] = None,
+    ) -> None:
+        """Emit one structured, grep-able log line per routing decision.
+
+        These lines are the raw material for the routing eval set: misroutes
+        observed in production get copied into roo/routing_eval/cases/.
+        """
+        try:
+            safe_params = {
+                key: value
+                for key, value in (params or {}).items()
+                if key not in ("requested_by_slack_user_id", "effective_slack_user_id")
+            }
+            payload = {
+                "event": "routing_decision",
+                "layer": layer or "none",
+                "skill": skill_name,
+                "action": action,
+                "params": safe_params,
+                "channel_id": channel_id,
+                "thread_ts": thread_ts,
+                "latency_ms": (
+                    round((time.monotonic() - started_at) * 1000)
+                    if started_at is not None
+                    else None
+                ),
+                "text": (text or "")[:300],
+            }
+            print("ROUTING_DECISION " + json.dumps(payload, ensure_ascii=False, default=str))
+        except Exception as exc:
+            print(f"⚠️ Failed to log routing decision: {exc}")
+
+    def _safe_channel_name(self, channel_id: Optional[str]) -> Optional[str]:
+        """Resolve a channel name without ever raising (Slack may be unavailable)."""
+        if not channel_id:
+            return None
+        try:
+            from .slack_client import get_channel_name
+            return get_channel_name(channel_id)
+        except Exception as exc:
+            print(f"⚠️ Channel name lookup failed for {channel_id}: {exc}")
+            return None
+
+    def _router_v2_mode(self) -> str:
+        """Read ROUTER_V2 without ever raising (tests run without env)."""
+        try:
+            return str(getattr(get_settings(), "ROUTER_V2", "off") or "off").strip().lower()
+        except Exception:
+            return "off"
+
+    async def _route_v2(
+        self,
+        text: str,
+        thread_history: Optional[List[dict]],
+        channel_id: Optional[str],
+        thread_ts: Optional[str],
+        event_files: Optional[list] = None,
+    ):
+        """Run the v2 tool-calling router over the live skill catalog."""
+        from . import router as router_v2
+
+        file_names = [
+            file.get("name") or file.get("title")
+            for file in (event_files or [])
+            if isinstance(file, dict)
+        ]
+        return await router_v2.route(
+            text,
+            skills=self.skills,
+            channel_name=self._safe_channel_name(channel_id),
+            thread_history=thread_history,
+            thread_hint=self._get_thread_context(channel_id, thread_ts),
+            file_names=[name for name in file_names if name] or None,
+        )
+
+    def _v2_param_overrides(self, decision, thread_context: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        """Decision params -> executor param overrides, with thread post-fill.
+
+        Mirrors what the old intent regexes did for content-factory threads:
+        a follow-up inherits the thread's domain/job when the router didn't
+        extract them from the message itself.
+        """
+        params = dict(decision.params or {})
+        if decision.action:
+            params["action"] = decision.action
+        if (
+            decision.skill == "content-factory"
+            and thread_context
+            and thread_context.get("skill_name") == "content-factory"
+        ):
+            if thread_context.get("domain") and not params.get("domain"):
+                params["domain"] = thread_context["domain"]
+            if decision.action == "publish_pr" and thread_context.get("active_job_id"):
+                params.setdefault("job_id", thread_context["active_job_id"])
+        return params
+
+    async def _shadow_route_v2(
+        self,
+        text: str,
+        thread_history: Optional[List[dict]],
+        channel_id: Optional[str],
+        thread_ts: Optional[str],
+        event_files: Optional[list],
+        v1_skill: Optional[str],
+        v1_layer: Optional[str],
+    ) -> None:
+        """Shadow mode: run v2 after the fact and log (dis)agreement. Never raises."""
+        try:
+            decision = await self._route_v2(text, thread_history, channel_id, thread_ts, event_files)
+            v2_skill = decision.skill
+            payload = {
+                "event": "routing_decision_v2",
+                "mode": "shadow",
+                "skill": v2_skill,
+                "action": decision.action,
+                "params": decision.params,
+                "clarification": decision.clarification,
+                "source": decision.source,
+                "v1_skill": v1_skill,
+                "v1_layer": v1_layer,
+                "disagree": (v2_skill or None) != (v1_skill or None),
+                "channel_id": channel_id,
+                "thread_ts": thread_ts,
+                "text": (text or "")[:300],
+            }
+            print("ROUTING_DECISION_V2 " + json.dumps(payload, ensure_ascii=False, default=str))
+        except Exception as exc:
+            print(f"⚠️ Shadow router v2 failed: {exc}")
+
     def _looks_like_content_request(self, text: str) -> bool:
+        # Verb + object only. Bare nouns ("article", "blog", "topic", "keyword")
+        # fire on vocabulary, not intent — "summarise this article" and "what's
+        # the topic for the meetup?" must NOT land here.
         patterns = (
-            r'\barticle\b',
-            r'\bblog(?:\s+post)?\b',
+            r'\b(?:write|draft|generate|create)\b.*\b(article|blog(?:\s+post)?|content)\b',
+            r'\bresearch\b(?!\s+papers?\b).*\b(article|topic|keyword|blog(?:\s+post)?)\b',
+            r'\b(?:article|blog)\s+(?:idea|topic|draft)s?\b',
             r'\bseo\b',
-            r'\bkeyword\b',
-            r'\btopic\b',
-            r'\bwrite\b.*\b(article|blog(?:\s+post)?)\b',
-            r'\bresearch\b.*\b(article|topic|keyword)\b',
             r'\bfor my domain\b',
         )
         return any(re.search(pattern, text) for pattern in patterns)
@@ -360,6 +578,7 @@ class RooAgent:
             r'\bbalance\b',
             r'\bcoworking\b',
             r'\bbook\s+me\s+in\b',
+            r'\bbook\b.*<@[a-z0-9]+>.*\bin\b',
             r'\bcheck\b.*<@[a-z0-9]+>.*\bin\b',
             r'\brewards?\b',
             r'\bclaim\s+task\b',
@@ -425,6 +644,20 @@ class RooAgent:
         )
         return any(re.search(pattern, text) for pattern in patterns)
 
+    def _skill_available_in_channel(self, skill: Skill, channel_name: Optional[str]) -> bool:
+        """Channel scoping as a routing constraint.
+
+        A skill restricted to exclusive_channels must not capture messages from
+        other channels (its keywords used to grab e.g. "patient"/"announcement"
+        workspace-wide, then the executor refused to run). Mirrors the executor
+        rule: an unknown channel (None) is allowed through.
+        """
+        if not skill.exclusive_channels:
+            return True
+        if not channel_name:
+            return True
+        return channel_name in skill.exclusive_channels
+
     def _keyword_matches(self, text: str, keyword: str) -> bool:
         keyword = keyword.lower().strip()
         if not keyword:
@@ -439,10 +672,27 @@ class RooAgent:
         text: str,
         thread_context: Optional[Dict[str, Any]] = None,
         has_file_context: bool = False,
+        channel_name: Optional[str] = None,
     ) -> Optional[Skill]:
+        skill, _layer = self._select_skill_from_triggers_detail(
+            text,
+            thread_context,
+            has_file_context=has_file_context,
+            channel_name=channel_name,
+        )
+        return skill
+
+    def _select_skill_from_triggers_detail(
+        self,
+        text: str,
+        thread_context: Optional[Dict[str, Any]] = None,
+        has_file_context: bool = False,
+        channel_name: Optional[str] = None,
+    ) -> Tuple[Optional[Skill], Optional[str]]:
+        """Deterministic (pre-LLM) skill selection, reporting which layer decided."""
         routing_intent = self._get_routing_intent(text, thread_context)
         if routing_intent:
-            return routing_intent["skill"]
+            return routing_intent["skill"], "intent-regex"
 
         text_lower = text.lower().strip()
         content_skill = self._get_skill_by_name("content-factory")
@@ -451,16 +701,16 @@ class RooAgent:
         linear_meeting_skill = self._get_skill_by_name("linear-meeting-actions")
 
         if luma_skill and self._looks_like_luma_request(text_lower):
-            return luma_skill
+            return luma_skill, "looks-like-luma"
 
         if content_skill and self._looks_like_content_request(text_lower):
-            return content_skill
+            return content_skill, "looks-like-content"
 
         if linear_meeting_skill and self._looks_like_linear_meeting_request(text_lower, has_file_context):
-            return linear_meeting_skill
+            return linear_meeting_skill, "looks-like-linear"
 
         if points_skill and self._looks_like_points_request(text_lower):
-            return points_skill
+            return points_skill, "looks-like-points"
 
         if (
             thread_context
@@ -469,10 +719,12 @@ class RooAgent:
             and self._looks_like_content_follow_up(text_lower)
             and not self._looks_like_points_request(text_lower)
         ):
-            return content_skill
+            return content_skill, "content-follow-up"
 
         skill_scores: Dict[str, int] = {}
         for skill in self.skills:
+            if not self._skill_available_in_channel(skill, channel_name):
+                continue
             matched_keywords = [
                 keyword for keyword in skill.trigger_keywords
                 if self._keyword_matches(text_lower, keyword)
@@ -481,39 +733,29 @@ class RooAgent:
                 skill_scores[skill.name] = sum(len(keyword.split()) * 3 + len(keyword) for keyword in matched_keywords)
 
         if not skill_scores:
-            return None
+            return None, None
 
         ranked = sorted(skill_scores.items(), key=lambda item: item[1], reverse=True)
         best_skill_name, best_score = ranked[0]
         runner_up_score = ranked[1][1] if len(ranked) > 1 else -1
 
         if len(ranked) == 1 or best_score >= runner_up_score + 4:
-            return self._get_skill_by_name(best_skill_name)
+            return self._get_skill_by_name(best_skill_name), "keywords"
 
-        return None
+        return None, "keyword-tie"
 
-    async def _try_fast_path(
-        self, 
-        text: str, 
-        user_id: str,
-        channel_id: Optional[str] = None,
-        thread_ts: Optional[str] = None
-    ) -> Optional[Dict[str, Any]]:
+    def _match_fast_path(self, text: str) -> Optional[str]:
+        """Match exact-command shortcuts without executing them.
+
+        Returns the points action name, or None. Pure function so the routing
+        eval can replay it without hitting the backend.
         """
-        Attempt to execute a direct command without LLM.
-        
-        Regex matches specific high-frequency commands.
-        """
-        import re
-        
         text_lower = text.lower().strip()
-        
-        # --- Points Skill Fast Paths ---
-        
+
         # 1. Balance Check: "points", "balance", "my points"
         if re.match(r'^(?:points|balance|my points)$', text_lower):
-            return await self._execute_fast_points(user_id, "balance")
-            
+            return "balance"
+
         # 2. Earn/Tasks shortcuts
         if re.match(
             r'^(?:points\s+earn|earn\s+points|ways\s+to\s+earn|'
@@ -521,6 +763,42 @@ class RooAgent:
             r'my\s+tasks|review\s+tasks|open\s+tasks|all\s+tasks)$',
             text_lower,
         ):
+            return "list_tasks"
+
+        # 3. Rewards: "points rewards", "rewards"
+        if re.match(r'^(?:points\s+rewards|rewards)$', text_lower):
+            return "list_rewards"
+
+        # 4. Coworking Book Today: "coworking book today"
+        if re.match(r'^coworking\s+book\s+today$', text_lower):
+            return "book_coworking"
+
+        # 5. Coworking Cancel: "coworking cancel" (assumes today/upcoming)
+        if re.match(r'^coworking\s+cancel$', text_lower):
+            return "cancel_coworking"
+
+        return None
+
+    async def _try_fast_path(
+        self,
+        text: str,
+        user_id: str,
+        channel_id: Optional[str] = None,
+        thread_ts: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Attempt to execute a direct command without LLM.
+
+        Regex matches specific high-frequency commands.
+        """
+        action = self._match_fast_path(text)
+        if action is None:
+            return None
+
+        if action == "balance":
+            return await self._execute_fast_points(user_id, "balance")
+
+        if action == "list_tasks":
             return await self._execute_fast_points(
                 user_id,
                 "list_tasks",
@@ -529,28 +807,23 @@ class RooAgent:
                 thread_ts=thread_ts,
             )
 
-        # 3. Rewards: "points rewards", "rewards"
-        if re.match(r'^(?:points\s+rewards|rewards)$', text_lower):
+        if action == "list_rewards":
             return await self._execute_fast_points(user_id, "list_rewards")
 
-        # 4. Coworking Book Today: "coworking book today"
-        if re.match(r'^coworking\s+book\s+today$', text_lower):
+        if action == "book_coworking":
             today = self._get_today().isoformat()
             return await self._execute_fast_points(
-                user_id, "book_coworking", 
+                user_id, "book_coworking",
                 date=today, channel_id=channel_id, thread_ts=thread_ts
             )
 
-        # 5. Coworking Cancel: "coworking cancel" (assumes today/upcoming)
-        if re.match(r'^coworking\s+cancel$', text_lower):
-            # For "cancel", we might need to handle logic in the client or pass a flag
-            # The user requirement was "will cancel booking for today"
+        if action == "cancel_coworking":
             today = self._get_today().isoformat()
             return await self._execute_fast_points(
-                user_id, "cancel_coworking", 
+                user_id, "cancel_coworking",
                 date=today
             )
-            
+
         return None
 
     def _get_today(self):
@@ -584,11 +857,9 @@ class RooAgent:
             
             if action == "balance":
                 data = await client.get_balance(user_id)
-                msg = (
-                    f"G'day mate! Here's your points summary:\n\n"
-                    f"💰 **Current Balance:** {data.get('balance', 0)} points\n"
-                    f"📈 **Lifetime Earned:** {data.get('lifetime_earned', 0)} points\n"
-                    f"Nice work! Check out `@Roo tasks` to get more! 🦘"
+                msg = self.skill_executor._format_points_balance_summary(
+                    data,
+                    tasks_command="@Roo tasks",
                 )
                 
             elif action == "list_tasks":
@@ -605,14 +876,14 @@ class RooAgent:
             
             elif action == "list_rewards":
                 rewards = await client.list_rewards(user_id)
-                if not rewards:
-                    msg = "No rewards available right now."
-                else:
-                    lines = ["🎁 **Rewards Menu:**\n"]
-                    for r in rewards:
-                        lines.append(f"• **{r['code']}** - {r['name']} ({r['cost_points']} pts)")
-                    lines.append("\nAsk me to `buy a sticker` or similar to redeem!")
-                    msg = "\n".join(lines)
+                balance_summary = await self.skill_executor._get_points_balance_summary_for_rewards(
+                    client,
+                    user_id,
+                )
+                msg = self.skill_executor._format_rewards_catalog(
+                    rewards,
+                    balance_summary=balance_summary,
+                )
             
             elif action == "book_coworking":
                 booking_date = kwargs.get("date")
@@ -683,44 +954,156 @@ class RooAgent:
         has_file_context: bool = False,
     ) -> Optional[Skill]:
         """Use LLM to decide which skill to use."""
+        skill, _layer = await self._select_skill_detail(
+            text,
+            history,
+            channel_id,
+            thread_ts,
+            has_file_context=has_file_context,
+        )
+        return skill
+
+    async def _select_skill_detail(
+        self,
+        text: str,
+        history: List[dict] = None,
+        channel_id: Optional[str] = None,
+        thread_ts: Optional[str] = None,
+        has_file_context: bool = False,
+        channel_name: Optional[str] = None,
+    ) -> Tuple[Optional[Skill], Optional[str]]:
+        """Select a skill, reporting which layer decided ("intent-regex", "looks-like-*",
+        "keywords", "llm", …). `channel_name` may be passed pre-resolved (eval harness);
+        otherwise it is resolved from `channel_id` without ever raising."""
         if not self.skills:
-            return None
+            return None, "no-skills"
 
         thread_context = self._get_thread_context(channel_id, thread_ts)
         routing_intent = self._get_routing_intent(text, thread_context)
         if routing_intent:
-            return routing_intent["skill"]
+            return routing_intent["skill"], "intent-regex"
+
+        if channel_name is None:
+            channel_name = self._safe_channel_name(channel_id)
 
         has_slack_files = has_file_context or any(message.get("files") for message in history or [])
-        trigger_skill = self._select_skill_from_triggers(
+        trigger_skill, trigger_layer = self._select_skill_from_triggers_detail(
             text,
             thread_context,
             has_file_context=has_slack_files,
+            channel_name=channel_name,
         )
         if trigger_skill:
-            return trigger_skill
+            return trigger_skill, trigger_layer
 
-        # Resolve channel name for priority matching
+        llm_skill = await self._llm_select_skill(
+            text,
+            history,
+            channel_name=channel_name,
+            thread_context=thread_context,
+        )
+        if llm_skill:
+            return llm_skill, "llm"
+        return None, "llm-none"
+
+    # Routing examples shown to the LLM fallback, keyed by skill name so that
+    # skills filtered out (channel scoping / not loaded) drop their examples too.
+    # Interim home until Phase 2 moves routing examples into SKILL.md frontmatter.
+    LLM_ROUTER_EXAMPLES: Dict[str, Tuple[str, ...]] = {
+        "content-factory": (
+            '"please research the best article for me to write" -> content-factory',
+            '"scan the repo for the domain woofya.com.au" -> content-factory',
+            '"write me an article about how to build an ai agent harness" -> content-factory',
+            '"set up a blog section on my site" -> content-factory',
+        ),
+        "github-integration": (
+            '"reconnect github for woofya.com.au" -> github-integration',
+            '"I need to reauthorise github" -> github-integration',
+        ),
+        "linear-meeting-actions": (
+            '"turn this meeting summary into Linear tasks" -> linear-meeting-actions',
+            '"extract action items from this transcript and add them to Linear" -> linear-meeting-actions',
+            '"send this attached PDF to Linear as tasks" -> linear-meeting-actions',
+            '"add a task to linear to fix the login bug" -> linear-meeting-actions',
+        ),
+        "mlai-points": (
+            '"create a task called fix docs worth 5 points" -> mlai-points',
+            '"what tasks are open?" -> mlai-points',
+            '"how do I earn points?" -> mlai-points',
+            '"I\'d like to claim the docs task" -> mlai-points',
+        ),
+        "luma-events": (
+            '"give me CSVs for the past 3 MLAI events" -> luma-events',
+            '"how many people registered for the april 29 event" -> luma-events',
+            '"who\'s coming to the patient-data workshop?" -> luma-events',
+            '"how many signed up for thursday\'s event?" -> luma-events',
+        ),
+        "connect-users": (
+            '"do you know anyone in AI research?" -> connect-users',
+            '"anyone in the community working with medical imaging?" -> connect-users',
+            '"connect me with someone who writes blog content" -> connect-users',
+            '"looking for a mentor in data engineering, any suggestions?" -> connect-users',
+        ),
+        "tone-of-voice": (
+            '"rewrite this announcement in our tone of voice" -> tone-of-voice',
+            '"can you make this sound more like mlai?" -> tone-of-voice',
+        ),
+        "medhack": (
+            '"give me a clinical case to diagnose" -> medhack',
+            '"what time does medhack kick off on saturday?" -> medhack',
+        ),
+        "watt-the-hack": (
+            '"announce that judging starts at 5pm" -> watt-the-hack',
+            '"post an announcement: pizza in the atrium" -> watt-the-hack',
+        ),
+        "none": (
+            '"can you summarise this article for me?" -> none',
+            '"what did you think of the blog post I shared yesterday?" -> none',
+            '"what\'s the topic for this week\'s meetup?" -> none',
+            '"research the best time to post on linkedin" -> none',
+            '"please analyse this project proposal" -> none',
+        ),
+    }
+
+    async def _llm_select_skill(
+        self,
+        text: str,
+        history: List[dict] = None,
+        channel_name: Optional[str] = None,
+        thread_context: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Skill]:
+        """LLM fallback classification over the skill catalog."""
+        # Channel scoping: skills locked to other channels are not candidates.
+        available_skills = [
+            skill for skill in self.skills
+            if self._skill_available_in_channel(skill, channel_name)
+        ]
+        if not available_skills:
+            return None
+
+        channel_hint = f"\nChannel: #{channel_name}\n" if channel_name else ""
         channel_priority_hint = ""
-        if channel_id:
-            from .slack_client import get_channel_name
-            channel_name = get_channel_name(channel_id)
-            if channel_name:
-                for skill in self.skills:
-                    if channel_name in skill.priority_channels:
-                        channel_priority_hint = (
-                            f"\nIMPORTANT: The user is in #{channel_name}. "
-                            f"Strongly prefer the '{skill.name}' skill unless "
-                            f"the request is clearly about a different skill "
-                            f"(e.g. checking points balance, writing content).\n"
-                        )
-                        break
+        if channel_name:
+            for skill in available_skills:
+                if channel_name in skill.priority_channels:
+                    channel_priority_hint = (
+                        f"IMPORTANT: The user is in #{channel_name}. "
+                        f"Strongly prefer the '{skill.name}' skill unless "
+                        f"the request is clearly about a different skill "
+                        f"(e.g. checking points balance, writing content).\n"
+                    )
+                    break
 
-        # Fall back to LLM classification
         skill_descriptions = "\n".join(
             f"- {s.name}: {s.description}"
-            for s in self.skills
+            for s in available_skills
         )
+
+        example_lines: List[str] = []
+        for skill in available_skills:
+            example_lines.extend(self.LLM_ROUTER_EXAMPLES.get(skill.name, ()))
+        example_lines.extend(self.LLM_ROUTER_EXAMPLES["none"])
+        examples = "\n".join(f"- {line}" for line in example_lines)
 
         # Format history for context
         history_context = ""
@@ -743,45 +1126,41 @@ class RooAgent:
 Available skills:
 {skill_descriptions}
 - none: Use this if no skill is appropriate (general conversation)
-{channel_priority_hint}
+{channel_hint}{channel_priority_hint}
 {history_context}
 {thread_context_hint}
 User message: "{text}"
 
 Routing rules:
-- Prefer content-factory for domain-backed repo scans, article/blog writing, SEO research, content planning, scaffolding blog/article pages, and requests like "scan the domain mlai.au" or "scan the repo for the domain mlai.au".
+- Route on what the user wants DONE, not on vocabulary. A message mentioning "article", "task" or "csv" is not automatically a skill request.
+- Prefer content-factory for domain-backed repo scans, writing NEW articles/blog posts, SEO research, content planning, and scaffolding blog/article pages.
+- Do NOT use content-factory for summarising, reviewing, or giving opinions on existing content — that is none.
 - Prefer github-integration for GitHub auth, reconnecting GitHub, or account/integration management.
-- Prefer linear-meeting-actions for requests to turn Slack meeting notes, summaries, transcripts, action items, or attached files into Linear issues/tasks/tickets.
-- Prefer mlai-points for points, rewards, coworking, and task management.
-- Prefer luma-events for Luma registration counts, attendee reports, guest lists, CSV documents, and recent/past MLAI event attendee CSVs.
+- Prefer linear-meeting-actions for creating Linear issues/tickets/tasks, including from meeting notes, transcripts, action items, or attached files.
+- Prefer mlai-points for the Roo points system: balances, claimable community tasks, coworking bookings, rewards, top-ups.
+- Prefer luma-events for event registration counts, attendee lists/reports, and attendee CSV exports.
+- Prefer connect-users when the user wants to FIND or MEET community members with some expertise ("anyone who…", "who knows…", "connect me with…").
+- Prefer tone-of-voice for rewriting/rephrasing existing text in MLAI's tone or brand voice.
+- Questions about meetups/events that are not Luma data requests, file questions with no skill action, summaries, and chit-chat -> none.
+- When genuinely unsure between a skill and none, answer none.
 
 Examples:
-- "please research the best article for me to write" -> content-factory
-- "scan the repo for the domain woofya.com.au" -> content-factory
-- "scan the domain woofya.com.au" -> content-factory
-- "reconnect github for woofya.com.au" -> github-integration
-- "write me an article about how to build an ai agent harness for long-running specific tasks" -> content-factory
-- "turn this meeting summary into Linear tasks" -> linear-meeting-actions
-- "extract action items from this transcript and add them to Linear" -> linear-meeting-actions
-- "send this attached PDF to Linear as tasks" -> linear-meeting-actions
-- "create a task called fix docs worth 5 points" -> mlai-points
-- "give me CSVs for the past 3 MLAI events" -> luma-events
-- "how many people registered for the april 29 event" -> luma-events
+{examples}
 
-Respond with ONLY the skill name (e.g., "connect_users" or "none"):"""
+Respond with ONLY the skill name (e.g., "connect-users" or "none"):"""
 
         try:
             settings = get_settings()
             response = await chat([
                 {"role": "system", "content": "You are a skill router. Respond with only the skill name."},
                 {"role": "user", "content": prompt}
-            ], model=settings.ROUTER_MODEL, max_tokens=96, reasoning_effort="low")
+            ], model=settings.ROUTER_MODEL, max_tokens=128, reasoning_effort="medium")
 
             skill_name = response.content.strip().lower()
             # Normalize: both underscores and hyphens should match
             skill_name_normalized = skill_name.replace("_", "-")
 
-            for skill in self.skills:
+            for skill in available_skills:
                 skill_normalized = skill.name.lower().replace("_", "-")
                 if skill_normalized == skill_name_normalized:
                     return skill
