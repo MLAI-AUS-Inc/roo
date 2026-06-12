@@ -65,6 +65,12 @@ def main() -> int:
         return 0
 
     baseline = runner.load_baseline()
+    if baseline is not None and baseline.get("mode") != args.mode:
+        print(
+            f"\n(baseline is {baseline.get('mode')}-mode; skipping comparison for a "
+            f"{args.mode} run — improvements/regressions across modes are not meaningful)"
+        )
+        baseline = None
     if baseline is not None and not args.tag_filter:
         regressions, improvements = runner.compare_to_baseline(results, baseline)
         if improvements:

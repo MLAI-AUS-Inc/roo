@@ -45,6 +45,7 @@ routing:
     - {text: "write me an article about how to build an ai agent harness", action: write}
     - {text: "scan the repo for the domain mlai.au", action: scan}
     - {text: "what should I write about next for woofya.com.au?", action: research}
+    - {text: "recommend a topic for my next blog post", action: research}
     - {text: "set up a blog section on my site", action: scaffold}
     - {text: "publish this article as a PR", action: publish_pr}
   negative_examples:

@@ -39,8 +39,9 @@ Rules:
 - Use respond_in_chat for general conversation, opinions, summaries of shared \
 content, translations, explanations, and anything no skill is clearly for.
 - Use ask_clarification ONLY when the message clearly needs a skill but you \
-cannot choose between two specific skills (or a required detail is missing); \
-ask one short question.
+cannot choose between two specific skills. If the skill is clear and only a \
+detail is missing, pick the skill anyway — skills ask for missing details \
+themselves.
 - When torn between a skill and respond_in_chat, prefer respond_in_chat.
 - Fill parameters only with values actually present in the message or context; \
 never invent values.
@@ -180,9 +181,10 @@ def _clarification_tool() -> Dict[str, Any]:
         "function": {
             "name": ASK_CLARIFICATION,
             "description": (
-                "The message clearly needs a skill but is ambiguous between two "
-                "specific skills, or is missing a detail required to proceed. "
-                "Ask ONE short question."
+                "The message clearly needs a skill but is AMBIGUOUS BETWEEN TWO "
+                "SPECIFIC SKILLS. Do NOT use this for missing details (a date, a "
+                "title, a body…) — pick the skill instead; skills ask for their "
+                "own missing details. Ask ONE short question."
             ),
             "parameters": {
                 "type": "object",

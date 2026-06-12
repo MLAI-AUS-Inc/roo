@@ -34,9 +34,12 @@ routing:
     - {text: "how do I earn points?", action: list_tasks}
     - {text: "what's my balance", action: balance}
     - {text: "book me in for coworking tomorrow", action: book_coworking}
+    - {text: "book me in", action: book_coworking}
     - {text: "claim task ROO-12", action: claim_task}
     - {text: "how busy was the coworking space in may?", action: coworking_report}
     - {text: "give 10 points to @member for organising the meetup", action: award_points}
+    - {text: "I need more points", action: topup_points}
+    - {text: "add roo points", action: topup_points}
   negative_examples:
     - {text: "add a task to linear to fix the login bug", instead: linear-meeting-actions}
     - {text: "book club is meeting thursday, can you remind the channel?", instead: respond_in_chat}
@@ -122,7 +125,7 @@ actions:
   - name: view_rate_card
     description: Show how many points actions are worth.
   - name: topup_points
-    description: Buy a fixed top-up pack of Roo points.
+    description: Buy a fixed top-up pack of Roo points ("top up", "buy/add roo points", "I need more points").
   - name: request_points
     description: Ask admins to grant the user points for something they did.
     params:
