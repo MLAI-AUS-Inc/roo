@@ -1,20 +1,6 @@
 ---
 name: luma-events
 description: Report on Luma event registrations and export attendee CSV files for recent MLAI events
-# Keep keywords high-precision. Bare generic nouns (csv, attendees, guests,
-# registered) used to capture any message containing them ("inspect the CSV I
-# uploaded…"); anything less specific now goes through the LLM router.
-trigger_keywords:
-  - luma
-  - guest list
-  - attendee list
-  - attendee csv
-  - attendee report
-  - export guests
-  - export attendees
-  - past csv documents
-  - mlai events
-  - recent events
 routing:
   use_when: >
     The user wants DATA about who signed up for / attended MLAI events on Luma:

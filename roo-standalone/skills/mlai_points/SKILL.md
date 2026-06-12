@@ -1,29 +1,6 @@
 ---
 name: mlai-points
 description: Manage MLAI points system - check balance, book coworking, claim tasks, redeem rewards
-# Keep keywords high-precision. Bare generic nouns (book, task, tasks) used to
-# capture unrelated messages ("add a task to linear…", "book club is meeting…");
-# anything less specific now goes through the LLM router.
-trigger_keywords:
-  - points
-  - balance
-  - coworking
-  - reward
-  - rewards
-  - topup
-  - top-up
-  - top up
-  - buy points
-  - buy roo points
-  - purchase points
-  - purchase roo points
-  - pay for points
-  - add points
-  - add roo points
-  - claim a task
-  - claim task
-  - open tasks
-  - my tasks
 routing:
   use_when: >
     The user wants to check or spend THEIR Roo points, see point history, list/claim/

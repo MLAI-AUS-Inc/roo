@@ -1184,18 +1184,16 @@ async def test_new_domain_requires_repo_selection_without_falling_back_to_generi
 
 
 @pytest.mark.asyncio
-async def test_execute_applies_param_overrides_after_extraction(monkeypatch):
+async def test_execute_passes_param_overrides_to_handlers(monkeypatch):
+    # Phase 4 of the routing redesign removed the free-form LLM parameter
+    # extraction — handler params come from the router/caller overrides only.
     executor = SkillExecutor()
     captured_params = {}
-
-    async def fake_extract(skill, text, user_id, history=None):
-        return {"domain": "wrong-domain.com", "topic": "Original topic"}
 
     async def fake_content_factory(skill, text, params, user_id, channel_id, thread_ts, thread_history=None):
         captured_params.update(params)
         return "ok"
 
-    monkeypatch.setattr(executor, "_extract_parameters", fake_extract)
     monkeypatch.setattr(executor, "_execute_content_factory", fake_content_factory)
 
     result = await executor.execute(
@@ -1208,7 +1206,6 @@ async def test_execute_applies_param_overrides_after_extraction(monkeypatch):
     assert result.success is True
     assert captured_params == {
         "domain": "woofya.com.au",
-        "topic": "Original topic",
         "confirmed": True,
     }
 

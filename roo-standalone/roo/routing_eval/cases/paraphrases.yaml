@@ -109,6 +109,10 @@
   text: "I'd like to claim the docs task"
   expect: {skill: mlai-points, action: claim_task}
   tags: [paraphrase]
+- id: para-points-give-me-tasks
+  text: "give me the tasks please"
+  expect: {skill: mlai-points, action: list_tasks}
+  tags: [paraphrase]
 - id: para-points-book-friday
   text: "book a coworking spot for friday"
   expect: {skill: mlai-points, action: book_coworking}

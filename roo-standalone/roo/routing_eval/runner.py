@@ -5,28 +5,28 @@ real routing code and scores the decisions.
 
 Two modes:
 
-- deterministic: replays ONLY the pre-LLM funnel (fast path, intent regexes,
-  looks-like heuristics, keyword scoring) exactly in handle_mention order.
-  Hermetic — no network, no API keys. A case that reaches the LLM router is
-  scored as a "fallthrough", which is acceptable (the LLM gets to decide) but
-  never as deterministically correct.
+- deterministic: hermetic (no network, no API keys). Since Phase 3 of the
+  routing redesign deleted the regex/keyword funnel, the only deterministic
+  routing left is the exact-match fast path — every other case is scored as a
+  "fallthrough" to the v2 router. This mode is the CI tripwire that the fast
+  path keeps working and that nobody reintroduces deterministic capture.
 
-- full: same funnel, then the real LLM fallback (RooAgent._llm_select_skill)
-  for cases that fell through. Needs an LLM API key (OPENAI_API_KEY /
-  GOOGLE_API_KEY) in the environment or .env.
+- v2: the real thing — every case goes fast-path-then-router (one LLM
+  tool-call over the SKILL.md catalog). Needs an OPENAI_API_KEY (Slack vars
+  are dummied automatically). This is the primary quality gate; run it after
+  any SKILL.md/router/model change.
 
 Verdicts per case:
 - correct          decided skill == expected skill
-- ok-fallthrough   undecided, and expected skill is "none" (good: the message
-                   should reach general chat / the LLM rather than a skill)
-- fallthrough      undecided, but a skill was expected (neutral in
-                   deterministic mode; the LLM layer is responsible for it)
+- ok-fallthrough   undecided, and expected skill is "none" (in v2 mode this
+                   means the router chose respond_in_chat — a correct call)
+- fallthrough      undecided, but a skill was expected (expected in
+                   deterministic mode; a miss in v2 mode)
 - misroute         decided skill != expected skill (always bad)
 
 Gates (see roo/tests/test_routing_eval_gate.py):
-- every case tagged `blessed` must be `correct` (and action-correct when both
-  expected and predicted actions are present)
-- no case tagged `misroute-guard` may be a `misroute`
+- every case tagged `fast-path` must be deterministically `correct`
+- no case may ever be deterministically misrouted
 - no per-case regression against the committed baseline.json
 """
 from __future__ import annotations
@@ -188,59 +188,12 @@ def _thread_context(case: RoutingCase) -> Optional[Dict[str, Any]]:
 
 
 def predict_deterministic(agent, case: RoutingCase) -> Prediction:
-    """Replay the pre-LLM funnel in RooAgent.handle_mention order."""
-    from roo.content_intent import parse_routing_intent
-
+    """Replay the only deterministic layer left: the exact-match fast path."""
     clean = _clean(case.text)
-    thread_context = _thread_context(case)
-
-    # 1. fast path (exact commands)
     fast_action = agent._match_fast_path(clean)
     if fast_action:
         return Prediction(layer="fast", skill="mlai-points", action=fast_action)
-
-    # 2. intent regexes (content_intent.parse_routing_intent)
-    intent = parse_routing_intent(
-        clean,
-        thread_skill_name=(thread_context or {}).get("skill_name"),
-        thread_domain=(thread_context or {}).get("domain"),
-        thread_job_id=(thread_context or {}).get("active_job_id"),
-    )
-    if intent:
-        params = dict(intent.get("params") or {})
-        return Prediction(
-            layer="intent-regex",
-            skill=intent["skill_name"],
-            action=params.get("action"),
-            params=params,
-        )
-
-    # 3. looks-like heuristics, thread follow-up, keyword scoring
-    skill, layer = agent._select_skill_from_triggers_detail(
-        clean,
-        thread_context,
-        has_file_context=case.files,
-        channel_name=case.channel,
-    )
-    if skill:
-        return Prediction(layer=layer or "triggers", skill=skill.name)
-
-    return Prediction(layer="llm-fallthrough", skill=None)
-
-
-async def _predict_full_async(agent, case: RoutingCase, deterministic: Prediction) -> Prediction:
-    if deterministic.skill is not None:
-        return deterministic
-    clean = _clean(case.text)
-    skill = await agent._llm_select_skill(
-        clean,
-        [],
-        channel_name=case.channel,
-        thread_context=_thread_context(case),
-    )
-    if skill:
-        return Prediction(layer="llm", skill=skill.name)
-    return Prediction(layer="llm-none", skill=None)
+    return Prediction(layer="v2-pending", skill=None)
 
 
 async def _predict_v2_async(agent, case: RoutingCase) -> Prediction:
@@ -313,7 +266,7 @@ def run_eval(
             results.append(score(case, predict_deterministic(agent, case)))
         return results
 
-    if mode in ("full", "v2"):
+    if mode == "v2":
         import os
 
         os.environ.setdefault("SLACK_BOT_TOKEN", "xoxb-routing-eval-dummy")
@@ -325,11 +278,7 @@ def run_eval(
 
         async def _run_case(case: RoutingCase) -> CaseResult:
             async with semaphore:
-                if mode == "v2":
-                    prediction = await _predict_v2_async(agent, case)
-                else:
-                    deterministic = predict_deterministic(agent, case)
-                    prediction = await _predict_full_async(agent, case, deterministic)
+                prediction = await _predict_v2_async(agent, case)
             result = score(case, prediction)
             progress["done"] += 1
             print(

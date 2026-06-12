@@ -56,24 +56,11 @@ WRITE_PATTERNS = (
     r"\bgenerate\b.*\b(article|blog(?:\s+post)?|content)\b",
     r"\bdraft\b.*\b(article|blog(?:\s+post)?)\b",
 )
-CONTENT_TARGET_PATTERN = re.compile(
-    r"\b(?:repo(?:sitory)?|codebase|domain|site|website)\b"
-)
-GITHUB_AUTH_PATTERNS = (
-    r"\bgithub\s+integration\b",
-    r"\b(?:re-?connect|connect|authori[sz]e|link|install|fix)\b.*\bgithub\b",
-    r"\bgithub\b.*\b(?:re-?connect|connect|authori[sz]e|link|install|fix)\b",
-    r"\bgithub\s+(?:auth|authentication|access|permission)\b",
-    r"\bauthenticat(?:e|ion)\b.*\bgithub\b",
-    r"\bgithub\b.*\bauthenticat(?:e|ion)\b",
-)
-THREAD_DOMAIN_REFERENCE_PATTERN = re.compile(
-    r"\b(?:it|this|that|my\s+(?:domain|site|website|repo|repository|codebase)|"
-    r"the\s+(?:domain|site|website|repo|repository|codebase))\b"
-)
-THREAD_FOLLOW_UP_PATTERN = re.compile(
-    r"\b(?:do\s+it|go\s+ahead|continue|proceed|write\s+it|scan\s+it|scan\s+this|rescan)\b"
-)
+# NOTE (Phase 3, routing redesign): the regex routing tables that used to live
+# here (GITHUB_AUTH_PATTERNS, CONTENT_TARGET_PATTERN, thread follow-up
+# patterns, parse_routing_intent) were deleted — routing is done by the LLM
+# tool-calling router over the SKILL.md catalog (roo/router.py). The patterns
+# below survive only as helpers for delegation parsing and executor flows.
 
 
 def normalize_slack_text(text: str) -> str:
@@ -167,84 +154,3 @@ def is_explicit_scan_request(text: str, action: Optional[str] = None) -> bool:
     return any(re.search(pattern, text_lower) for pattern in SCAN_PATTERNS)
 
 
-def parse_routing_intent(
-    text: str,
-    *,
-    thread_skill_name: Optional[str] = None,
-    thread_domain: Optional[str] = None,
-    thread_job_id: Optional[str] = None,
-) -> Optional[Dict[str, Any]]:
-    """Return a deterministic routing decision for common content flows."""
-    normalized = normalize_slack_text(text)
-    text_lower = normalized.lower().strip()
-
-    explicit_domain = extract_domain(normalized)
-    references_thread_domain = bool(
-        thread_domain
-        and (
-            THREAD_DOMAIN_REFERENCE_PATTERN.search(text_lower)
-            or THREAD_FOLLOW_UP_PATTERN.search(text_lower)
-        )
-    )
-    domain = explicit_domain or (thread_domain if references_thread_domain else None)
-    action = detect_content_action(normalized)
-
-    if any(re.search(pattern, text_lower) for pattern in GITHUB_AUTH_PATTERNS):
-        params: Dict[str, Any] = {}
-        if domain:
-            params["domain"] = domain
-        if action == "scan":
-            params["action"] = "scan"
-        else:
-            params["action"] = "reconnect"
-        return {"skill_name": "github-integration", "params": params}
-
-    if action == "scan" and (domain or CONTENT_TARGET_PATTERN.search(text_lower)):
-        params = {"action": "scan"}
-        if domain:
-            params["domain"] = domain
-        return {"skill_name": "content-factory", "params": params}
-
-    if action == "scaffold":
-        params = {"action": "scaffold"}
-        if domain:
-            params["domain"] = domain
-        return {"skill_name": "content-factory", "params": params}
-
-    if action == "research":
-        params = {}
-        if domain:
-            params["domain"] = domain
-        return {"skill_name": "content-factory", "params": params}
-
-    if (
-        action == "publish_pr"
-        and thread_skill_name == "content-factory"
-        and (thread_job_id or thread_domain)
-    ):
-        params = {"action": "publish_pr"}
-        if thread_job_id:
-            params["job_id"] = thread_job_id
-        if domain:
-            params["domain"] = domain
-        return {"skill_name": "content-factory", "params": params}
-
-    if action == "write" and (
-        domain or re.search(r"\b(?:article|blog(?:\s+post)?|content)\b", text_lower)
-    ):
-        params = {"action": "write"}
-        if domain:
-            params["domain"] = domain
-        return {"skill_name": "content-factory", "params": params}
-
-    if (
-        thread_skill_name == "content-factory"
-        and thread_domain
-        and THREAD_FOLLOW_UP_PATTERN.search(text_lower)
-    ):
-        params = {"domain": thread_domain}
-        if "scan" in text_lower or "rescan" in text_lower:
-            params["action"] = "scan"
-        return {"skill_name": "content-factory", "params": params}
-
-    return None

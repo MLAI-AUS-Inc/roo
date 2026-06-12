@@ -1,16 +1,6 @@
 ---
 name: tone-of-voice
 description: Rewrite text using the MLAI organisation tone of voice
-# Keep keywords high-precision: bare "tone"/"rewrite"/"rephrase" collide with
-# unrelated requests; less specific phrasings go through the LLM router.
-trigger_keywords:
-  - tone of voice
-  - our tone
-  - mlai tone
-  - brand voice
-  - in our voice
-  - rewrite this in
-  - rephrase this in
 routing:
   use_when: >
     The user has existing text they want rewritten, rephrased, or polished in MLAI's

@@ -1,20 +1,6 @@
 ---
 name: linear-meeting-actions
 description: Extract action items from Slack meeting transcripts, summaries, files, PDFs, DOCX documents, or images, create Linear project updates, and create correctly assigned Linear issues
-trigger_keywords:
-  - meeting actions
-  - meeting action items
-  - meeting notes to linear
-  - meeting summary to linear
-  - transcript to linear
-  - pdf to linear
-  - docx to linear
-  - image to linear
-  - file to linear
-  - linear tasks from meeting
-  - create linear tickets from transcript
-  - extract action items
-  - sync meeting notes to linear
 requires_auth: true
 parameters:
   - action: One of extract, create, approve, or reject. Defaults to create for transcript-to-Linear requests.

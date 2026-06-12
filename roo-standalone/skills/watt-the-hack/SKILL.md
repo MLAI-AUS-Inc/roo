@@ -1,15 +1,6 @@
 ---
 name: watt-the-hack
 description: Answer questions about the Watt The Hack hackathon (dates, venue, tracks, prizes, schedule, judging, team size, sponsors, FAQ) and let MLAI superusers post announcements to the Watt The Hack website. The default assistant for the #watt-the-hack channel.
-trigger_keywords:
-  - watt the hack
-  - watt
-  - grid guardian
-  - base44
-  - announcement
-  - announce
-  - post announcement
-  - create announcement
 priority_channels:
   - watt-the-hack
 exclusive_channels:

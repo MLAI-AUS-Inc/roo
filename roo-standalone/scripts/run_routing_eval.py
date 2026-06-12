@@ -6,15 +6,15 @@ Usage (from roo-standalone/):
     .venv/bin/python scripts/run_routing_eval.py --verbose            # + fallthrough list
     .venv/bin/python scripts/run_routing_eval.py --check              # fail on baseline regression
     .venv/bin/python scripts/run_routing_eval.py --write-baseline     # record current results
-    .venv/bin/python scripts/run_routing_eval.py --mode full          # include live LLM fallback
+    .venv/bin/python scripts/run_routing_eval.py --mode v2            # the real router (live LLM)
     .venv/bin/python scripts/run_routing_eval.py --filter blessed     # only cases with a tag
     .venv/bin/python scripts/run_routing_eval.py --json out.json      # machine-readable results
 
 Modes:
-  deterministic (default)  hermetic; replays the pre-LLM funnel only
-  full                     also runs the real LLM fallback for fallthrough cases
-                           (needs OPENAI_API_KEY or GOOGLE_API_KEY; Slack vars
-                           are dummied automatically)
+  deterministic (default)  hermetic; fast-path-only (the regex funnel was
+                           deleted in Phase 3 — everything else is the router)
+  v2                       fast path + the LLM tool-calling router for every
+                           case (needs OPENAI_API_KEY; Slack vars are dummied)
 """
 import argparse
 import json
@@ -28,12 +28,12 @@ from roo.routing_eval import runner
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mode", choices=["deterministic", "full", "v2"], default="deterministic")
+    parser.add_argument("--mode", choices=["deterministic", "v2"], default="deterministic")
     parser.add_argument(
         "--concurrency",
         type=int,
         default=8,
-        help="parallel LLM calls in full/v2 modes (default 8)",
+        help="parallel LLM calls in v2 mode (default 8)",
     )
     parser.add_argument("--filter", dest="tag_filter", help="only run cases with this tag")
     parser.add_argument("--verbose", action="store_true", help="also list fallthrough cases")

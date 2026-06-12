@@ -302,62 +302,6 @@ class FakePartnerRestrictedClient(FakeAwardGuardClient):
         return {"points_awarded": 5}
 
 
-def test_resolve_points_action_prefers_request_points():
-    executor = SkillExecutor()
-
-    action = executor._resolve_points_action(
-        {"action": "award_points"},
-        "request 5 points for helping at the event",
-    )
-
-    assert action == "request_points"
-
-
-def test_resolve_points_action_maps_plain_request_to_request_points():
-    executor = SkillExecutor()
-
-    action = executor._resolve_points_action(
-        {"action": "request"},
-        "I'm requesting 6 points for volunteering at MedHack",
-    )
-
-    assert action == "request_points"
-
-
-def test_resolve_points_action_maps_topup_phrases():
-    executor = SkillExecutor()
-
-    for text in [
-        "/roo topup",
-        "top up Roo Points",
-        "buy 10 roo points",
-        "purchase 25 Roo Points",
-        "pay for 5 points",
-        "paid Roo Points",
-        "add roo points",
-        "I need more points",
-    ]:
-        assert executor._resolve_points_action({}, text) == "topup_points"
-
-
-def test_resolve_points_action_maps_topup_action_aliases():
-    executor = SkillExecutor()
-
-    for action in ["topup_points", "top_up_points", "purchase_points", "buy_points"]:
-        assert executor._resolve_points_action({"action": action}, "points") == "topup_points"
-
-
-def test_request_points_phrase_does_not_map_to_topup():
-    executor = SkillExecutor()
-
-    action = executor._resolve_points_action(
-        {},
-        "request 5 points for helping at the event",
-    )
-
-    assert action == "request_points"
-
-
 def test_extract_points_request_reason_supports_requesting_phrase():
     executor = SkillExecutor()
 
@@ -376,50 +320,6 @@ def test_extract_points_request_reason_supports_award_me_phrase():
     )
 
     assert reason == "volunteering at medhack"
-
-
-def test_resolve_points_action_maps_promote_points_admin():
-    executor = SkillExecutor()
-
-    action = executor._resolve_points_action(
-        {},
-        "please promote <@U123ABC> to roo points admin",
-    )
-
-    assert action == "promote_points_admin"
-
-
-def test_resolve_points_action_maps_points_allowance_change():
-    executor = SkillExecutor()
-
-    action = executor._resolve_points_action(
-        {},
-        "change <@U123ABC> weekly points allowance to 150",
-    )
-
-    assert action == "set_points_admin_allowance"
-
-
-def test_resolve_points_action_maps_natural_language_points_allowance_change():
-    executor = SkillExecutor()
-
-    action = executor._resolve_points_action(
-        {"action": "award_points"},
-        "please increase the number of points <@U123ABC> can give out weekly to 48",
-    )
-
-    assert action == "set_points_admin_allowance"
-
-
-def test_resolve_points_action_maps_revoke_points_admin():
-    executor = SkillExecutor()
-
-    action = executor._resolve_points_action(
-        {},
-        "remove <@U123ABC> as roo points admin",
-    )
-
-    assert action == "revoke_points_admin"
 
 
 @pytest.mark.asyncio
@@ -2548,7 +2448,7 @@ async def test_admin_checkin_book_mention_phrase_books_target_for_today(tmp_path
     monkeypatch.setattr(executor_module, "get_coworking_intent_store", lambda: store)
     monkeypatch.setattr(slack_client_module, "get_bot_user_id", lambda: "UROO")
 
-    action = executor._resolve_points_action(
+    action = executor._resolve_routed_points_action(
         {"action": "book_coworking", "target_users": ["<@UTARGET>"]},
         "also book <@UTARGET> in today",
     )
@@ -3195,7 +3095,7 @@ async def test_execute_mlai_points_html_500_uses_backend_unavailable_message(mon
     result = await executor._execute_mlai_points(
         skill=skill,
         text="how many people used the coworking space this week",
-        params={},
+        params={"action": "coworking_report"},
         user_id=executor_module.POINTS_SUPER_ADMIN_SLACK_ID,
         channel_id="C123",
         thread_ts="111.222",
@@ -3203,82 +3103,6 @@ async def test_execute_mlai_points_html_500_uses_backend_unavailable_message(mon
 
     assert "<!doctype html>" not in result
     assert "couldn't reach the MLAI points backend" in result
-
-
-def test_resolve_points_action_detects_coworking_report_wording():
-    executor = SkillExecutor()
-
-    assert executor._resolve_points_action({}, "coworking summary last 6 months") == "coworking_report"
-    assert executor._resolve_points_action({"action": "report"}, "coworking report last year") == "coworking_report"
-    assert (
-        executor._resolve_points_action(
-            {},
-            "how many people used the coworking space this week",
-        )
-        == "coworking_report"
-    )
-    assert (
-        executor._resolve_points_action(
-            {},
-            "how many people attended the office this week",
-        )
-        == "coworking_report"
-    )
-    assert (
-        executor._resolve_points_action(
-            {},
-            "give me a report for how many people used the coworking space last week",
-        )
-        == "coworking_report"
-    )
-    assert (
-        executor._resolve_points_action(
-            {},
-            "Roo how many peopel used the coworkign space last week and how does that usage compare to the week prior?",
-        )
-        == "coworking_report"
-    )
-    assert executor._resolve_points_action({}, "which day was busiest for coworking last month") == "coworking_report"
-    assert (
-        executor._resolve_points_action(
-            {},
-            "how did coworking usage last week compare to the week prior?",
-        )
-        == "coworking_report"
-    )
-    assert (
-        executor._resolve_points_action(
-            {},
-            "show coworking trends for the last 3 months and recommendations",
-        )
-        == "coworking_report"
-    )
-
-
-def test_resolve_points_action_detects_coworking_shortcuts():
-    executor = SkillExecutor()
-
-    assert executor._resolve_points_action({}, "book me in") == "book_coworking"
-    assert executor._resolve_points_action({}, "book me in today") == "book_coworking"
-    assert (
-        executor._resolve_points_action({}, "check <@UTARGET> in today")
-        == "admin_checkin_coworking"
-    )
-    assert (
-        executor._resolve_points_action({}, "book <@UTARGET> in today")
-        == "admin_checkin_coworking"
-    )
-    assert (
-        executor._resolve_points_action(
-            {"action": "book_coworking", "target_users": ["<@UTARGET>"]},
-            "also book <@UTARGET> in today",
-        )
-        == "admin_checkin_coworking"
-    )
-    assert (
-        executor._resolve_points_action({}, "book <@UONE> and <@UTWO> in today")
-        == "admin_checkin_coworking"
-    )
 
 
 @pytest.mark.asyncio

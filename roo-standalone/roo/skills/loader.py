@@ -28,7 +28,6 @@ class Skill:
     description: str
     content: str  # Full markdown body with instructions
     path: Path  # Path to the skill directory
-    trigger_keywords: List[str] = field(default_factory=list)
     requires_auth: bool = False
     parameters: List[dict] = field(default_factory=list)
     priority_channels: List[str] = field(default_factory=list)
@@ -148,7 +147,6 @@ def load_skill_from_directory(skill_dir: Path) -> Optional[Skill]:
         description=post.metadata.get("description", ""),
         content=post.content,
         path=skill_dir,
-        trigger_keywords=post.metadata.get("trigger_keywords", []),
         requires_auth=post.metadata.get("requires_auth", False),
         parameters=parameters,
         priority_channels=post.metadata.get("priority_channels", []),
@@ -188,7 +186,6 @@ def load_skill_file(file_path: Path) -> Optional[Skill]:
         description=post.metadata.get("description", ""),
         content=post.content,
         path=file_path.parent,
-        trigger_keywords=post.metadata.get("trigger_keywords", []),
         requires_auth=post.metadata.get("requires_auth", False),
         parameters=parameters,
         priority_channels=post.metadata.get("priority_channels", []),

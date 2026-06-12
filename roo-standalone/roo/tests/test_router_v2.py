@@ -147,6 +147,24 @@ def test_route_swallows_transport_errors(monkeypatch):
     assert "connection reset" in decision.reason
 
 
+def test_route_resolves_configured_router_model(monkeypatch):
+    captured = {}
+
+    async def fake_chat_tools(messages, tools, **kwargs):
+        captured.update(kwargs)
+        return ToolCall(name=router.RESPOND_IN_CHAT, arguments={})
+
+    monkeypatch.setattr(router, "chat_tools", fake_chat_tools)
+    import roo.config as config_module
+    monkeypatch.setattr(
+        config_module, "get_settings", lambda: type("S", (), {"ROUTER_MODEL": "gpt-5.5"})()
+    )
+
+    asyncio.run(router.route("hello", skills=[POINTS]))  # no explicit model
+    assert captured["model"] == "gpt-5.5"
+    assert captured["reasoning_effort"] == "medium"
+
+
 def test_route_keeps_user_text_out_of_system_prompt(monkeypatch):
     captured = {}
 

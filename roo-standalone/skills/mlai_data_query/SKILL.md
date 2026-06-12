@@ -1,22 +1,6 @@
 ---
 name: mlai-data-query
 description: Query curated read-only MLAI backend data resources through the permissioned data access API
-trigger_keywords:
-  - data catalog
-  - database catalog
-  - query data
-  - data resource
-  - data resources
-  - vibe raising companies
-  - startup update drafts
-  - monthly update drafts
-  - content factory jobs
-  - content factory runs
-  - linear issues
-  - gmail messages
-  - slack messages
-  - github integrations
-  - financial records
 requires_auth: true
 routing:
   use_when: >

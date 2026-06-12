@@ -121,29 +121,27 @@ def test_v2_on_chat_decision_falls_to_general_response(monkeypatch):
     assert result["message"] == "g'day!"
 
 
-def test_v2_error_falls_back_to_legacy_funnel(monkeypatch):
-    """Provider outage must not lobotomise routing — legacy funnel takes over."""
+def test_v2_error_degrades_to_general_response(monkeypatch):
+    """Provider outage: routing yields no skill; Roo answers conversationally.
+
+    (The legacy-funnel fallback died with the funnel in Phase 3; the fast path
+    still serves exact commands during an outage.)
+    """
     agent = _make_agent()
-    captured = {}
-
-    class FakeExecutor:
-        async def execute(self, **kwargs):
-            captured.update(kwargs)
-            return SimpleNamespace(message="ok", data=None, blocks=None, suppress_post=False)
-
-    agent.skill_executor = FakeExecutor()
 
     async def failing_route(self, text, thread_history, channel_id, thread_ts, event_files=None):
         return RouteDecision(skill=None, source="error", reason="connection reset")
 
+    async def fake_general(self, text, history=None):
+        return "sorry mate, having a moment — try again in a tic"
+
     monkeypatch.setattr(RooAgent, "_route_v2", failing_route)
-    monkeypatch.setattr("roo.agent.get_settings", _on_settings)
+    monkeypatch.setattr(RooAgent, "_general_response", fake_general)
     monkeypatch.setattr("roo.agent.get_thread_messages", lambda channel, thread_ts: [])
     monkeypatch.setattr("roo.slack_client.get_bot_user_id", lambda: "U090FV0GTT4")
 
     result = asyncio.run(
         agent.handle_mention(
-            # matches the legacy looks-like-points heuristic deterministically
             text="<@U090FV0GTT4> whats my balance",
             user_id="U123",
             channel_id="C123",
@@ -151,8 +149,8 @@ def test_v2_error_falls_back_to_legacy_funnel(monkeypatch):
         )
     )
 
-    assert result["skill_used"] == "mlai-points"
-    assert captured["text"] == "whats my balance"
+    assert result["skill_used"] is None
+    assert "sorry mate" in result["message"]
 
 
 def test_v2_on_content_factory_thread_post_fill(monkeypatch):

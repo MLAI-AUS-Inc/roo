@@ -30,3 +30,38 @@
   text: "how many people registered for the gen ai night event?"
   expect: {skill: luma-events}
   tags: [data-query, trap]
+- id: dq-synced-for-startup
+  text: "show Linear issues synced for this startup"
+  expect: {skill: mlai-data-query}
+  tags: [data-query, hard]
+
+# harvested from upstream funnel tests before Phase 3 deleted the heuristics
+- id: linear-thread-to-project
+  text: "add this thread to Linear project BITGET EVENT"
+  expect: {skill: linear-meeting-actions, action: create}
+  tags: [paraphrase, thread]
+- id: linear-above-to-project
+  text: "put the above in Linear project called BITGET EVENT"
+  expect: {skill: linear-meeting-actions}
+  tags: [paraphrase, thread]
+- id: linear-project-update-pdf
+  text: "create a project update from this PDF"
+  files: true
+  expect: {skill: linear-meeting-actions}
+  tags: [paraphrase, files]
+- id: linear-meeting-project-update
+  text: "summarize this meeting as a Linear project update"
+  expect: {skill: linear-meeting-actions}
+  tags: [paraphrase]
+- id: linear-do-project-update
+  text: "do a project update in Linear"
+  expect: {skill: linear-meeting-actions}
+  tags: [paraphrase]
+- id: linear-todo-with-assignee
+  text: "create a to do item in the linear project 'venture studio' assign to Sonia"
+  expect: {skill: linear-meeting-actions, action: create}
+  tags: [paraphrase]
+- id: linear-task-for-member
+  text: "add a Linear task to Venture Studio for Sonia"
+  expect: {skill: linear-meeting-actions, action: create}
+  tags: [paraphrase]

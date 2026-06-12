@@ -1,24 +1,6 @@
 ---
 name: medhack
 description: Answer questions about the MedHack Frontiers event and run the Guess the Diagnosis game where users diagnose a simulated patient
-trigger_keywords:
-  - medhack
-  - frontiers
-  - diagnosis
-  - announcement
-  - announce
-  - patient
-  - symptoms
-  - clinical case
-  - medical case
-  - examine
-  - investigation
-  - blood test
-  - ecg
-  - imaging
-  - x-ray
-  - ct scan
-  - mri
 priority_channels:
   - medhack-frontiers
 exclusive_channels:

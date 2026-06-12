@@ -4,12 +4,11 @@ Roo Agent - Core Orchestration Layer
 The agent receives user messages, selects appropriate skills,
 and executes them to generate responses.
 """
-import asyncio
 import json
 import re
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Optional, Dict, Any, List
 from pathlib import Path
 
 from .config import get_settings
@@ -17,7 +16,6 @@ from .content_intent import (
     extract_content_factory_delegation,
     extract_domain,
     normalize_slack_text,
-    parse_routing_intent,
 )
 from .llm import chat
 from .skills.loader import Skill, load_skills
@@ -118,8 +116,7 @@ class RooAgent:
         is_delegated_content_factory_request = (
             requested_by_slack_user_id != effective_slack_user_id
         )
-        routing_intent = self._get_routing_intent(clean_text, thread_context)
-        
+
         print(f"🔍 Processing: {clean_text[:100]}...")
         
         # 0. Fetch Thread Context (if available)
@@ -134,10 +131,6 @@ class RooAgent:
                 thread_history = raw_history[-10:] if raw_history else []
             except Exception as e:
                 print(f"⚠️ Failed to fetch thread history: {e}")
-        has_prior_thread_context = self._has_prior_slack_thread_context(
-            thread_history,
-            current_message_ts=kwargs.get("current_message_ts"),
-        )
 
         # 1. Try Fast Path (Direct Command Execution)
         fast_result = await self._try_fast_path(clean_text, user_id, channel_id, thread_ts)
@@ -154,91 +147,39 @@ class RooAgent:
             )
             return fast_result
 
-        # 2. Select appropriate skill
-        router_mode = self._router_v2_mode()
-        v2_decision = None
-
-        if router_mode == "on":
-            # Router v2 decides (fast path and delegation parsing stayed in front).
-            v2_decision = await self._route_v2(
-                clean_text, thread_history, channel_id, thread_ts, kwargs.get("event_files")
+        # 2. Route via the LLM tool-calling router over the SKILL.md catalog.
+        # (The legacy regex/keyword funnel was deleted in Phase 3 of the
+        # routing redesign — see ROUTING_REDESIGN_PLAN.md. Only the exact-match
+        # fast path above and delegation parsing remain deterministic.)
+        v2_decision = await self._route_v2(
+            clean_text, thread_history, channel_id, thread_ts, kwargs.get("event_files")
+        )
+        if v2_decision.is_clarification:
+            self._log_routing_decision(
+                text=clean_text,
+                channel_id=channel_id,
+                thread_ts=thread_ts,
+                layer="v2-clarify",
+                skill_name=None,
+                started_at=routing_started_at,
             )
-            if v2_decision.is_clarification:
-                self._log_routing_decision(
-                    text=clean_text,
-                    channel_id=channel_id,
-                    thread_ts=thread_ts,
-                    layer="v2-clarify",
-                    skill_name=None,
-                    started_at=routing_started_at,
-                )
-                return {
-                    "message": v2_decision.clarification,
-                    "skill_used": None,
-                    "data": {"router": "v2", "clarification": True},
-                }
-            if v2_decision.source == "error":
-                # Provider/transport failure — fall back to the legacy funnel
-                # while it still exists (once Phase 3 removes it, this becomes
-                # general chat). Keeps the bot useful through LLM outages.
-                print("⚠️ Router v2 errored; falling back to legacy routing")
-                if routing_intent:
-                    skill, selection_layer = routing_intent["skill"], "v2-error-intent-regex"
-                else:
-                    skill, fallback_layer = await self._select_skill_detail(
-                        clean_text,
-                        thread_history,
-                        channel_id,
-                        thread_ts,
-                        has_file_context=bool(kwargs.get("event_files")),
-                        has_thread_context=has_prior_thread_context,
-                    )
-                    selection_layer = f"v2-error-{fallback_layer or 'none'}"
-                v2_decision = None  # legacy params/overrides apply downstream
-            else:
-                skill = self._get_skill_by_name(v2_decision.skill) if v2_decision.skill else None
-                selection_layer = "v2"
-        elif routing_intent:
-            skill, selection_layer = routing_intent["skill"], "intent-regex"
-        else:
-            skill, selection_layer = await self._select_skill_detail(
-                clean_text,
-                thread_history,
-                channel_id,
-                thread_ts,
-                has_file_context=bool(kwargs.get("event_files")),
-                has_thread_context=has_prior_thread_context,
-            )
+            return {
+                "message": v2_decision.clarification,
+                "skill_used": None,
+                "data": {"router": "v2", "clarification": True},
+            }
 
-        if router_mode == "shadow":
-            try:
-                asyncio.create_task(
-                    self._shadow_route_v2(
-                        clean_text,
-                        thread_history,
-                        channel_id,
-                        thread_ts,
-                        kwargs.get("event_files"),
-                        skill.name if skill else None,
-                        selection_layer,
-                    )
-                )
-            except RuntimeError:
-                pass  # no running event loop (sync contexts)
+        skill = self._get_skill_by_name(v2_decision.skill) if v2_decision.skill else None
+        selection_layer = "v2" if v2_decision.source == "router" else "v2-error"
 
-        log_action = (routing_intent or {}).get("params", {}).get("action")
-        log_params = (routing_intent or {}).get("params")
-        if v2_decision is not None:
-            log_action = v2_decision.action
-            log_params = v2_decision.params
         self._log_routing_decision(
             text=clean_text,
             channel_id=channel_id,
             thread_ts=thread_ts,
             layer=selection_layer,
             skill_name=skill.name if skill else None,
-            action=log_action,
-            params=log_params,
+            action=v2_decision.action,
+            params=v2_decision.params,
             started_at=routing_started_at,
         )
 
@@ -249,6 +190,9 @@ class RooAgent:
                 channel_id,
                 thread_ts,
                 clean_text,
+                workflow=(
+                    v2_decision.action if skill.name == "content-factory" else None
+                ),
                 requested_by_slack_user_id=(
                     requested_by_slack_user_id
                     if skill.name == "content-factory" and is_delegated_content_factory_request
@@ -261,14 +205,9 @@ class RooAgent:
                 ),
             )
             effective_param_overrides = dict(param_overrides or {})
-            if v2_decision is not None and v2_decision.skill == skill.name:
+            if v2_decision.skill == skill.name:
                 effective_param_overrides = {
                     **self._v2_param_overrides(v2_decision, thread_context),
-                    **effective_param_overrides,
-                }
-            elif routing_intent and skill.name == routing_intent["skill"].name:
-                effective_param_overrides = {
-                    **routing_intent.get("params", {}),
                     **effective_param_overrides,
                 }
             if skill.name == "content-factory":
@@ -352,22 +291,15 @@ class RooAgent:
         thread_ts: Optional[str],
         text: str,
         *,
+        workflow: Optional[str] = None,
         requested_by_slack_user_id: Optional[str] = None,
         effective_slack_user_id: Optional[str] = None,
     ) -> None:
-        workflow = None
-        text_lower = text.lower()
+        """Store the routing decision as a thread hint for follow-up context.
 
-        if skill_name == "content-factory":
-            if any(term in text_lower for term in ("scan", "codebase", "repository", "repo")):
-                workflow = "scan"
-            elif any(term in text_lower for term in ("scaffold", "articles directory", "blog page")):
-                workflow = "scaffold"
-            elif any(term in text_lower for term in ("research", "keyword", "topic")):
-                workflow = "research"
-            elif any(term in text_lower for term in ("write", "article", "blog")):
-                workflow = "write"
-
+        The workflow comes straight from the router's decided action — it is a
+        hint fed back into the next routing pass, never a routing bypass.
+        """
         self.remember_thread_context(
             skill_name,
             channel_id,
@@ -417,28 +349,6 @@ class RooAgent:
     def _extract_domain(self, text: str) -> Optional[str]:
         return extract_domain(text)
 
-    def _get_routing_intent(
-        self,
-        text: str,
-        thread_context: Optional[Dict[str, Any]] = None,
-    ) -> Optional[Dict[str, Any]]:
-        route = parse_routing_intent(
-            text,
-            thread_skill_name=(thread_context or {}).get("skill_name"),
-            thread_domain=(thread_context or {}).get("domain"),
-            thread_job_id=(thread_context or {}).get("active_job_id"),
-        )
-        if not route:
-            return None
-
-        skill = self._get_skill_by_name(route["skill_name"])
-        if not skill:
-            return None
-
-        return {
-            "skill": skill,
-            "params": dict(route.get("params") or {}),
-        }
 
     def _log_routing_decision(
         self,
@@ -493,12 +403,6 @@ class RooAgent:
             print(f"⚠️ Channel name lookup failed for {channel_id}: {exc}")
             return None
 
-    def _router_v2_mode(self) -> str:
-        """Read ROUTER_V2 without ever raising (tests run without env)."""
-        try:
-            return str(getattr(get_settings(), "ROUTER_V2", "off") or "off").strip().lower()
-        except Exception:
-            return "off"
 
     async def _route_v2(
         self,
@@ -546,341 +450,6 @@ class RooAgent:
                 params.setdefault("job_id", thread_context["active_job_id"])
         return params
 
-    async def _shadow_route_v2(
-        self,
-        text: str,
-        thread_history: Optional[List[dict]],
-        channel_id: Optional[str],
-        thread_ts: Optional[str],
-        event_files: Optional[list],
-        v1_skill: Optional[str],
-        v1_layer: Optional[str],
-    ) -> None:
-        """Shadow mode: run v2 after the fact and log (dis)agreement. Never raises."""
-        try:
-            decision = await self._route_v2(text, thread_history, channel_id, thread_ts, event_files)
-            v2_skill = decision.skill
-            payload = {
-                "event": "routing_decision_v2",
-                "mode": "shadow",
-                "skill": v2_skill,
-                "action": decision.action,
-                "params": decision.params,
-                "clarification": decision.clarification,
-                "source": decision.source,
-                "v1_skill": v1_skill,
-                "v1_layer": v1_layer,
-                "disagree": (v2_skill or None) != (v1_skill or None),
-                "channel_id": channel_id,
-                "thread_ts": thread_ts,
-                "text": (text or "")[:300],
-            }
-            print("ROUTING_DECISION_V2 " + json.dumps(payload, ensure_ascii=False, default=str))
-        except Exception as exc:
-            print(f"⚠️ Shadow router v2 failed: {exc}")
-
-    def _looks_like_content_request(self, text: str) -> bool:
-        # Verb + object only. Bare nouns ("article", "blog", "topic", "keyword")
-        # fire on vocabulary, not intent — "summarise this article" and "what's
-        # the topic for the meetup?" must NOT land here.
-        patterns = (
-            r'\b(?:write|draft|generate|create)\b.*\b(article|blog(?:\s+post)?|content)\b',
-            r'\bresearch\b(?!\s+papers?\b).*\b(article|topic|keyword|blog(?:\s+post)?)\b',
-            r'\b(?:article|blog)\s+(?:idea|topic|draft)s?\b',
-            r'\bseo\b',
-            r'\bfor my domain\b',
-        )
-        return any(re.search(pattern, text) for pattern in patterns)
-
-    def _looks_like_points_request(self, text: str) -> bool:
-        text = self._normalize_points_routing_text(text)
-        patterns = (
-            r'\bpoints?\b',
-            r'\btop\s*up\b',
-            r'\btopup\b',
-            r'\btop-up\b',
-            r'\bbalance\b',
-            r'\bcoworking\b',
-            r'\boffice\b.*\b(?:attendance|attended|usage|used|report|summary)\b',
-            r'\b(?:attendance|attended|usage|used)\b.*\boffice\b',
-            r'\bbook\s+me\s+in\b',
-            r'\bbook\b.*<@[a-z0-9]+>.*\bin\b',
-            r'\bcheck\b.*<@[a-z0-9]+>.*\bin\b',
-            r'\brewards?\b',
-            r'\bclaim\s+task\b',
-            r'\bcreate\s+(?:a\s+)?task\b',
-            r'\btask\s+create\b',
-            r'\bworth\s+\d+\s+points?\b',
-        )
-        return any(re.search(pattern, text) for pattern in patterns)
-
-    def _normalize_points_routing_text(self, text: str) -> str:
-        """Normalize common typos before points-skill routing checks."""
-        text_lower = str(text or "").lower()
-        replacements = {
-            "coworkign": "coworking",
-            "cowokrking": "coworking",
-            "cowokring": "coworking",
-            "co working": "coworking",
-            "co-working": "coworking",
-        }
-        for typo, replacement in replacements.items():
-            text_lower = text_lower.replace(typo, replacement)
-        return text_lower
-
-    def _looks_like_luma_request(self, text: str) -> bool:
-        patterns = (
-            r'\bluma\b',
-            r'\battendees?\b',
-            r'\bguest\s+lists?\b',
-            r'\bguests?\b.*\bcsv\b',
-            r'\bcsv\b.*\bguests?\b',
-            r'\bcsv\b.*\bmlai\s+events?\b',
-            r'\bmlai\s+events?\b.*\bcsv\b',
-            r'\bpast\s+csv\s+documents?\b',
-            r'\bregistered\b.*\bevents?\b',
-            r'\bregistrations?\b.*\bevents?\b',
-        )
-        return any(re.search(pattern, text) for pattern in patterns)
-
-    def _has_prior_slack_thread_context(
-        self,
-        history: Optional[List[dict]],
-        current_message_ts: Optional[str] = None,
-    ) -> bool:
-        current_ts = str(current_message_ts or "").strip()
-        for message in history or []:
-            if message.get("is_bot") or message.get("bot_id"):
-                continue
-            if current_ts and str(message.get("ts") or "").strip() == current_ts:
-                continue
-            if str(message.get("text") or "").strip() or message.get("files"):
-                return True
-        return False
-
-    def _looks_like_linear_thread_reference_request(self, text: str) -> bool:
-        if not re.search(r'\blinear\b', text):
-            return False
-        reference = r'(?:this|that|above|thread|conversation|message|discussion)'
-        return bool(
-            re.search(rf'\b(?:add|put|send|sync|create)\b.*\b{reference}\b.*\blinear\b', text)
-            or re.search(rf'\blinear\b.*\b(?:add|put|send|sync|create)\b.*\b{reference}\b', text)
-        )
-
-    def _looks_like_linear_meeting_request(
-        self,
-        text: str,
-        has_file_context: bool = False,
-        has_thread_context: bool = False,
-    ) -> bool:
-        has_linear = bool(re.search(r'\blinear\b', text))
-        has_meeting_source = bool(
-            re.search(
-                r'\b(meeting|transcript|summary|notes?|action\s+items?|to-?dos?|file|pdf|docx?|document|image|screenshot)\b',
-                text,
-            )
-        ) or has_file_context
-        has_creation_intent = bool(
-            re.search(r'\b(extract|sync|turn|send|put|create|add|do|write|post|generate|summari[sz]e|tickets?|issues?|tasks?)\b', text)
-        )
-        if self._looks_like_linear_direct_issue_request(text):
-            return True
-        if self._looks_like_linear_project_update_request(text, has_file_context):
-            return True
-        if has_linear and has_meeting_source and has_creation_intent:
-            return True
-        return (
-            has_creation_intent
-            and (has_file_context or has_thread_context)
-            and self._looks_like_linear_thread_reference_request(text)
-        )
-
-    def _looks_like_linear_project_update_request(self, text: str, has_file_context: bool = False) -> bool:
-        if not re.search(r'\bproject\s+updates?\b', text):
-            return False
-        has_update_intent = bool(
-            re.search(r'\b(create|do|write|post|generate|draft|summari[sz]e|make)\b', text)
-        )
-        has_source_context = has_file_context or bool(
-            re.search(r'\b(linear|meeting|transcript|summary|notes?|file|pdf|docx?|document|image|screenshot)\b', text)
-        )
-        return has_update_intent and has_source_context
-
-    def _looks_like_linear_direct_issue_request(self, text: str) -> bool:
-        if not re.search(r'\blinear\b', text):
-            return False
-        if re.search(r'\b(points?|rewards?|coworking|allowance|worth\s+\d+\s+points?)\b', text):
-            return False
-        if re.search(r'\bproject\s+updates?\b', text):
-            return False
-        has_creation_intent = bool(re.search(r'\b(create|add|open|file|make)\b', text))
-        has_issue_noun = bool(
-            re.search(r'\b(?:to\s*do\s+items?|todo\s+items?|tasks?|issues?|tickets?)\b', text)
-        )
-        has_linear_project = bool(
-            re.search(
-                r'\blinear\s+project\b|\bproject\s+(?:called|named)\b|'
-                r'\blinear\s+(?:tasks?|issues?|tickets?|to\s*do\s+items?)\s+(?:in|to|under)\b',
-                text,
-            )
-        )
-        return has_creation_intent and has_issue_noun and has_linear_project
-
-    def _looks_like_data_query_request(self, text: str) -> bool:
-        if re.search(r'\b(?:data|database|db)\s+(?:catalog|resources?|tables?|schema)\b', text):
-            return True
-        if re.search(r'\b(?:what|which|show|list)\b.*\b(?:tables?|resources?)\b.*\b(?:query|available|access)\b', text):
-            return True
-
-        has_query_intent = bool(
-            re.search(
-                r'\b(?:how\s+many|count|show|list|which|what|query|find|search|give\s+me|display|report)\b',
-                text,
-            )
-        )
-        if not has_query_intent:
-            return False
-
-        data_subject_patterns = (
-            r'\bvibe\s*raising\b',
-            r'\bstartup\s+(?:updates?|drafts?|profiles?|bindings?|metrics?|events?)\b',
-            r'\bmonthly\s+update\s+drafts?\b',
-            r'\bupdates?\s+drafts?\b',
-            r'\bcontent\s+factory\s+(?:jobs?|runs?|steps?|attempts?|articles?)\b',
-            r'\blinear\s+(?:issues?|projects?|project\s+updates?)\b',
-            r'\bgmail\s+(?:messages?|threads?|attachments?)\b',
-            r'\bslack\s+(?:messages?|threads?|channel\s+selections?)\b',
-            r'\bgithub\s+integrations?\b',
-            r'\bfinancial\s+(?:records?|accounts?)\b',
-            r'\borganizations?\b',
-            r'\bstartup\s+data\b',
-        )
-        return any(re.search(pattern, text) for pattern in data_subject_patterns)
-
-    def _looks_like_content_follow_up(self, text: str) -> bool:
-        patterns = (
-            r'\bwrite\b',
-            r'\bresearch\b',
-            r'\barticle\b',
-            r'\bblog\b',
-            r'\bkeyword\b',
-            r'\btopic\b',
-            r'\bdraft\b',
-            r'\boutline\b',
-            r'\bfor my domain\b',
-        )
-        return any(re.search(pattern, text) for pattern in patterns)
-
-    def _skill_available_in_channel(self, skill: Skill, channel_name: Optional[str]) -> bool:
-        """Channel scoping as a routing constraint.
-
-        A skill restricted to exclusive_channels must not capture messages from
-        other channels (its keywords used to grab e.g. "patient"/"announcement"
-        workspace-wide, then the executor refused to run). Mirrors the executor
-        rule: an unknown channel (None) is allowed through.
-        """
-        if not skill.exclusive_channels:
-            return True
-        if not channel_name:
-            return True
-        return channel_name in skill.exclusive_channels
-
-    def _keyword_matches(self, text: str, keyword: str) -> bool:
-        keyword = keyword.lower().strip()
-        if not keyword:
-            return False
-
-        escaped = re.escape(keyword)
-        pattern = rf'(?<!\w){escaped}(?!\w)'
-        return re.search(pattern, text) is not None
-
-    def _select_skill_from_triggers(
-        self,
-        text: str,
-        thread_context: Optional[Dict[str, Any]] = None,
-        has_file_context: bool = False,
-        has_thread_context: bool = False,
-        channel_name: Optional[str] = None,
-    ) -> Optional[Skill]:
-        skill, _layer = self._select_skill_from_triggers_detail(
-            text,
-            thread_context,
-            has_file_context=has_file_context,
-            has_thread_context=has_thread_context,
-            channel_name=channel_name,
-        )
-        return skill
-
-    def _select_skill_from_triggers_detail(
-        self,
-        text: str,
-        thread_context: Optional[Dict[str, Any]] = None,
-        has_file_context: bool = False,
-        has_thread_context: bool = False,
-        channel_name: Optional[str] = None,
-    ) -> Tuple[Optional[Skill], Optional[str]]:
-        """Deterministic (pre-LLM) skill selection, reporting which layer decided."""
-        routing_intent = self._get_routing_intent(text, thread_context)
-        if routing_intent:
-            return routing_intent["skill"], "intent-regex"
-
-        text_lower = text.lower().strip()
-        content_skill = self._get_skill_by_name("content-factory")
-        luma_skill = self._get_skill_by_name("luma-events")
-        points_skill = self._get_skill_by_name("mlai-points")
-        linear_meeting_skill = self._get_skill_by_name("linear-meeting-actions")
-        data_query_skill = self._get_skill_by_name("mlai-data-query")
-
-        if luma_skill and self._looks_like_luma_request(text_lower):
-            return luma_skill, "looks-like-luma"
-
-        if content_skill and self._looks_like_content_request(text_lower):
-            return content_skill, "looks-like-content"
-
-        if points_skill and self._looks_like_points_request(text_lower):
-            return points_skill, "looks-like-points"
-
-        if linear_meeting_skill and self._looks_like_linear_meeting_request(
-            text_lower,
-            has_file_context,
-            has_thread_context,
-        ):
-            return linear_meeting_skill, "looks-like-linear"
-
-        if data_query_skill and self._looks_like_data_query_request(text_lower):
-            return data_query_skill, "looks-like-data-query"
-
-        if (
-            thread_context
-            and thread_context.get("skill_name") == "content-factory"
-            and content_skill
-            and self._looks_like_content_follow_up(text_lower)
-            and not self._looks_like_points_request(text_lower)
-        ):
-            return content_skill, "content-follow-up"
-
-        skill_scores: Dict[str, int] = {}
-        for skill in self.skills:
-            if not self._skill_available_in_channel(skill, channel_name):
-                continue
-            matched_keywords = [
-                keyword for keyword in skill.trigger_keywords
-                if self._keyword_matches(text_lower, keyword)
-            ]
-            if matched_keywords:
-                skill_scores[skill.name] = sum(len(keyword.split()) * 3 + len(keyword) for keyword in matched_keywords)
-
-        if not skill_scores:
-            return None, None
-
-        ranked = sorted(skill_scores.items(), key=lambda item: item[1], reverse=True)
-        best_skill_name, best_score = ranked[0]
-        runner_up_score = ranked[1][1] if len(ranked) > 1 else -1
-
-        if len(ranked) == 1 or best_score >= runner_up_score + 4:
-            return self._get_skill_by_name(best_skill_name), "keywords"
-
-        return None, "keyword-tie"
 
     def _match_fast_path(self, text: str) -> Optional[str]:
         """Match exact-command shortcuts without executing them.
@@ -1083,241 +652,8 @@ class RooAgent:
         cleaned = ' '.join(cleaned.split())
         return cleaned.strip()
     
-    async def _select_skill(
-        self,
-        text: str,
-        history: List[dict] = None,
-        channel_id: Optional[str] = None,
-        thread_ts: Optional[str] = None,
-        has_file_context: bool = False,
-        has_thread_context: bool = False,
-    ) -> Optional[Skill]:
-        """Use LLM to decide which skill to use."""
-        skill, _layer = await self._select_skill_detail(
-            text,
-            history,
-            channel_id,
-            thread_ts,
-            has_file_context=has_file_context,
-            has_thread_context=has_thread_context,
-        )
-        return skill
 
-    async def _select_skill_detail(
-        self,
-        text: str,
-        history: List[dict] = None,
-        channel_id: Optional[str] = None,
-        thread_ts: Optional[str] = None,
-        has_file_context: bool = False,
-        has_thread_context: bool = False,
-        channel_name: Optional[str] = None,
-    ) -> Tuple[Optional[Skill], Optional[str]]:
-        """Select a skill, reporting which layer decided ("intent-regex", "looks-like-*",
-        "keywords", "llm", …). `channel_name` may be passed pre-resolved (eval harness);
-        otherwise it is resolved from `channel_id` without ever raising."""
-        if not self.skills:
-            return None, "no-skills"
 
-        thread_context = self._get_thread_context(channel_id, thread_ts)
-        routing_intent = self._get_routing_intent(text, thread_context)
-        if routing_intent:
-            return routing_intent["skill"], "intent-regex"
-
-        if channel_name is None:
-            channel_name = self._safe_channel_name(channel_id)
-
-        has_slack_files = has_file_context or any(message.get("files") for message in history or [])
-        trigger_skill, trigger_layer = self._select_skill_from_triggers_detail(
-            text,
-            thread_context,
-            has_file_context=has_slack_files,
-            has_thread_context=has_thread_context,
-            channel_name=channel_name,
-        )
-        if trigger_skill:
-            return trigger_skill, trigger_layer
-
-        llm_skill = await self._llm_select_skill(
-            text,
-            history,
-            channel_name=channel_name,
-            thread_context=thread_context,
-        )
-        if llm_skill:
-            return llm_skill, "llm"
-        return None, "llm-none"
-
-    # Routing examples shown to the LLM fallback, keyed by skill name so that
-    # skills filtered out (channel scoping / not loaded) drop their examples too.
-    # Interim home until Phase 2 moves routing examples into SKILL.md frontmatter.
-    LLM_ROUTER_EXAMPLES: Dict[str, Tuple[str, ...]] = {
-        "content-factory": (
-            '"please research the best article for me to write" -> content-factory',
-            '"scan the repo for the domain woofya.com.au" -> content-factory',
-            '"write me an article about how to build an ai agent harness" -> content-factory',
-            '"set up a blog section on my site" -> content-factory',
-        ),
-        "github-integration": (
-            '"reconnect github for woofya.com.au" -> github-integration',
-            '"I need to reauthorise github" -> github-integration',
-        ),
-        "linear-meeting-actions": (
-            '"turn this meeting summary into Linear tasks" -> linear-meeting-actions',
-            '"extract action items from this transcript and add them to Linear" -> linear-meeting-actions',
-            '"send this attached PDF to Linear as tasks" -> linear-meeting-actions',
-            '"add a task to linear to fix the login bug" -> linear-meeting-actions',
-        ),
-        "mlai-points": (
-            '"create a task called fix docs worth 5 points" -> mlai-points',
-            '"what tasks are open?" -> mlai-points',
-            '"how do I earn points?" -> mlai-points',
-            '"I\'d like to claim the docs task" -> mlai-points',
-        ),
-        "luma-events": (
-            '"give me CSVs for the past 3 MLAI events" -> luma-events',
-            '"how many people registered for the april 29 event" -> luma-events',
-            '"who\'s coming to the patient-data workshop?" -> luma-events',
-            '"how many signed up for thursday\'s event?" -> luma-events',
-        ),
-        "mlai-data-query": (
-            '"How many Vibe Raising companies do we have?" -> mlai-data-query',
-            '"What data resources can Roo query?" -> mlai-data-query',
-            '"Which Content Factory jobs failed?" -> mlai-data-query',
-        ),
-        "connect-users": (
-            '"do you know anyone in AI research?" -> connect-users',
-            '"anyone in the community working with medical imaging?" -> connect-users',
-            '"connect me with someone who writes blog content" -> connect-users',
-            '"looking for a mentor in data engineering, any suggestions?" -> connect-users',
-        ),
-        "tone-of-voice": (
-            '"rewrite this announcement in our tone of voice" -> tone-of-voice',
-            '"can you make this sound more like mlai?" -> tone-of-voice',
-        ),
-        "medhack": (
-            '"give me a clinical case to diagnose" -> medhack',
-            '"what time does medhack kick off on saturday?" -> medhack',
-        ),
-        "watt-the-hack": (
-            '"announce that judging starts at 5pm" -> watt-the-hack',
-            '"post an announcement: pizza in the atrium" -> watt-the-hack',
-        ),
-        "none": (
-            '"can you summarise this article for me?" -> none',
-            '"what did you think of the blog post I shared yesterday?" -> none',
-            '"what\'s the topic for this week\'s meetup?" -> none',
-            '"research the best time to post on linkedin" -> none',
-            '"please analyse this project proposal" -> none',
-        ),
-    }
-
-    async def _llm_select_skill(
-        self,
-        text: str,
-        history: List[dict] = None,
-        channel_name: Optional[str] = None,
-        thread_context: Optional[Dict[str, Any]] = None,
-    ) -> Optional[Skill]:
-        """LLM fallback classification over the skill catalog."""
-        # Channel scoping: skills locked to other channels are not candidates.
-        available_skills = [
-            skill for skill in self.skills
-            if self._skill_available_in_channel(skill, channel_name)
-        ]
-        if not available_skills:
-            return None
-
-        channel_hint = f"\nChannel: #{channel_name}\n" if channel_name else ""
-        channel_priority_hint = ""
-        if channel_name:
-            for skill in available_skills:
-                if channel_name in skill.priority_channels:
-                    channel_priority_hint = (
-                        f"IMPORTANT: The user is in #{channel_name}. "
-                        f"Strongly prefer the '{skill.name}' skill unless "
-                        f"the request is clearly about a different skill "
-                        f"(e.g. checking points balance, writing content).\n"
-                    )
-                    break
-
-        skill_descriptions = "\n".join(
-            f"- {s.name}: {s.description}"
-            for s in available_skills
-        )
-
-        example_lines: List[str] = []
-        for skill in available_skills:
-            example_lines.extend(self.LLM_ROUTER_EXAMPLES.get(skill.name, ()))
-        example_lines.extend(self.LLM_ROUTER_EXAMPLES["none"])
-        examples = "\n".join(f"- {line}" for line in example_lines)
-
-        # Format history for context
-        history_context = ""
-        if history:
-            trimmed_history = history[:-1][-4:]
-            history_str = "\n".join([f"{msg.get('user')}: {msg.get('text')}" for msg in trimmed_history]) # Skip last as it's the current request usually
-            history_context = f"Conversation History:\n{history_str}\n"
-
-        thread_context_hint = ""
-        if thread_context:
-            thread_context_hint = (
-                "Active Thread Context:\n"
-                f"- last skill: {thread_context.get('skill_name')}\n"
-                f"- domain: {thread_context.get('domain') or 'unknown'}\n"
-                f"- workflow: {thread_context.get('workflow') or 'unknown'}\n"
-            )
-
-        prompt = f"""Choose the best skill for the user's message.
-
-Available skills:
-{skill_descriptions}
-- none: Use this if no skill is appropriate (general conversation)
-{channel_hint}{channel_priority_hint}
-{history_context}
-{thread_context_hint}
-User message: "{text}"
-
-Routing rules:
-- Route on what the user wants DONE, not on vocabulary. A message mentioning "article", "task" or "csv" is not automatically a skill request.
-- Prefer content-factory for domain-backed repo scans, writing NEW articles/blog posts, SEO research, content planning, and scaffolding blog/article pages.
-- Do NOT use content-factory for summarising, reviewing, or giving opinions on existing content — that is none.
-- Prefer github-integration for GitHub auth, reconnecting GitHub, or account/integration management.
-- Prefer linear-meeting-actions for creating Linear issues/tickets/tasks, including from meeting notes, transcripts, action items, or attached files.
-- Prefer mlai-points for the Roo points system: balances, claimable community tasks, coworking bookings, rewards, top-ups.
-- Prefer luma-events for event registration counts, attendee lists/reports, and attendee CSV exports.
-- Prefer mlai-data-query for read-only questions over backend data (Vibe Raising companies, startup/monthly update drafts, Content Factory jobs/runs, synced Linear issues, integration status, the data catalog).
-- Prefer connect-users when the user wants to FIND or MEET community members with some expertise ("anyone who…", "who knows…", "connect me with…").
-- Prefer tone-of-voice for rewriting/rephrasing existing text in MLAI's tone or brand voice.
-- Questions about meetups/events that are not Luma data requests, file questions with no skill action, summaries, and chit-chat -> none.
-- When genuinely unsure between a skill and none, answer none.
-
-Examples:
-{examples}
-
-Respond with ONLY the skill name (e.g., "connect-users" or "none"):"""
-
-        try:
-            settings = get_settings()
-            response = await chat([
-                {"role": "system", "content": "You are a skill router. Respond with only the skill name."},
-                {"role": "user", "content": prompt}
-            ], model=settings.ROUTER_MODEL, max_tokens=128, reasoning_effort="medium")
-
-            skill_name = response.content.strip().lower()
-            # Normalize: both underscores and hyphens should match
-            skill_name_normalized = skill_name.replace("_", "-")
-
-            for skill in available_skills:
-                skill_normalized = skill.name.lower().replace("_", "-")
-                if skill_normalized == skill_name_normalized:
-                    return skill
-
-            return None
-
-        except Exception as e:
-            print(f"❌ Skill selection failed: {e}")
-            return None
     
     async def _general_response(self, text: str, history: List[dict] = None) -> str:
         """Generate a general conversational response."""
@@ -1327,9 +663,16 @@ Respond with ONLY the skill name (e.g., "connect-users" or "none"):"""
             history_str = "\n".join([f"{msg.get('user')}: {msg.get('text')}" for msg in history[:-1]])
             history_context = f"\nRecent Context:\n{history_str}\n"
 
-        skill_list = "\n".join(f"- {s.name}: {s.description}" for s in self.skills)
+        skill_lines = []
+        for s in self.skills:
+            line = f"- {s.name}: {s.description}"
+            if s.exclusive_channels:
+                channels = ", ".join(f"#{channel}" for channel in s.exclusive_channels)
+                line += f" (only available in {channels})"
+            skill_lines.append(line)
+        skill_list = "\n".join(skill_lines)
         prompt = f"""You are Roo, the friendly AI assistant for the MLAI community.
-        
+
 Your personality:
 - Warm and approachable, like a helpful local
 - Use casual Australian expressions occasionally (mate, no worries, etc.)
@@ -1340,6 +683,7 @@ Your Capabilities / Skills:
 {skill_list}
 
 If the user asks "what can you do?" or "what are you?", summarize your role and list your skills in a friendly, conversational way. Don't just dump the raw list, explain it naturally.
+If the user asks for something a channel-restricted skill does, point them to that skill's home channel instead of attempting it here.
 
 {history_context}
 Respond to the user's message in a helpful, conversational way."""
