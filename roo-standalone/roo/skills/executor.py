@@ -150,6 +150,8 @@ class SkillExecutor:
                 result = await self._execute_connect_users(skill, text, params, user_id)
             elif skill.name == "mlai-points":
                 result = await self._execute_mlai_points(skill, text, params, user_id, channel_id, thread_ts)
+            elif skill.name == "mlai-data-query":
+                result = await self._execute_mlai_data_query(skill, text, params, user_id)
             elif skill.name == "github-integration":
                 result = await self._execute_github_integration(skill, text, params, user_id, channel_id, thread_ts)
             elif skill.name == "linear-meeting-actions":
@@ -162,6 +164,7 @@ class SkillExecutor:
                     thread_ts,
                     thread_history,
                     kwargs.get("event_files"),
+                    kwargs.get("current_message_ts"),
                 )
             elif skill.name == "tone-of-voice":
                 result = await self._execute_tone_of_voice(skill, text, params, user_id)
@@ -916,8 +919,38 @@ Original text:
         is_announcement = any(k in text_lower for k in announce_keywords)
 
         if not is_announcement:
-            # Not an announcement request — fall back to a general LLM answer.
-            return await self._execute_with_llm(skill, text, params, user_id, thread_history)
+            # Event Q&A: answer questions about Watt The Hack from the skill's
+            # knowledge base. Falls back to the generic skill content only if the
+            # knowledge file is missing.
+            knowledge = ""
+            try:
+                knowledge_file = skill.path / "knowledge.md"
+                if knowledge_file.exists():
+                    knowledge = knowledge_file.read_text(encoding="utf-8")
+            except Exception as e:
+                print(f"⚠️ Watt The Hack: failed to load knowledge.md: {e}")
+
+            if not knowledge:
+                return await self._execute_with_llm(skill, text, params, user_id, thread_history)
+
+            qa_system_prompt = (
+                "You are Roo, the friendly assistant for the Watt The Hack hackathon, "
+                "answering questions in the #watt-the-hack Slack channel.\n\n"
+                "Answer the user's question using ONLY the Watt The Hack information below. "
+                "Be concise, warm and helpful, and use simple Slack-friendly formatting. "
+                "If the answer is not in the information, say you're not sure and suggest they "
+                "check watt-the-hack.com or ask an organiser — do NOT invent facts, dates, "
+                "prizes, names, times or venues.\n\n"
+                "=== WATT THE HACK INFORMATION ===\n"
+                f"{knowledge}\n"
+                "=== END INFORMATION ==="
+            )
+            openai_client = get_llm_client("openai")
+            qa_response = await openai_client.chat([
+                {"role": "system", "content": qa_system_prompt},
+                {"role": "user", "content": text},
+            ], model="gpt-4o-mini", max_tokens=700)
+            return qa_response.content.strip()
 
         # Use an LLM to extract a clear title and body from the request.
         extract_prompt = f"""Extract the announcement title and body from this message.
@@ -1626,17 +1659,24 @@ Keep the response concise but informative."""
         thread_ts: Optional[str],
         thread_history: Optional[List[dict]] = None,
         event_files: Optional[List[dict]] = None,
+        current_message_ts: Optional[str] = None,
     ) -> dict:
         settings = get_settings()
+        params = self._apply_linear_meeting_project_hint_prepass(text, params)
+        params = self._apply_linear_meeting_owner_hint_prepass(text, params)
+        direct_issue_request = self._is_linear_direct_issue_request(text, params)
+        thread_reference_request = self._is_linear_thread_reference_request(text, params)
         source_result = await self._build_linear_meeting_source_result(
             text=text,
             params=params,
             thread_history=thread_history,
             event_files=event_files,
             settings=settings,
+            current_message_ts=current_message_ts,
+            exclude_current_message=thread_reference_request,
         )
         transcript = source_result.combined_text()
-        if len(transcript.split()) < 8:
+        if len(transcript.split()) < 8 and not direct_issue_request:
             warning_suffix = self._format_linear_meeting_source_warnings(source_result.warnings)
             return {
                 "message": (
@@ -1664,13 +1704,33 @@ Keep the response concise but informative."""
                 "message": f"I couldn't read Linear context yet: {detail}"
             }
 
-        candidates = await self._extract_linear_meeting_candidates_from_sources(
-            sources=source_result.sources,
-            params=params,
-            users=users,
-            projects=projects,
-        )
-        if not candidates:
+        if direct_issue_request:
+            candidates = await self._extract_linear_direct_issue_candidates(
+                text=text,
+                params=params,
+                users=users,
+                projects=projects,
+            )
+        else:
+            candidates = await self._extract_linear_meeting_candidates_from_sources(
+                sources=source_result.sources,
+                params=params,
+                users=users,
+                projects=projects,
+            )
+        project_update_requested = self._linear_meeting_project_update_requested(text, params)
+        contextual_review_mode = False
+        if not candidates and thread_reference_request and not project_update_requested:
+            contextual_candidate = await self._extract_linear_thread_context_candidate(
+                sources=source_result.sources,
+                params=params,
+                users=users,
+                projects=projects,
+            )
+            if contextual_candidate:
+                candidates = [contextual_candidate]
+                contextual_review_mode = True
+        if not candidates and not project_update_requested:
             return {
                 "message": (
                     "I couldn't find any concrete action items in those meeting notes."
@@ -1693,14 +1753,44 @@ Keep the response concise but informative."""
         created: list[dict[str, Any]] = []
         review_needed: list[dict[str, Any]] = []
         skipped: list[dict[str, Any]] = []
+        project_update: Optional[dict[str, Any]] = None
+        project_update_error: Optional[str] = None
         source = {
             "channel_id": channel_id,
             "thread_ts": thread_ts,
             "requester_slack_id": user_id,
         }
 
+        if project_update_requested:
+            if source_result.files_seen and not source_result.files_parsed and len(transcript.split()) < 80:
+                project_update_error = "Skipped project update because the attached file content could not be parsed."
+            else:
+                project_update_match = self._match_linear_meeting_project_from_sources(
+                    source_result.sources,
+                    projects,
+                    params.get("project_hint"),
+                )
+                project = project_update_match.get("project")
+                if not project or float(project_update_match.get("confidence") or 0.0) < uncertain_threshold:
+                    project_update_error = "Skipped project update because Roo could not confidently match the Linear project."
+                else:
+                    try:
+                        update_input = await self._build_linear_meeting_project_update_input(
+                            sources=source_result.sources,
+                            params=params,
+                            project=project,
+                            candidates=candidates,
+                            recent_issues=recent_issues,
+                            settings=settings,
+                        )
+                        project_update = await client.create_project_update(**update_input)
+                    except Exception as exc:
+                        project_update_error = f"Could not create project update: {exc.__class__.__name__}: {exc}"
+
         for raw_candidate in candidates[:20]:
             candidate = self._normalize_linear_meeting_candidate(raw_candidate)
+            if raw_candidate.get("contextual_review_only"):
+                candidate["contextual_review_only"] = True
             if not candidate.get("title"):
                 continue
 
@@ -1731,6 +1821,8 @@ Keep the response concise but informative."""
                 auto_threshold=auto_threshold,
                 uncertain_threshold=uncertain_threshold,
             )
+            if candidate.get("contextual_review_only") and decision == "create":
+                decision = "review"
 
             issue_input = self._build_linear_meeting_issue_input(
                 candidate=candidate,
@@ -1780,9 +1872,30 @@ Keep the response concise but informative."""
                 review_needed.append({**display, "pending_id": pending_id})
                 continue
 
-            skipped.append({**display, "reason": "Low confidence mapping"})
+            skip_reason = self._linear_meeting_skip_reason(
+                candidate,
+                owner_match,
+                project_match,
+                team_match,
+                uncertain_threshold,
+            )
+            if candidate.get("contextual_review_only"):
+                if float(owner_match.get("confidence") or 0.0) < uncertain_threshold:
+                    skip_reason = "Assignee unclear; mention who should own this and I can add it to Linear."
+                elif float(project_match.get("confidence") or 0.0) < uncertain_threshold:
+                    skip_reason = "Project unclear; mention the Linear project and I can add it."
+                elif float(team_match.get("confidence") or 0.0) < uncertain_threshold:
+                    skip_reason = "Linear team unclear; mention the team and I can add it."
+            skipped.append({**display, "reason": skip_reason})
 
-        message = self._format_linear_meeting_result_message(created, review_needed, skipped)
+        message = self._format_linear_meeting_result_message(
+            created,
+            review_needed,
+            skipped,
+            project_update=project_update,
+            project_update_error=project_update_error,
+            contextual_review_mode=contextual_review_mode,
+        )
         message += self._format_linear_meeting_source_warnings(source_result.warnings)
         blocks = (
             self._build_linear_meeting_review_blocks(message, review_needed, user_id)
@@ -1833,6 +1946,8 @@ Keep the response concise but informative."""
         thread_history: Optional[List[dict]],
         event_files: Optional[List[dict]],
         settings: Any,
+        current_message_ts: Optional[str] = None,
+        exclude_current_message: bool = False,
     ) -> SourceParseResult:
         image_parser = None
         if getattr(settings, "OPENAI_API_KEY", None):
@@ -1855,6 +1970,8 @@ Keep the response concise but informative."""
             thread_history=thread_history,
             event_files=event_files,
             image_parser=image_parser,
+            current_message_ts=current_message_ts,
+            exclude_current_message=exclude_current_message,
         )
 
     def _format_linear_meeting_source_warnings(self, warnings: list[str]) -> str:
@@ -1866,6 +1983,410 @@ Keep the response concise but informative."""
         if len(warnings) > 8:
             lines.append(f"- {len(warnings) - 8} more source note(s) omitted.")
         return "\n".join(lines)
+
+    def _apply_linear_meeting_project_hint_prepass(
+        self,
+        text: str,
+        params: dict,
+    ) -> dict:
+        if params.get("project_hint"):
+            return params
+        project_hint = self._extract_linear_meeting_project_hint_from_text(text)
+        if not project_hint:
+            return params
+        return {**params, "project_hint": project_hint}
+
+    def _apply_linear_meeting_owner_hint_prepass(
+        self,
+        text: str,
+        params: dict,
+    ) -> dict:
+        if params.get("owner_hint") or params.get("owner"):
+            return params
+        owner_hint = self._extract_linear_meeting_owner_hint_from_text(text)
+        if not owner_hint:
+            return params
+        return {**params, "owner_hint": owner_hint}
+
+    def _extract_linear_meeting_project_hint_from_text(self, text: str) -> Optional[str]:
+        value = str(text or "").strip()
+        for pattern in self._linear_meeting_project_hint_patterns():
+            match = re.search(pattern, value, flags=re.IGNORECASE)
+            if match:
+                project_hint = self._clean_linear_meeting_project_hint(match.group(1))
+                normalized_hint = self._normalize_match_text(project_hint)
+                if project_hint and normalized_hint not in {"update", "updates"} and not normalized_hint.startswith("update"):
+                    return project_hint
+
+        return None
+
+    @staticmethod
+    def _linear_meeting_project_hint_patterns() -> tuple[str, ...]:
+        quoted = r'["\'“”‘’]([^"\'“”‘’]+)["\'“”‘’]'
+        unquoted = (
+            r'([A-Za-z0-9][A-Za-z0-9 _/&-]{1,80}?)'
+            r'(?=\s+(?:to|and|assign|assigned|with|please|from|as|for|due|by)\b|[.!?,;]|$)'
+        )
+        return (
+            rf'\b(?:in|into|to|under)\s+(?:the\s+)?linear\s+project\s+{quoted}',
+            rf'\blinear\s+project\s+{quoted}',
+            rf'\b(?:in|into|to|under)\s+(?:the\s+)?project\s+{quoted}',
+            rf'\bproject\s+(?:called|named)\s+{quoted}',
+            rf'\bproject\s+{quoted}',
+            rf'\b(?:in|into|to|under)\s+(?:the\s+)?linear\s+project\s+{unquoted}',
+            rf'\bto\s+linear\s+project\s+{unquoted}',
+            rf'\bproject\s+(?:called|named)\s+{unquoted}',
+            rf'\b(?:in|into|to|under)\s+(?:the\s+)?project\s+{unquoted}',
+            rf'\bproject\s+{unquoted}',
+        )
+
+    @staticmethod
+    def _clean_linear_meeting_project_hint(value: str) -> Optional[str]:
+        cleaned = str(value or "").strip(" \t\n\r'\"“”‘’`")
+        return cleaned or None
+
+    def _extract_linear_meeting_owner_hint_from_text(self, text: str) -> Optional[str]:
+        value = str(text or "").strip()
+        mention_assignment = re.search(
+            r'\b(?:assign(?:ed)?(?:\s+(?:it|this|task|issue))?\s+to|assignee\s*:|owner\s*:)\s*(<@[A-Z0-9]+>)',
+            value,
+            flags=re.IGNORECASE,
+        )
+        if mention_assignment:
+            return mention_assignment.group(1)
+
+        assignment = re.search(
+            r'\b(?:assign(?:ed)?(?:\s+(?:it|this|task|issue))?\s+to|assignee\s*:|owner\s*:)\s*'
+            r'(.+?)(?=\s+(?:in|to|under)\s+(?:the\s+)?linear\s+project\b|[.!?]\s|$)',
+            value,
+            flags=re.IGNORECASE,
+        )
+        if assignment:
+            return self._clean_linear_meeting_owner_hint(assignment.group(1))
+
+        for_owner = re.search(
+            r'\bfor\s+(<@[A-Z0-9]+>|@?[A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+){0,3})\s*$',
+            value,
+        )
+        if for_owner:
+            return self._clean_linear_meeting_owner_hint(for_owner.group(1))
+        return None
+
+    @staticmethod
+    def _clean_linear_meeting_owner_hint(value: str) -> Optional[str]:
+        cleaned = str(value or "").strip(" \t\n\r'\"“”`")
+        cleaned = re.sub(r'^(?:@|to\s+)', '', cleaned, flags=re.IGNORECASE).strip()
+        cleaned = re.sub(r'\s+', ' ', cleaned).strip(" ,;:")
+        return cleaned or None
+
+    def _is_linear_direct_issue_request(self, text: str, params: dict[str, Any]) -> bool:
+        value = str(text or "").lower()
+        if "linear" not in value:
+            return False
+        if re.search(r'\b(points?|rewards?|coworking|allowance|worth\s+\d+\s+points?)\b', value):
+            return False
+        if self._linear_meeting_project_update_requested(text, params):
+            return False
+        has_creation_intent = bool(re.search(r'\b(create|add|open|file|make)\b', value))
+        has_issue_noun = bool(
+            re.search(r'\b(?:to\s*do\s+items?|todo\s+items?|tasks?|issues?|tickets?)\b', value)
+        )
+        return has_creation_intent and has_issue_noun
+
+    def _is_linear_thread_reference_request(self, text: str, params: dict[str, Any]) -> bool:
+        normalized = str(text or "").lower()
+        if "linear" not in normalized:
+            return False
+        if self._normalize_match_text(params.get("action")) in {"threadreference", "addthread", "addthis"}:
+            return True
+        reference = r'(?:this|that|above|thread|conversation|message|discussion)'
+        return bool(
+            re.search(rf'\b(?:add|put|send|sync|create)\b.*\b{reference}\b.*\blinear\b', normalized)
+            or re.search(rf'\blinear\b.*\b(?:add|put|send|sync|create)\b.*\b{reference}\b', normalized)
+        )
+
+    async def _extract_linear_thread_context_candidate(
+        self,
+        *,
+        sources: list[ParsedSource],
+        params: dict,
+        users: list[dict[str, Any]],
+        projects: list[dict[str, Any]],
+    ) -> Optional[dict[str, Any]]:
+        source_excerpt = "\n\n".join(
+            chunk
+            for source in sources
+            for chunk in source_text_chunks(source, max_chars=5000)[:1]
+        )[:12000]
+        if len(source_excerpt.split()) < 8:
+            return None
+
+        project_names = ", ".join(
+            str(project.get("name") or project.get("slugId") or "")
+            for project in projects[:40]
+            if project.get("name") or project.get("slugId")
+        )
+        user_names = ", ".join(
+            str(user.get("displayName") or user.get("name") or user.get("email") or "")
+            for user in users[:80]
+            if user.get("displayName") or user.get("name") or user.get("email")
+        )
+        prompt = f"""Draft exactly one possible Linear issue from the referenced Slack thread.
+
+This is not a formal meeting transcript. The user asked Roo to add the thread context to Linear, so infer the likely follow-up item from the prior conversation only.
+
+Rules:
+- Return null if the thread is too vague to turn into one useful Linear issue.
+- Do not create a task called "add this to Linear" or similar.
+- For a discussion or decision, write the issue as a concrete follow-up such as "Decide ..." or "Confirm ...".
+- Infer the owner from direct address, mentions, and conversational responsibility. Prefer an exact Slack mention token like <@U123> when present.
+- Use the explicit project hint if present.
+
+Project hint: {params.get("project_hint") or "none"}
+Known Linear projects: {project_names or "none loaded"}
+Known Linear users: {user_names or "none loaded"}
+
+Referenced Slack thread:
+{source_excerpt}
+
+Return JSON only with this shape:
+{{
+  "issue": {{
+    "title": "imperative issue title",
+    "description": "one or two sentence issue description",
+    "owner_hint": "person, Slack mention, or email",
+    "project_hint": "project name if clear",
+    "team_hint": "team if clear",
+    "evidence": "short phrase from the thread",
+    "source_label": "Slack thread",
+    "confidence": 0.0
+  }}
+}}"""
+        settings = get_settings()
+        response = await chat(
+            [
+                {"role": "system", "content": "You draft one review-only Linear issue from Slack context. Return valid JSON only."},
+                {"role": "user", "content": prompt},
+            ],
+            model=getattr(settings, "LINEAR_MEETING_LLM_MODEL", "gpt-5.5"),
+            reasoning_effort=getattr(settings, "LINEAR_MEETING_LLM_REASONING_EFFORT", "low"),
+        )
+        content = response.content.strip()
+        if content.startswith("```"):
+            content = re.sub(r"^```\w*\n?", "", content)
+            content = re.sub(r"\n?```$", "", content)
+        try:
+            parsed = json.loads(content)
+        except json.JSONDecodeError:
+            return None
+        issue = parsed.get("issue") if isinstance(parsed, dict) else None
+        if not isinstance(issue, dict):
+            return None
+        candidate = self._normalize_linear_meeting_candidate(issue)
+        if not candidate.get("title"):
+            return None
+        if params.get("project_hint") and not candidate.get("project_hint"):
+            candidate["project_hint"] = str(params["project_hint"])
+        candidate["contextual_review_only"] = True
+        candidate["source_label"] = candidate.get("source_label") or "Slack thread"
+        candidate["priority"] = candidate.get("priority", 3)
+        return candidate
+
+    async def _extract_linear_direct_issue_candidates(
+        self,
+        *,
+        text: str,
+        params: dict,
+        users: list[dict[str, Any]],
+        projects: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        project_hint = str(params.get("project_hint") or "").strip()
+        if not project_hint:
+            project_hint = self._infer_linear_direct_project_hint_from_known_projects(text, projects)
+            if project_hint:
+                params = {**params, "project_hint": project_hint}
+        task_body = self._extract_linear_direct_issue_body(text, params)
+        if not task_body:
+            return []
+
+        owner_hint = str(params.get("owner_hint") or params.get("owner") or "").strip()
+        fallback = {
+            "title": self._linear_direct_issue_title_from_body(task_body),
+            "description": task_body,
+            "owner_hint": owner_hint,
+            "project_hint": project_hint,
+            "evidence": text[:700],
+            "source_label": "Slack command",
+            "confidence": 0.96,
+        }
+
+        project_names = ", ".join(
+            str(project.get("name") or project.get("slugId") or "")
+            for project in projects[:40]
+            if project.get("name") or project.get("slugId")
+        )
+        user_names = ", ".join(
+            str(user.get("displayName") or user.get("name") or user.get("email") or "")
+            for user in users[:80]
+            if user.get("displayName") or user.get("name") or user.get("email")
+        )
+        prompt = f"""Clean up this explicit Slack command into Linear issue fields.
+
+The user is directly asking Roo to create Linear issue(s). Do not ignore the command as a meta-instruction.
+Use the parsed task body as the work to create, not "create a Linear task" itself.
+
+Parsed project hint: {project_hint or "none"}
+Parsed assignee hint: {owner_hint or "none"}
+Parsed task body: {task_body}
+
+Known Linear projects: {project_names or "none loaded"}
+Known Linear users: {user_names or "none loaded"}
+
+Slack command:
+{text[:12000]}
+
+Return JSON only:
+{{
+  "issues": [
+    {{
+      "title": "imperative issue title",
+      "description": "one or two sentence issue description",
+      "owner_hint": "{owner_hint}",
+      "project_hint": "{project_hint}",
+      "due_date": null,
+      "priority": 3,
+      "evidence": "short phrase from the command",
+      "source_label": "Slack command",
+      "confidence": 0.96
+    }}
+  ]
+}}"""
+        settings = get_settings()
+        try:
+            response = await chat(
+                [
+                    {"role": "system", "content": "You convert explicit Slack commands into Linear issue fields. Return valid JSON only."},
+                    {"role": "user", "content": prompt},
+                ],
+                model=getattr(settings, "LINEAR_MEETING_LLM_MODEL", "gpt-5.5"),
+                reasoning_effort=getattr(settings, "LINEAR_MEETING_LLM_REASONING_EFFORT", "low"),
+            )
+            content = response.content.strip()
+            if content.startswith("```"):
+                content = re.sub(r"^```\w*\n?", "", content)
+                content = re.sub(r"\n?```$", "", content)
+            parsed = json.loads(content)
+        except Exception:
+            parsed = {}
+
+        issues = parsed.get("issues") if isinstance(parsed, dict) else []
+        candidates: list[dict[str, Any]] = []
+        for issue in issues or []:
+            if not isinstance(issue, dict):
+                continue
+            candidate = {
+                **fallback,
+                **issue,
+                "owner_hint": issue.get("owner_hint") or owner_hint,
+                "project_hint": issue.get("project_hint") or project_hint,
+                "source_label": issue.get("source_label") or "Slack command",
+                "evidence": issue.get("evidence") or text[:700],
+                "confidence": issue.get("confidence", 0.96),
+            }
+            normalized = self._normalize_linear_meeting_candidate(candidate)
+            if normalized.get("title"):
+                candidates.append(normalized)
+        return candidates or [fallback]
+
+    def _infer_linear_direct_project_hint_from_known_projects(
+        self,
+        text: str,
+        projects: list[dict[str, Any]],
+    ) -> str:
+        normalized_text = self._normalize_match_text(text)
+        matches: list[tuple[int, str]] = []
+        for project in projects:
+            name = str(project.get("name") or "").strip()
+            slug = str(project.get("slugId") or "").strip()
+            for value in (name, slug):
+                normalized_value = self._normalize_match_text(value)
+                if normalized_value and normalized_value in normalized_text:
+                    matches.append((len(normalized_value), name or slug))
+                    break
+        if not matches:
+            return ""
+        matches.sort(reverse=True)
+        return matches[0][1]
+
+    def _extract_linear_direct_issue_body(self, text: str, params: dict[str, Any]) -> str:
+        value = str(text or "").strip()
+        value = re.sub(r'<@[A-Z0-9]+>', ' ', value)
+        value = re.sub(r'\s+', ' ', value).strip()
+
+        assignment_pattern = (
+            r'\b(?:assign(?:ed)?(?:\s+(?:it|this|task|issue))?\s+to|assignee\s*:|owner\s*:)\b.*$'
+        )
+        without_assignment = re.sub(assignment_pattern, '', value, flags=re.IGNORECASE).strip(" ,.;:")
+
+        project_match = None
+        for pattern in self._linear_meeting_project_hint_patterns():
+            match = re.search(pattern, without_assignment, flags=re.IGNORECASE)
+            if match:
+                project_match = match
+                break
+
+        if project_match:
+            task_body = without_assignment[project_match.end():].strip()
+            if not task_body:
+                task_body = without_assignment[:project_match.start()].strip()
+        else:
+            task_body = without_assignment
+
+        project_hint = str(params.get("project_hint") or "").strip()
+        if project_hint:
+            hint_pattern = re.escape(project_hint)
+            direct_project_match = re.search(
+                rf'\b(?:in|into|to|under)\s+{hint_pattern}\b',
+                task_body,
+                flags=re.IGNORECASE,
+            )
+            if direct_project_match:
+                after_project = task_body[direct_project_match.end():].strip()
+                before_project = task_body[:direct_project_match.start()].strip()
+                task_body = after_project or before_project
+
+        task_body = re.sub(
+            r'^(?:please\s+)?(?:create|add|open|file|make)\s+(?:a|an|the)?\s*'
+            r'(?:linear\s+)?(?:(?:to\s*do|todo)\s+items?|tasks?|issues?|tickets?)\s*',
+            '',
+            task_body,
+            flags=re.IGNORECASE,
+        )
+        owner_hint = str(params.get("owner_hint") or params.get("owner") or "").strip()
+        if owner_hint:
+            task_body = re.sub(
+                rf'^\s*for\s+{re.escape(owner_hint)}\s*$',
+                '',
+                task_body,
+                flags=re.IGNORECASE,
+            )
+            task_body = re.sub(
+                rf'\s+\bfor\s+{re.escape(owner_hint)}\s*$',
+                '',
+                task_body,
+                flags=re.IGNORECASE,
+            )
+        task_body = re.sub(r'^(?:in|into|to|under|for|about|that|where|:|-)\s+', '', task_body, flags=re.IGNORECASE)
+        task_body = re.sub(r'\s+', ' ', task_body).strip(" ,.;:-")
+        return task_body
+
+    @staticmethod
+    def _linear_direct_issue_title_from_body(task_body: str) -> str:
+        title = str(task_body or "").strip()
+        title = re.sub(r'^(?:to\s+)+', '', title, flags=re.IGNORECASE).strip()
+        if not title:
+            return "Create Linear task"
+        return title[:1].upper() + title[1:]
 
     async def _extract_linear_meeting_candidates_from_sources(
         self,
@@ -1942,11 +2463,16 @@ Return JSON only with this shape:
   ]
 }}
 
-Only include actionable work someone agreed to do. Do not include decisions, FYIs, or vague follow-ups."""
-        response = await chat([
-            {"role": "system", "content": "You extract structured meeting action items. Return valid JSON only."},
-            {"role": "user", "content": prompt},
-        ])
+Only include actionable work someone agreed to do. Do not include decisions, FYIs, vague follow-ups, or the user's instruction to create Linear tasks/project updates."""
+        settings = get_settings()
+        response = await chat(
+            [
+                {"role": "system", "content": "You extract structured meeting action items. Return valid JSON only."},
+                {"role": "user", "content": prompt},
+            ],
+            model=getattr(settings, "LINEAR_MEETING_LLM_MODEL", "gpt-5.5"),
+            reasoning_effort=getattr(settings, "LINEAR_MEETING_LLM_REASONING_EFFORT", "low"),
+        )
         content = response.content.strip()
         if content.startswith("```"):
             content = re.sub(r"^```\w*\n?", "", content)
@@ -1968,39 +2494,431 @@ Only include actionable work someone agreed to do. Do not include decisions, FYI
         for candidate in candidates:
             title = self._normalize_match_text(candidate.get("title") or candidate.get("task"))
             owner = self._normalize_match_text(candidate.get("owner_hint") or candidate.get("owner"))
-            if not title:
+            if not title or self._is_linear_meeting_meta_candidate(candidate):
                 continue
-            key = f"{title}:{owner}"
+            key = self._find_similar_linear_meeting_candidate_key(deduped, candidate) or f"{title}:{owner}"
             if key not in deduped:
                 deduped[key] = dict(candidate)
                 continue
 
-            existing = deduped[key]
-            try:
-                existing_confidence = float(existing.get("confidence", 0.0))
-                candidate_confidence = float(candidate.get("confidence", 0.0))
-            except (TypeError, ValueError):
-                existing_confidence = candidate_confidence = 0.0
-            if candidate_confidence > existing_confidence:
-                existing["confidence"] = candidate.get("confidence")
-
-            labels = {
-                str(existing.get("source_label") or "").strip(),
-                str(candidate.get("source_label") or "").strip(),
-            }
-            labels.discard("")
-            if labels:
-                existing["source_label"] = ", ".join(sorted(labels))
-
-            existing_evidence = str(existing.get("evidence") or "").strip()
-            candidate_evidence = str(candidate.get("evidence") or "").strip()
-            if candidate_evidence and candidate_evidence not in existing_evidence:
-                existing["evidence"] = (
-                    f"{existing_evidence}\n{candidate_evidence}".strip()
-                    if existing_evidence
-                    else candidate_evidence
-                )
+            self._merge_linear_meeting_candidate(deduped[key], candidate)
         return list(deduped.values())
+
+    def _find_similar_linear_meeting_candidate_key(
+        self,
+        deduped: dict[str, dict[str, Any]],
+        candidate: dict[str, Any],
+    ) -> Optional[str]:
+        title = str(candidate.get("title") or candidate.get("task") or "")
+        normalized_title = self._normalize_match_text(title)
+        owner = self._normalize_match_text(candidate.get("owner_hint") or candidate.get("owner"))
+        candidate_tokens = self._linear_meeting_candidate_tokens(title)
+        for key, existing in deduped.items():
+            existing_title = str(existing.get("title") or existing.get("task") or "")
+            normalized_existing_title = self._normalize_match_text(existing_title)
+            if normalized_title == normalized_existing_title:
+                return key
+
+            existing_owner = self._normalize_match_text(existing.get("owner_hint") or existing.get("owner"))
+            existing_tokens = self._linear_meeting_candidate_tokens(existing_title)
+            if not candidate_tokens or not existing_tokens:
+                continue
+
+            overlap = len(candidate_tokens & existing_tokens) / min(len(candidate_tokens), len(existing_tokens))
+            similarity = SequenceMatcher(None, normalized_title, normalized_existing_title).ratio()
+            owners_match = not owner or not existing_owner or owner == existing_owner
+            if overlap >= 0.86 or (owners_match and (overlap >= 0.74 or (overlap >= 0.68 and similarity >= 0.68))):
+                return key
+        return None
+
+    def _merge_linear_meeting_candidate(self, existing: dict[str, Any], candidate: dict[str, Any]) -> None:
+        try:
+            existing_confidence = float(existing.get("confidence", 0.0))
+            candidate_confidence = float(candidate.get("confidence", 0.0))
+        except (TypeError, ValueError):
+            existing_confidence = candidate_confidence = 0.0
+        if candidate_confidence > existing_confidence:
+            existing["confidence"] = candidate.get("confidence")
+            for field in ("title", "description", "owner_hint", "project_hint", "team_hint", "due_date", "priority"):
+                if candidate.get(field):
+                    existing[field] = candidate.get(field)
+
+        labels = {
+            str(existing.get("source_label") or "").strip(),
+            str(candidate.get("source_label") or "").strip(),
+        }
+        labels.discard("")
+        if labels:
+            existing["source_label"] = ", ".join(sorted(labels))
+
+        existing_evidence = str(existing.get("evidence") or "").strip()
+        candidate_evidence = str(candidate.get("evidence") or "").strip()
+        if candidate_evidence and candidate_evidence not in existing_evidence:
+            existing["evidence"] = (
+                f"{existing_evidence}\n{candidate_evidence}".strip()
+                if existing_evidence
+                else candidate_evidence
+            )
+
+    def _is_linear_meeting_meta_candidate(self, candidate: dict[str, Any]) -> bool:
+        title = self._normalize_match_text(candidate.get("title") or candidate.get("task"))
+        description = self._normalize_match_text(candidate.get("description") or "")
+        combined = f"{title} {description}"
+        if "linear" in combined and (
+            "projectupdate" in combined
+            or "createlineartask" in combined
+            or "extract" in combined
+            or "todo" in combined
+        ):
+            return True
+        return title in {"postprojectupdate", "extractmeetingtodos", "createlineartasks"}
+
+    def _linear_meeting_candidate_tokens(self, text: str) -> set[str]:
+        replacements = {
+            "builders": "talent",
+            "builder": "talent",
+            "people": "talent",
+            "professionals": "talent",
+            "technical": "tech",
+            "pool": "supply",
+            "pools": "supply",
+            "model": "service",
+        }
+        stop_words = {
+            "a", "an", "and", "as", "by", "for", "from", "in", "into", "of", "on",
+            "or", "the", "to", "with", "will", "meeting", "linear", "task", "tasks",
+            "action", "actions", "item", "items", "create", "build", "start", "run",
+            "make", "prepare", "draft", "update", "rework", "revise", "add", "share",
+            "recruit", "building", "publish", "initial", "vetted",
+        }
+        tokens: set[str] = set()
+        for token in re.findall(r"[a-z0-9]+", str(text or "").lower()):
+            token = replacements.get(token, token)
+            token = self._linear_meeting_singular_token(token)
+            if len(token) < 3 or token in stop_words:
+                continue
+            tokens.add(token)
+        return tokens
+
+    def _linear_meeting_project_tokens(self, text: str) -> set[str]:
+        stop_words = {
+            "a", "an", "and", "by", "for", "from", "in", "of", "on", "or", "the",
+            "to", "with", "project", "update", "meeting", "notes", "note", "call",
+            "pdf", "docx", "slack", "linear",
+        }
+        tokens: set[str] = set()
+        for token in re.findall(r"[a-z0-9]+", str(text or "").lower()):
+            token = self._linear_meeting_singular_token(token)
+            if len(token) < 3 or token in stop_words:
+                continue
+            tokens.add(token)
+        return tokens
+
+    @staticmethod
+    def _linear_meeting_singular_token(token: str) -> str:
+        if len(token) > 4 and token.endswith("ies"):
+            return f"{token[:-3]}y"
+        if len(token) > 4 and token.endswith("s"):
+            return token[:-1]
+        return token
+
+    def _linear_meeting_project_update_requested(self, text: str, params: dict[str, Any]) -> bool:
+        action = self._normalize_match_text(params.get("action"))
+        if action in {"projectupdate", "updateproject", "projectstatus"}:
+            return True
+        normalized_text = self._normalize_match_text(text)
+        if "projectupdate" not in normalized_text:
+            return False
+        return any(
+            token in normalized_text
+            for token in (
+                "linear",
+                "meeting",
+                "transcript",
+                "summary",
+                "notes",
+                "file",
+                "pdf",
+                "docx",
+                "document",
+                "image",
+            )
+        )
+
+    def _match_linear_meeting_project_from_sources(
+        self,
+        sources: list[ParsedSource],
+        projects: list[dict[str, Any]],
+        explicit_project_hint: Optional[str],
+    ) -> dict[str, Any]:
+        if explicit_project_hint:
+            return self._match_linear_meeting_project(
+                {"project_hint": explicit_project_hint},
+                projects,
+                owner_user=None,
+                explicit_project_hint=explicit_project_hint,
+            )
+
+        source_label_text = " ".join(source.label for source in sources if source.label)
+        source_text = " ".join(
+            f"{source.label} {source.text[:4000]}"
+            for source in sources
+            if source.text or source.label
+        )
+        normalized_source = self._normalize_match_text(source_text)
+        source_tokens = self._linear_meeting_project_tokens(source_text)
+        source_label_tokens = self._linear_meeting_project_tokens(source_label_text)
+        best_project = None
+        best_score = 0.0
+        for project in projects:
+            project_text = " ".join(
+                str(value or "")
+                for value in (project.get("name"), project.get("slugId"))
+                if value
+            )
+            project_tokens = self._linear_meeting_project_tokens(project_text)
+            if len(project_tokens) >= 2:
+                label_overlap = len(project_tokens & source_label_tokens) / len(project_tokens)
+                source_overlap = len(project_tokens & source_tokens) / len(project_tokens)
+                token_score = max(label_overlap, source_overlap)
+                if token_score >= 0.67:
+                    score = 0.78 + (0.14 * token_score)
+                    if label_overlap >= 0.67:
+                        score += 0.04
+                    if score > best_score:
+                        best_project = project
+                        best_score = min(score, 0.94)
+
+            for value in (project.get("name"), project.get("slugId")):
+                normalized_project = self._normalize_match_text(value)
+                if not normalized_project:
+                    continue
+                if normalized_project in normalized_source:
+                    return {
+                        "project": project,
+                        "confidence": 0.9,
+                        "reason": "Matched project from meeting source",
+                    }
+                score = SequenceMatcher(None, normalized_project, normalized_source[: max(len(normalized_project) * 3, 80)]).ratio()
+                if score > best_score:
+                    best_project = project
+                    best_score = score
+        if best_project and best_score >= 0.65:
+            return {
+                "project": best_project,
+                "confidence": min(best_score, 0.94),
+                "reason": "Matched project by source similarity",
+            }
+        return {"project": None, "confidence": 0.0, "reason": "No project match"}
+
+    async def _build_linear_meeting_project_update_input(
+        self,
+        *,
+        sources: list[ParsedSource],
+        params: dict[str, Any],
+        project: dict[str, Any],
+        candidates: list[dict[str, Any]],
+        recent_issues: Optional[list[dict[str, Any]]] = None,
+        settings: Any,
+    ) -> dict[str, Any]:
+        project_name = str(project.get("name") or "the project")
+        source_summary = await self._summarize_linear_project_update_sources(
+            sources=sources,
+            settings=settings,
+        )
+        previous_update = self._format_linear_project_previous_update(project.get("lastUpdate"))
+        project_issue_context = self._format_linear_project_recent_issues(
+            project,
+            recent_issues or [],
+        )
+        candidate_lines = "\n".join(
+            f"- {candidate.get('title') or candidate.get('task')} ({candidate.get('owner_hint') or 'owner unclear'})"
+            for candidate in candidates[:15]
+            if candidate.get("title") or candidate.get("task")
+        )
+        prompt = f"""Write a concise Linear project update for {project_name}.
+
+Use the latest Linear project update as the baseline, and the meeting notes as the primary source for what changed since then.
+
+Return JSON only:
+{{
+  "body": "Markdown project update body",
+  "health": "onTrack|atRisk|offTrack"
+}}
+
+Use this structure in the body:
+- Summary
+- Work done since last update
+- Decisions made
+- Risks / open questions, if any
+- Next steps
+
+Keep the update concise. Include only work done, decisions, risks, and next steps supported by the notes or Linear context. Do not invent dates, completion, blockers, or commitments.
+End the body with exactly: _Generated by Roo from Slack meeting notes._
+
+Latest Linear project update:
+{previous_update or "No previous project update available."}
+
+Relevant recent Linear issues:
+{project_issue_context or "No recent project issues available."}
+
+Meeting note summaries:
+{source_summary or "No meeting notes available."}
+
+Extracted action candidates:
+{candidate_lines or "none"}"""
+        try:
+            response = await chat(
+                [
+                    {"role": "system", "content": "You write concise Linear project updates from meeting notes. Return valid JSON only."},
+                    {"role": "user", "content": prompt},
+                ],
+                model=getattr(settings, "LINEAR_MEETING_LLM_MODEL", "gpt-5.5"),
+                reasoning_effort=getattr(settings, "LINEAR_MEETING_LLM_REASONING_EFFORT", "low"),
+                max_tokens=1800,
+            )
+            content = response.content.strip()
+            if content.startswith("```"):
+                content = re.sub(r"^```\w*\n?", "", content)
+                content = re.sub(r"\n?```$", "", content)
+            parsed = json.loads(content)
+        except Exception:
+            parsed = {}
+
+        body = str(parsed.get("body") or "").strip() if isinstance(parsed, dict) else ""
+        health = str(parsed.get("health") or "onTrack").strip() if isinstance(parsed, dict) else "onTrack"
+        if health not in {"onTrack", "atRisk", "offTrack"}:
+            health = "onTrack"
+        if not body:
+            body = self._fallback_linear_meeting_project_update_body(project_name, candidates)
+        body = self._ensure_linear_project_update_footer(body)
+        return {
+            "project_id": str(project.get("id") or ""),
+            "body": body,
+            "health": health,
+        }
+
+    async def _summarize_linear_project_update_sources(
+        self,
+        *,
+        sources: list[ParsedSource],
+        settings: Any,
+    ) -> str:
+        chunks: list[tuple[str, str]] = []
+        for source in sources:
+            for chunk in source_text_chunks(source, max_chars=8000):
+                chunks.append((source.label, chunk))
+
+        if not chunks:
+            return ""
+
+        summaries: list[str] = []
+        for index, (label, chunk) in enumerate(chunks, start=1):
+            prompt = f"""Summarize this meeting-notes chunk for a Linear project update.
+
+Return concise Markdown bullets under these headings only:
+- Work done
+- Decisions
+- Risks / open questions
+- Next steps
+
+Only include facts supported by the chunk. Omit empty headings.
+
+Chunk {index} source: {label}
+{chunk[:8000]}"""
+            try:
+                response = await chat(
+                    [
+                        {"role": "system", "content": "You summarize meeting notes for concise project updates."},
+                        {"role": "user", "content": prompt},
+                    ],
+                    model=getattr(settings, "LINEAR_MEETING_LLM_MODEL", "gpt-5.5"),
+                    reasoning_effort=getattr(settings, "LINEAR_MEETING_LLM_REASONING_EFFORT", "low"),
+                    max_tokens=900,
+                )
+                summary = response.content.strip()
+            except Exception:
+                summary = ""
+            if summary:
+                summaries.append(f"### Source chunk {index}: {label}\n{summary[:3000]}")
+        return "\n\n".join(summaries)
+
+    def _format_linear_project_previous_update(self, last_update: Any) -> str:
+        if not isinstance(last_update, dict) or not last_update:
+            return ""
+        author = last_update.get("user") or {}
+        author_label = (
+            author.get("displayName")
+            or author.get("name")
+            or author.get("email")
+            or "unknown"
+        )
+        parts = [
+            f"- Created: {last_update.get('createdAt') or 'unknown'}",
+            f"- Health: {last_update.get('health') or 'unknown'}",
+            f"- Author: {author_label}",
+        ]
+        if last_update.get("url"):
+            parts.append(f"- URL: {last_update['url']}")
+        body = str(last_update.get("body") or "").strip()
+        if body:
+            parts.extend(["", body[:4000]])
+        return "\n".join(parts).strip()
+
+    def _format_linear_project_recent_issues(
+        self,
+        project: dict[str, Any],
+        recent_issues: list[dict[str, Any]],
+    ) -> str:
+        project_id = str(project.get("id") or "")
+        if not project_id:
+            return ""
+        lines: list[str] = []
+        for issue in recent_issues:
+            issue_project_id = str(((issue.get("project") or {}).get("id")) or "")
+            if issue_project_id != project_id:
+                continue
+            assignee = issue.get("assignee") or {}
+            assignee_label = (
+                assignee.get("displayName")
+                or assignee.get("name")
+                or assignee.get("email")
+                or "unassigned"
+            )
+            state = (issue.get("state") or {}).get("name") or "unknown"
+            identifier = issue.get("identifier") or issue.get("id") or "issue"
+            lines.append(f"- {identifier}: {issue.get('title') or 'Untitled'} [{state}, {assignee_label}]")
+            if len(lines) >= 20:
+                break
+        return "\n".join(lines)
+
+    @staticmethod
+    def _ensure_linear_project_update_footer(body: str) -> str:
+        footer = "_Generated by Roo from Slack meeting notes._"
+        cleaned = str(body or "").strip()
+        if footer.lower() in cleaned.lower():
+            return cleaned
+        return f"{cleaned}\n\n{footer}".strip()
+
+    def _fallback_linear_meeting_project_update_body(
+        self,
+        project_name: str,
+        candidates: list[dict[str, Any]],
+    ) -> str:
+        lines = [
+            f"## {project_name} meeting update",
+            "",
+            "Roo generated this update from meeting notes.",
+            "",
+            "### Action items",
+        ]
+        action_lines = [
+            f"- {candidate.get('title') or candidate.get('task')}"
+            for candidate in candidates[:12]
+            if candidate.get("title") or candidate.get("task")
+        ]
+        lines.extend(action_lines or ["- No concrete action items were extracted."])
+        return "\n".join(lines).strip()
 
     def _normalize_linear_meeting_candidate(self, candidate: dict[str, Any]) -> dict[str, Any]:
         title = str(candidate.get("title") or candidate.get("task") or "").strip()
@@ -2065,6 +2983,16 @@ Only include actionable work someone agreed to do. Do not include decisions, FYI
                 return {"user": user, "confidence": 0.98, "reason": "Matched owner by email"}
 
         normalized_hint = self._normalize_match_text(hint)
+        plain_matches = self._find_unique_linear_user_name_matches(hint, users)
+        if len(plain_matches) == 1:
+            return {
+                "user": plain_matches[0],
+                "confidence": 0.94,
+                "reason": "Matched owner by unique name",
+            }
+        if len(plain_matches) > 1:
+            return {"user": None, "confidence": 0.0, "reason": "Ambiguous owner hint"}
+
         best_user = None
         best_score = 0.0
         best_reason = "No user match"
@@ -2093,6 +3021,52 @@ Only include actionable work someone agreed to do. Do not include decisions, FYI
             return {"user": best_user, "confidence": min(best_score, 0.84), "reason": best_reason}
         return {"user": None, "confidence": 0.0, "reason": "No user match"}
 
+    def _find_unique_linear_user_name_matches(
+        self,
+        owner_hint: str,
+        users: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        hint_tokens = self._linear_person_name_tokens(owner_hint)
+        if not hint_tokens:
+            return []
+        matches: list[dict[str, Any]] = []
+        for user in users:
+            user_tokens = self._linear_user_name_tokens(user)
+            if not user_tokens:
+                continue
+            if hint_tokens & user_tokens:
+                matches.append(user)
+        return self._dedupe_linear_users_by_id(matches)
+
+    def _linear_user_name_tokens(self, user: dict[str, Any]) -> set[str]:
+        values = [user.get("displayName"), user.get("name"), user.get("email")]
+        tokens: set[str] = set()
+        for value in values:
+            tokens.update(self._linear_person_name_tokens(str(value or "").split("@", 1)[0]))
+        return tokens
+
+    @staticmethod
+    def _linear_person_name_tokens(value: str) -> set[str]:
+        stop_words = {"assign", "assigned", "owner", "assignee", "to", "for", "it", "this", "task", "issue"}
+        tokens = {
+            token
+            for token in re.findall(r"[a-z0-9]+", str(value or "").lower())
+            if len(token) >= 3 and token not in stop_words
+        }
+        return tokens
+
+    @staticmethod
+    def _dedupe_linear_users_by_id(users: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        seen: set[str] = set()
+        deduped: list[dict[str, Any]] = []
+        for user in users:
+            key = str(user.get("id") or user.get("email") or user.get("name") or "").lower()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            deduped.append(user)
+        return deduped
+
     def _match_linear_meeting_project(
         self,
         candidate: dict[str, Any],
@@ -2103,28 +3077,55 @@ Only include actionable work someone agreed to do. Do not include decisions, FYI
         hint = str(explicit_project_hint or candidate.get("project_hint") or "").strip()
         if hint:
             normalized_hint = self._normalize_match_text(hint)
-            best_project = None
-            best_score = 0.0
+            exact_name_matches: list[dict[str, Any]] = []
+            exact_value_matches: list[dict[str, Any]] = []
+            scored_matches: list[tuple[float, dict[str, Any]]] = []
             for project in projects:
-                names = [project.get("name"), project.get("slugId")]
-                for name in names:
-                    normalized_name = self._normalize_match_text(name)
-                    if not normalized_name:
+                project_name = project.get("name")
+                project_slug = project.get("slugId")
+                normalized_project_name = self._normalize_match_text(project_name)
+                if normalized_project_name and normalized_hint == normalized_project_name:
+                    exact_name_matches.append(project)
+                    continue
+                for value in (project_slug, project_name):
+                    normalized_value = self._normalize_match_text(value)
+                    if not normalized_value:
                         continue
-                    if normalized_hint == normalized_name:
-                        return {
-                            "project": project,
-                            "confidence": 0.96,
-                            "reason": "Matched project by exact hint",
-                        }
-                    if normalized_name in normalized_hint or normalized_hint in normalized_name:
+                    if normalized_hint == normalized_value:
+                        exact_value_matches.append(project)
+                        continue
+                    if normalized_value in normalized_hint or normalized_hint in normalized_value:
                         score = 0.88
                     else:
-                        score = SequenceMatcher(None, normalized_hint, normalized_name).ratio()
-                    if score > best_score:
-                        best_project = project
-                        best_score = score
-            if best_project and best_score >= 0.78:
+                        score = SequenceMatcher(None, normalized_hint, normalized_value).ratio()
+                    scored_matches.append((score, project))
+
+            exact_name_matches = self._dedupe_linear_projects_by_id(exact_name_matches)
+            if len(exact_name_matches) == 1:
+                return {
+                    "project": exact_name_matches[0],
+                    "confidence": 0.96,
+                    "reason": "Matched project by exact hint",
+                }
+            if len(exact_name_matches) > 1:
+                return {"project": None, "confidence": 0.0, "reason": "Ambiguous project hint"}
+
+            exact_value_matches = self._dedupe_linear_projects_by_id(exact_value_matches)
+            if len(exact_value_matches) == 1:
+                return {
+                    "project": exact_value_matches[0],
+                    "confidence": 0.94,
+                    "reason": "Matched project by exact slug",
+                }
+            if len(exact_value_matches) > 1:
+                return {"project": None, "confidence": 0.0, "reason": "Ambiguous project hint"}
+
+            scored_matches.sort(key=lambda item: item[0], reverse=True)
+            if scored_matches and scored_matches[0][0] >= 0.78:
+                best_score, best_project = scored_matches[0]
+                second_score = scored_matches[1][0] if len(scored_matches) > 1 else 0.0
+                if second_score >= 0.78 and best_score - second_score < 0.03:
+                    return {"project": None, "confidence": 0.0, "reason": "Ambiguous project hint"}
                 return {
                     "project": best_project,
                     "confidence": min(best_score, 0.86),
@@ -2153,6 +3154,18 @@ Only include actionable work someone agreed to do. Do not include decisions, FYI
                 "reason": "Only active project found for owner",
             }
         return {"project": None, "confidence": 0.0, "reason": "No project match"}
+
+    @staticmethod
+    def _dedupe_linear_projects_by_id(projects: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        seen: set[str] = set()
+        deduped: list[dict[str, Any]] = []
+        for project in projects:
+            key = str(project.get("id") or project.get("name") or project.get("slugId") or "").lower()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            deduped.append(project)
+        return deduped
 
     def _match_linear_meeting_team(
         self,
@@ -2261,6 +3274,30 @@ Only include actionable work someone agreed to do. Do not include decisions, FYI
             return "review", overall
         return "skip", overall
 
+    def _linear_meeting_skip_reason(
+        self,
+        candidate: dict[str, Any],
+        owner_match: dict[str, Any],
+        project_match: dict[str, Any],
+        team_match: dict[str, Any],
+        uncertain_threshold: float,
+    ) -> str:
+        if float(candidate.get("confidence") or 0.0) < uncertain_threshold:
+            return "Candidate confidence too low"
+        if float(owner_match.get("confidence") or 0.0) < uncertain_threshold:
+            reason = str(owner_match.get("reason") or "")
+            if "ambiguous" in reason.lower():
+                return "Assignee unclear: multiple Linear users matched"
+            return "Assignee unclear"
+        if float(project_match.get("confidence") or 0.0) < uncertain_threshold:
+            reason = str(project_match.get("reason") or "")
+            if "ambiguous" in reason.lower():
+                return "Project unclear: multiple Linear projects matched"
+            return "Project unclear"
+        if float(team_match.get("confidence") or 0.0) < uncertain_threshold:
+            return "Team unclear"
+        return "Low confidence mapping"
+
     def _build_linear_meeting_issue_input(
         self,
         *,
@@ -2332,6 +3369,7 @@ Only include actionable work someone agreed to do. Do not include decisions, FYI
             "project": project.get("name") or "Unresolved",
             "team": team.get("key") or team.get("name") or "Unresolved",
             "source": candidate.get("source_label") or "Slack thread",
+            "evidence": candidate.get("evidence") or "",
             "confidence": confidence,
             "owner_reason": owner_match.get("reason"),
             "project_reason": project_match.get("reason"),
@@ -2361,9 +3399,33 @@ Only include actionable work someone agreed to do. Do not include decisions, FYI
         created: list[dict[str, Any]],
         review_needed: list[dict[str, Any]],
         skipped: list[dict[str, Any]],
+        *,
+        project_update: Optional[dict[str, Any]] = None,
+        project_update_error: Optional[str] = None,
+        contextual_review_mode: bool = False,
     ) -> str:
         lines: list[str] = []
+        if project_update:
+            project_update_label = (
+                ((project_update.get("project") or {}).get("name"))
+                or project_update.get("id")
+                or "Linear project update"
+            )
+            if project_update.get("url"):
+                lines.append(f"Created Linear project update: <{project_update['url']}|{project_update_label}>")
+            else:
+                lines.append(f"Created Linear project update: {project_update_label}")
+        elif project_update_error:
+            lines.append(project_update_error)
+
+        if contextual_review_mode and review_needed:
+            if lines:
+                lines.append("")
+            lines.append("I found a possible Linear issue from this thread. Please review before I create it.")
+
         if created:
+            if lines:
+                lines.append("")
             lines.append(f"Created {len(created)} Linear issue{'s' if len(created) != 1 else ''}:")
             for item in created[:10]:
                 issue = item.get("issue") or {}
@@ -2387,10 +3449,11 @@ Only include actionable work someone agreed to do. Do not include decisions, FYI
             lines.append(f"Skipped {len(skipped)} item{'s' if len(skipped) != 1 else ''}:")
             for item in skipped[:8]:
                 duplicate = item.get("duplicate") or {}
+                mapping = f"project: {item['project']}; assignee: {item['assignee']}"
                 if duplicate.get("url"):
-                    lines.append(f"- {item['title']} - {item['reason']} (<{duplicate['url']}|existing issue>)")
+                    lines.append(f"- {item['title']} - {item['reason']} ({mapping}; <{duplicate['url']}|existing issue>)")
                 else:
-                    lines.append(f"- {item['title']} - {item['reason']}")
+                    lines.append(f"- {item['title']} - {item['reason']} ({mapping})")
         return "\n".join(lines) if lines else "No Linear issues were created from those meeting notes."
 
     def _build_linear_meeting_review_blocks(
@@ -2409,6 +3472,8 @@ Only include actionable work someone agreed to do. Do not include decisions, FYI
                 f"Project: `{item['project']}` | Assignee: `{item['assignee']}` | "
                 f"Confidence: `{item['confidence']:.0%}` | Source: `{item.get('source', 'Slack thread')}`"
             )
+            if item.get("evidence"):
+                summary += f"\nEvidence: “{item['evidence']}”"
             value = json.dumps({"pending_id": pending_id, "requested_by": user_id})
             blocks.extend([
                 {"type": "section", "text": {"type": "mrkdwn", "text": summary[:2500]}},
@@ -5071,6 +6136,351 @@ Only include actionable work someone agreed to do. Do not include decisions, FYI
         if match:
             return match.group(1).strip()
         return None
+
+    async def _execute_mlai_data_query(
+        self,
+        skill: Skill,
+        text: str,
+        params: dict,
+        user_id: str,
+    ) -> Any:
+        """Execute curated read-only data queries through mlai-backend."""
+        from roo.clients import mlai_backend as backend_module
+
+        settings = get_settings()
+        if not settings.MLAI_BACKEND_URL:
+            return "Sorry mate, the data query API isn't configured. Ask the team to set MLAI_BACKEND_URL."
+
+        client = backend_module.MLAIBackendClient(
+            base_url=settings.MLAI_BACKEND_URL,
+            api_key=settings.ROO_API_KEY or settings.MLAI_API_KEY,
+            internal_api_key=settings.INTERNAL_API_KEY or settings.ROO_API_KEY or settings.MLAI_API_KEY,
+        )
+
+        try:
+            if self._data_query_catalog_requested(text, params):
+                catalog = await client.get_data_catalog()
+                return {
+                    "message": self._format_data_catalog(catalog),
+                    "data": {"action": "data_catalog", "catalog": catalog},
+                }
+
+            payload = self._build_data_query_payload(text, params, user_id)
+            if not payload.get("resource"):
+                return (
+                    "I can query the curated data resources, but I need a more specific dataset. "
+                    "Ask for the data catalog to see what is available."
+                )
+
+            result = await client.query_data(payload)
+            return {
+                "message": self._format_data_query_result(payload, result),
+                "data": {
+                    "action": "data_query",
+                    "payload": payload,
+                    "result": result,
+                },
+            }
+        except backend_module.MLAIBackendUnavailableError:
+            return "MLAI backend is temporarily unavailable. Please try again in a moment."
+        except httpx.HTTPStatusError as exc:
+            detail = self._extract_http_error_detail(exc)
+            if exc.response.status_code == 403:
+                return detail or "You do not have access to that data resource."
+            if exc.response.status_code == 400:
+                return f"The data query was rejected: {detail or 'invalid query'}"
+            return detail or "The data query failed. Please try again in a moment."
+
+    def _data_query_catalog_requested(self, text: str, params: dict) -> bool:
+        text_lower = str(text or "").lower()
+        raw_catalog_request = bool(
+            re.search(r'\b(?:data|database|db)\s+(?:catalog|resources?|tables?|schema)\b', text_lower)
+            or re.search(r'\b(?:what|which|show|list)\b.*\b(?:tables?|resources?)\b.*\b(?:query|available|access)\b', text_lower)
+        )
+        if raw_catalog_request:
+            return True
+
+        action = str(params.get("action") or "").lower().strip()
+        if action not in {"catalog", "list_resources", "schema"}:
+            return False
+
+        # The generic LLM extractor can mistake "how many X do we have?" for a
+        # catalog request. If the raw text points at a known resource, query it.
+        return not bool(self._infer_data_query_resource(text_lower, params))
+
+    def _build_data_query_payload(self, text: str, params: dict, user_id: str) -> dict:
+        text_lower = str(text or "").lower()
+        operation = self._infer_data_query_operation(text_lower, params)
+        resource = self._infer_data_query_resource(text_lower, params)
+        payload: dict[str, Any] = {
+            "requester_slack_id": user_id,
+            "resource": resource,
+            "operation": operation,
+            "offset": self._coerce_data_query_offset(params.get("offset")),
+        }
+
+        filters = self._extract_data_query_filters(params)
+        filters.extend(self._infer_data_query_filters(text_lower, resource))
+        if filters:
+            payload["filters"] = filters
+
+        if operation == "aggregate":
+            group_by = self._extract_string_list(params.get("group_by"))
+            if group_by:
+                payload["group_by"] = group_by
+            limit = self._coerce_data_query_limit(params.get("limit"), default=20)
+            payload["limit"] = limit
+            order_by = self._extract_data_query_order_by(params.get("order_by"))
+            if order_by:
+                payload["order_by"] = order_by
+            return payload
+
+        if operation == "count":
+            return payload
+
+        fields = self._extract_string_list(params.get("fields")) or self._default_data_query_fields(resource)
+        if fields:
+            payload["fields"] = fields
+        limit = self._coerce_data_query_limit(params.get("limit"), default=20)
+        payload["limit"] = limit
+        order_by = self._extract_data_query_order_by(params.get("order_by"))
+        if order_by:
+            payload["order_by"] = order_by
+        return payload
+
+    def _infer_data_query_operation(self, text_lower: str, params: dict) -> str:
+        if re.search(r'\b(?:how\s+many|count|number\s+of|total\s+number)\b', text_lower):
+            return "count"
+        if re.search(r'\b(?:group\s+by|break\s+down|breakdown|by\s+status|by\s+state|by\s+month)\b', text_lower):
+            return "aggregate"
+        if re.search(r'\b(?:show|list|which|what|query|find|search|give\s+me|display|report)\b', text_lower):
+            return "list"
+
+        operation = str(params.get("operation") or "").lower().strip()
+        if operation in {"list", "count", "aggregate"}:
+            return operation
+        return "list"
+
+    def _infer_data_query_resource(self, text_lower: str, params: dict) -> str:
+        resource_patterns = (
+            ("vibe_raising_companies", (r'\bvibe\s*raising\b.*\bcompan', r'\bcompan(?:y|ies)\b.*\bvibe\s*raising\b')),
+            ("vibe_raising_profiles", (r'\bvibe\s*raising\b.*\bprofiles?\b', r'\bfounder\s+profiles?\b')),
+            ("monthly_update_drafts", (r'\bmonthly\s+update\s+drafts?\b', r'\bupdate\s+drafts?\b', r'\bdrafts?\s+for\s+my\s+company\b')),
+            ("startup_metrics", (r'\bstartup\s+metrics?\b', r'\bmetrics?\b.*\bstartup\b')),
+            ("startup_events", (r'\bstartup\s+events?\b', r'\btimeline\s+events?\b')),
+            ("startup_profiles", (r'\bstartup\s+profiles?\b', r'\bcompany\s+profile\b')),
+            ("startup_bindings", (r'\bstartup\s+bindings?\b', r'\buser\s+startup\s+bindings?\b')),
+            ("content_factory_run_step_attempts", (r'\bcontent\s+factory\b.*\bstep\s+attempts?\b',)),
+            ("content_factory_run_steps", (r'\bcontent\s+factory\b.*\brun\s+steps?\b', r'\bcontent\s+factory\b.*\bsteps?\b')),
+            ("content_factory_runs", (r'\bcontent\s+factory\b.*\bruns?\b',)),
+            ("content_factory_jobs", (r'\bcontent\s+factory\b.*\bjobs?\b', r'\barticle\s+jobs?\b')),
+            ("written_articles", (r'\bwritten\s+articles?\b', r'\bpublished\s+articles?\b')),
+            ("researched_keywords", (r'\bresearched\s+keywords?\b', r'\bseo\s+keywords?\b')),
+            ("linear_project_updates", (r'\blinear\b.*\bproject\s+updates?\b',)),
+            ("linear_projects", (r'\blinear\b.*\bprojects?\b',)),
+            ("linear_issues", (r'\blinear\b.*\b(?:issues?|tickets?|tasks?)\b',)),
+            ("gmail_attachments", (r'\bgmail\b.*\battachments?\b',)),
+            ("gmail_threads", (r'\bgmail\b.*\bthreads?\b',)),
+            ("gmail_messages", (r'\bgmail\b.*\bmessages?\b', r'\bemails?\b')),
+            ("slack_channel_selections", (r'\bslack\b.*\bchannel\s+selections?\b',)),
+            ("slack_threads", (r'\bslack\b.*\bthreads?\b',)),
+            ("slack_messages", (r'\bslack\b.*\bmessages?\b',)),
+            ("github_integrations", (r'\bgithub\s+integrations?\b', r'\bconnected\s+github\b')),
+            ("financial_accounts", (r'\bfinancial\s+accounts?\b', r'\bbank\s+accounts?\b')),
+            ("financial_records", (r'\bfinancial\s+records?\b', r'\btransactions?\b')),
+            ("organizations", (r'\borganizations?\b', r'\bcompanies?\b')),
+            ("coworking_bookings", (r'\bcoworking\b.*\bbookings?\b',)),
+        )
+        for resource, patterns in resource_patterns:
+            if any(re.search(pattern, text_lower) for pattern in patterns):
+                return resource
+
+        explicit = str(params.get("resource") or params.get("table") or "").strip().lower()
+        if explicit:
+            return re.sub(r'[^a-z0-9_]+', '_', explicit).strip("_")
+        return ""
+
+    def _infer_data_query_filters(self, text_lower: str, resource: str) -> list[dict]:
+        filters: list[dict] = []
+        if resource in {"content_factory_jobs", "content_factory_runs", "content_factory_run_steps", "content_factory_run_step_attempts"}:
+            if re.search(r'\b(?:failed|failure|errored|errors?)\b', text_lower):
+                value = "error" if resource == "content_factory_jobs" else "failed"
+                field = "status"
+                operator = "eq"
+                filters.append({"field": field, "operator": operator, "value": value})
+            elif re.search(r'\b(?:queued|running|completed|cancelled|canceled)\b', text_lower):
+                status_match = re.search(r'\b(queued|running|completed|cancelled|canceled)\b', text_lower)
+                if status_match:
+                    value = "cancelled" if status_match.group(1) == "canceled" else status_match.group(1)
+                    filters.append({"field": "status", "operator": "eq", "value": value})
+        if resource == "monthly_update_drafts":
+            status_match = re.search(r'\b(draft|generated|sent|approved|failed|error)\b', text_lower)
+            if status_match:
+                value = "error" if status_match.group(1) in {"failed", "error"} else status_match.group(1)
+                filters.append({"field": "status", "operator": "eq", "value": value})
+        if resource == "vibe_raising_companies" and re.search(r'\bregistered\b', text_lower):
+            filters.append({"field": "registered", "operator": "eq", "value": True})
+        return filters
+
+    def _default_data_query_fields(self, resource: str) -> list[str]:
+        defaults = {
+            "vibe_raising_companies": ["name", "domain", "organization_domain", "registered", "created_at"],
+            "vibe_raising_profiles": ["user_email", "user_slack_id", "role", "organization_name", "updated_at"],
+            "monthly_update_drafts": ["organization_id", "month", "status", "title", "groundedness_status", "updated_at"],
+            "startup_profiles": ["organization_id", "stage", "organization_kind", "short_description", "updated_at"],
+            "startup_bindings": ["user_email", "organization_domain", "role", "is_default_for_gmail", "updated_at"],
+            "startup_metrics": ["metric_name", "value_text", "value_number", "unit", "period_month", "confidence"],
+            "startup_events": ["event_type", "title", "event_date", "sentiment", "investor_importance", "confidence"],
+            "content_factory_jobs": ["job_id", "domain", "status", "selected_keyword", "article_url", "pr_url", "error_message", "created_at"],
+            "content_factory_runs": ["run_id", "workflow", "domain", "status", "current_step", "approval_state", "error", "updated_at"],
+            "content_factory_run_steps": ["run_key", "domain", "step_key", "status", "attempts", "message", "error"],
+            "content_factory_run_step_attempts": ["run_key", "domain", "attempt", "status", "message", "error", "created_at"],
+            "written_articles": ["title", "slug", "category", "article_url", "primary_keyword", "published_at"],
+            "researched_keywords": ["keyword", "volume", "difficulty", "intent", "tier", "opportunity_index", "status"],
+            "linear_issues": ["identifier", "title", "state_name", "priority_label", "assignee_name", "team_key", "url", "updated_at_linear"],
+            "linear_projects": ["name", "status_name", "health", "progress", "priority", "lead_name", "target_date", "url"],
+            "linear_project_updates": ["health", "author_name", "url", "created_at_linear", "updated_at_linear"],
+            "gmail_messages": ["internal_date", "subject", "from_address", "snippet", "relevance_label", "relevance_score"],
+            "gmail_threads": ["gmail_thread_id", "source_message_count", "hydration_status", "extraction_status", "latest_message_internal_date"],
+            "gmail_attachments": ["filename", "mime_type", "size_bytes", "extraction_status", "created_at"],
+            "slack_messages": ["channel_name", "author_name", "posted_at", "thread_ts", "created_at"],
+            "slack_threads": ["channel_name", "thread_ts", "source_message_count", "latest_message_at", "relevance_label"],
+            "slack_channel_selections": ["channel_name", "selected", "last_synced_at", "updated_at"],
+            "github_integrations": ["slack_user_id", "github_user_name", "github_repo", "project_scanned", "last_scanned_at", "updated_at"],
+            "financial_accounts": ["provider", "account_label", "institution_name", "account_type", "status", "currency", "balance", "last_synced_at"],
+            "financial_records": ["provider", "record_type", "amount", "direction", "status", "transaction_date", "description", "merchant_name"],
+            "organizations": ["id", "name", "domain", "created_at"],
+            "coworking_bookings": ["user_email", "user_slack_id", "date", "status", "points_cost"],
+        }
+        return list(defaults.get(resource, []))
+
+    def _extract_string_list(self, value: Any) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        result = []
+        for item in value:
+            if isinstance(item, str) and item.strip():
+                result.append(item.strip())
+        return result
+
+    def _extract_data_query_filters(self, value: Any) -> list[dict]:
+        if not isinstance(value, list):
+            return []
+        filters = []
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            field = str(item.get("field") or "").strip()
+            operator = str(item.get("operator") or "").strip()
+            if not field or not operator:
+                continue
+            filters.append({"field": field, "operator": operator, "value": item.get("value")})
+        return filters
+
+    def _extract_data_query_order_by(self, value: Any) -> list[dict]:
+        if not isinstance(value, list):
+            return []
+        order_by = []
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            field = str(item.get("field") or "").strip()
+            direction = str(item.get("direction") or "asc").strip().lower()
+            if field and direction in {"asc", "desc"}:
+                order_by.append({"field": field, "direction": direction})
+        return order_by
+
+    def _coerce_data_query_limit(self, value: Any, *, default: int) -> int:
+        try:
+            limit = int(value)
+        except (TypeError, ValueError):
+            return default
+        return max(1, min(limit, 100))
+
+    def _coerce_data_query_offset(self, value: Any) -> int:
+        try:
+            offset = int(value)
+        except (TypeError, ValueError):
+            return 0
+        return max(0, offset)
+
+    def _format_data_catalog(self, catalog: dict) -> str:
+        resources = catalog.get("resources") or []
+        if not resources:
+            return "No data resources are currently registered."
+
+        lines = ["Available data resources:"]
+        for resource in resources[:30]:
+            key = resource.get("key") or "unknown"
+            operations = ", ".join(resource.get("operations") or [])
+            fields = ", ".join((resource.get("fields") or [])[:8])
+            lines.append(f"- `{key}` ({operations}): {fields}")
+        if len(resources) > 30:
+            lines.append(f"...and {len(resources) - 30} more.")
+        return "\n".join(lines)
+
+    def _format_data_query_result(self, payload: dict, result: dict) -> str:
+        if result.get("message"):
+            return str(result["message"])
+
+        resource = result.get("resource") or payload.get("resource") or "resource"
+        rows = result.get("rows") or []
+        operation = payload.get("operation") or "list"
+
+        if operation == "count":
+            count_value = rows[0].get("count") if rows else 0
+            return f"`{resource}` count: {count_value}"
+
+        if not rows:
+            return f"No matching records found for `{resource}`."
+
+        display_rows = rows[:10]
+        fields = list(display_rows[0].keys())
+        table_rows = [[self._stringify_data_cell(row.get(field)) for field in fields] for row in display_rows]
+        message = [
+            f"`{resource}` results",
+            self._data_query_table(fields, table_rows),
+        ]
+        returned_count = result.get("returned_count", len(rows))
+        limit = result.get("limit", payload.get("limit"))
+        offset = result.get("offset", payload.get("offset", 0))
+        if result.get("has_more"):
+            message.append(f"Showing {returned_count} rows from offset {offset}. More rows are available with a higher offset.")
+        else:
+            message.append(f"Showing {returned_count} row{'s' if returned_count != 1 else ''}.")
+        if len(rows) > len(display_rows):
+            message.append(f"Displayed first {len(display_rows)} of {len(rows)} returned rows.")
+        if limit:
+            message.append(f"Limit: {limit}.")
+        return "\n".join(message)
+
+    def _stringify_data_cell(self, value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, (dict, list)):
+            rendered = json.dumps(value, default=str)
+        else:
+            rendered = str(value)
+        rendered = rendered.replace("\n", " ").strip()
+        if len(rendered) > 80:
+            return rendered[:77] + "..."
+        return rendered
+
+    def _data_query_table(self, headers: list[str], rows: list[list[str]]) -> str:
+        widths = [min(max(len(header), 3), 28) for header in headers]
+        for row in rows:
+            for index, cell in enumerate(row):
+                widths[index] = min(max(widths[index], len(cell)), 28)
+
+        def fit(value: str, width: int) -> str:
+            if len(value) > width:
+                return value[: max(0, width - 3)] + "..."
+            return value.ljust(width)
+
+        lines = [" ".join(fit(header, widths[index]) for index, header in enumerate(headers))]
+        for row in rows:
+            lines.append(" ".join(fit(cell, widths[index]) for index, cell in enumerate(row)))
+        return "```\n" + "\n".join(lines) + "\n```"
     
     async def _execute_mlai_points(
         self,
@@ -5176,6 +6586,9 @@ Only include actionable work someone agreed to do. Do not include decisions, FYI
         text_lower = self._normalize_points_routing_text(text)
         explicit_points_request = "request" in text_lower and "point" in text_lower and "reward" not in text_lower
 
+        if action in {"topup_points", "top_up_points", "purchase_points", "buy_points"}:
+            return "topup_points"
+
         management_action = self._resolve_points_admin_management_action(
             text,
             explicit_action=action,
@@ -5241,7 +6654,7 @@ Only include actionable work someone agreed to do. Do not include decisions, FYI
             return "unclaim_task"
         if "submit" in text_lower:
             return "submit_task"
-        if "coworking" in text_lower and any(
+        if ("coworking" in text_lower or "office" in text_lower) and any(
             w in text_lower
             for w in [
                 "report",
@@ -5250,6 +6663,8 @@ Only include actionable work someone agreed to do. Do not include decisions, FYI
                 "how many users",
                 "how many people",
                 "used the coworking",
+                "used the office",
+                "attended",
                 "attendance",
                 "usage",
                 "compare",
@@ -5305,7 +6720,11 @@ Only include actionable work someone agreed to do. Do not include decisions, FYI
         text_lower = self._normalize_points_routing_text(text)
         if re.search(r"\btop\s*up\b|\btopup\b|\btop-up\b", text_lower):
             return True
-        if re.search(r"\bbuy\b.*\b(?:roo\s+)?points?\b", text_lower):
+        if re.search(r"\b(?:buy|purchase)\b.*\b(?:roo\s+)?points?\b", text_lower):
+            return True
+        if re.search(r"\bpay\s+for\b.*\b(?:roo\s+)?points?\b", text_lower):
+            return True
+        if re.search(r"\bpaid\s+(?:roo\s+)?points?\b", text_lower):
             return True
         if re.search(r"\badd\b.*\b(?:roo\s+)?points?\b", text_lower):
             return True
@@ -6832,7 +8251,7 @@ Only include actionable work someone agreed to do. Do not include decisions, FYI
                     slack_user_id=user_id,
                     pack_id=pack_id,
                     purchase_from=purchase_from,
-                )
+            )
             except httpx.HTTPStatusError as exc:
                 error_detail = self._extract_http_error_detail(exc)
                 if self._is_topup_balance_cap_error(error_detail):
@@ -6852,7 +8271,8 @@ Only include actionable work someone agreed to do. Do not include decisions, FYI
                 "I created your Top-up Roo Points checkout. Continue here:\n"
                 f"{checkout_url}\n\n"
                 "Top-up Roo Points are MLAI community reward points. They are not money, "
-                "have no cash value, cannot be converted to cash, and cannot be sold or transferred."
+                "have no cash value, cannot be converted to cash, and cannot be sold or transferred. "
+                "They do not count toward lifetime earned contribution."
             )
 
         if action == "balance":

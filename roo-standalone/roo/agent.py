@@ -134,6 +134,10 @@ class RooAgent:
                 thread_history = raw_history[-10:] if raw_history else []
             except Exception as e:
                 print(f"⚠️ Failed to fetch thread history: {e}")
+        has_prior_thread_context = self._has_prior_slack_thread_context(
+            thread_history,
+            current_message_ts=kwargs.get("current_message_ts"),
+        )
 
         # 1. Try Fast Path (Direct Command Execution)
         fast_result = await self._try_fast_path(clean_text, user_id, channel_id, thread_ts)
@@ -173,8 +177,27 @@ class RooAgent:
                     "skill_used": None,
                     "data": {"router": "v2", "clarification": True},
                 }
-            skill = self._get_skill_by_name(v2_decision.skill) if v2_decision.skill else None
-            selection_layer = "v2" if v2_decision.source == "router" else "v2-error"
+            if v2_decision.source == "error":
+                # Provider/transport failure — fall back to the legacy funnel
+                # while it still exists (once Phase 3 removes it, this becomes
+                # general chat). Keeps the bot useful through LLM outages.
+                print("⚠️ Router v2 errored; falling back to legacy routing")
+                if routing_intent:
+                    skill, selection_layer = routing_intent["skill"], "v2-error-intent-regex"
+                else:
+                    skill, fallback_layer = await self._select_skill_detail(
+                        clean_text,
+                        thread_history,
+                        channel_id,
+                        thread_ts,
+                        has_file_context=bool(kwargs.get("event_files")),
+                        has_thread_context=has_prior_thread_context,
+                    )
+                    selection_layer = f"v2-error-{fallback_layer or 'none'}"
+                v2_decision = None  # legacy params/overrides apply downstream
+            else:
+                skill = self._get_skill_by_name(v2_decision.skill) if v2_decision.skill else None
+                selection_layer = "v2"
         elif routing_intent:
             skill, selection_layer = routing_intent["skill"], "intent-regex"
         else:
@@ -184,6 +207,7 @@ class RooAgent:
                 channel_id,
                 thread_ts,
                 has_file_context=bool(kwargs.get("event_files")),
+                has_thread_context=has_prior_thread_context,
             )
 
         if router_mode == "shadow":
@@ -577,6 +601,8 @@ class RooAgent:
             r'\btop-up\b',
             r'\bbalance\b',
             r'\bcoworking\b',
+            r'\boffice\b.*\b(?:attendance|attended|usage|used|report|summary)\b',
+            r'\b(?:attendance|attended|usage|used)\b.*\boffice\b',
             r'\bbook\s+me\s+in\b',
             r'\bbook\b.*<@[a-z0-9]+>.*\bin\b',
             r'\bcheck\b.*<@[a-z0-9]+>.*\bin\b',
@@ -617,7 +643,36 @@ class RooAgent:
         )
         return any(re.search(pattern, text) for pattern in patterns)
 
-    def _looks_like_linear_meeting_request(self, text: str, has_file_context: bool = False) -> bool:
+    def _has_prior_slack_thread_context(
+        self,
+        history: Optional[List[dict]],
+        current_message_ts: Optional[str] = None,
+    ) -> bool:
+        current_ts = str(current_message_ts or "").strip()
+        for message in history or []:
+            if message.get("is_bot") or message.get("bot_id"):
+                continue
+            if current_ts and str(message.get("ts") or "").strip() == current_ts:
+                continue
+            if str(message.get("text") or "").strip() or message.get("files"):
+                return True
+        return False
+
+    def _looks_like_linear_thread_reference_request(self, text: str) -> bool:
+        if not re.search(r'\blinear\b', text):
+            return False
+        reference = r'(?:this|that|above|thread|conversation|message|discussion)'
+        return bool(
+            re.search(rf'\b(?:add|put|send|sync|create)\b.*\b{reference}\b.*\blinear\b', text)
+            or re.search(rf'\blinear\b.*\b(?:add|put|send|sync|create)\b.*\b{reference}\b', text)
+        )
+
+    def _looks_like_linear_meeting_request(
+        self,
+        text: str,
+        has_file_context: bool = False,
+        has_thread_context: bool = False,
+    ) -> bool:
         has_linear = bool(re.search(r'\blinear\b', text))
         has_meeting_source = bool(
             re.search(
@@ -626,9 +681,81 @@ class RooAgent:
             )
         ) or has_file_context
         has_creation_intent = bool(
-            re.search(r'\b(extract|sync|turn|send|create|add|tickets?|issues?|tasks?)\b', text)
+            re.search(r'\b(extract|sync|turn|send|put|create|add|do|write|post|generate|summari[sz]e|tickets?|issues?|tasks?)\b', text)
         )
-        return has_linear and has_meeting_source and has_creation_intent
+        if self._looks_like_linear_direct_issue_request(text):
+            return True
+        if self._looks_like_linear_project_update_request(text, has_file_context):
+            return True
+        if has_linear and has_meeting_source and has_creation_intent:
+            return True
+        return (
+            has_creation_intent
+            and (has_file_context or has_thread_context)
+            and self._looks_like_linear_thread_reference_request(text)
+        )
+
+    def _looks_like_linear_project_update_request(self, text: str, has_file_context: bool = False) -> bool:
+        if not re.search(r'\bproject\s+updates?\b', text):
+            return False
+        has_update_intent = bool(
+            re.search(r'\b(create|do|write|post|generate|draft|summari[sz]e|make)\b', text)
+        )
+        has_source_context = has_file_context or bool(
+            re.search(r'\b(linear|meeting|transcript|summary|notes?|file|pdf|docx?|document|image|screenshot)\b', text)
+        )
+        return has_update_intent and has_source_context
+
+    def _looks_like_linear_direct_issue_request(self, text: str) -> bool:
+        if not re.search(r'\blinear\b', text):
+            return False
+        if re.search(r'\b(points?|rewards?|coworking|allowance|worth\s+\d+\s+points?)\b', text):
+            return False
+        if re.search(r'\bproject\s+updates?\b', text):
+            return False
+        has_creation_intent = bool(re.search(r'\b(create|add|open|file|make)\b', text))
+        has_issue_noun = bool(
+            re.search(r'\b(?:to\s*do\s+items?|todo\s+items?|tasks?|issues?|tickets?)\b', text)
+        )
+        has_linear_project = bool(
+            re.search(
+                r'\blinear\s+project\b|\bproject\s+(?:called|named)\b|'
+                r'\blinear\s+(?:tasks?|issues?|tickets?|to\s*do\s+items?)\s+(?:in|to|under)\b',
+                text,
+            )
+        )
+        return has_creation_intent and has_issue_noun and has_linear_project
+
+    def _looks_like_data_query_request(self, text: str) -> bool:
+        if re.search(r'\b(?:data|database|db)\s+(?:catalog|resources?|tables?|schema)\b', text):
+            return True
+        if re.search(r'\b(?:what|which|show|list)\b.*\b(?:tables?|resources?)\b.*\b(?:query|available|access)\b', text):
+            return True
+
+        has_query_intent = bool(
+            re.search(
+                r'\b(?:how\s+many|count|show|list|which|what|query|find|search|give\s+me|display|report)\b',
+                text,
+            )
+        )
+        if not has_query_intent:
+            return False
+
+        data_subject_patterns = (
+            r'\bvibe\s*raising\b',
+            r'\bstartup\s+(?:updates?|drafts?|profiles?|bindings?|metrics?|events?)\b',
+            r'\bmonthly\s+update\s+drafts?\b',
+            r'\bupdates?\s+drafts?\b',
+            r'\bcontent\s+factory\s+(?:jobs?|runs?|steps?|attempts?|articles?)\b',
+            r'\blinear\s+(?:issues?|projects?|project\s+updates?)\b',
+            r'\bgmail\s+(?:messages?|threads?|attachments?)\b',
+            r'\bslack\s+(?:messages?|threads?|channel\s+selections?)\b',
+            r'\bgithub\s+integrations?\b',
+            r'\bfinancial\s+(?:records?|accounts?)\b',
+            r'\borganizations?\b',
+            r'\bstartup\s+data\b',
+        )
+        return any(re.search(pattern, text) for pattern in data_subject_patterns)
 
     def _looks_like_content_follow_up(self, text: str) -> bool:
         patterns = (
@@ -672,12 +799,14 @@ class RooAgent:
         text: str,
         thread_context: Optional[Dict[str, Any]] = None,
         has_file_context: bool = False,
+        has_thread_context: bool = False,
         channel_name: Optional[str] = None,
     ) -> Optional[Skill]:
         skill, _layer = self._select_skill_from_triggers_detail(
             text,
             thread_context,
             has_file_context=has_file_context,
+            has_thread_context=has_thread_context,
             channel_name=channel_name,
         )
         return skill
@@ -687,6 +816,7 @@ class RooAgent:
         text: str,
         thread_context: Optional[Dict[str, Any]] = None,
         has_file_context: bool = False,
+        has_thread_context: bool = False,
         channel_name: Optional[str] = None,
     ) -> Tuple[Optional[Skill], Optional[str]]:
         """Deterministic (pre-LLM) skill selection, reporting which layer decided."""
@@ -699,6 +829,7 @@ class RooAgent:
         luma_skill = self._get_skill_by_name("luma-events")
         points_skill = self._get_skill_by_name("mlai-points")
         linear_meeting_skill = self._get_skill_by_name("linear-meeting-actions")
+        data_query_skill = self._get_skill_by_name("mlai-data-query")
 
         if luma_skill and self._looks_like_luma_request(text_lower):
             return luma_skill, "looks-like-luma"
@@ -706,11 +837,18 @@ class RooAgent:
         if content_skill and self._looks_like_content_request(text_lower):
             return content_skill, "looks-like-content"
 
-        if linear_meeting_skill and self._looks_like_linear_meeting_request(text_lower, has_file_context):
-            return linear_meeting_skill, "looks-like-linear"
-
         if points_skill and self._looks_like_points_request(text_lower):
             return points_skill, "looks-like-points"
+
+        if linear_meeting_skill and self._looks_like_linear_meeting_request(
+            text_lower,
+            has_file_context,
+            has_thread_context,
+        ):
+            return linear_meeting_skill, "looks-like-linear"
+
+        if data_query_skill and self._looks_like_data_query_request(text_lower):
+            return data_query_skill, "looks-like-data-query"
 
         if (
             thread_context
@@ -952,6 +1090,7 @@ class RooAgent:
         channel_id: Optional[str] = None,
         thread_ts: Optional[str] = None,
         has_file_context: bool = False,
+        has_thread_context: bool = False,
     ) -> Optional[Skill]:
         """Use LLM to decide which skill to use."""
         skill, _layer = await self._select_skill_detail(
@@ -960,6 +1099,7 @@ class RooAgent:
             channel_id,
             thread_ts,
             has_file_context=has_file_context,
+            has_thread_context=has_thread_context,
         )
         return skill
 
@@ -970,6 +1110,7 @@ class RooAgent:
         channel_id: Optional[str] = None,
         thread_ts: Optional[str] = None,
         has_file_context: bool = False,
+        has_thread_context: bool = False,
         channel_name: Optional[str] = None,
     ) -> Tuple[Optional[Skill], Optional[str]]:
         """Select a skill, reporting which layer decided ("intent-regex", "looks-like-*",
@@ -991,6 +1132,7 @@ class RooAgent:
             text,
             thread_context,
             has_file_context=has_slack_files,
+            has_thread_context=has_thread_context,
             channel_name=channel_name,
         )
         if trigger_skill:
@@ -1037,6 +1179,11 @@ class RooAgent:
             '"how many people registered for the april 29 event" -> luma-events',
             '"who\'s coming to the patient-data workshop?" -> luma-events',
             '"how many signed up for thursday\'s event?" -> luma-events',
+        ),
+        "mlai-data-query": (
+            '"How many Vibe Raising companies do we have?" -> mlai-data-query',
+            '"What data resources can Roo query?" -> mlai-data-query',
+            '"Which Content Factory jobs failed?" -> mlai-data-query',
         ),
         "connect-users": (
             '"do you know anyone in AI research?" -> connect-users',
@@ -1139,6 +1286,7 @@ Routing rules:
 - Prefer linear-meeting-actions for creating Linear issues/tickets/tasks, including from meeting notes, transcripts, action items, or attached files.
 - Prefer mlai-points for the Roo points system: balances, claimable community tasks, coworking bookings, rewards, top-ups.
 - Prefer luma-events for event registration counts, attendee lists/reports, and attendee CSV exports.
+- Prefer mlai-data-query for read-only questions over backend data (Vibe Raising companies, startup/monthly update drafts, Content Factory jobs/runs, synced Linear issues, integration status, the data catalog).
 - Prefer connect-users when the user wants to FIND or MEET community members with some expertise ("anyone who…", "who knows…", "connect me with…").
 - Prefer tone-of-voice for rewriting/rephrasing existing text in MLAI's tone or brand voice.
 - Questions about meetups/events that are not Luma data requests, file questions with no skill action, summaries, and chit-chat -> none.

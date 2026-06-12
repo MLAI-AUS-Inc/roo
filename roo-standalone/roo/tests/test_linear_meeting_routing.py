@@ -57,6 +57,12 @@ def test_linear_meeting_file_prompts_route_to_linear_meeting_actions():
         "sync meeting notes to Linear project Alpha",
         "send this PDF to Linear as tasks",
         "create Linear issues from this image",
+        "create a project update from this PDF",
+        "summarize this meeting as a Linear project update",
+        "do a project update in Linear",
+        "create a to do item in the linear project 'venture studio' assign to Sonia",
+        "create an issue in Linear project Venture Studio assigned to <@U123>",
+        "add a Linear task to Venture Studio for Sonia",
     ]:
         skill = agent._select_skill_from_triggers(text)
         assert skill is not None
@@ -69,6 +75,20 @@ def test_linear_file_context_routes_short_attached_file_request():
     skill = agent._select_skill_from_triggers(
         "send this to Linear as tasks",
         has_file_context=True,
+    )
+
+    assert skill is not None
+    assert skill.name == "linear-meeting-actions"
+
+
+def test_linear_thread_reference_routes_only_with_context():
+    agent = _make_agent()
+
+    assert agent._select_skill_from_triggers("add this to Linear") is None
+
+    skill = agent._select_skill_from_triggers(
+        '@Roo add this to the Linear project called "BITGET EVENT"',
+        has_thread_context=True,
     )
 
     assert skill is not None

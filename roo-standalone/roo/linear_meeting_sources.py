@@ -71,6 +71,8 @@ async def parse_linear_meeting_sources(
     thread_history: Optional[list[dict[str, Any]]] = None,
     event_files: Optional[list[dict[str, Any]]] = None,
     image_parser: Optional[ImageParser] = None,
+    current_message_ts: Optional[str] = None,
+    exclude_current_message: bool = False,
     max_files: int = DEFAULT_MAX_FILES,
     max_file_bytes: int = DEFAULT_MAX_FILE_BYTES,
     max_pdf_pages: int = DEFAULT_MAX_PDF_PAGES,
@@ -79,7 +81,13 @@ async def parse_linear_meeting_sources(
     """Parse Slack text and supported Slack files into text sources."""
     result = SourceParseResult()
 
-    text_source = _build_thread_text_source(text, params, thread_history)
+    text_source = _build_thread_text_source(
+        text,
+        params,
+        thread_history,
+        current_message_ts=current_message_ts,
+        exclude_current_message=exclude_current_message,
+    )
     if text_source and text_source.text.strip():
         result.sources.append(
             ParsedSource(label=text_source.label, text=text_source.text, kind="slack_text")
@@ -143,14 +151,20 @@ def _build_thread_text_source(
     text: str,
     params: dict[str, Any],
     thread_history: Optional[list[dict[str, Any]]],
+    *,
+    current_message_ts: Optional[str] = None,
+    exclude_current_message: bool = False,
 ) -> Optional[SlackSource]:
     explicit = str(params.get("transcript") or "").strip()
     parts: list[str] = []
     if explicit:
         parts.append(explicit)
 
+    current_ts = str(current_message_ts or "").strip()
     for message in thread_history or []:
         if message.get("is_bot") or message.get("bot_id"):
+            continue
+        if exclude_current_message and current_ts and str(message.get("ts") or "").strip() == current_ts:
             continue
         message_text = str(message.get("text") or "").strip()
         if not message_text:
@@ -159,7 +173,7 @@ def _build_thread_text_source(
         parts.append(f"{speaker}: {message_text}")
 
     clean_text = str(text or "").strip()
-    if clean_text and all(clean_text not in part for part in parts):
+    if not exclude_current_message and clean_text and all(clean_text not in part for part in parts):
         parts.append(clean_text)
 
     if not parts:

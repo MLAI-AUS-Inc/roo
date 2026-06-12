@@ -1,11 +1,11 @@
 {
   "mode": "deterministic",
-  "generated_at": "2026-06-12T00:41:47.787873+00:00",
+  "generated_at": "2026-06-12T08:03:23.181953+00:00",
   "counts": {
     "misroute": 0,
     "fallthrough": 32,
     "ok-fallthrough": 27,
-    "correct": 115
+    "correct": 122
   },
   "action": {
     "checked": 36,
@@ -517,6 +517,48 @@
       "action": null
     },
     "blessed-luma-registrations-date": {
+      "verdict": "correct",
+      "layer": "looks-like-luma",
+      "skill": "luma-events",
+      "action": null
+    },
+    "dq-vibe-raising-count": {
+      "verdict": "correct",
+      "layer": "looks-like-data-query",
+      "skill": "mlai-data-query",
+      "action": null
+    },
+    "dq-catalog": {
+      "verdict": "correct",
+      "layer": "looks-like-data-query",
+      "skill": "mlai-data-query",
+      "action": null
+    },
+    "dq-cf-jobs-failed": {
+      "verdict": "correct",
+      "layer": "looks-like-data-query",
+      "skill": "mlai-data-query",
+      "action": null
+    },
+    "dq-startup-drafts": {
+      "verdict": "correct",
+      "layer": "looks-like-data-query",
+      "skill": "mlai-data-query",
+      "action": null
+    },
+    "dq-linear-synced": {
+      "verdict": "correct",
+      "layer": "looks-like-data-query",
+      "skill": "mlai-data-query",
+      "action": null
+    },
+    "dq-trap-create-linear": {
+      "verdict": "correct",
+      "layer": "looks-like-linear",
+      "skill": "linear-meeting-actions",
+      "action": null
+    },
+    "dq-trap-luma-attendance": {
       "verdict": "correct",
       "layer": "looks-like-luma",
       "skill": "luma-events",

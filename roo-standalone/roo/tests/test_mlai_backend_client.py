@@ -167,6 +167,131 @@ async def test_get_coworking_report_uses_canonical_endpoint(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_get_data_catalog_uses_canonical_endpoint(monkeypatch):
+    captured = {}
+
+    async def fake_request(method, endpoint, **kwargs):
+        captured["method"] = method
+        captured["endpoint"] = endpoint
+        request = httpx.Request(method, f"https://backend.test{endpoint}")
+        return httpx.Response(200, request=request, json={"resources": [{"key": "vibe_raising_companies"}]})
+
+    client = MLAIBackendClient(
+        base_url="https://backend.test",
+        api_key="roo-api-key",
+        internal_api_key="roo-api-key",
+    )
+    monkeypatch.setattr(client, "_request", fake_request)
+
+    result = await client.get_data_catalog()
+
+    assert result == {"resources": [{"key": "vibe_raising_companies"}]}
+    assert captured["method"] == "GET"
+    assert captured["endpoint"] == "/api/v1/data/catalog/"
+
+
+@pytest.mark.asyncio
+async def test_query_data_uses_canonical_endpoint_and_payload(monkeypatch):
+    captured = {}
+    payload = {
+        "requester_slack_id": "U123",
+        "resource": "content_factory_jobs",
+        "operation": "count",
+    }
+
+    async def fake_request(method, endpoint, **kwargs):
+        captured["method"] = method
+        captured["endpoint"] = endpoint
+        captured["json"] = kwargs["json"]
+        request = httpx.Request(method, f"https://backend.test{endpoint}")
+        return httpx.Response(200, request=request, json={"resource": "content_factory_jobs", "rows": [{"count": 2}]})
+
+    client = MLAIBackendClient(
+        base_url="https://backend.test",
+        api_key="roo-api-key",
+        internal_api_key="roo-api-key",
+    )
+    monkeypatch.setattr(client, "_request", fake_request)
+
+    result = await client.query_data(payload)
+
+    assert result == {"resource": "content_factory_jobs", "rows": [{"count": 2}]}
+    assert captured["method"] == "POST"
+    assert captured["endpoint"] == "/api/v1/data/query/"
+    assert captured["json"] == payload
+
+
+@pytest.mark.asyncio
+async def test_create_points_purchase_sends_slack_origin(monkeypatch):
+    captured = {}
+
+    async def fake_request(method, endpoint, **kwargs):
+        captured["method"] = method
+        captured["endpoint"] = endpoint
+        captured["json"] = kwargs["json"]
+        request = httpx.Request(method, f"https://backend.test{endpoint}")
+        return httpx.Response(
+            201,
+            request=request,
+            json={
+                "id": "purchase-123",
+                "frontend_checkout_page_url": "https://mlai.test/roo/topup/purchase-123",
+            },
+        )
+
+    client = MLAIBackendClient(
+        base_url="https://backend.test",
+        api_key="roo-api-key",
+        internal_api_key="roo-api-key",
+    )
+    monkeypatch.setattr(client, "_request", fake_request)
+
+    result = await client.create_points_purchase(
+        slack_user_id="<@U123>",
+        pack_id="topup_10",
+        purchase_from={
+            "source": "slack",
+            "slack_channel_id": "C123",
+            "slack_thread_ts": "111.222",
+        },
+    )
+
+    assert captured["method"] == "POST"
+    assert captured["endpoint"] == "/api/v1/points/purchases/"
+    assert captured["json"] == {
+        "slack_user_id": "U123",
+        "pack_id": "topup_10",
+        "purchase_from": {
+            "source": "slack",
+            "slack_channel_id": "C123",
+            "slack_thread_ts": "111.222",
+        },
+    }
+    assert result["frontend_checkout_page_url"] == "https://mlai.test/roo/topup/purchase-123"
+
+
+@pytest.mark.asyncio
+async def test_create_points_purchase_503_raises_backend_unavailable(monkeypatch):
+    async def fake_request(method, endpoint, **kwargs):
+        request = httpx.Request(method, f"https://backend.test{endpoint}")
+        return httpx.Response(
+            503,
+            request=request,
+            json={"message": "Points purchase checkout is temporarily unavailable."},
+        )
+
+    client = MLAIBackendClient(
+        base_url="https://backend.test",
+        api_key="roo-api-key",
+        internal_api_key="roo-api-key",
+    )
+    monkeypatch.setattr(client, "_request", fake_request)
+
+    with pytest.raises(MLAIBackendUnavailableError, match="Points purchase checkout is temporarily unavailable"):
+        await client.create_points_purchase("<@U123>", pack_id="topup_10")
+
+
+@pytest.mark.asyncio
 async def test_get_coworking_report_503_raises_backend_unavailable(monkeypatch):
     async def fake_request(method, endpoint, **kwargs):
         request = httpx.Request(method, f"https://backend.test{endpoint}")

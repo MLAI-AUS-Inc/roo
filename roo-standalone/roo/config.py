@@ -51,6 +51,8 @@ class Settings(BaseSettings):
     #   shadow -> legacy decides; v2 runs after the fact and logs disagreements
     #   on     -> v2 decides (fast path + delegation parsing stay in front)
     ROUTER_V2: str = "off"
+    LINEAR_MEETING_LLM_MODEL: str = "gpt-5.5"
+    LINEAR_MEETING_LLM_REASONING_EFFORT: str = "low"
     LINEAR_MEETING_AUTO_CREATE_MIN_CONFIDENCE: float = 0.85
     LINEAR_MEETING_UNCERTAIN_MIN_CONFIDENCE: float = 0.65
     COWORKING_INTENTS_DB_PATH: str = "data/coworking_booking_intents.db"
@@ -70,6 +72,7 @@ class Settings(BaseSettings):
     JOBS_SCHEDULE_MINUTE: int = 0
     JOBS_COLLECT_LIVE: bool = True
     JOBS_POST_TO_SLACK: bool = False
+    JOBS_SLACK_CHANNEL: Optional[str] = None
     JOBS_POST_TO_NOTION: bool = True
     JOBS_MAX_PAGES: Optional[int] = 1
     JOBS_PER_KEYWORD_LIMIT: Optional[int] = 5

@@ -1,0 +1,32 @@
+# mlai-data-query: read-only backend data queries (skill landed on main 2026-06,
+# PRs #167/#168 — added to the eval when origin/main was merged into the
+# routing redesign branch).
+
+- id: dq-vibe-raising-count
+  text: "How many Vibe Raising companies do we have?"
+  expect: {skill: mlai-data-query, action: query}
+  tags: [data-query]
+- id: dq-catalog
+  text: "What data resources can Roo query?"
+  expect: {skill: mlai-data-query, action: catalog}
+  tags: [data-query]
+- id: dq-cf-jobs-failed
+  text: "which content factory jobs failed yesterday?"
+  expect: {skill: mlai-data-query, action: query}
+  tags: [data-query, paraphrase]
+- id: dq-startup-drafts
+  text: "show the monthly update drafts for my startup"
+  expect: {skill: mlai-data-query}
+  tags: [data-query, paraphrase]
+- id: dq-linear-synced
+  text: "list the linear issues synced for studynash"
+  expect: {skill: mlai-data-query}
+  tags: [data-query, paraphrase, hard]
+- id: dq-trap-create-linear
+  text: "create a linear issue to follow up with sponsors"
+  expect: {skill: linear-meeting-actions}
+  tags: [data-query, trap]
+- id: dq-trap-luma-attendance
+  text: "how many people registered for the gen ai night event?"
+  expect: {skill: luma-events}
+  tags: [data-query, trap]

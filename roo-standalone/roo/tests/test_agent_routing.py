@@ -99,6 +99,19 @@ def _make_agent() -> RooAgent:
                 "recent events",
             ],
         ),
+        _make_skill(
+            "mlai-data-query",
+            [
+                "data catalog",
+                "database catalog",
+                "query data",
+                "vibe raising companies",
+                "startup update drafts",
+                "content factory jobs",
+                "linear issues",
+                "gmail messages",
+            ],
+        ),
     ]
     agent.skill_executor = SimpleNamespace()
     agent._thread_skill_context = {}
@@ -134,6 +147,12 @@ def test_linear_meeting_tasks_route_to_linear_meeting_actions():
         "sync meeting notes to Linear project Alpha",
         "send this PDF to Linear as tasks",
         "create Linear issues from this image",
+        "create a project update from this PDF",
+        "summarize this meeting as a Linear project update",
+        "do a project update in Linear",
+        "create a to do item in the linear project 'venture studio' assign to Sonia",
+        "create an issue in Linear project Venture Studio assigned to <@U123>",
+        "add a Linear task to Venture Studio for Sonia",
     ]:
         skill = agent._select_skill_from_triggers(text)
         assert skill is not None
@@ -150,6 +169,30 @@ def test_linear_file_context_routes_short_attached_file_request():
 
     assert skill is not None
     assert skill.name == "linear-meeting-actions"
+
+
+def test_linear_thread_reference_routes_when_thread_context_exists():
+    agent = _make_agent()
+
+    for text in [
+        '@Roo add this to the Linear project called "BITGET EVENT"',
+        "add this thread to Linear project BITGET EVENT",
+        "put the above in Linear project called BITGET EVENT",
+    ]:
+        skill = agent._select_skill_from_triggers(
+            text,
+            has_thread_context=True,
+        )
+        assert skill is not None
+        assert skill.name == "linear-meeting-actions"
+
+
+def test_linear_thread_reference_does_not_route_without_context():
+    agent = _make_agent()
+
+    skill = agent._select_skill_from_triggers("add this to Linear")
+
+    assert skill is None
 
 
 def test_request_points_phrase_routes_to_points():
@@ -212,6 +255,7 @@ def test_coworking_report_wording_routes_to_points():
         "coworking summary last 6 months",
         "coworking overview from 2026-01-01 to 2026-03-31",
         "how many people used the coworking space this week",
+        "how many people attended the office this week",
         "give me a report for how many people used the coworking space last week",
         "Roo how many peopel used the coworkign space last week and how does that usage compare to the week prior?",
         "which day was busiest for coworking last month",
@@ -221,6 +265,51 @@ def test_coworking_report_wording_routes_to_points():
         skill = agent._select_skill_from_triggers(text)
         assert skill is not None
         assert skill.name == "mlai-points"
+
+
+def test_data_catalog_request_routes_to_data_query():
+    agent = _make_agent()
+
+    skill = agent._select_skill_from_triggers("what data resources can Roo query?")
+
+    assert skill is not None
+    assert skill.name == "mlai-data-query"
+
+
+def test_vibe_raising_data_request_routes_to_data_query():
+    agent = _make_agent()
+
+    skill = agent._select_skill_from_triggers("how many Vibe Raising companies do we have?")
+
+    assert skill is not None
+    assert skill.name == "mlai-data-query"
+
+
+def test_content_factory_job_state_request_routes_to_data_query():
+    agent = _make_agent()
+
+    skill = agent._select_skill_from_triggers("which content factory jobs failed last week?")
+
+    assert skill is not None
+    assert skill.name == "mlai-data-query"
+
+
+def test_startup_update_drafts_request_routes_to_data_query():
+    agent = _make_agent()
+
+    skill = agent._select_skill_from_triggers("show startup update drafts for my company")
+
+    assert skill is not None
+    assert skill.name == "mlai-data-query"
+
+
+def test_synced_linear_issue_read_request_routes_to_data_query():
+    agent = _make_agent()
+
+    skill = agent._select_skill_from_triggers("show Linear issues synced for this startup")
+
+    assert skill is not None
+    assert skill.name == "mlai-data-query"
 
 
 def test_promote_points_admin_phrase_routes_to_points():
