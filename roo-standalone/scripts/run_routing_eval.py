@@ -29,6 +29,12 @@ from roo.routing_eval import runner
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=["deterministic", "full", "v2"], default="deterministic")
+    parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=8,
+        help="parallel LLM calls in full/v2 modes (default 8)",
+    )
     parser.add_argument("--filter", dest="tag_filter", help="only run cases with this tag")
     parser.add_argument("--verbose", action="store_true", help="also list fallthrough cases")
     parser.add_argument("--json", dest="json_path", help="write per-case results to a JSON file")
@@ -44,7 +50,9 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    results = runner.run_eval(mode=args.mode, tag_filter=args.tag_filter)
+    results = runner.run_eval(
+        mode=args.mode, tag_filter=args.tag_filter, concurrency=args.concurrency
+    )
     print(runner.report(results, verbose=args.verbose))
 
     if args.json_path:

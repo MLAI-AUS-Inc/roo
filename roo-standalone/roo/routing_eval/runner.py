@@ -294,7 +294,11 @@ def score(case: RoutingCase, prediction: Prediction) -> CaseResult:
     return CaseResult(case=case, prediction=prediction, verdict=verdict, action_verdict=action_verdict)
 
 
-def run_eval(mode: str = "deterministic", tag_filter: Optional[str] = None) -> List[CaseResult]:
+def run_eval(
+    mode: str = "deterministic",
+    tag_filter: Optional[str] = None,
+    concurrency: int = 8,
+) -> List[CaseResult]:
     agent = build_agent()
     cases = load_cases()
     validate_cases(cases, agent)
@@ -315,16 +319,28 @@ def run_eval(mode: str = "deterministic", tag_filter: Optional[str] = None) -> L
         os.environ.setdefault("SLACK_BOT_TOKEN", "xoxb-routing-eval-dummy")
         os.environ.setdefault("SLACK_SIGNING_SECRET", "routing-eval-dummy")
 
-        async def _run() -> List[CaseResult]:
-            collected: List[CaseResult] = []
-            for case in cases:
+        total = len(cases)
+        progress = {"done": 0}
+        semaphore = asyncio.Semaphore(max(1, concurrency))
+
+        async def _run_case(case: RoutingCase) -> CaseResult:
+            async with semaphore:
                 if mode == "v2":
                     prediction = await _predict_v2_async(agent, case)
                 else:
                     deterministic = predict_deterministic(agent, case)
                     prediction = await _predict_full_async(agent, case, deterministic)
-                collected.append(score(case, prediction))
-            return collected
+            result = score(case, prediction)
+            progress["done"] += 1
+            print(
+                f"  [{progress['done']:>3}/{total}] {result.verdict:<15} "
+                f"{result.prediction.layer:<12} {case.id}",
+                flush=True,
+            )
+            return result
+
+        async def _run() -> List[CaseResult]:
+            return list(await asyncio.gather(*(_run_case(case) for case in cases)))
 
         return asyncio.run(_run())
 
