@@ -775,7 +775,7 @@ def test_handle_mention_passes_publish_pr_job_from_thread_context_aliases(monkey
     }
 
 
-def test_llm_router_uses_gpt_5_4(monkeypatch):
+def test_llm_router_uses_configured_router_model(monkeypatch):
     agent = _make_agent()
     captured = {}
 
@@ -784,11 +784,11 @@ def test_llm_router_uses_gpt_5_4(monkeypatch):
         return SimpleNamespace(content="content-factory")
 
     monkeypatch.setattr("roo.agent.chat", fake_chat)
-    monkeypatch.setattr("roo.agent.get_settings", lambda: SimpleNamespace(ROUTER_MODEL="gpt-5.4"))
+    monkeypatch.setattr("roo.agent.get_settings", lambda: SimpleNamespace(ROUTER_MODEL="gpt-5.5"))
 
     skill = asyncio.run(agent._select_skill("help me decide what to do next", [], None, None))
 
     assert skill is not None
     assert skill.name == "content-factory"
-    assert captured["model"] == "gpt-5.4"
+    assert captured["model"] == "gpt-5.5"
     assert captured["reasoning_effort"] == "medium"

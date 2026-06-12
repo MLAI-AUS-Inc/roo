@@ -45,7 +45,9 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = "INFO"
     SKILLS_DIR: str = "skills"
     TIMEZONE: str = "Australia/Melbourne"
-    ROUTER_MODEL: str = "gpt-5.4"
+    # Used by router v2 and the legacy LLM fallback. Override via ROUTER_MODEL
+    # in .env; re-run `scripts/run_routing_eval.py --mode v2` after any change.
+    ROUTER_MODEL: str = "gpt-5.5"
     # Router v2 (LLM tool-calling over the SKILL.md catalog):
     #   off    -> legacy funnel only
     #   shadow -> legacy decides; v2 runs after the fact and logs disagreements
