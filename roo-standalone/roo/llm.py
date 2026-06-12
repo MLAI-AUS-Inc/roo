@@ -120,16 +120,22 @@ class OpenAIClient(BaseLLMClient):
         model = kwargs.get("model", self.model)
         is_reasoning_model = model.startswith(("gpt-5", "o1", "o3"))
         max_tokens_key = "max_completion_tokens" if is_reasoning_model else "max_tokens"
+        # Reasoning models spend completion tokens on internal reasoning before
+        # emitting the tool call — give them headroom or they return nothing.
+        default_max_tokens = 4096 if is_reasoning_model else 1024
         create_kwargs = {
             "model": model,
             "messages": messages,
             "tools": tools,
             "tool_choice": kwargs.get("tool_choice", "required"),
-            max_tokens_key: kwargs.get("max_tokens", 1024),
+            max_tokens_key: kwargs.get("max_tokens", default_max_tokens),
         }
         if not is_reasoning_model:
             create_kwargs["temperature"] = kwargs.get("temperature", 0.2)
-        if "reasoning_effort" in kwargs:
+        # gpt-5.x rejects function tools + reasoning_effort on /v1/chat/completions
+        # (API error 400: "use /v1/responses instead"), so only forward the knob
+        # for models that accept the combination.
+        if "reasoning_effort" in kwargs and not model.startswith("gpt-5"):
             create_kwargs["reasoning_effort"] = kwargs["reasoning_effort"]
 
         response = await self.client.chat.completions.create(**create_kwargs)
