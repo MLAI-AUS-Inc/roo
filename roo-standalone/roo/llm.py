@@ -3,8 +3,9 @@ Model-Agnostic LLM Client
 
 Supports multiple LLM providers with a unified async interface.
 """
+import json
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any
 from enum import Enum
 import base64
@@ -27,18 +28,42 @@ class LLMResponse:
     usage: Optional[Dict[str, int]] = None
 
 
+@dataclass
+class ToolCall:
+    """A single tool/function call chosen by the model."""
+    name: str
+    arguments: Dict[str, Any] = field(default_factory=dict)
+    model: str = ""
+
+
+class ToolCallParseError(ValueError):
+    """The model produced no tool call or unparsable arguments."""
+
+
 class BaseLLMClient(ABC):
     """Abstract base class for LLM clients."""
-    
+
     @abstractmethod
     async def chat(self, messages: List[Dict[str, str]], **kwargs) -> LLMResponse:
         """Send a chat completion request."""
         pass
-    
+
     @abstractmethod
     async def embed(self, text: str) -> List[float]:
         """Generate embeddings for text."""
         pass
+
+    async def chat_tools(
+        self,
+        messages: List[Dict[str, str]],
+        tools: List[Dict[str, Any]],
+        **kwargs,
+    ) -> ToolCall:
+        """Send a chat request that must answer with a tool call."""
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support tool calling yet; "
+            "use an OpenAI-compatible provider (openai/gemini) for the router."
+        )
 
 
 class OpenAIClient(BaseLLMClient):
@@ -80,6 +105,61 @@ class OpenAIClient(BaseLLMClient):
             }
         )
     
+    async def chat_tools(
+        self,
+        messages: List[Dict[str, str]],
+        tools: List[Dict[str, Any]],
+        **kwargs,
+    ) -> ToolCall:
+        """Chat completion that must answer with a tool call.
+
+        Works for OpenAI and for Gemini through the OpenAI-compatibility layer.
+        Raises ToolCallParseError when the model returns no/unparsable tool call
+        (callers retry once, then fall back).
+        """
+        model = kwargs.get("model", self.model)
+        is_reasoning_model = model.startswith(("gpt-5", "o1", "o3"))
+        max_tokens_key = "max_completion_tokens" if is_reasoning_model else "max_tokens"
+        # Reasoning models spend completion tokens on internal reasoning before
+        # emitting the tool call — give them headroom or they return nothing.
+        default_max_tokens = 4096 if is_reasoning_model else 1024
+        create_kwargs = {
+            "model": model,
+            "messages": messages,
+            "tools": tools,
+            "tool_choice": kwargs.get("tool_choice", "required"),
+            max_tokens_key: kwargs.get("max_tokens", default_max_tokens),
+        }
+        if not is_reasoning_model:
+            create_kwargs["temperature"] = kwargs.get("temperature", 0.2)
+        # gpt-5.x rejects function tools + reasoning_effort on /v1/chat/completions
+        # (API error 400: "use /v1/responses instead"), so only forward the knob
+        # for models that accept the combination.
+        if "reasoning_effort" in kwargs and not model.startswith("gpt-5"):
+            create_kwargs["reasoning_effort"] = kwargs["reasoning_effort"]
+
+        response = await self.client.chat.completions.create(**create_kwargs)
+
+        message = response.choices[0].message
+        tool_calls = getattr(message, "tool_calls", None) or []
+        if not tool_calls:
+            raise ToolCallParseError(
+                f"model returned no tool call (content={message.content!r:.200})"
+            )
+        call = tool_calls[0]
+        raw_arguments = call.function.arguments or "{}"
+        try:
+            arguments = json.loads(raw_arguments)
+        except json.JSONDecodeError as exc:
+            raise ToolCallParseError(
+                f"unparsable tool arguments for {call.function.name}: {raw_arguments[:200]}"
+            ) from exc
+        if not isinstance(arguments, dict):
+            raise ToolCallParseError(
+                f"tool arguments for {call.function.name} are not an object: {raw_arguments[:200]}"
+            )
+        return ToolCall(name=call.function.name, arguments=arguments, model=response.model)
+
     async def embed(self, text: str) -> List[float]:
         """Generate embeddings using OpenAI."""
         response = await self.client.embeddings.create(
@@ -111,7 +191,7 @@ class AnthropicClient(BaseLLMClient):
                 chat_messages.append(msg)
         
         response = await self.client.messages.create(
-            model=self.model,
+            model=kwargs.get("model", self.model),
             max_tokens=kwargs.get("max_tokens", 2048),
             system=system or "You are a helpful assistant.",
             messages=chat_messages
@@ -216,6 +296,16 @@ async def chat(messages: List[Dict[str, str]], **kwargs) -> LLMResponse:
     """Convenience function for quick chat completions."""
     client = get_default_client()
     return await client.chat(messages, **kwargs)
+
+
+async def chat_tools(
+    messages: List[Dict[str, str]],
+    tools: List[Dict[str, Any]],
+    **kwargs,
+) -> ToolCall:
+    """Convenience function for tool-calling completions (router v2)."""
+    client = get_default_client()
+    return await client.chat_tools(messages, tools, **kwargs)
 
 
 async def embed(text: str) -> List[float]:

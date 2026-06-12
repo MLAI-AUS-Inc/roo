@@ -1,0 +1,409 @@
+# Paraphrase + trap coverage: realistic phrasings that do NOT copy the blessed
+# wording. In deterministic mode these guard against keyword/regex capture
+# (verdict must never be `misroute`); in full mode they measure whether the
+# LLM layer generalises. Grow this file from real Slack misroutes.
+
+# --- connect-users (no trigger keywords exist; LLM-only today) ---
+- id: para-connect-rl
+  text: "who in the community knows about reinforcement learning?"
+  expect: {skill: connect-users}
+  tags: [paraphrase]
+- id: para-connect-cv
+  text: "is there anyone here with experience in computer vision?"
+  expect: {skill: connect-users}
+  tags: [paraphrase]
+- id: para-connect-agents
+  text: "can you introduce me to people working on LLM agents?"
+  expect: {skill: connect-users}
+  tags: [paraphrase]
+- id: para-connect-mentor
+  text: "looking for a mentor in data engineering, any suggestions?"
+  expect: {skill: connect-users}
+  tags: [paraphrase]
+- id: para-connect-healthcare
+  text: "who should I reach out to about ML in healthcare?"
+  expect: {skill: connect-users}
+  tags: [paraphrase, misroute-guard]
+- id: para-connect-edge
+  text: "find me someone who has deployed models on edge devices"
+  expect: {skill: connect-users}
+  tags: [paraphrase]
+- id: para-connect-robotics
+  text: "any members with a robotics background?"
+  expect: {skill: connect-users}
+  tags: [paraphrase]
+- id: para-connect-cofounder
+  text: "I need a cofounder who understands machine learning, who's around?"
+  expect: {skill: connect-users}
+  tags: [paraphrase]
+- id: para-connect-nlp
+  text: "does anyone here do NLP research?"
+  expect: {skill: connect-users}
+  tags: [paraphrase, misroute-guard]
+- id: para-connect-evals
+  text: "put me in touch with folks who know about model evals"
+  expect: {skill: connect-users}
+  tags: [paraphrase]
+
+# --- content-factory ---
+- id: para-content-write-prompting
+  text: "write me an article about prompt engineering best practices"
+  expect: {skill: content-factory, action: write}
+  tags: [paraphrase]
+- id: para-content-draft-blog
+  text: "can you draft a blog post on fine-tuning open models for my site?"
+  expect: {skill: content-factory, action: write}
+  tags: [paraphrase]
+- id: para-content-generate
+  text: "generate some content about our latest hackathon for the website"
+  expect: {skill: content-factory, action: write}
+  tags: [paraphrase]
+- id: para-content-what-next
+  text: "what should I write about next for woofya.com.au?"
+  expect:
+    skill: content-factory
+    params_subset: {domain: woofya.com.au}
+  tags: [paraphrase]
+- id: para-content-suggest-topic
+  text: "suggest a topic for my next article"
+  expect: {skill: content-factory}
+  tags: [paraphrase]
+- id: para-content-keywords-target
+  text: "find good keywords to target for studynash.co"
+  expect: {skill: content-factory}
+  tags: [paraphrase]
+- id: para-content-rescan
+  text: "rescan birdpsychology.com.au please"
+  expect:
+    skill: content-factory
+    action: scan
+    params_subset: {domain: birdpsychology.com.au}
+  tags: [paraphrase]
+- id: para-content-setup-blog
+  text: "set up a blog section on my site"
+  expect: {skill: content-factory, action: scaffold}
+  tags: [paraphrase]
+- id: para-content-scaffold
+  text: "scaffold the articles directory for mlai.au"
+  expect: {skill: content-factory, action: scaffold}
+  tags: [paraphrase]
+- id: para-content-seo-audit
+  text: "do an seo audit of my domain mlai.au"
+  expect: {skill: content-factory}
+  tags: [paraphrase]
+
+# --- mlai-points ---
+- id: para-points-how-many
+  text: "how many points do I have right now?"
+  expect: {skill: mlai-points, action: balance}
+  tags: [paraphrase]
+- id: para-points-spend-on
+  text: "what can I spend my roo points on?"
+  expect: {skill: mlai-points}
+  tags: [paraphrase]
+- id: para-points-rewards-shop
+  text: "show me what's in the rewards shop"
+  expect: {skill: mlai-points, action: list_rewards}
+  tags: [paraphrase]
+- id: para-points-claim-docs-task
+  text: "I'd like to claim the docs task"
+  expect: {skill: mlai-points, action: claim_task}
+  tags: [paraphrase]
+- id: para-points-give-me-tasks
+  text: "give me the tasks please"
+  expect: {skill: mlai-points, action: list_tasks}
+  tags: [paraphrase]
+- id: para-points-book-friday
+  text: "book a coworking spot for friday"
+  expect: {skill: mlai-points, action: book_coworking}
+  tags: [paraphrase]
+- id: para-points-cancel-tomorrow
+  text: "cancel my coworking booking tomorrow"
+  expect: {skill: mlai-points, action: cancel_coworking}
+  tags: [paraphrase]
+- id: para-points-space-monday
+  text: "is there space at coworking on monday?"
+  expect: {skill: mlai-points, action: check_coworking}
+  tags: [paraphrase]
+- id: para-points-award
+  text: "give 10 points to <@U123ABC> for organising the meetup"
+  expect: {skill: mlai-points, action: award_points}
+  tags: [paraphrase]
+- id: para-points-history
+  text: "what's my points history this month?"
+  expect: {skill: mlai-points, action: history}
+  tags: [paraphrase]
+- id: para-points-coworking-may
+  text: "how busy was the coworking space in may?"
+  expect: {skill: mlai-points, action: coworking_report}
+  tags: [paraphrase]
+- id: para-points-make-admin
+  text: "make <@U123ABC> a points admin"
+  expect: {skill: mlai-points, action: promote_points_admin}
+  tags: [paraphrase]
+- id: para-points-buy-pack
+  text: "I want to buy a points pack"
+  expect: {skill: mlai-points, action: topup_points}
+  tags: [paraphrase]
+
+# --- luma-events ---
+- id: para-luma-signed-up
+  text: "how many signed up for thursday's event?"
+  expect: {skill: luma-events}
+  tags: [paraphrase]
+- id: para-luma-guest-list
+  text: "pull the guest list for the last meetup"
+  expect: {skill: luma-events}
+  tags: [paraphrase]
+- id: para-luma-attendee-csv
+  text: "download the attendee csv for the april event"
+  expect: {skill: luma-events}
+  tags: [paraphrase]
+- id: para-luma-who-registered
+  text: "who registered for the gen ai night?"
+  expect: {skill: luma-events}
+  tags: [paraphrase]
+- id: para-luma-export-two-events
+  text: "export attendees from the last two events"
+  expect: {skill: luma-events}
+  tags: [paraphrase]
+- id: para-luma-numbers
+  text: "get me the luma numbers for last week"
+  expect: {skill: luma-events}
+  tags: [paraphrase]
+- id: para-luma-how-many-came
+  text: "how many people came to our last three events?"
+  expect: {skill: luma-events}
+  tags: [paraphrase]
+- id: para-luma-signup-csv
+  text: "send me the signup csv for the hackathon event"
+  expect: {skill: luma-events}
+  tags: [paraphrase]
+
+# --- github-integration ---
+- id: para-github-broken
+  text: "github access is broken for studynash.co, can you fix it?"
+  expect: {skill: github-integration, action: reconnect}
+  tags: [paraphrase]
+- id: para-github-reauthorise
+  text: "I need to reauthorise github"
+  expect: {skill: github-integration, action: reconnect}
+  tags: [paraphrase]
+- id: para-github-link
+  text: "link my github account"
+  expect: {skill: github-integration, action: reconnect}
+  tags: [paraphrase]
+- id: para-github-setup-again
+  text: "set up the github integration again"
+  expect: {skill: github-integration, action: reconnect}
+  tags: [paraphrase]
+- id: para-github-cant-see-repo
+  text: "roo can't see my repo anymore, reconnect please"
+  expect: {skill: github-integration, action: reconnect}
+  tags: [paraphrase, hard]
+- id: para-github-authorize-domain
+  text: "authorize github for birdpsychology.com.au"
+  expect: {skill: github-integration, action: reconnect}
+  tags: [paraphrase]
+
+# --- linear-meeting-actions ---
+- id: para-linear-standup
+  text: "turn the standup notes into linear tickets"
+  expect: {skill: linear-meeting-actions}
+  tags: [paraphrase]
+- id: para-linear-push-items
+  text: "push these action items into linear"
+  expect: {skill: linear-meeting-actions}
+  tags: [paraphrase]
+- id: para-linear-issues-from-summary
+  text: "make linear issues out of this meeting summary"
+  expect: {skill: linear-meeting-actions}
+  tags: [paraphrase]
+- id: para-linear-retro-followups
+  text: "log these followups from the retro in linear"
+  expect: {skill: linear-meeting-actions}
+  tags: [paraphrase]
+- id: para-linear-attached-doc
+  text: "create tickets in linear from the attached doc"
+  files: true
+  expect: {skill: linear-meeting-actions}
+  tags: [paraphrase, files]
+- id: para-linear-add-this
+  text: "add this to linear"
+  files: true
+  expect: {skill: linear-meeting-actions}
+  tags: [paraphrase, files]
+- id: para-linear-raise-issue
+  text: "raise a linear issue to fix the signup bug"
+  expect: {skill: linear-meeting-actions}
+  tags: [paraphrase]
+- id: para-linear-sync-team-meeting
+  text: "sync the team meeting actions to linear"
+  expect: {skill: linear-meeting-actions}
+  tags: [paraphrase]
+
+# --- tone-of-voice ---
+- id: para-tone-sound-like-mlai
+  text: "can you make this sound more like mlai?"
+  expect: {skill: tone-of-voice}
+  tags: [paraphrase]
+- id: para-tone-brand-voice
+  text: "polish this message to match our brand voice"
+  expect: {skill: tone-of-voice}
+  tags: [paraphrase]
+- id: para-tone-redo-mlai-tone
+  text: "redo this paragraph in the mlai tone"
+  expect: {skill: tone-of-voice}
+  tags: [paraphrase]
+- id: para-tone-rephrase-our-tone
+  text: "rephrase this in our tone please"
+  expect: {skill: tone-of-voice}
+  tags: [paraphrase]
+- id: para-tone-friendlier
+  text: "make this email sound friendlier in our voice"
+  expect: {skill: tone-of-voice}
+  tags: [paraphrase]
+
+# --- medhack (exclusive to #medhack-frontiers) ---
+- id: para-medhack-kickoff
+  text: "what time does medhack kick off on saturday?"
+  channel: medhack-frontiers
+  expect: {skill: medhack}
+  tags: [paraphrase, channel]
+- id: para-medhack-clinical-case
+  text: "give me a clinical case to diagnose"
+  channel: medhack-frontiers
+  expect: {skill: medhack}
+  tags: [paraphrase, channel]
+- id: para-medhack-guess
+  text: "I think the patient has atrial fibrillation"
+  channel: medhack-frontiers
+  expect: {skill: medhack}
+  tags: [paraphrase, channel]
+- id: para-medhack-ecg
+  text: "order an ecg for the patient"
+  channel: medhack-frontiers
+  expect: {skill: medhack}
+  tags: [paraphrase, channel]
+- id: para-medhack-announce-lunch
+  text: "post an announcement that lunch is ready"
+  channel: medhack-frontiers
+  expect: {skill: medhack}
+  tags: [paraphrase, channel]
+
+# --- watt-the-hack (exclusive to #watt-the-hack) ---
+- id: para-watt-judging
+  text: "announce that judging starts at 5pm"
+  channel: watt-the-hack
+  expect: {skill: watt-the-hack, action: announce}
+  tags: [paraphrase, channel]
+- id: para-watt-pizza
+  text: "post an announcement: pizza in the atrium"
+  channel: watt-the-hack
+  expect: {skill: watt-the-hack, action: announce}
+  tags: [paraphrase, channel]
+- id: para-watt-final-demo
+  text: "when is the watt the hack final demo?"
+  channel: watt-the-hack
+  expect: {skill: watt-the-hack}
+  tags: [paraphrase, channel]
+- id: para-watt-wifi
+  text: "create an announcement titled Wifi Details"
+  channel: watt-the-hack
+  expect: {skill: watt-the-hack, action: announce}
+  tags: [paraphrase, channel]
+
+# --- general conversation (expected: no skill) ---
+- id: para-none-summarise-thread
+  text: "can you summarise this thread for me?"
+  expect: {skill: none}
+  tags: [paraphrase, negative]
+- id: para-none-startup-idea
+  text: "what do you think of this idea for a startup?"
+  expect: {skill: none}
+  tags: [paraphrase, negative]
+- id: para-none-thanks
+  text: "thanks roo, you're a legend"
+  expect: {skill: none}
+  tags: [paraphrase, negative]
+- id: para-none-what-can-you-do
+  text: "what can you do?"
+  expect: {skill: none}
+  tags: [paraphrase, negative]
+- id: para-none-translate
+  text: "translate this message to spanish"
+  expect: {skill: none}
+  tags: [paraphrase, negative]
+- id: para-none-wifi
+  text: "what's the wifi password at the office?"
+  expect: {skill: none}
+  tags: [paraphrase, negative]
+- id: para-none-remind-discussion
+  text: "remind me what we discussed yesterday"
+  expect: {skill: none}
+  tags: [paraphrase, negative]
+- id: para-none-office-holiday
+  text: "is the office open on the public holiday?"
+  expect: {skill: none}
+  tags: [paraphrase, negative]
+- id: para-none-vector-db
+  text: "explain what a vector database is"
+  expect: {skill: none}
+  tags: [paraphrase, negative]
+- id: para-none-rag-vs-finetune
+  text: "what's the difference between rag and fine tuning?"
+  expect: {skill: none}
+  tags: [paraphrase, negative]
+- id: para-none-fix-typo
+  text: "fix the typo in my message"
+  expect: {skill: none}
+  tags: [paraphrase, negative]
+- id: para-none-footy
+  text: "who won the footy last night?"
+  expect: {skill: none}
+  tags: [paraphrase, negative]
+
+# --- cross-skill traps ---
+- id: trap-claim-reward
+  text: "claim the reward voucher please"
+  expect: {skill: mlai-points, action: request_reward}
+  tags: [paraphrase, trap, action-trap]
+- id: trap-medhack-meeting
+  text: "schedule a meeting with the medhack organisers"
+  channel: general
+  expect: {skill: none}
+  tags: [paraphrase, trap, negative, channel, misroute-guard]
+- id: trap-linear-howto
+  text: "how do I write a good linear ticket?"
+  expect: {skill: none}
+  tags: [paraphrase, trap, negative, hard]
+- id: trap-earn-promotion
+  text: "what's the best way to earn a promotion at work?"
+  expect: {skill: none}
+  tags: [paraphrase, trap, negative]
+- id: trap-scan-pdf
+  text: "can you scan this pdf for typos?"
+  files: true
+  expect: {skill: none}
+  tags: [paraphrase, trap, negative, files]
+- id: trap-book-club
+  text: "book club is meeting thursday, can you remind the channel?"
+  expect: {skill: none}
+  tags: [paraphrase, trap, negative, misroute-guard]
+
+# --- thread-context behaviour ---
+- id: thread-points-interrupt
+  text: "actually can you check my points balance"
+  thread: {last_skill: content-factory, domain: mlai.au, workflow: write}
+  expect: {skill: mlai-points, action: balance}
+  tags: [paraphrase, thread]
+- id: thread-content-go-ahead
+  text: "go ahead"
+  thread: {last_skill: content-factory, domain: mlai.au, workflow: research}
+  expect: {skill: content-factory}
+  tags: [paraphrase, thread]
+- id: thread-points-do-it
+  text: "yes do it"
+  thread: {last_skill: mlai-points}
+  expect: {skill: mlai-points}
+  tags: [paraphrase, thread, hard]

@@ -1,25 +1,134 @@
 ---
 name: mlai-points
 description: Manage MLAI points system - check balance, book coworking, claim tasks, redeem rewards
-trigger_keywords:
-  - points
-  - balance
-  - coworking
-  - book
-  - task
-  - tasks
-  - reward
-  - rewards
-  - topup
-  - top-up
-  - top up
-  - buy points
-  - buy roo points
-  - purchase points
-  - purchase roo points
-  - pay for points
-  - add points
-  - add roo points
+routing:
+  use_when: >
+    The user wants to check or spend THEIR Roo points, see point history, list/claim/
+    submit/manage claimable community tasks, book or cancel coworking days, browse or
+    request rewards, buy top-up packs, request points, or administer the points system
+    (award/deduct points, promote admins, allowances).
+  avoid_when: >
+    "Task"/"ticket"/"issue" in the context of Linear or meetings (linear-meeting-actions).
+    Event attendance numbers (luma-events). Booking rooms or non-coworking logistics.
+  examples:
+    - {text: "how do I earn points?", action: list_tasks}
+    - {text: "what's my balance", action: balance}
+    - {text: "book me in for coworking tomorrow", action: book_coworking}
+    - {text: "book me in", action: book_coworking}
+    - {text: "claim task ROO-12", action: claim_task}
+    - {text: "how busy was the coworking space in may?", action: coworking_report}
+    - {text: "give 10 points to @member for organising the meetup", action: award_points}
+    - {text: "I need more points", action: topup_points}
+    - {text: "add roo points", action: topup_points}
+  negative_examples:
+    - {text: "add a task to linear to fix the login bug", instead: linear-meeting-actions}
+    - {text: "book club is meeting thursday, can you remind the channel?", instead: respond_in_chat}
+    - {text: "how many people came to our last event?", instead: luma-events}
+actions:
+  - name: balance
+    description: Show the user's current points balance.
+  - name: history
+    description: Show recent points transactions.
+    params:
+      days: {type: integer, description: "How many days back (default 7)."}
+      limit: {type: integer, description: "Max entries (default 10)."}
+  - name: list_tasks
+    description: List claimable community tasks.
+    params:
+      mode: {type: string, enum: [open, mine, review, all], description: "Which task queue."}
+  - name: claim_task
+    description: Claim an open community task.
+    params:
+      task_id: {type: string, description: "Task id like ROO-12 if mentioned."}
+  - name: unclaim_task
+    description: Release a previously claimed task.
+    params:
+      task_id: {type: string}
+  - name: submit_task
+    description: Submit completed task work for approval.
+    params:
+      task_id: {type: string}
+      submission_text: {type: string, description: "What was done."}
+      submission_url: {type: string, description: "Link to the work if given."}
+  - name: create_task
+    description: Admin — create a new community task worth points.
+    params:
+      task_title: {type: string}
+      points: {type: integer}
+      description: {type: string}
+      portfolio: {type: string}
+  - name: edit_task
+    description: Admin — edit an existing task.
+    params:
+      task_id: {type: string}
+  - name: cancel_task
+    description: Admin — cancel/archive a task.
+    params:
+      task_id: {type: string}
+  - name: approve_task
+    description: Admin — approve a submitted task.
+    params:
+      task_id: {type: string}
+  - name: reject_task
+    description: Admin — reject a submitted task.
+    params:
+      task_id: {type: string}
+      reason: {type: string}
+  - name: book_coworking
+    description: Book the user a coworking day.
+    params:
+      date: {type: string, description: "ISO date or natural phrase like 'tomorrow'."}
+  - name: cancel_coworking
+    description: Cancel the user's coworking booking.
+    params:
+      date: {type: string}
+  - name: check_coworking
+    description: Check coworking availability.
+    params:
+      date: {type: string}
+  - name: admin_checkin_coworking
+    description: Admin — check ANOTHER member in for coworking (message mentions someone else).
+    params:
+      date: {type: string}
+  - name: coworking_report
+    description: Usage report/trends/comparisons for the coworking space.
+    params:
+      start_date: {type: string}
+      end_date: {type: string}
+  - name: list_rewards
+    description: Show the rewards catalog.
+  - name: request_reward
+    description: Redeem/request a reward from the catalog.
+    params:
+      reward_code: {type: string}
+      quantity: {type: integer}
+  - name: view_rate_card
+    description: Show how many points actions are worth.
+  - name: topup_points
+    description: Buy a fixed top-up pack of Roo points ("top up", "buy/add roo points", "I need more points").
+  - name: request_points
+    description: Ask admins to grant the user points for something they did.
+    params:
+      points: {type: integer}
+      reason: {type: string}
+  - name: award_points
+    description: Admin — give points to another member.
+    params:
+      points: {type: integer}
+      reason: {type: string}
+  - name: deduct_points
+    description: Admin — remove points from a member.
+    params:
+      points: {type: integer}
+      reason: {type: string}
+  - name: promote_points_admin
+    description: Super-admin — make a member a points admin.
+  - name: revoke_points_admin
+    description: Super-admin — remove a member's points-admin role.
+  - name: set_points_admin_allowance
+    description: Super-admin — change an admin's weekly give-out allowance.
+    params:
+      weekly_allowance: {type: integer}
 ---
 
 # MLAI Points System Skill

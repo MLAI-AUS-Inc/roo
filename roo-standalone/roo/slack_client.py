@@ -352,15 +352,27 @@ def send_dm(user_id: str, text: str, **kwargs) -> Optional[Dict[str, Any]]:
     return None
 
 
-@lru_cache(maxsize=100)
+_channel_name_cache: Dict[str, str] = {}
+
+
 def get_channel_name(channel_id: str) -> Optional[str]:
-    """Get channel name by ID using conversations.info."""
+    """Get channel name by ID using conversations.info.
+
+    Successful lookups are cached for the process lifetime (channel renames are
+    rare); failures are not cached so transient Slack errors can recover.
+    """
+    cached = _channel_name_cache.get(channel_id)
+    if cached:
+        return cached
+
     client = get_slack_client()
 
     try:
         response = client.conversations_info(channel=channel_id)
         if response.get("ok"):
             name = response["channel"].get("name")
+            if name:
+                _channel_name_cache[channel_id] = name
             return name
         return None
     except Exception as e:

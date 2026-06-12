@@ -136,12 +136,13 @@ class SkillExecutor:
         print(f"🎯 Executing skill: {skill.name}")
         
         try:
-            # Extract parameters using LLM
-            params = await self._extract_parameters(skill, text, user_id, thread_history)
-            if param_overrides:
-                params = {**params, **param_overrides}
-                print(f"   Applied param overrides: {param_overrides}")
-            print(f"   Extracted params: {params}")
+            # Router v2 supplies structured params (action + declared fields);
+            # interactive callbacks pass explicit param_overrides. The free-form
+            # LLM parameter-extraction call was removed in Phase 4 of the
+            # routing redesign — handlers parse remaining details from the text.
+            params = dict(param_overrides or {})
+            if params:
+                print(f"   Routed params: {params}")
             
             # Check for skill-specific implementation
             if skill.name == "content-factory":
@@ -207,55 +208,6 @@ class SkillExecutor:
                 error=str(e)
             )
     
-    async def _extract_parameters(self, skill: Skill, text: str, user_id: str, history: Optional[List[dict]] = None) -> dict:
-        """Extract parameters from user message based on skill definition."""
-        from ..utils import get_current_date
-        
-        # Parse parameter definitions from skill content
-        param_section = self._find_section(skill.content, "Parameters")
-        
-        if not param_section:
-            return {}
-            
-        # Format history context
-        history_context = ""
-        if history:
-            # Simple format: "User: msg"
-            context_lines = [f"{msg.get('user')}: {msg.get('text')}" for msg in history[:-1]]
-            history_context = "\nConversation Context (use this to fill missing parameters):\n" + "\n".join(context_lines)
-        
-        current_date_str = get_current_date().isoformat()
-        
-        prompt = f"""Extract parameters from the user's message based on these definitions:
-
-{param_section}
-
-Current Date: {current_date_str}
-
-{history_context}
-
-User message: "{text}"
-
-Return a JSON object with the extracted parameters. Only include parameters that are clearly present.
-Example: {{"query": "machine learning", "limit": 5}}
-
-JSON:"""
-
-        response = await chat([
-            {"role": "system", "content": "You extract structured parameters from text. Return valid JSON only."},
-            {"role": "user", "content": prompt}
-        ])
-        
-        # Parse JSON from response
-        try:
-            # Clean up response - extract JSON if wrapped in markdown
-            content = response.content.strip()
-            if content.startswith("```"):
-                content = re.sub(r'^```\w*\n?', '', content)
-                content = re.sub(r'\n?```$', '', content)
-            return json.loads(content)
-        except json.JSONDecodeError:
-            return {}
 
     def _should_prompt_for_article_direction(self, text: str, params: dict) -> bool:
         """Prompt for topic-vs-research only on generic article requests."""
@@ -915,8 +867,14 @@ Original text:
                 return f"The Watt The Hack skill is only available in {channels_list}."
 
         text_lower = text.lower()
-        announce_keywords = ["announce", "announcement", "post announcement", "create announcement"]
-        is_announcement = any(k in text_lower for k in announce_keywords)
+        # The router's validated action wins; keyword sniffing only covers
+        # callers that did not route (e.g. direct invocations without params).
+        requested_action = str(params.get("action") or "").strip().lower()
+        if requested_action in ("announce", "event_qa"):
+            is_announcement = requested_action == "announce"
+        else:
+            announce_keywords = ["announce", "announcement", "post announcement", "create announcement"]
+            is_announcement = any(k in text_lower for k in announce_keywords)
 
         if not is_announcement:
             # Event Q&A: answer questions about Watt The Hack from the skill's
@@ -952,6 +910,12 @@ Original text:
             ], model="gpt-4o-mini", max_tokens=700)
             return qa_response.content.strip()
 
+        # Prefer title/body the router already extracted from the message.
+        ann_title = str(params.get("title") or "").strip() or None
+        ann_body = str(params.get("body") or "").strip() or None
+        if ann_title and ann_body:
+            return await self._publish_watt_announcement(user_id, ann_title, ann_body)
+
         # Use an LLM to extract a clear title and body from the request.
         extract_prompt = f"""Extract the announcement title and body from this message.
 The user wants to create an announcement for the Watt The Hack hackathon website.
@@ -979,8 +943,8 @@ JSON:"""
         except json.JSONDecodeError:
             extracted = {}
 
-        ann_title = extracted.get("title")
-        ann_body = extracted.get("body")
+        ann_title = ann_title or extracted.get("title")
+        ann_body = ann_body or extracted.get("body")
 
         if not ann_title or not ann_body:
             return (
@@ -989,9 +953,15 @@ JSON:"""
                 f"_\"Post an announcement titled 'Lunch is served' with body 'Pizza is in the atrium at 1pm.'\"_"
             )
 
-        # Publish via the backend. The requesting human (user_id) is checked
-        # against Django superusers; authorship is attributed to Roo's bot id so
-        # the website shows Roo as the author.
+        return await self._publish_watt_announcement(user_id, ann_title, ann_body)
+
+    async def _publish_watt_announcement(self, user_id: str, ann_title: str, ann_body: str) -> str:
+        """Publish a Watt The Hack announcement via the backend.
+
+        The requesting human (user_id) is checked against Django superusers;
+        authorship is attributed to Roo's bot id so the website shows Roo as
+        the author.
+        """
         from ..clients.mlai_backend import MLAIBackendClient
         from ..slack_client import get_bot_user_id
         backend = MLAIBackendClient()
@@ -1168,8 +1138,12 @@ JSON:"""
 
         # --- Announcement creation ---
         MEDHACK_ANNOUNCE_ADMIN_IDS = ["U08DD0DCL4D", "U05QPB483K9", "U08CWAPMQH0", "U07QJ5L0EHY"]
-        announce_keywords = ["announce", "announcement", "post announcement", "create announcement"]
-        is_announcement = any(k in text_lower for k in announce_keywords)
+        requested_action = str(params.get("action") or "").strip().lower()
+        if requested_action in ("announce", "event_qa", "game"):
+            is_announcement = requested_action == "announce"
+        else:
+            announce_keywords = ["announce", "announcement", "post announcement", "create announcement"]
+            is_announcement = any(k in text_lower for k in announce_keywords)
 
         if is_announcement:
             if user_id not in MEDHACK_ANNOUNCE_ADMIN_IDS:
@@ -6129,13 +6103,6 @@ Chunk {index} source: {label}
             error_msg = f"❌ Something went wrong with the article generation: {str(e)}"
             post_message(channel_id, error_msg, thread_ts)
     
-    def _find_section(self, content: str, section_name: str) -> Optional[str]:
-        """Find a section in the markdown content."""
-        pattern = rf'##\s*{section_name}\s*\n(.*?)(?=\n##|\Z)'
-        match = re.search(pattern, content, re.DOTALL | re.IGNORECASE)
-        if match:
-            return match.group(1).strip()
-        return None
 
     async def _execute_mlai_data_query(
         self,
@@ -6515,7 +6482,14 @@ Chunk {index} source: {label}
                 internal_api_key=settings.INTERNAL_API_KEY or settings.ROO_API_KEY or settings.MLAI_API_KEY
             )
 
-            action = self._resolve_points_action(params, text)
+            action = self._resolve_routed_points_action(params, text)
+
+            if not action:
+                return (
+                    "Not sure which points action you're after, mate — try "
+                    "`balance`, `tasks`, `coworking book today`, `rewards`, or "
+                    "`coworking report`. 🦘"
+                )
 
             # Execute the appropriate action
             return await self._handle_points_action(
@@ -6580,155 +6554,6 @@ Chunk {index} source: {label}
             traceback.print_exc()
             return f"Had some trouble with the points system: {str(e)}"
 
-    def _resolve_points_action(self, params: dict, text: str) -> str:
-        """Resolve the intended points action from extracted params and raw text."""
-        action = str(params.get("action", "") or "").lower().strip()
-        text_lower = self._normalize_points_routing_text(text)
-        explicit_points_request = "request" in text_lower and "point" in text_lower and "reward" not in text_lower
-
-        if action in {"topup_points", "top_up_points", "purchase_points", "buy_points"}:
-            return "topup_points"
-
-        management_action = self._resolve_points_admin_management_action(
-            text,
-            explicit_action=action,
-        )
-        if management_action:
-            return management_action
-
-        if self._is_task_list_request(text, params):
-            return "list_tasks"
-
-        if self._looks_like_points_topup_request(text):
-            return "topup_points"
-
-        if explicit_points_request:
-            return "request_points"
-
-        if action in [
-            "coworking_report",
-            "report_coworking",
-            "coworking_summary",
-            "coworking_overview",
-        ]:
-            return "coworking_report"
-        if action in ["report", "summary", "overview"] and "coworking" in text_lower:
-            return "coworking_report"
-        if self._is_coworking_admin_checkin_request(text):
-            return "admin_checkin_coworking"
-        if action in [
-            "admin_checkin_coworking",
-            "coworking_checkin",
-            "checkin_coworking",
-            "check_in_coworking",
-        ]:
-            return "admin_checkin_coworking"
-
-        if action == "book":
-            action = "book_coworking"
-        elif action in ["create", "task", "create_task"]:
-            if params.get("task_title") or "create" in text_lower:
-                action = "create_task"
-
-        if action == "book_coworking" and self._coworking_target_mentions_present(text, params):
-            return "admin_checkin_coworking"
-
-        if action and action != "task":
-            return action
-
-        if any(w in text_lower for w in ["balance", "how many points", "my points"]):
-            return "balance"
-        if "history" in text_lower:
-            return "history"
-        if self._looks_like_points_topup_request(text):
-            return "topup_points"
-        if "request" in text_lower and "point" in text_lower and "reward" not in text_lower:
-            return "request_points"
-        if any(w in text_lower for w in ["tasks mine", "my tasks", "tasks review", "review tasks", "tasks all", "all tasks"]):
-            return "list_tasks"
-        if any(w in text_lower for w in ["tasks open", "open tasks", "tasks"]):
-            return "list_tasks"
-        if "claim" in text_lower:
-            return "claim_task"
-        if "unclaim" in text_lower or "release task" in text_lower:
-            return "unclaim_task"
-        if "submit" in text_lower:
-            return "submit_task"
-        if ("coworking" in text_lower or "office" in text_lower) and any(
-            w in text_lower
-            for w in [
-                "report",
-                "summary",
-                "overview",
-                "how many users",
-                "how many people",
-                "used the coworking",
-                "used the office",
-                "attended",
-                "attendance",
-                "usage",
-                "compare",
-                "compared",
-                "comparison",
-                "busiest",
-                "quietest",
-                "trend",
-                "trends",
-                "recommendation",
-                "recommendations",
-            ]
-        ):
-            return "coworking_report"
-        task_reference_present = bool(
-            re.search(r"\bROO-\d+\b", text, re.IGNORECASE)
-            or re.search(r"(?:task|#)\s*\d+", text, re.IGNORECASE)
-        )
-        if any(w in text_lower for w in ["delete task", "cancel task", "archive task"]):
-            return "cancel_task"
-        if "coworking" not in text_lower and re.search(r"\b(cancel|delete|archive)\b", text_lower) and (task_reference_present or "task" in text_lower):
-            return "cancel_task"
-        if any(w in text_lower for w in ["edit task", "update task", "change task"]):
-            return "edit_task"
-        if re.search(r"\b(edit|update|change|mark|set)\b", text_lower) and (task_reference_present or "task" in text_lower):
-            return "edit_task"
-        if any(w in text_lower for w in ["coworking check", "check coworking", "availability"]):
-            return "check_coworking"
-        if any(w in text_lower for w in ["coworking book", "book coworking", "book me"]):
-            return "book_coworking"
-        if "cancel" in text_lower and "coworking" in text_lower:
-            return "cancel_coworking"
-        if any(w in text_lower for w in ["rate card", "point values", "how much is"]):
-            return "view_rate_card"
-        if any(w in text_lower for w in ["rewards", "perks"]):
-            return "list_rewards"
-        if "reward" in text_lower and "request" in text_lower:
-            return "request_reward"
-        if "task" in text_lower and "create" in text_lower:
-            return "create_task"
-        if "approve" in text_lower:
-            return "approve_task"
-        if "reject" in text_lower:
-            return "reject_task"
-        if any(w in text_lower for w in ["award", "give points", "reward"]):
-            return "award_points"
-        if any(w in text_lower for w in ["deduct", "remove points"]):
-            return "deduct_points"
-        return action
-
-    def _looks_like_points_topup_request(self, text: str) -> bool:
-        """Return True for member requests to buy fixed top-up Roo Points packs."""
-        text_lower = self._normalize_points_routing_text(text)
-        if re.search(r"\btop\s*up\b|\btopup\b|\btop-up\b", text_lower):
-            return True
-        if re.search(r"\b(?:buy|purchase)\b.*\b(?:roo\s+)?points?\b", text_lower):
-            return True
-        if re.search(r"\bpay\s+for\b.*\b(?:roo\s+)?points?\b", text_lower):
-            return True
-        if re.search(r"\bpaid\s+(?:roo\s+)?points?\b", text_lower):
-            return True
-        if re.search(r"\badd\b.*\b(?:roo\s+)?points?\b", text_lower):
-            return True
-        return bool(re.search(r"\bi\s+need\s+more\s+(?:roo\s+)?points?\b", text_lower))
 
     def _resolve_topup_pack_id(self, text: str, params: dict) -> tuple[Optional[str], Optional[int]]:
         """Resolve a top-up pack ID; return unsupported amount when a non-pack amount is present."""
@@ -6802,15 +6627,6 @@ Chunk {index} source: {label}
             text_lower = text_lower.replace(typo, replacement)
         return text_lower
 
-    def _is_coworking_admin_checkin_request(self, text: str) -> bool:
-        """Detect admin coworking check-in commands like `book <@U123> in today`."""
-        return bool(
-            re.search(
-                r"\b(?:check|book)\b.*<@[A-Z0-9]+>.*\bin\b",
-                str(text or ""),
-                re.IGNORECASE,
-            )
-        )
 
     def _coworking_target_mentions_present(self, text: str, params: dict) -> bool:
         """Return True when a coworking booking request contains a non-Roo target mention."""
@@ -6899,9 +6715,6 @@ Chunk {index} source: {label}
             return "open"
         return None
 
-    def _is_task_list_request(self, text: str, params: Optional[dict] = None) -> bool:
-        """Return true when the text clearly asks for a task list view."""
-        return self._match_task_list_mode(text, params or {}) is not None
 
     def _resolve_task_list_mode(self, text: str, params: dict) -> str:
         """Resolve which task list variant the user asked for."""
@@ -6971,6 +6784,22 @@ Chunk {index} source: {label}
                 updates["reviewer_slack_id"] = target_user
 
         return updates
+
+    def _resolve_routed_points_action(self, params: dict, text: str) -> str:
+        """Normalize the router-supplied points action; safety guards only.
+
+        Phase 4 of the routing redesign: the action arrives validated from the
+        router's enum (or a button payload) — no text-sniffing re-derivation.
+        """
+        action = str(params.get("action") or "").strip().lower()
+        # Historical alias from older button payloads
+        if action == "book":
+            action = "book_coworking"
+        # Safety guard (not text-sniffing): a booking that names ANOTHER
+        # member is an admin check-in, whatever the router said.
+        if action == "book_coworking" and self._coworking_target_mentions_present(text, params):
+            action = "admin_checkin_coworking"
+        return action
 
     def _resolve_points_admin_management_action(
         self,

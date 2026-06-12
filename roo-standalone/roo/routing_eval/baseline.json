@@ -1,0 +1,1156 @@
+{
+  "mode": "deterministic",
+  "generated_at": "2026-06-12T08:40:55.002003+00:00",
+  "counts": {
+    "misroute": 0,
+    "fallthrough": 153,
+    "ok-fallthrough": 27,
+    "correct": 10
+  },
+  "action": {
+    "checked": 10,
+    "correct": 10
+  },
+  "cases": {
+    "audit-anyone-ai-research": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "audit-medical-imaging": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "audit-sponsorship-contact": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "audit-summarise-article": {
+      "verdict": "ok-fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "audit-blog-post-opinion": {
+      "verdict": "ok-fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "audit-analyse-proposal": {
+      "verdict": "ok-fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "audit-inspect-csv": {
+      "verdict": "ok-fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "audit-book-coworking-tomorrow": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "audit-book-meeting-room": {
+      "verdict": "ok-fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "audit-linear-login-bug": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "audit-linear-ticket-thread": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "audit-how-earn-points": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "audit-whats-my-balance": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "audit-balance-question-mark": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "audit-rewrite-tone": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "audit-announce-watt-channel": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "audit-announce-medhack-channel": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "audit-announce-general-channel": {
+      "verdict": "ok-fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "audit-luma-registered-count": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "audit-luma-export-attendees": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "audit-write-medhack-article": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "audit-connect-blog-writer": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "audit-open-tasks-question": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "audit-scan-repo-mlai": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "audit-research-paper-thoughts": {
+      "verdict": "ok-fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "audit-ecg-teammate": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "audit-meetup-topic": {
+      "verdict": "ok-fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "audit-patient-data-workshop": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "audit-summarise-thread": {
+      "verdict": "ok-fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "audit-research-linkedin-timing": {
+      "verdict": "ok-fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "fast-points": {
+      "verdict": "correct",
+      "layer": "fast",
+      "skill": "mlai-points",
+      "action": "balance"
+    },
+    "fast-balance": {
+      "verdict": "correct",
+      "layer": "fast",
+      "skill": "mlai-points",
+      "action": "balance"
+    },
+    "fast-my-points": {
+      "verdict": "correct",
+      "layer": "fast",
+      "skill": "mlai-points",
+      "action": "balance"
+    },
+    "fast-tasks": {
+      "verdict": "correct",
+      "layer": "fast",
+      "skill": "mlai-points",
+      "action": "list_tasks"
+    },
+    "fast-my-tasks": {
+      "verdict": "correct",
+      "layer": "fast",
+      "skill": "mlai-points",
+      "action": "list_tasks"
+    },
+    "fast-open-tasks": {
+      "verdict": "correct",
+      "layer": "fast",
+      "skill": "mlai-points",
+      "action": "list_tasks"
+    },
+    "fast-earn-points": {
+      "verdict": "correct",
+      "layer": "fast",
+      "skill": "mlai-points",
+      "action": "list_tasks"
+    },
+    "fast-rewards": {
+      "verdict": "correct",
+      "layer": "fast",
+      "skill": "mlai-points",
+      "action": "list_rewards"
+    },
+    "fast-coworking-book-today": {
+      "verdict": "correct",
+      "layer": "fast",
+      "skill": "mlai-points",
+      "action": "book_coworking"
+    },
+    "fast-coworking-cancel": {
+      "verdict": "correct",
+      "layer": "fast",
+      "skill": "mlai-points",
+      "action": "cancel_coworking"
+    },
+    "blessed-write-article-harness": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "blessed-scan-domain": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "blessed-scan-repo-for-domain": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "blessed-thread-write-follow-up": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "blessed-thread-scan-follow-up": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "blessed-thread-publish-pr": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "blessed-thread-publish-bundle-pr": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "blessed-thread-turn-bundle-into-pr": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "blessed-thread-open-draft-pr": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "blessed-thread-push-bundle-to-pr": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "blessed-thread-push-article-to-pr": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "blessed-github-reconnect": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "blessed-github-authenticate-with": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "blessed-github-authenticate": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "blessed-github-connect-again": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "blessed-linear-meeting-summary": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "blessed-linear-transcript-actions": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "blessed-linear-sync-notes": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "blessed-linear-pdf": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "blessed-linear-image": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "blessed-linear-attached-file": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "blessed-points-create-task": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "blessed-points-request": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "blessed-points-topup-slash": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "blessed-points-topup-phrase": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "blessed-points-buy-roo-points": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "blessed-points-add-roo-points": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "blessed-points-need-more": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "blessed-coworking-book-me-in": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "blessed-coworking-book-me-in-today": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "blessed-coworking-checkin-mention": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "blessed-coworking-book-mention": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "blessed-coworking-report-3-months": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "blessed-coworking-summary-6-months": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "blessed-coworking-usage-week": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "blessed-coworking-usage-typo": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "blessed-coworking-busiest-day": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "blessed-coworking-trends": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "blessed-points-promote-admin": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "blessed-points-allowance": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "blessed-points-allowance-natural": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "blessed-points-revoke-admin": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "blessed-luma-past-csv": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "blessed-luma-registered-report": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "blessed-luma-registrations-date": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "dq-vibe-raising-count": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "dq-catalog": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "dq-cf-jobs-failed": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "dq-startup-drafts": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "dq-linear-synced": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "dq-trap-create-linear": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "dq-trap-luma-attendance": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "dq-synced-for-startup": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "linear-thread-to-project": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "linear-above-to-project": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "linear-project-update-pdf": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "linear-meeting-project-update": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "linear-do-project-update": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "linear-todo-with-assignee": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "linear-task-for-member": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-connect-rl": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-connect-cv": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-connect-agents": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-connect-mentor": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-connect-healthcare": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-connect-edge": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-connect-robotics": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-connect-cofounder": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-connect-nlp": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-connect-evals": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-content-write-prompting": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-content-draft-blog": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-content-generate": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-content-what-next": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-content-suggest-topic": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-content-keywords-target": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-content-rescan": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-content-setup-blog": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-content-scaffold": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-content-seo-audit": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-points-how-many": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-points-spend-on": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-points-rewards-shop": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-points-claim-docs-task": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-points-give-me-tasks": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-points-book-friday": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-points-cancel-tomorrow": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-points-space-monday": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-points-award": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-points-history": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-points-coworking-may": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-points-make-admin": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-points-buy-pack": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-luma-signed-up": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-luma-guest-list": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-luma-attendee-csv": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-luma-who-registered": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-luma-export-two-events": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-luma-numbers": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-luma-how-many-came": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-luma-signup-csv": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-github-broken": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-github-reauthorise": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-github-link": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-github-setup-again": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-github-cant-see-repo": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-github-authorize-domain": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-linear-standup": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-linear-push-items": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-linear-issues-from-summary": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-linear-retro-followups": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-linear-attached-doc": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-linear-add-this": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-linear-raise-issue": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-linear-sync-team-meeting": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-tone-sound-like-mlai": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-tone-brand-voice": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-tone-redo-mlai-tone": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-tone-rephrase-our-tone": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-tone-friendlier": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-medhack-kickoff": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-medhack-clinical-case": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-medhack-guess": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-medhack-ecg": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-medhack-announce-lunch": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-watt-judging": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-watt-pizza": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-watt-final-demo": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-watt-wifi": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-none-summarise-thread": {
+      "verdict": "ok-fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-none-startup-idea": {
+      "verdict": "ok-fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-none-thanks": {
+      "verdict": "ok-fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-none-what-can-you-do": {
+      "verdict": "ok-fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-none-translate": {
+      "verdict": "ok-fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-none-wifi": {
+      "verdict": "ok-fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-none-remind-discussion": {
+      "verdict": "ok-fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-none-office-holiday": {
+      "verdict": "ok-fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-none-vector-db": {
+      "verdict": "ok-fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-none-rag-vs-finetune": {
+      "verdict": "ok-fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-none-fix-typo": {
+      "verdict": "ok-fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "para-none-footy": {
+      "verdict": "ok-fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "trap-claim-reward": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "trap-medhack-meeting": {
+      "verdict": "ok-fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "trap-linear-howto": {
+      "verdict": "ok-fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "trap-earn-promotion": {
+      "verdict": "ok-fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "trap-scan-pdf": {
+      "verdict": "ok-fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "trap-book-club": {
+      "verdict": "ok-fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "thread-points-interrupt": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "thread-content-go-ahead": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    },
+    "thread-points-do-it": {
+      "verdict": "fallthrough",
+      "layer": "v2-pending",
+      "skill": null,
+      "action": null
+    }
+  }
+}

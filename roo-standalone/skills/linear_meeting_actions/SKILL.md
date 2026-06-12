@@ -1,20 +1,6 @@
 ---
 name: linear-meeting-actions
 description: Extract action items from Slack meeting transcripts, summaries, files, PDFs, DOCX documents, or images, create Linear project updates, and create correctly assigned Linear issues
-trigger_keywords:
-  - meeting actions
-  - meeting action items
-  - meeting notes to linear
-  - meeting summary to linear
-  - transcript to linear
-  - pdf to linear
-  - docx to linear
-  - image to linear
-  - file to linear
-  - linear tasks from meeting
-  - create linear tickets from transcript
-  - extract action items
-  - sync meeting notes to linear
 requires_auth: true
 parameters:
   - action: One of extract, create, approve, or reject. Defaults to create for transcript-to-Linear requests.
@@ -23,6 +9,37 @@ parameters:
   - owner_hint: Optional Linear assignee name, email, or Slack mention.
   - team_hint: Optional Linear team name or key mentioned by the user.
   - confirm_create: Boolean flag used by Slack approval actions for uncertain items.
+routing:
+  use_when: >
+    The user wants Linear issues/tickets/tasks created or extracted — from meeting
+    notes, transcripts, summaries, action items, attached files (PDF/DOCX/images),
+    the current thread, or a direct request ("add a task to linear to fix X").
+  avoid_when: >
+    MLAI community tasks worth points (mlai-points). How-to questions about Linear
+    itself. The word "task"/"action items" without any Linear destination.
+  examples:
+    - {text: "turn this meeting summary into Linear tasks", action: create}
+    - {text: "add a task to linear to fix the login bug", action: create}
+    - {text: "extract action items from this transcript and add them to Linear", action: create}
+    - {text: "send this attached PDF to Linear as tasks", action: create}
+  negative_examples:
+    - {text: "create a task called fix docs worth 5 points", instead: mlai-points}
+    - {text: "how do I write a good linear ticket?", instead: respond_in_chat}
+actions:
+  - name: create
+    description: Extract candidate action items (from the message, thread, or files) and create Linear issues.
+    params:
+      project_hint: {type: string, description: "Linear project name/slug if mentioned."}
+      team_hint: {type: string, description: "Linear team name/key if mentioned."}
+  - name: extract
+    description: Only extract/preview action items without creating issues yet.
+    params:
+      project_hint: {type: string}
+      team_hint: {type: string}
+  - name: approve
+    description: Approve previously previewed uncertain items (usually a button follow-up).
+  - name: reject
+    description: Reject previously previewed uncertain items.
 ---
 
 # Linear Meeting Actions Skill

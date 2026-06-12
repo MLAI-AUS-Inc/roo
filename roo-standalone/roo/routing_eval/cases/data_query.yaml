@@ -1,0 +1,67 @@
+# mlai-data-query: read-only backend data queries (skill landed on main 2026-06,
+# PRs #167/#168 — added to the eval when origin/main was merged into the
+# routing redesign branch).
+
+- id: dq-vibe-raising-count
+  text: "How many Vibe Raising companies do we have?"
+  expect: {skill: mlai-data-query, action: query}
+  tags: [data-query]
+- id: dq-catalog
+  text: "What data resources can Roo query?"
+  expect: {skill: mlai-data-query, action: catalog}
+  tags: [data-query]
+- id: dq-cf-jobs-failed
+  text: "which content factory jobs failed yesterday?"
+  expect: {skill: mlai-data-query, action: query}
+  tags: [data-query, paraphrase]
+- id: dq-startup-drafts
+  text: "show the monthly update drafts for my startup"
+  expect: {skill: mlai-data-query}
+  tags: [data-query, paraphrase]
+- id: dq-linear-synced
+  text: "list the linear issues synced for studynash"
+  expect: {skill: mlai-data-query}
+  tags: [data-query, paraphrase, hard]
+- id: dq-trap-create-linear
+  text: "create a linear issue to follow up with sponsors"
+  expect: {skill: linear-meeting-actions}
+  tags: [data-query, trap]
+- id: dq-trap-luma-attendance
+  text: "how many people registered for the gen ai night event?"
+  expect: {skill: luma-events}
+  tags: [data-query, trap]
+- id: dq-synced-for-startup
+  text: "show Linear issues synced for this startup"
+  expect: {skill: mlai-data-query}
+  tags: [data-query, hard]
+
+# harvested from upstream funnel tests before Phase 3 deleted the heuristics
+- id: linear-thread-to-project
+  text: "add this thread to Linear project BITGET EVENT"
+  expect: {skill: linear-meeting-actions, action: create}
+  tags: [paraphrase, thread]
+- id: linear-above-to-project
+  text: "put the above in Linear project called BITGET EVENT"
+  expect: {skill: linear-meeting-actions}
+  tags: [paraphrase, thread]
+- id: linear-project-update-pdf
+  text: "create a project update from this PDF"
+  files: true
+  expect: {skill: linear-meeting-actions}
+  tags: [paraphrase, files]
+- id: linear-meeting-project-update
+  text: "summarize this meeting as a Linear project update"
+  expect: {skill: linear-meeting-actions}
+  tags: [paraphrase]
+- id: linear-do-project-update
+  text: "do a project update in Linear"
+  expect: {skill: linear-meeting-actions}
+  tags: [paraphrase]
+- id: linear-todo-with-assignee
+  text: "create a to do item in the linear project 'venture studio' assign to Sonia"
+  expect: {skill: linear-meeting-actions, action: create}
+  tags: [paraphrase]
+- id: linear-task-for-member
+  text: "add a Linear task to Venture Studio for Sonia"
+  expect: {skill: linear-meeting-actions, action: create}
+  tags: [paraphrase]

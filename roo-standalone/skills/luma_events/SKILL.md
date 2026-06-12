@@ -1,20 +1,34 @@
 ---
 name: luma-events
 description: Report on Luma event registrations and export attendee CSV files for recent MLAI events
-trigger_keywords:
-  - luma
-  - attendees
-  - attendee
-  - guest list
-  - guests
-  - export guests
-  - csv
-  - csv documents
-  - past csv documents
-  - mlai events
-  - recent events
-  - registered
-  - registrations
+routing:
+  use_when: >
+    The user wants DATA about who signed up for / attended MLAI events on Luma:
+    registration counts, attendee lists or reports, check-in numbers, or CSV exports.
+  avoid_when: >
+    Questions about an event's content, time, or topic (chat). Coworking attendance
+    (mlai-points coworking_report). Files the user uploaded themselves.
+  examples:
+    - {text: "how many people registered for the april 29 event", action: attendee_report}
+    - {text: "who's coming to the patient-data workshop?", action: attendee_report}
+    - {text: "export the attendee list as a csv", action: export_attendee_csv}
+    - {text: "how many signed up for thursday's event?", action: attendee_report}
+  negative_examples:
+    - {text: "what's the topic for this week's meetup?", instead: respond_in_chat}
+    - {text: "can you inspect the CSV I uploaded and tell me the columns?", instead: respond_in_chat}
+    - {text: "how many people used the coworking space this week", instead: mlai-points}
+actions:
+  - name: attendee_report
+    description: Report registration/check-in counts for recent or specific events.
+    params:
+      event_count: {type: integer, description: "How many recent events (default 3)."}
+      event_date: {type: string, description: "Specific event date if given."}
+  - name: export_attendee_csv
+    description: Same report but explicitly uploading attendee CSV files.
+    params:
+      event_count: {type: integer}
+      event_date: {type: string}
+      include_csv: {type: boolean, description: "Set true."}
 ---
 
 # Luma Events Skill

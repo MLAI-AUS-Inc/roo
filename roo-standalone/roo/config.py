@@ -45,7 +45,9 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = "INFO"
     SKILLS_DIR: str = "skills"
     TIMEZONE: str = "Australia/Melbourne"
-    ROUTER_MODEL: str = "gpt-5.4"
+    # Used by router v2 and the legacy LLM fallback. Override via ROUTER_MODEL
+    # in .env; re-run `scripts/run_routing_eval.py --mode v2` after any change.
+    ROUTER_MODEL: str = "gpt-5.5"
     LINEAR_MEETING_LLM_MODEL: str = "gpt-5.5"
     LINEAR_MEETING_LLM_REASONING_EFFORT: str = "low"
     LINEAR_MEETING_AUTO_CREATE_MIN_CONFIDENCE: float = 0.85

@@ -1,39 +1,51 @@
 ---
 name: content-factory
 description: Generate SEO-optimized blog articles using the Content Factory pipeline
-trigger_keywords:
-  - write me an article
-  - write an article
-  - write article
-  - research the best article
-  - content factory
-  - auto write
-  - write content
-  - generate article
-  - article topic
-  - blog post
-  - target keyword
-  - seo keyword
-  - scaffold
-  - create articles
-  - articles directory
-  - articles page
-  - set up articles
-  - set up blog
-  - create blog page
-  - add blog
-  - scan codebase
-  - scan my codebase
-  - scan repo
-  - scan repository
-  - scan the repo
-  - scan the domain
-  - scan domain
-  - analyze repo
-  - analyse repo
-  - analyze domain
-  - analyse domain
-  - connect to
+routing:
+  use_when: >
+    The user wants NEW website content produced or planned via the Content Factory
+    pipeline: write an SEO article/blog post, research what to write next (topics,
+    keywords), scan a connected repo/domain to set it up, scaffold the blog/articles
+    section, or publish a finished article bundle as a pull request.
+  avoid_when: >
+    Summarising, reviewing, or giving opinions on EXISTING content someone shared.
+    Research that is not aimed at producing site content. GitHub auth problems
+    (github-integration). Vocabulary alone ("article", "blog") is not intent.
+  examples:
+    - {text: "write me an article about how to build an ai agent harness", action: write}
+    - {text: "scan the repo for the domain mlai.au", action: scan}
+    - {text: "what should I write about next for woofya.com.au?", action: research}
+    - {text: "recommend a topic for my next blog post", action: research}
+    - {text: "set up a blog section on my site", action: scaffold}
+    - {text: "publish this article as a PR", action: publish_pr}
+  negative_examples:
+    - {text: "can you summarise this article for me?", instead: respond_in_chat}
+    - {text: "what's the topic for this week's meetup?", instead: respond_in_chat}
+    - {text: "research the best time to post on linkedin", instead: respond_in_chat}
+    - {text: "reconnect github for mlai.au", instead: github-integration}
+actions:
+  - name: scan
+    description: Scan/analyse a connected repo or domain so Content Factory can work with it.
+    params:
+      domain: {type: string, description: "Domain like woofya.com.au if mentioned."}
+  - name: scaffold
+    description: Create the articles/blog infrastructure (directory, listing page) in the repo.
+    params:
+      domain: {type: string}
+  - name: research
+    description: Research what to write — topic discovery, keyword research, next-article recommendations.
+    params:
+      domain: {type: string}
+      topic: {type: string, description: "Seed topic if the user gave one."}
+  - name: write
+    description: Write a new SEO-optimised article/blog post.
+    params:
+      domain: {type: string}
+      topic: {type: string, description: "What the article should be about."}
+  - name: publish_pr
+    description: Publish a finished article bundle as a GitHub pull request (usually a thread follow-up).
+    params:
+      domain: {type: string}
 ---
 
 # Content Factory Skill

@@ -1,28 +1,38 @@
 ---
 name: medhack
 description: Answer questions about the MedHack Frontiers event and run the Guess the Diagnosis game where users diagnose a simulated patient
-trigger_keywords:
-  - medhack
-  - frontiers
-  - diagnosis
-  - announcement
-  - announce
-  - patient
-  - symptoms
-  - clinical case
-  - medical case
-  - examine
-  - investigation
-  - blood test
-  - ecg
-  - imaging
-  - x-ray
-  - ct scan
-  - mri
 priority_channels:
   - medhack-frontiers
 exclusive_channels:
   - medhack-frontiers
+routing:
+  use_when: >
+    In #medhack-frontiers only: questions about the MedHack Frontiers event, playing
+    the Guess the Diagnosis game (asking the simulated patient questions, ordering
+    tests, guessing diagnoses), or admins posting event announcements.
+  avoid_when: >
+    Any other channel. MedHack mentioned as context for something else: finding
+    teammates (connect-users), scheduling/logistics (chat), writing articles about
+    MedHack (content-factory).
+  examples:
+    - {text: "what time does medhack kick off on saturday?", action: event_qa}
+    - {text: "I think the patient has atrial fibrillation", action: game}
+    - {text: "order an ecg for the patient", action: game}
+    - {text: "post an announcement that lunch is ready", action: announce}
+  negative_examples:
+    - {text: "my ecg project needs a teammate, anyone interested in medical AI?", instead: connect-users}
+    - {text: "schedule a meeting with the medhack organisers", instead: respond_in_chat}
+    - {text: "can you write an article about our medhack winners?", instead: content-factory}
+actions:
+  - name: event_qa
+    description: Answer questions about the MedHack Frontiers event (schedule, venue, tickets…).
+  - name: game
+    description: Guess the Diagnosis gameplay — questions to the simulated patient, ordering tests/investigations, or proposing a diagnosis.
+  - name: announce
+    description: Admin — post an announcement for the event.
+    params:
+      title: {type: string}
+      body: {type: string}
 ---
 
 # MedHack Skill

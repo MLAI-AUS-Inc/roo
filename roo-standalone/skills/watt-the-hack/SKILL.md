@@ -1,19 +1,36 @@
 ---
 name: watt-the-hack
 description: Answer questions about the Watt The Hack hackathon (dates, venue, tracks, prizes, schedule, judging, team size, sponsors, FAQ) and let MLAI superusers post announcements to the Watt The Hack website. The default assistant for the #watt-the-hack channel.
-trigger_keywords:
-  - watt the hack
-  - watt
-  - grid guardian
-  - base44
-  - announcement
-  - announce
-  - post announcement
-  - create announcement
 priority_channels:
   - watt-the-hack
 exclusive_channels:
   - watt-the-hack
+routing:
+  use_when: >
+    In #watt-the-hack only: the DEFAULT assistant for that channel. Questions about
+    the hackathon (dates, venue, tracks like Pitching/Grid Guardian/Smart Home,
+    prizes, schedule, judging, teams, sponsors, FAQ), and organisers posting
+    announcements to the participant website.
+  avoid_when: >
+    Any other channel. Rewriting announcement TEXT (tone-of-voice). Checking MLAI
+    points or writing content — those belong to their own skills even in this channel.
+  examples:
+    - {text: "announce that judging starts at 5pm", action: announce}
+    - {text: "post an announcement: pizza in the atrium", action: announce}
+    - {text: "when is the watt the hack final demo?", action: event_qa}
+    - {text: "how big can teams be?", action: event_qa}
+    - {text: "what's the grid guardian track about?", action: event_qa}
+  negative_examples:
+    - {text: "rewrite this announcement in our tone of voice", instead: tone-of-voice}
+    - {text: "who should I talk to about hackathon sponsorship announcements?", instead: connect-users}
+actions:
+  - name: event_qa
+    description: Answer questions about the Watt The Hack event from the knowledge base.
+  - name: announce
+    description: Publish an announcement to the Watt The Hack website (superusers only).
+    params:
+      title: {type: string}
+      body: {type: string}
 ---
 
 # Watt The Hack Skill

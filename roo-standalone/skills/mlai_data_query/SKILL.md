@@ -1,23 +1,36 @@
 ---
 name: mlai-data-query
 description: Query curated read-only MLAI backend data resources through the permissioned data access API
-trigger_keywords:
-  - data catalog
-  - database catalog
-  - query data
-  - data resource
-  - data resources
-  - vibe raising companies
-  - startup update drafts
-  - monthly update drafts
-  - content factory jobs
-  - content factory runs
-  - linear issues
-  - gmail messages
-  - slack messages
-  - github integrations
-  - financial records
 requires_auth: true
+routing:
+  use_when: >
+    The user wants to READ curated MLAI backend data: counts, lists, or
+    aggregates over Vibe Raising companies, startup/monthly update drafts,
+    Content Factory jobs/runs, synced Linear issues/projects, Gmail/Slack sync
+    metadata, GitHub integration status, financial records, organizations, or
+    coworking booking records — or asks what data/tables/resources Roo can query.
+  avoid_when: >
+    CREATING Linear issues (linear-meeting-actions). Luma event attendance
+    (luma-events). Personal points/coworking bookings (mlai-points). Questions
+    about files the user uploaded (chat). Roo never writes data or runs SQL.
+  examples:
+    - {text: "How many Vibe Raising companies do we have?", action: query}
+    - {text: "Which Content Factory jobs failed this week?", action: query}
+    - {text: "Show Linear issues synced for this startup", action: query}
+    - {text: "What data resources can Roo query?", action: catalog}
+  negative_examples:
+    - {text: "create a linear ticket from this thread", instead: linear-meeting-actions}
+    - {text: "how many people registered for the AI safety event?", instead: luma-events}
+    - {text: "how busy was the coworking space in may?", instead: mlai-points}
+actions:
+  - name: catalog
+    description: List the data resources/tables Roo is allowed to query.
+  - name: query
+    description: Run a read-only list/count/aggregate query against one resource.
+    params:
+      resource: {type: string, description: "Exact resource key if known (e.g. vibe_raising_companies, content_factory_jobs, linear_issues)."}
+      operation: {type: string, enum: [list, count, aggregate], description: "Query type."}
+      limit: {type: integer, description: "Max rows if the user asked for a specific number."}
 ---
 
 # MLAI Data Query Skill

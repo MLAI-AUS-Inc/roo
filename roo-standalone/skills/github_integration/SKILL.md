@@ -1,21 +1,37 @@
 ---
 name: github-integration
 description: Interact with the user's GitHub repositories (scan, analyze, access).
-trigger_keywords:
-  - connect github
-  - github integration
-  - reconnect github
-  - reconnect to github
-  - authenticate with github
-  - authenticate github
-  - connect github again
-  - github auth
-  - github access
 requires_auth: true
 parameters:
   - repo_name: The name of the repository to scan (e.g. owner/project).
   - domain: The domain associated with the project (optional).
   - action: One of reconnect or scan.
+routing:
+  use_when: >
+    The user's GitHub connection/auth is the subject: connecting or reconnecting
+    GitHub, authorising access, fixing broken GitHub integration, linking an account.
+  avoid_when: >
+    Scanning a repo/domain to produce content (content-factory). Questions about
+    code or git itself. "Connect me with someone" (connect-users).
+  examples:
+    - {text: "reconnect github for mlai.au", action: reconnect}
+    - {text: "I need to reauthorise github", action: reconnect}
+    - {text: "github access is broken for studynash.co, can you fix it?", action: reconnect}
+    - {text: "link my github account", action: reconnect}
+  negative_examples:
+    - {text: "scan the repo for the domain mlai.au", instead: content-factory}
+    - {text: "connect me with someone who writes blog content", instead: connect-users}
+actions:
+  - name: reconnect
+    description: (Re)connect or re-authorise the user's GitHub integration.
+    params:
+      domain: {type: string, description: "Related domain if mentioned."}
+      repo_name: {type: string, description: "owner/repo if mentioned."}
+  - name: scan
+    description: Scan a connected repository via the GitHub integration.
+    params:
+      domain: {type: string}
+      repo_name: {type: string}
 ---
 
 # GitHub Integration Skill
