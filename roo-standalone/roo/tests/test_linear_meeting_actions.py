@@ -603,8 +603,9 @@ async def test_linear_meeting_candidate_extraction_chunks_sources(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_linear_meeting_executor_creates_issue_from_parsed_file_source(monkeypatch):
+async def test_linear_meeting_executor_queues_review_from_parsed_file_source(monkeypatch):
     executor = SkillExecutor()
+    executor_module.LINEAR_MEETING_PENDING_ACTIONS.clear()
     created_inputs = []
 
     async def fake_source_result(**kwargs):
@@ -615,7 +616,9 @@ async def test_linear_meeting_executor_creates_issue_from_parsed_file_source(mon
                     text="Sam will update onboarding docs in Alpha.",
                     kind="pdf",
                 )
-            ]
+            ],
+            files_seen=1,
+            files_parsed=1,
         )
 
     async def fake_candidates_from_sources(**kwargs):
@@ -701,13 +704,21 @@ async def test_linear_meeting_executor_creates_issue_from_parsed_file_source(mon
         event_files=[{"id": "F1", "name": "meeting.pdf"}],
     )
 
+    # Extraction path is "review first": nothing is auto-created; the fully-resolved
+    # issue is stashed for Slack Approve/Reject instead.
     assert "data" in result, result
-    assert result["data"]["created_count"] == 1
-    assert created_inputs[0]["title"] == "Update onboarding docs"
-    assert created_inputs[0]["assignee_id"] == "user-1"
-    assert created_inputs[0]["project_id"] == "project-1"
-    assert created_inputs[0]["label_ids"] == ["label-1"]
-    assert "meeting.pdf page 3" in created_inputs[0]["description"]
+    assert result["data"]["created_count"] == 0
+    assert result["data"]["review_count"] == 1
+    assert created_inputs == []
+
+    pending = list(executor_module.LINEAR_MEETING_PENDING_ACTIONS.values())
+    assert len(pending) == 1
+    issue_input = pending[0]["issue_input"]
+    assert issue_input["title"] == "Update onboarding docs"
+    assert issue_input["assignee_id"] == "user-1"
+    assert issue_input["project_id"] == "project-1"
+    assert issue_input["label_ids"] == ["label-1"]
+    assert "meeting.pdf page 3" in issue_input["description"]
 
 
 @pytest.mark.asyncio
@@ -978,6 +989,7 @@ async def test_linear_direct_issue_command_reports_ambiguous_assignee(monkeypatc
 @pytest.mark.asyncio
 async def test_linear_meeting_executor_creates_project_update_when_requested(monkeypatch):
     executor = SkillExecutor()
+    executor_module.LINEAR_MEETING_PENDING_ACTIONS.clear()
     created_updates = []
     created_issues = []
 
@@ -1088,7 +1100,12 @@ async def test_linear_meeting_executor_creates_project_update_when_requested(mon
     )
 
     assert created_updates == [{"project_id": "project-1", "body": "Meeting update", "health": "onTrack"}]
-    assert created_issues[0]["title"] == "Validate the bounty model with VCs"
+    # Project updates are still posted immediately when explicitly requested, but the
+    # extracted action item is queued for review rather than auto-created.
+    assert created_issues == []
+    assert result["data"]["review_count"] == 1
+    pending = list(executor_module.LINEAR_MEETING_PENDING_ACTIONS.values())
+    assert any(p["issue_input"]["title"] == "Validate the bounty model with VCs" for p in pending)
     assert "Created Linear project update" in result["message"]
 
 
@@ -1546,3 +1563,211 @@ async def test_linear_meeting_slack_reject_clears_contextual_issue(monkeypatch):
     assert response.status_code == 200
     assert pending_id not in live_executor_module.LINEAR_MEETING_PENDING_ACTIONS
     assert posted_messages[0]["text"] == "Skipped Linear issue creation for: Decide event positioning"
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("if you're not sure who to assign to, assign to Dr Sam Donegan", "Dr Sam Donegan"),
+        ("extract tasks and add to linear; if unsure, assign to Jane Doe", "Jane Doe"),
+        ("turn these notes into tasks. Default assignee: Sam Donegan", "Sam Donegan"),
+        ("add these to linear and assign to the correct people", None),
+    ],
+)
+def test_linear_meeting_default_assignee_prepass_extracts_fallback(text, expected):
+    executor = SkillExecutor()
+    params = executor._apply_linear_meeting_default_assignee_prepass(text, {})
+    assert params.get("default_assignee_hint") == expected
+
+
+@pytest.mark.asyncio
+async def test_linear_meeting_command_with_file_uses_extraction_not_direct_path(monkeypatch):
+    """Regression for the "one task about assigning the tasks" bug.
+
+    A direct-looking command ("add ... tasks ... linear") with an attached file must
+    extract action items from the file (not parse the command into a single issue), map
+    every task to the explicitly named project, fall back to the named assignee when an
+    owner is unclear, and queue everything for review.
+    """
+    executor = SkillExecutor()
+    executor_module.LINEAR_MEETING_PENDING_ACTIONS.clear()
+    created_inputs = []
+
+    async def fake_source_result(**kwargs):
+        return SourceParseResult(
+            sources=[
+                ParsedSource(
+                    label="MLAI Committee Meeting.pdf",
+                    text="Committee discussed the venue, sponsors, and the budget.",
+                    kind="pdf",
+                )
+            ],
+            files_seen=1,
+            files_parsed=1,
+        )
+
+    async def fake_candidates_from_sources(**kwargs):
+        assert kwargs["sources"][0].label == "MLAI Committee Meeting.pdf"
+        return [
+            {"title": "Confirm the venue booking", "owner_hint": "Sonia", "confidence": 0.9,
+             "source_label": "MLAI Committee Meeting.pdf"},
+            {"title": "Draft the sponsorship deck", "owner_hint": "the team", "confidence": 0.9,
+             "source_label": "MLAI Committee Meeting.pdf"},
+        ]
+
+    async def fail_direct(**kwargs):
+        raise AssertionError("direct-issue path must not run when a file was parsed")
+
+    team = {"id": "team-1", "key": "MLA", "name": "MLAI"}
+    sonia = {"id": "user-sonia", "name": "Sonia", "displayName": "Sonia", "email": "sonia@example.com"}
+    sam = {"id": "user-sam", "name": "Sam Donegan", "displayName": "Dr Sam Donegan", "email": "sam@example.com"}
+    project = {
+        "id": "project-mlai",
+        "name": "MLAI Core",
+        "teams": {"nodes": [team]},
+        "members": {"nodes": [sonia, sam]},
+    }
+
+    class FakeClient:
+        async def list_teams(self):
+            return [team]
+
+        async def list_users(self):
+            return [sonia, sam]
+
+        async def list_active_projects(self):
+            return [project]
+
+        async def list_issue_labels(self):
+            return []
+
+        async def list_recent_open_issues(self):
+            return []
+
+        async def create_issue(self, **kwargs):
+            created_inputs.append(kwargs)
+            return {"identifier": "MLA-1", "title": kwargs["title"]}
+
+    class FakeSkill:
+        def get_client_class(self, name):
+            return FakeClient
+
+    monkeypatch.setattr(
+        executor_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            LINEAR_DEFAULT_TEAM=None,
+            LINEAR_MEETING_AUTO_CREATE_MIN_CONFIDENCE=0.85,
+            LINEAR_MEETING_UNCERTAIN_MIN_CONFIDENCE=0.65,
+        ),
+    )
+    monkeypatch.setattr(executor, "_build_linear_meeting_source_result", fake_source_result)
+    monkeypatch.setattr(executor, "_extract_linear_meeting_candidates_from_sources", fake_candidates_from_sources)
+    monkeypatch.setattr(executor, "_extract_linear_direct_issue_candidates", fail_direct)
+
+    result = await executor._execute_linear_meeting_actions(
+        skill=FakeSkill(),
+        text=(
+            "here's the committee meeting notes, please add them to the linear project "
+            "called 'MLAI Core' and assign the tasks to the correct people. if you're not "
+            "sure who to assign to, assign to Dr Sam Donegan"
+        ),
+        params={},
+        user_id="U1",
+        channel_id="C1",
+        thread_ts="1.1",
+        thread_history=[],
+        event_files=[{"id": "F1", "name": "MLAI Committee Meeting.pdf"}],
+    )
+
+    # Nothing auto-created; both extracted tasks are queued for review.
+    assert result["data"]["created_count"] == 0
+    assert result["data"]["review_count"] == 2
+    assert created_inputs == []
+
+    pending = {
+        p["issue_input"]["title"]: p["issue_input"]
+        for p in executor_module.LINEAR_MEETING_PENDING_ACTIONS.values()
+    }
+    assert set(pending) == {"Confirm the venue booking", "Draft the sponsorship deck"}
+    # Every task mapped to the explicitly named project and its team.
+    for issue_input in pending.values():
+        assert issue_input["project_id"] == "project-mlai"
+        assert issue_input["team_id"] == "team-1"
+    # Clear owner kept; vague owner fell back to the named default assignee.
+    assert pending["Confirm the venue booking"]["assignee_id"] == "user-sonia"
+    assert pending["Draft the sponsorship deck"]["assignee_id"] == "user-sam"
+
+
+@pytest.mark.asyncio
+async def test_linear_meeting_unmatched_owner_skipped_without_fallback(monkeypatch):
+    """Without a fallback assignee, a task whose owner can't be resolved is skipped
+    (not reviewed). The fallback is what rescues it (see the test above)."""
+    executor = SkillExecutor()
+    executor_module.LINEAR_MEETING_PENDING_ACTIONS.clear()
+    created_inputs = []
+
+    async def fake_source_result(**kwargs):
+        return SourceParseResult(
+            sources=[ParsedSource(label="notes.pdf", text="The team will sort it out.", kind="pdf")],
+            files_seen=1,
+            files_parsed=1,
+        )
+
+    async def fake_candidates_from_sources(**kwargs):
+        return [{"title": "Sort out logistics", "owner_hint": "the team", "confidence": 0.9}]
+
+    team = {"id": "team-1", "key": "MLA", "name": "MLAI"}
+    project = {"id": "project-mlai", "name": "MLAI Core", "teams": {"nodes": [team]}, "members": {"nodes": []}}
+
+    class FakeClient:
+        async def list_teams(self):
+            return [team]
+
+        async def list_users(self):
+            return [{"id": "user-sonia", "name": "Sonia", "displayName": "Sonia", "email": "sonia@example.com"}]
+
+        async def list_active_projects(self):
+            return [project]
+
+        async def list_issue_labels(self):
+            return []
+
+        async def list_recent_open_issues(self):
+            return []
+
+        async def create_issue(self, **kwargs):
+            created_inputs.append(kwargs)
+            return {"identifier": "MLA-1", "title": kwargs["title"]}
+
+    class FakeSkill:
+        def get_client_class(self, name):
+            return FakeClient
+
+    monkeypatch.setattr(
+        executor_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            LINEAR_DEFAULT_TEAM=None,
+            LINEAR_MEETING_AUTO_CREATE_MIN_CONFIDENCE=0.85,
+            LINEAR_MEETING_UNCERTAIN_MIN_CONFIDENCE=0.65,
+        ),
+    )
+    monkeypatch.setattr(executor, "_build_linear_meeting_source_result", fake_source_result)
+    monkeypatch.setattr(executor, "_extract_linear_meeting_candidates_from_sources", fake_candidates_from_sources)
+
+    result = await executor._execute_linear_meeting_actions(
+        skill=FakeSkill(),
+        text="add these notes to the linear project 'MLAI Core' as tasks",
+        params={},
+        user_id="U1",
+        channel_id="C1",
+        thread_ts="1.1",
+        thread_history=[],
+        event_files=[{"id": "F1", "name": "notes.pdf"}],
+    )
+
+    assert result["data"]["created_count"] == 0
+    assert result["data"]["review_count"] == 0
+    assert result["data"]["skipped_count"] == 1
+    assert created_inputs == []
