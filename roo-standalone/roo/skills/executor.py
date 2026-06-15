@@ -1638,6 +1638,7 @@ Keep the response concise but informative."""
         settings = get_settings()
         params = self._apply_linear_meeting_project_hint_prepass(text, params)
         params = self._apply_linear_meeting_owner_hint_prepass(text, params)
+        params = self._apply_linear_meeting_default_assignee_prepass(text, params)
         direct_issue_request = self._is_linear_direct_issue_request(text, params)
         thread_reference_request = self._is_linear_thread_reference_request(text, params)
         source_result = await self._build_linear_meeting_source_result(
@@ -1650,7 +1651,14 @@ Keep the response concise but informative."""
             exclude_current_message=thread_reference_request,
         )
         transcript = source_result.combined_text()
-        if len(transcript.split()) < 8 and not direct_issue_request:
+        # When meeting-note files (PDF/DOCX/text/image) were parsed, always extract
+        # action items from those sources. Only treat the message as a one-off "direct
+        # issue" command when no document was attached — otherwise a phrase like
+        # "add these to linear as tasks" hijacks the command path and the attached file
+        # is parsed but never used.
+        has_document_sources = source_result.files_parsed > 0
+        use_direct_issue_path = direct_issue_request and not has_document_sources
+        if len(transcript.split()) < 8 and not use_direct_issue_path:
             warning_suffix = self._format_linear_meeting_source_warnings(source_result.warnings)
             return {
                 "message": (
@@ -1678,7 +1686,7 @@ Keep the response concise but informative."""
                 "message": f"I couldn't read Linear context yet: {detail}"
             }
 
-        if direct_issue_request:
+        if use_direct_issue_path:
             candidates = await self._extract_linear_direct_issue_candidates(
                 text=text,
                 params=params,
@@ -1723,6 +1731,16 @@ Keep the response concise but informative."""
             for label in labels
             if self._normalize_match_text(label.get("name")) == "meetingaction"
         ]
+
+        # Resolve the optional fallback assignee once ("if unsure, assign to X").
+        # Used to rescue candidates whose own owner can't be confidently matched so
+        # they remain assignable instead of being dropped.
+        default_assignee_match: Optional[dict[str, Any]] = None
+        default_assignee_hint = str(params.get("default_assignee_hint") or "").strip()
+        if default_assignee_hint:
+            resolved_default = self._match_linear_meeting_owner(default_assignee_hint, users)
+            if resolved_default.get("user"):
+                default_assignee_match = resolved_default
 
         created: list[dict[str, Any]] = []
         review_needed: list[dict[str, Any]] = []
@@ -1769,6 +1787,16 @@ Keep the response concise but informative."""
                 continue
 
             owner_match = self._match_linear_meeting_owner(candidate.get("owner_hint"), users)
+            if (
+                float(owner_match.get("confidence") or 0.0) < uncertain_threshold
+                and default_assignee_match
+                and default_assignee_match.get("user")
+            ):
+                owner_match = {
+                    "user": default_assignee_match["user"],
+                    "confidence": float(default_assignee_match.get("confidence") or 0.9),
+                    "reason": "Fallback assignee",
+                }
             project_match = self._match_linear_meeting_project(
                 candidate,
                 projects,
@@ -1797,6 +1825,15 @@ Keep the response concise but informative."""
             )
             if candidate.get("contextual_review_only") and decision == "create":
                 decision = "review"
+            # Extraction path is "review first": never auto-create. Surface every
+            # creatable candidate for Slack Approve/Reject; only drop duplicates and
+            # items we couldn't resolve enough to create on approval (no team, or no
+            # assignee even after the fallback).
+            if not use_direct_issue_path and decision != "duplicate":
+                if owner_match.get("user") and team_match.get("team"):
+                    decision = "review"
+                else:
+                    decision = "skip"
 
             issue_input = self._build_linear_meeting_issue_input(
                 candidate=candidate,
@@ -1981,6 +2018,34 @@ Keep the response concise but informative."""
         if not owner_hint:
             return params
         return {**params, "owner_hint": owner_hint}
+
+    def _apply_linear_meeting_default_assignee_prepass(
+        self,
+        text: str,
+        params: dict,
+    ) -> dict:
+        if params.get("default_assignee_hint"):
+            return params
+        default_assignee = self._extract_linear_meeting_default_assignee_from_text(text)
+        if not default_assignee:
+            return params
+        return {**params, "default_assignee_hint": default_assignee}
+
+    def _extract_linear_meeting_default_assignee_from_text(self, text: str) -> Optional[str]:
+        """Parse a fallback assignee like "if you're not sure who to assign to, assign to X"."""
+        value = str(text or "").strip()
+        person = r'(<@[A-Z0-9]+>|@?[A-Z][\w.\-]*(?:\s+[A-Z][\w.\-]*){0,3})'
+        patterns = (
+            rf'\bif\s+(?:you(?:\'re|\s+are)?\s+)?(?:not\s+sure|unsure|in\s+doubt|you\s+don\'?t\s+know)\b[^.!?]*?\bassign(?:ed)?\b[^.!?]*?\bto\s+{person}',
+            rf'\bif\s+(?:it\'?s\s+)?(?:unclear|unknown|ambiguous)\b[^.!?]*?\bassign(?:ed)?\b[^.!?]*?\bto\s+{person}',
+            rf'\b(?:otherwise|by\s+default|as\s+a\s+fallback|default(?:ing)?)\b[^.!?]*?\bassign(?:ed)?\b[^.!?]*?\bto\s+{person}',
+            rf'\b(?:default|fallback)\s+assignee\s*[:\-]?\s*{person}',
+        )
+        for pattern in patterns:
+            match = re.search(pattern, value, flags=re.IGNORECASE)
+            if match:
+                return self._clean_linear_meeting_owner_hint(match.group(1))
+        return None
 
     def _extract_linear_meeting_project_hint_from_text(self, text: str) -> Optional[str]:
         value = str(text or "").strip()
@@ -2412,6 +2477,7 @@ Current date: {get_current_date().isoformat()}
 Source label: {source_label or "Slack thread"}
 Project hint: {params.get("project_hint") or "none"}
 Team hint: {params.get("team_hint") or "none"}
+Default assignee if the owner is unclear: {params.get("default_assignee_hint") or "none"}
 
 Known Linear projects: {project_names or "none loaded"}
 Known Linear users: {user_names or "none loaded"}
@@ -2437,7 +2503,8 @@ Return JSON only with this shape:
   ]
 }}
 
-Only include actionable work someone agreed to do. Do not include decisions, FYIs, vague follow-ups, or the user's instruction to create Linear tasks/project updates."""
+Only include actionable work someone agreed to do. Do not include decisions, FYIs, vague follow-ups, or the user's instruction to create Linear tasks/project updates.
+If an action item has no clear owner and a default assignee is given above, set its owner_hint to that default assignee."""
         settings = get_settings()
         response = await chat(
             [
@@ -3412,7 +3479,7 @@ Chunk {index} source: {label}
             if lines:
                 lines.append("")
             lines.append(f"{len(review_needed)} action item{'s' if len(review_needed) != 1 else ''} need approval:")
-            for item in review_needed[:10]:
+            for item in review_needed[:20]:
                 lines.append(
                     f"- {item['title']} -> {item['project']} / {item['assignee']} "
                     f"({item['confidence']:.0%}, {item.get('source', 'Slack thread')})"
@@ -3439,7 +3506,7 @@ Chunk {index} source: {label}
         blocks: list[dict[str, Any]] = [
             {"type": "section", "text": {"type": "mrkdwn", "text": message[:3000]}}
         ]
-        for item in review_needed[:8]:
+        for item in review_needed[:20]:
             pending_id = item["pending_id"]
             summary = (
                 f"*{item['title']}*\n"
