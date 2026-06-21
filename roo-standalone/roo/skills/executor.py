@@ -57,20 +57,23 @@ POINTS_SUPER_ADMIN_SLACK_ID = "U05QPB483K9"
 FULL_POINTS_ADMIN_ROLES = {"admin", "committee", "portfolio_lead"}
 COWORKING_REPORT_ROLES = {*FULL_POINTS_ADMIN_ROLES, "partner"}
 LINEAR_MEETING_PENDING_ACTIONS: dict[str, dict[str, Any]] = {}
+# Pack ids are opaque and kept stable; the id number no longer matches the
+# points it grants (points were doubled for the same price). Must stay in sync
+# with mlai-backend roo/services.py ROO_TOPUP_PACKS.
 ROO_TOPUP_PACKS = {
     "topup_5": {
-        "points": 5,
-        "label": "5 Top-up Roo Points",
+        "points": 10,
+        "label": "10 Top-up Roo Points",
         "price": "A$19.99",
     },
     "topup_10": {
-        "points": 10,
-        "label": "10 Top-up Roo Points",
+        "points": 20,
+        "label": "20 Top-up Roo Points",
         "price": "A$36.99",
     },
     "topup_25": {
-        "points": 25,
-        "label": "25 Top-up Roo Points",
+        "points": 50,
+        "label": "50 Top-up Roo Points",
         "price": "A$63.99",
     },
 }
@@ -6656,7 +6659,7 @@ Chunk {index} source: {label}
             return ROO_TOPUP_PACK_BY_POINTS.get(amount), amount
 
         text_lower = self._normalize_points_routing_text(text)
-        exact_pack = re.search(r"\btopup[_\s-]*(5|10|25)\b", text_lower)
+        exact_pack = re.search(r"\btopup[_\s-]*(10|20|50)\b", text_lower)
         if exact_pack:
             amount = int(exact_pack.group(1))
             return ROO_TOPUP_PACK_BY_POINTS[amount], None
@@ -8134,7 +8137,7 @@ Chunk {index} source: {label}
             if not pack_id:
                 if unsupported_amount is None:
                     return self._topup_pack_list_message()
-                return "I can only help with these fixed top-up packs right now: 5, 10, or 25 Top-up Roo Points."
+                return "I can only help with these fixed top-up packs right now: 10, 20, or 50 Top-up Roo Points."
 
             purchase_from = {"source": "slack"}
             if channel_id:
