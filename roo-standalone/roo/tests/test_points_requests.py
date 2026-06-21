@@ -688,9 +688,9 @@ async def test_topup_points_missing_pack_lists_fixed_packs(monkeypatch):
     )
 
     assert "Available Top-up Roo Points packs" in result
-    assert "5 Top-up Roo Points - A$19.99" in result
-    assert "10 Top-up Roo Points - A$36.99" in result
-    assert "25 Top-up Roo Points - A$63.99" in result
+    assert "10 Top-up Roo Points - A$19.99" in result
+    assert "20 Top-up Roo Points - A$36.99" in result
+    assert "50 Top-up Roo Points - A$63.99" in result
     assert "price per point" not in result.lower()
 
 
@@ -715,7 +715,7 @@ async def test_topup_points_unsupported_pack_is_rejected(monkeypatch):
         skill=SimpleNamespace(name="mlai-points"),
     )
 
-    assert "5, 10, or 25 Top-up Roo Points" in result
+    assert "10, 20, or 50 Top-up Roo Points" in result
 
 
 @pytest.mark.asyncio
@@ -746,7 +746,7 @@ async def test_topup_points_valid_pack_creates_purchase(monkeypatch):
     assert "do not count toward lifetime earned contribution" in result
     assert client.created == {
         "slack_user_id": "U123",
-        "pack_id": "topup_10",
+        "pack_id": "topup_5",
         "points_amount": None,
         "purchase_from": {
             "source": "slack",
@@ -794,8 +794,8 @@ async def test_topup_points_balance_cap_message_is_clear(monkeypatch):
     result = await executor._handle_points_action(
         client=BalanceCapTopupPurchaseClient(),
         action="topup_points",
-        params={"points": 5},
-        text="topup 5 points",
+        params={"points": 10},
+        text="topup 10 points",
         user_id="U123",
         channel_id="C123",
         thread_ts="111.222",
