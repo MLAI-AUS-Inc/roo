@@ -17,6 +17,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY roo/ ./roo/
 COPY skills/ ./skills/
 COPY ops/ ./ops/
+COPY bridge/ ./bridge/
 
 EXPOSE 8000
 

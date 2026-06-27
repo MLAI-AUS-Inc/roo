@@ -50,8 +50,24 @@ cd roo-standalone
 cp bridge/.env.example .env   # then fill it in (or merge into your existing .env)
 uvicorn bridge.main:app --host 0.0.0.0 --port 8100
 ```
-Health: `GET /healthz`. On the droplet, run it as its own systemd unit
-(`slack-bridge.service`) behind nginx, separate from Roo.
+Health: `GET /healthz`. No public port is needed — the bridge only makes
+outbound calls (both sides poll), so there are no inbound webhooks to expose.
+
+### 3. Deploy on the droplet (Docker)
+Roo runs via Docker Compose, so the bridge ships the same way — its own
+container in its own Compose project, independent of Roo's deploy:
+```bash
+cd roo-standalone
+docker compose -f docker-compose.bridge.yml up -d --build
+```
+To have systemd supervise it (mirroring `ops/docker-health-watchdog.service.example`):
+```bash
+sudo cp ops/slack-bridge.service.example /etc/systemd/system/slack-bridge.service
+# edit WorkingDirectory if your deploy dir differs from /root/roo/roo-standalone
+sudo systemctl daemon-reload && sudo systemctl enable --now slack-bridge
+```
+Because it's a separate Compose project (`name: slack-bridge`), Roo's regular
+`docker compose up -d --remove-orphans` deploy never starts or removes it.
 
 ## v1 scope and limitations
 - **Both sides poll**, not real-time. Expect a few seconds of latency
