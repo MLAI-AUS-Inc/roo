@@ -200,11 +200,18 @@ class Relay:
         return msg.get("username") or (msg.get("bot_profile", {}) or {}).get("name") or "bot"
 
     def _dst_thread_ts(self, src_team: str, src_channel: str, msg: Dict[str, Any]) -> Optional[str]:
+        """Map a reply's parent to its counterpart on the destination side.
+
+        The parent may have been sent FROM this side (forward map) or RECEIVED on
+        this side (reverse map), so check both directions."""
         thread_ts = msg.get("thread_ts")
         if not thread_ts or thread_ts == msg.get("ts"):
             return None
         dst = self.store.dst_for(src_team, src_channel, thread_ts)
-        return dst[2] if dst else None
+        if dst:
+            return dst[2]
+        src = self.store.src_for(src_team, src_channel, thread_ts)
+        return src[2] if src else None
 
     def _allow_post(self) -> bool:
         """Circuit breaker: never let a loop bug flood the channels."""

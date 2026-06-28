@@ -45,6 +45,9 @@ class BridgeSettings(BaseSettings):
 
     # --- Behaviour ---
     POLL_SECONDS: float = 5.0
+    # Thread replies are swept by re-scanning recent threads each poll; replies
+    # on threads whose parent is older than this window are not picked up.
+    THREAD_SWEEP_SECONDS: float = 3 * 24 * 3600
     BRIDGE_DELIVERY_POLL_SECONDS: float = 2.0
     BRIDGE_MAX_DELIVERY_ATTEMPTS: int = 5
     BRIDGE_DB_PATH: str = "data/slack_bridge.db"

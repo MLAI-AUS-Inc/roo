@@ -1,19 +1,19 @@
 """
-Channel poll loop — shared by both sides.
+Channel poll loop — shared by every pair side.
 
-Neither side uses a webhook: the MLAI side is polled with Roo's bot token, the
-S&C side with Sam's web session. Both poll conversations.history for new
-messages (and conversations.replies for active threads) and hand each message
-to a relay handler. A high-water mark (newest ts seen) is persisted in the kv
-store so restarts neither replay nor miss.
+Each bridged channel is polled with its workspace's bot token. Two things are
+tracked, because Slack surfaces them differently:
 
-The S&C poll is the deliberate v1 substitute for the web client's WebSocket;
-the clean upgrade is to swap that side's loop for a `client.userBoot` + WS
-listener. The relay handlers don't care where a message comes from.
+  * New top-level messages — conversations.history(oldest=hwm). The hwm advances
+    past everything processed, so we never replay or miss a root message.
+  * New thread replies — these do NOT appear in conversations.history, and a
+    reply can land on a parent that is OLDER than the hwm (so the parent is never
+    returned by the oldest=hwm query). So we run a separate "thread sweep": each
+    poll re-scans recent history for any thread whose latest_reply is newer than
+    a reply high-water mark, and drains those replies via conversations.replies.
 
-Behave like a real client: modest interval, cached user lookups, honour rate
-limits — anti-abuse heuristics invalidate the S&C session if it looks like a
-scraper.
+Both marks are persisted in the kv store so restarts neither replay nor miss.
+A delivery worker (below) drains the inbound queue the handlers fill.
 """
 import asyncio
 import time
@@ -21,6 +21,10 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 Handler = Callable[[Dict[str, Any]], Awaitable[None]]
 ErrorBackoff = Callable[[Exception], float]
+
+# Replies on threads whose parent is older than this are not swept (keeps the
+# per-poll scan bounded). Replies almost always arrive well within this window.
+DEFAULT_THREAD_SWEEP_SECONDS = 3 * 24 * 3600
 
 
 async def channel_poll_loop(
@@ -33,21 +37,29 @@ async def channel_poll_loop(
     store,
     poll_seconds: float,
     on_error: Optional[ErrorBackoff] = None,
+    thread_sweep_seconds: float = DEFAULT_THREAD_SWEEP_SECONDS,
 ) -> None:
+    reply_key = f"{hwm_key}:replies"
+
     # On first ever run, start from "now" so we don't replay history.
     last_ts = store.get_kv(hwm_key)
     if last_ts is None:
         last_ts = f"{time.time():.6f}"
         store.set_kv(hwm_key, last_ts)
+        store.set_kv(reply_key, last_ts)
         print(f"{label} ingest starting fresh from {last_ts}")
     else:
+        if store.get_kv(reply_key) is None:  # existing install, new reply mark
+            store.set_kv(reply_key, last_ts)
         print(f"{label} ingest resuming from {last_ts}")
 
     poll = max(1.0, float(poll_seconds))
 
     while True:
         try:
-            last_ts = await _poll_once(label, client, channel_id, hwm_key, handler, store, last_ts)
+            last_ts = await _poll_once(
+                label, client, channel_id, hwm_key, reply_key, handler, store, last_ts, thread_sweep_seconds
+            )
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -57,51 +69,64 @@ async def channel_poll_loop(
         await asyncio.sleep(poll)
 
 
-async def _poll_once(label, client, channel_id, hwm_key, handler, store, last_ts: str) -> str:
+async def _poll_once(
+    label, client, channel_id, hwm_key, reply_key, handler, store, last_ts: str, sweep_seconds: float
+) -> str:
+    # 1) New top-level messages.
     resp = client.conversations_history(channel=channel_id, oldest=last_ts, limit=200)
     if not resp.get("ok"):
         print(f"⚠️ {label} history not ok: {resp.get('error')}")
         return last_ts
 
-    # History returns newest-first; process chronologically.
-    roots: List[Dict[str, Any]] = list(reversed(resp.get("messages", [])))
+    roots: List[Dict[str, Any]] = list(reversed(resp.get("messages", [])))  # chronological
     high = float(last_ts)
-
     for msg in roots:
         ts = msg.get("ts")
         if ts and float(ts) > float(last_ts):
             await handler(msg)
             high = max(high, float(ts))
-
-        # Thread replies don't appear in history — pull them for active threads.
-        latest_reply = msg.get("latest_reply")
-        if latest_reply and float(latest_reply) > float(last_ts):
-            high = max(high, await _drain_thread(label, client, channel_id, handler, msg, last_ts))
-
     new_hwm = f"{high:.6f}"
     if new_hwm != last_ts:
         store.set_kv(hwm_key, new_hwm)
+
+    # 2) Thread replies — independent of the top-level hwm.
+    await _sweep_threads(label, client, channel_id, reply_key, handler, store, sweep_seconds)
     return new_hwm
 
 
-async def _drain_thread(label, client, channel_id, handler, root, last_ts: str) -> float:
-    high = float(last_ts)
+async def _sweep_threads(label, client, channel_id, reply_key, handler, store, sweep_seconds: float) -> None:
+    """Re-scan recent threads for replies newer than the reply high-water mark."""
+    reply_hwm = float(store.get_kv(reply_key) or 0)
+    oldest = f"{max(0.0, time.time() - sweep_seconds):.6f}"
+    resp = client.conversations_history(channel=channel_id, oldest=oldest, limit=200)
+    if not resp.get("ok"):
+        return
+
+    new_hwm = reply_hwm
+    for msg in resp.get("messages", []):
+        latest_reply = msg.get("latest_reply")
+        if msg.get("reply_count") and latest_reply and float(latest_reply) > reply_hwm:
+            new_hwm = max(new_hwm, await _drain_replies(label, client, channel_id, handler, msg, reply_hwm))
+    if new_hwm > reply_hwm:
+        store.set_kv(reply_key, f"{new_hwm:.6f}")
+
+
+async def _drain_replies(label, client, channel_id, handler, parent, reply_hwm: float) -> float:
+    high = reply_hwm
+    parent_ts = parent.get("thread_ts") or parent.get("ts")
     try:
         replies = client.conversations_replies(
-            channel=channel_id,
-            ts=root.get("thread_ts") or root.get("ts"),
-            oldest=last_ts,
-            limit=200,
+            channel=channel_id, ts=parent_ts, oldest=f"{reply_hwm:.6f}", limit=200
         )
         for r in replies.get("messages", []):
             ts = r.get("ts")
-            # Skip the parent (handled as a root) and anything not new.
-            if not ts or ts == root.get("ts") or float(ts) <= float(last_ts):
+            # Skip the parent itself and anything not newer than the mark.
+            if not ts or ts == parent_ts or float(ts) <= reply_hwm:
                 continue
             await handler(r)
             high = max(high, float(ts))
     except Exception as e:
-        print(f"⚠️ {label} thread drain failed for {root.get('ts')}: {e}")
+        print(f"⚠️ {label} reply drain failed for {parent_ts}: {e}")
     return high
 
 
