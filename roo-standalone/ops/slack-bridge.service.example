@@ -1,0 +1,29 @@
+# Systemd unit for the Slack cross-org bridge (runs the Docker Compose project).
+# Mirrors ops/docker-health-watchdog.service.example — on this droplet systemd
+# supervises Docker rather than running Python on the host.
+#
+# Install:
+#   sudo cp ops/slack-bridge.service.example /etc/systemd/system/slack-bridge.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now slack-bridge
+#
+# Adjust WorkingDirectory to your deploy dir (the GitHub deploy uses /root/roo)
+# and verify the docker path with `which docker`.
+[Unit]
+Description=Roo Slack cross-org bridge
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+WorkingDirectory=/root/roo/roo-standalone
+# Build then run the bridge Compose project in the foreground so systemd
+# supervises it and its logs land in journald.
+ExecStartPre=/usr/bin/docker compose -f docker-compose.bridge.yml build
+ExecStart=/usr/bin/docker compose -f docker-compose.bridge.yml up
+ExecStop=/usr/bin/docker compose -f docker-compose.bridge.yml down
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

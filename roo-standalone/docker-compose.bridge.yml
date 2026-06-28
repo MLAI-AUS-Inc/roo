@@ -1,0 +1,28 @@
+# Slack cross-org bridge — its own Compose project, independent of Roo's stack.
+# Run from roo-standalone/:
+#   docker compose -f docker-compose.bridge.yml up -d --build
+#
+# It is a SEPARATE project (name: slack-bridge), so Roo's regular
+# `docker compose up -d --remove-orphans` deploy never starts or removes it.
+name: slack-bridge
+
+services:
+  slack-bridge:
+    build: .
+    image: roo-slack-bridge:local
+    command: ["uvicorn", "bridge.main:app", "--host", "0.0.0.0", "--port", "8100"]
+    env_file:
+      - .env
+    restart: unless-stopped
+    # No published ports: both sides poll, so there are no inbound webhooks.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8100/healthz', timeout=5).read()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    volumes:
+      - slack-bridge-data:/app/data
+
+volumes:
+  slack-bridge-data:
