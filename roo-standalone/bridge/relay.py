@@ -1,26 +1,29 @@
 """
-Relay — split into capture and delivery for store-and-forward durability.
+Relay — capture + delivery, generalised to many MLAI<->partner channel pairs.
 
-CAPTURE (called by the channel pollers): cheap filtering + enqueue.
-  * capture_from_mlai(msg) / capture_from_snc(msg) — drop non-content subtypes,
-    our own echoes (loop guard), and (optionally) bot messages, then write the
-    raw message to the inbound queue exactly once. Never posts, never blocks on
-    the network — so a delivery problem can't lose a captured message.
+MLAI is the hub. Each pair has a label and two directions:
+  * to_remote — an MLAI message → the partner channel
+  * to_mlai   — a partner message → the MLAI channel
 
-DELIVERY (called by the delivery worker): attribution + post + bookkeeping.
-  * deliver(row) — render the queued message (real name + avatar via
-    chat:write.customize) and post it into the other workspace. On success,
-    record the loop-guard + thread mapping and mark the row delivered. On
-    failure, schedule a retry with backoff; after BRIDGE_MAX_DELIVERY_ATTEMPTS,
-    mark it failed and alert.
+CAPTURE (called by the channel pollers): cheap filtering + enqueue into the
+durable inbound queue. The queue row's `direction` is "<label>:to_remote" or
+"<label>:to_mlai" so delivery knows which pair + way to route it. Capture never
+posts, so a delivery problem can't lose a captured message.
 
-Loop prevention is authoritative via the posted_registry. Edits/deletes are not
-mirrored in poll mode. See SLACK_BRIDGE_PLAN.md.
+DELIVERY (called by the delivery worker): look up the pair, render the message
+(real name + avatar via chat:write.customize), post into the destination, record
+the loop-guard + thread mapping, mark delivered. On failure, retry with backoff;
+give up after BRIDGE_MAX_DELIVERY_ATTEMPTS.
+
+Loop prevention is authoritative via the posted_registry, keyed by (team,
+channel, ts) so it works across all pairs. Edits/deletes are not mirrored in
+poll mode. See SLACK_BRIDGE_PLAN.md.
 """
 import json
 import time
 from collections import deque
-from typing import Any, Dict, Optional
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional
 
 import httpx
 
@@ -29,12 +32,18 @@ from .identity import IdentityResolver
 from .slack import is_auth_error
 from .store import BridgeStore
 
-# Subtypes that represent real content. Everything else (joins, leaves,
-# topic/purpose changes, pins, edits, deletes, ...) is dropped.
 _RELAYABLE_SUBTYPES = {None, "", "bot_message", "file_share", "thread_broadcast", "me_message"}
 
-_MLAI_TO_SNC = "mlai_to_snc"
-_SNC_TO_MLAI = "snc_to_mlai"
+
+@dataclass
+class ResolvedPair:
+    """A pair with live clients + resolved channel IDs (built at startup)."""
+
+    label: str
+    remote_client: Any
+    remote_team: str
+    mlai_channel_id: str
+    remote_channel_id: str
 
 
 class Relay:
@@ -45,14 +54,13 @@ class Relay:
         store: BridgeStore,
         identity: IdentityResolver,
         mlai_client,
-        snc_client,
+        pairs: List[ResolvedPair],
     ):
         self.s = settings
         self.store = store
         self.identity = identity
         self.mlai = mlai_client
-        self.snc = snc_client
-        # Circuit breaker: timestamps of recent bridge posts.
+        self.pairs: Dict[str, ResolvedPair] = {p.label: p for p in pairs}
         self._recent_posts: deque[float] = deque(maxlen=512)
         self._paused = False
         self._last_alert_at = 0.0
@@ -61,17 +69,17 @@ class Relay:
     # capture (pollers → queue)
     # ========================================================================
 
-    async def capture_from_mlai(self, msg: Dict[str, Any]) -> None:
-        # Don't capture toward S&C if that side isn't configured (nothing could
-        # ever deliver it).
-        if not self.snc:
+    async def capture(self, label: str, to_mlai: bool, msg: Dict[str, Any]) -> None:
+        pair = self.pairs.get(label)
+        if not pair:
             return
-        self._capture(_MLAI_TO_SNC, self.s.MLAI_TEAM_ID or "", self.s.MLAI_CHANNEL_ID, msg)
+        if to_mlai:
+            src_team, src_channel = pair.remote_team, pair.remote_channel_id
+            direction = f"{label}:to_mlai"
+        else:
+            src_team, src_channel = self.s.MLAI_TEAM_ID or "", pair.mlai_channel_id
+            direction = f"{label}:to_remote"
 
-    async def capture_from_snc(self, msg: Dict[str, Any]) -> None:
-        self._capture(_SNC_TO_MLAI, self.s.SNC_TEAM_ID or "", self.s.SNC_CHANNEL_ID, msg)
-
-    def _capture(self, direction: str, src_team: str, src_channel: str, msg: Dict[str, Any]) -> None:
         ts = msg.get("ts")
         if not ts or msg.get("subtype") not in _RELAYABLE_SUBTYPES:
             return
@@ -84,7 +92,7 @@ class Relay:
             print(f"📥 captured {direction} {ts}")
 
     # ========================================================================
-    # delivery (worker → other workspace)
+    # delivery (worker → destination workspace)
     # ========================================================================
 
     async def deliver(self, row: Dict[str, Any]) -> None:
@@ -94,18 +102,20 @@ class Relay:
             self.store.mark_failed(row["id"], f"bad payload: {e}")
             return
 
-        if row["direction"] == _MLAI_TO_SNC:
-            src_client, src_team, src_channel = self.mlai, self.s.MLAI_TEAM_ID or "", self.s.MLAI_CHANNEL_ID
-            dst_client, dst_team, dst_channel = self.snc, self.s.SNC_TEAM_ID or "", self.s.SNC_CHANNEL_ID
-            arrow = "➡️  MLAI→S&C"
-        else:
-            src_client, src_team, src_channel = self.snc, self.s.SNC_TEAM_ID or "", self.s.SNC_CHANNEL_ID
-            dst_client, dst_team, dst_channel = self.mlai, self.s.MLAI_TEAM_ID or "", self.s.MLAI_CHANNEL_ID
-            arrow = "⬅️  S&C→MLAI"
-
-        if dst_client is None:
-            self._fail_or_retry(row, Exception("destination not configured"))
+        label, _, way = row["direction"].partition(":")
+        pair = self.pairs.get(label)
+        if not pair:
+            self.store.mark_failed(row["id"], f"unknown pair {label!r}")
             return
+
+        if way == "to_mlai":
+            src_client, src_team, src_channel = pair.remote_client, pair.remote_team, pair.remote_channel_id
+            dst_client, dst_team, dst_channel = self.mlai, self.s.MLAI_TEAM_ID or "", pair.mlai_channel_id
+            arrow = f"⬅️  {label}→MLAI"
+        else:
+            src_client, src_team, src_channel = self.mlai, self.s.MLAI_TEAM_ID or "", pair.mlai_channel_id
+            dst_client, dst_team, dst_channel = pair.remote_client, pair.remote_team, pair.remote_channel_id
+            arrow = f"➡️  MLAI→{label}"
 
         # Circuit breaker — leave the row pending and try again shortly.
         if not self._allow_post():
@@ -197,7 +207,7 @@ class Relay:
         return dst[2] if dst else None
 
     def _allow_post(self) -> bool:
-        """Circuit breaker: never let a loop bug flood both channels."""
+        """Circuit breaker: never let a loop bug flood the channels."""
         now = time.time()
         while self._recent_posts and now - self._recent_posts[0] > 60:
             self._recent_posts.popleft()

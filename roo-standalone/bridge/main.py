@@ -1,12 +1,10 @@
 """
 Bridge service.
 
-A dedicated "Bridge" Slack app is installed in both workspaces; this service
-holds both bot tokens. Store-and-forward design:
-
-  * two channel pollers CAPTURE new messages into the inbound DB queue, and
-  * one delivery worker drains the queue, posting into the other workspace with
-    retries.
+MLAI is the hub. For each pair in BRIDGE_PAIRS the service holds the partner
+workspace's bot token, resolves both channel IDs, and runs two capture pollers
+(MLAI channel + partner channel). A single delivery worker drains the shared
+inbound queue and posts into the destination workspace.
 
 No inbound webhooks; runs as its own process on the droplet, independent of Roo.
 A minimal FastAPI app exposes GET /healthz for nginx/monitoring.
@@ -20,8 +18,8 @@ from fastapi import FastAPI
 from .config import get_bridge_settings
 from .identity import get_resolver
 from .poller import channel_poll_loop, delivery_loop, poll_error_backoff
-from .relay import Relay
-from .slack import make_bot_client, resolve_identity
+from .relay import Relay, ResolvedPair
+from .slack import make_bot_client, resolve_channel_id, resolve_identity
 from .store import get_store
 
 
@@ -32,62 +30,69 @@ async def lifespan(app: FastAPI):
     identity = get_resolver()
 
     print("🌉 Slack bridge starting...")
-    print(f"   MLAI channel: {settings.MLAI_CHANNEL_ID}")
-    print(f"   S&C channel:  {settings.SNC_CHANNEL_ID}")
 
     mlai_client = make_bot_client(settings.MLAI_BOT_TOKEN)
     try:
         me = resolve_identity(mlai_client)
         settings.MLAI_BOT_USER_ID = settings.MLAI_BOT_USER_ID or me["user_id"]
         settings.MLAI_TEAM_ID = settings.MLAI_TEAM_ID or me["team_id"]
-        print(f"   MLAI bot: {settings.MLAI_BOT_USER_ID} @ team {settings.MLAI_TEAM_ID}")
+        print(f"   MLAI hub: bot {settings.MLAI_BOT_USER_ID} @ team {settings.MLAI_TEAM_ID}")
     except Exception as e:
         print(f"❌ MLAI bot auth.test failed — check MLAI_BOT_TOKEN: {e}")
         raise
 
-    snc_client = None
-    if settings.snc_configured:
-        snc_client = make_bot_client(settings.SNC_BOT_TOKEN)
+    # Resolve each pair into live clients + channel IDs. A pair that can't be
+    # resolved (channel missing or bot not invited) is skipped with a warning so
+    # the rest of the bridge still runs; fix it and restart.
+    resolved: List[ResolvedPair] = []
+    poll_specs = []  # (display, client, channel_id, team, label, to_mlai)
+    for pair in settings.BRIDGE_PAIRS:
         try:
-            who = resolve_identity(snc_client)
-            settings.SNC_BOT_USER_ID = settings.SNC_BOT_USER_ID or who["user_id"]
-            settings.SNC_TEAM_ID = settings.SNC_TEAM_ID or who["team_id"]
-            print(f"   S&C bot: {settings.SNC_BOT_USER_ID} @ team {settings.SNC_TEAM_ID}")
+            remote_client = make_bot_client(pair.remote_token)
+            who = resolve_identity(remote_client)
+            remote_team = who["team_id"]
         except Exception as e:
-            print(f"⚠️ S&C bot auth.test failed — check SNC_BOT_TOKEN: {e}")
-    else:
-        print("⚠️ SNC_BOT_TOKEN not set — S&C side disabled until configured")
+            print(f"⚠️ pair {pair.label!r}: remote token auth failed, skipping: {e}")
+            continue
+
+        mlai_ch = resolve_channel_id(mlai_client, pair.mlai_channel)
+        remote_ch = resolve_channel_id(remote_client, pair.remote_channel)
+        if not mlai_ch:
+            print(f"⚠️ pair {pair.label!r}: MLAI channel {pair.mlai_channel!r} not found "
+                  f"(create it + invite the bot, then restart) — skipping")
+            continue
+        if not remote_ch:
+            print(f"⚠️ pair {pair.label!r}: partner channel {pair.remote_channel!r} not found "
+                  f"(invite the bot there, then restart) — skipping")
+            continue
+
+        resolved.append(ResolvedPair(pair.label, remote_client, remote_team, mlai_ch, remote_ch))
+        poll_specs.append((f"MLAI#{pair.label}", mlai_client, mlai_ch, settings.MLAI_TEAM_ID, pair.label, False))
+        poll_specs.append((f"{pair.label}#remote", remote_client, remote_ch, remote_team, pair.label, True))
+        print(f"   pair {pair.label!r}: MLAI {mlai_ch} <-> {remote_team}/{remote_ch}")
+
+    if not resolved:
+        print("⚠️ no usable pairs — bridge is idle until BRIDGE_PAIRS is configured + channels exist")
 
     relay = Relay(
         settings=settings, store=store, identity=identity,
-        mlai_client=mlai_client, snc_client=snc_client,
+        mlai_client=mlai_client, pairs=resolved,
     )
     app.state.ready = True
 
     tasks: List[asyncio.Task] = []
-    # Capture pollers.
-    tasks.append(
-        asyncio.create_task(
-            channel_poll_loop(
-                label="📥 MLAI", client=mlai_client, channel_id=settings.MLAI_CHANNEL_ID,
-                hwm_key="mlai_last_ts", handler=relay.capture_from_mlai, store=store,
-                poll_seconds=settings.MLAI_POLL_SECONDS,
-                on_error=lambda e: poll_error_backoff(e, label="MLAI", relay=relay),
-            )
-        )
-    )
-    if snc_client is not None:
+    for display, client, channel_id, team, label, to_mlai in poll_specs:
         tasks.append(
             asyncio.create_task(
                 channel_poll_loop(
-                    label="📥 S&C", client=snc_client, channel_id=settings.SNC_CHANNEL_ID,
-                    hwm_key="snc_last_ts", handler=relay.capture_from_snc, store=store,
-                    poll_seconds=settings.SNC_POLL_SECONDS,
-                    on_error=lambda e: poll_error_backoff(e, label="S&C", relay=relay),
+                    label=f"📥 {display}", client=client, channel_id=channel_id,
+                    hwm_key=f"hwm:{team}:{channel_id}",
+                    handler=(lambda msg, _l=label, _t=to_mlai: relay.capture(_l, _t, msg)),
+                    store=store, poll_seconds=settings.POLL_SECONDS,
+                    on_error=(lambda e, _n=display: poll_error_backoff(e, label=_n, relay=relay)),
                 )
             )
         )
-    # Delivery worker.
     tasks.append(
         asyncio.create_task(
             delivery_loop(relay=relay, store=store, poll_seconds=settings.BRIDGE_DELIVERY_POLL_SECONDS)

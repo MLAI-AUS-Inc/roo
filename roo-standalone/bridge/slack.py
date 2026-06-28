@@ -1,10 +1,14 @@
 """
 Slack client helpers.
 
-The bridge is a dedicated app installed in both workspaces, so each side is a
-plain bot token — one WebClient factory covers both.
+The bridge is a dedicated app installed in each workspace, so every side is a
+plain bot token — one WebClient factory covers them all. Plus a channel-name
+resolver so pairs can be configured by name instead of opaque IDs.
 """
-from typing import Any, Dict
+import re
+from typing import Any, Dict, Optional
+
+_ID_RE = re.compile(r"^[CGD][A-Z0-9]{6,}$")
 
 
 def make_bot_client(token: str):
@@ -25,6 +29,35 @@ def resolve_identity(client) -> Dict[str, Any]:
         "team": resp.get("team"),
         "url": resp.get("url"),
     }
+
+
+def resolve_channel_id(client, value: str) -> Optional[str]:
+    """Return a channel ID for `value`, which may already be an ID or a name.
+
+    Names are matched against conversations.list (falling back to public-only if
+    the token lacks the private-channel scope). Returns None if not found — e.g.
+    the channel doesn't exist yet or the bot can't see it.
+    """
+    v = (value or "").strip()
+    if _ID_RE.match(v):
+        return v
+    name = v.lstrip("#")
+    for types in ("public_channel,private_channel", "public_channel"):
+        try:
+            cursor = None
+            while True:
+                r = client.conversations_list(types=types, limit=1000, cursor=cursor)
+                for ch in r.get("channels", []):
+                    if ch.get("name") == name:
+                        return ch["id"]
+                cursor = (r.get("response_metadata") or {}).get("next_cursor")
+                if not cursor:
+                    return None
+        except Exception as e:
+            if "missing_scope" in str(e):
+                continue  # no groups:read → retry public channels only
+            raise
+    return None
 
 
 def is_auth_error(exc: Exception) -> bool:

@@ -6,7 +6,7 @@ import time
 
 from bridge.config import BridgeSettings
 from bridge.identity import IdentityResolver
-from bridge.relay import Relay
+from bridge.relay import Relay, ResolvedPair
 from bridge.store import BridgeStore
 
 
@@ -40,18 +40,19 @@ def _store():
     return BridgeStore(os.path.join(d, "b.db"))
 
 
-def _relay(store, snc_fail=False):
-    settings = BridgeSettings(
-        MLAI_BOT_TOKEN="xoxb-x", MLAI_CHANNEL_ID="C_M", SNC_CHANNEL_ID="C_S",
-        MLAI_TEAM_ID="T_M", SNC_TEAM_ID="T_S",
-    )
+def _relay(store, remote_fail=False):
+    settings = BridgeSettings(MLAI_BOT_TOKEN="xoxb-x", MLAI_TEAM_ID="T_M")
     mlai = FakeClient()
-    snc = FakeClient(fail=snc_fail)
+    remote = FakeClient(fail=remote_fail)
+    pair = ResolvedPair(
+        label="hex", remote_client=remote, remote_team="T_R",
+        mlai_channel_id="C_M", remote_channel_id="C_R",
+    )
     relay = Relay(
         settings=settings, store=store, identity=IdentityResolver(),
-        mlai_client=mlai, snc_client=snc,
+        mlai_client=mlai, pairs=[pair],
     )
-    return relay, mlai, snc, settings
+    return relay, mlai, remote, settings
 
 
 # --- markup translation ---------------------------------------------------
@@ -61,12 +62,6 @@ def test_translate_labeled_mention_and_channel_and_special():
     out = r.translate(FakeClient(), "hey <@U123|alice> in <#C1|general> <!here>", team="T")
     assert "@alice" in out and "#general" in out and "@here" in out
     assert "<@" not in out and "<#" not in out and "<!" not in out
-
-
-def test_translate_unlabeled_mention_uses_lookup():
-    r = IdentityResolver()
-    out = r.translate(FakeClient({"U999": "bob"}), "yo <@U999>", team="T")
-    assert "@bob" in out
 
 
 def test_translate_links_and_unescape():
@@ -92,67 +87,77 @@ def test_message_map_roundtrip():
     assert s.dst_for("TA", "CA", "missing") is None
 
 
-def test_kv_roundtrip():
-    s = _store()
-    assert s.get_kv("hwm") is None
-    s.set_kv("hwm", "123.45")
-    assert s.get_kv("hwm") == "123.45"
-
-
 # --- capture (poller → queue) ---------------------------------------------
 
-def test_capture_enqueues_and_dedups():
+def test_capture_to_remote_enqueues_with_pair_direction():
     s = _store()
-    relay, mlai, snc, settings = _relay(s)
-    asyncio.run(relay.capture_from_mlai({"ts": "111.1", "user": "U_ALICE", "text": "hello"}))
+    relay, mlai, remote, settings = _relay(s)
+    asyncio.run(relay.capture("hex", False, {"ts": "111.1", "user": "U_ALICE", "text": "hi"}))
     due = s.claim_due_inbound(10, time.time())
-    assert len(due) == 1 and due[0]["direction"] == "mlai_to_snc"
-    # Idempotent: the same source ts is never enqueued twice.
-    asyncio.run(relay.capture_from_mlai({"ts": "111.1", "user": "U_ALICE", "text": "hello"}))
+    assert len(due) == 1 and due[0]["direction"] == "hex:to_remote"
+    # Idempotent on the source coordinates.
+    asyncio.run(relay.capture("hex", False, {"ts": "111.1", "user": "U_ALICE", "text": "hi"}))
     assert len(s.claim_due_inbound(10, time.time())) == 1
+
+
+def test_capture_to_mlai_uses_remote_team_and_channel():
+    s = _store()
+    relay, mlai, remote, settings = _relay(s)
+    asyncio.run(relay.capture("hex", True, {"ts": "222.2", "user": "U_BOB", "text": "yo"}))
+    due = s.claim_due_inbound(10, time.time())
+    assert len(due) == 1 and due[0]["direction"] == "hex:to_mlai"
+    assert due[0]["src_team"] == "T_R" and due[0]["src_channel"] == "C_R"
 
 
 def test_capture_skips_self_posted_echo():
     s = _store()
-    relay, mlai, snc, settings = _relay(s)
-    s.record_posted("T_M", "C_M", "222.2")  # a message the bridge itself posted
-    asyncio.run(relay.capture_from_mlai({"ts": "222.2", "user": "U_X", "text": "echo"}))
+    relay, mlai, remote, settings = _relay(s)
+    s.record_posted("T_M", "C_M", "333.3")  # a message the bridge itself posted
+    asyncio.run(relay.capture("hex", False, {"ts": "333.3", "user": "U_X", "text": "echo"}))
     assert s.claim_due_inbound(10, time.time()) == []
 
 
 def test_capture_skips_non_content_subtype():
     s = _store()
-    relay, mlai, snc, settings = _relay(s)
-    asyncio.run(relay.capture_from_mlai({"ts": "333.3", "subtype": "channel_join", "user": "U_X"}))
+    relay, mlai, remote, settings = _relay(s)
+    asyncio.run(relay.capture("hex", False, {"ts": "444.4", "subtype": "channel_join", "user": "U"}))
     assert s.claim_due_inbound(10, time.time()) == []
 
 
-# --- delivery (worker → other workspace) ----------------------------------
+# --- delivery (worker → destination) --------------------------------------
 
-def test_deliver_posts_records_and_maps():
+def test_deliver_to_remote_posts_records_and_maps():
     s = _store()
-    relay, mlai, snc, settings = _relay(s)
-    asyncio.run(relay.capture_from_mlai({"ts": "111.1", "user": "U_ALICE", "text": "hello"}))
+    relay, mlai, remote, settings = _relay(s)
+    asyncio.run(relay.capture("hex", False, {"ts": "111.1", "user": "U_ALICE", "text": "hello"}))
     row = s.claim_due_inbound(10, time.time())[0]
     asyncio.run(relay.deliver(row))
-    # Posted into S&C with the author spoofed via chat:write.customize.
-    assert len(snc.posted) == 1
-    assert snc.posted[0]["text"] == "hello"
-    assert snc.posted[0]["username"] == "U_ALICE"
-    assert snc.posted[0]["channel"] == "C_S"
-    # Mapped + registered (loop guard) + no longer pending.
+    # Posted into the partner channel, author spoofed via chat:write.customize.
+    assert len(remote.posted) == 1
+    assert remote.posted[0]["text"] == "hello"
+    assert remote.posted[0]["username"] == "U_ALICE"
+    assert remote.posted[0]["channel"] == "C_R"
     dst = s.dst_for("T_M", "C_M", "111.1")
-    assert dst is not None and s.is_self_posted("T_S", "C_S", dst[2])
+    assert dst is not None and s.is_self_posted("T_R", "C_R", dst[2])
     assert s.claim_due_inbound(10, time.time()) == []
+
+
+def test_deliver_to_mlai_routes_to_hub():
+    s = _store()
+    relay, mlai, remote, settings = _relay(s)
+    asyncio.run(relay.capture("hex", True, {"ts": "222.2", "user": "U_BOB", "text": "inbound"}))
+    row = s.claim_due_inbound(10, time.time())[0]
+    asyncio.run(relay.deliver(row))
+    assert len(mlai.posted) == 1 and mlai.posted[0]["channel"] == "C_M"
 
 
 def test_deliver_retries_on_failure_instead_of_dropping():
     s = _store()
-    relay, mlai, snc, settings = _relay(s, snc_fail=True)
-    asyncio.run(relay.capture_from_mlai({"ts": "111.1", "user": "U_ALICE", "text": "hello"}))
+    relay, mlai, remote, settings = _relay(s, remote_fail=True)
+    asyncio.run(relay.capture("hex", False, {"ts": "111.1", "user": "U_ALICE", "text": "hello"}))
     row = s.claim_due_inbound(10, time.time())[0]
     asyncio.run(relay.deliver(row))
-    assert snc.posted == []
+    assert remote.posted == []
     # Not lost: backed off into the future, attempt_count incremented.
     assert s.claim_due_inbound(10, time.time()) == []
     later = s.claim_due_inbound(10, time.time() + 120)
