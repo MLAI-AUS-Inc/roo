@@ -3,20 +3,32 @@
 luma_stripe_merge.py
 ====================
 Pull Luma ticket sales + Stripe payments, merge them, and write a Xero
-reconciliation worksheet (Sales detail + Payout summary).
+reconciliation pack:
+
+  1. an .xlsx worksheet  (Sales detail + Payout summary)  — the audit trail
+  2. a Cowork brief (.md) — one section per Stripe payout = one bank deposit,
+     pre-filled with the Xero "Create" fields (Who / What / Why / Event Name /
+     Project Name / Tax Rate) so Claude Cowork can reconcile it in the browser.
 
 Because Luma processes card payments through your own Stripe account, the same
 sale appears in both systems. This script joins them so each ticket sale is
 linked to its Stripe charge and rolled up into the Stripe *payout* that lands in
 your bank — which is the line you actually reconcile in Xero.
 
+The pull is *payout-driven*: it starts from every payout that settled in the
+window, pulls every charge inside it, then enriches with Luma. That guarantees
+each payout's lines sum to the exact bank deposit (even if a charge's Luma sale
+happened before the window).
+
 Usage
 -----
   # See the output shape with realistic fake data (no keys needed):
-  python luma_stripe_merge.py --mock --out sample_reconciliation.xlsx
+  python luma_stripe_merge.py --mock --out sample.xlsx
 
   # Real run (reads keys from environment / .env):
-  python luma_stripe_merge.py --month 2026-06 --out june_2026.xlsx
+  python luma_stripe_merge.py --days 30 --out last30.xlsx
+  python luma_stripe_merge.py --since 2026-06-01 --until 2026-06-30 --out june.xlsx
+  python luma_stripe_merge.py --month 2026-06 --out june.xlsx
 
 Auth (real run)
 ---------------
@@ -28,12 +40,24 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import json
 import os
 import sys
 from collections import defaultdict
 
 LUMA_BASE = "https://public-api.luma.com/v1"
 STRIPE_BASE = "https://api.stripe.com/v1"
+
+# --- Xero mapping (edit to match your chart of accounts) ----------------------
+# These feed the "What (account)" column of the Cowork brief.
+TICKET_INCOME_ACCOUNT = "Ticket Sales"   # income account ticket revenue posts to
+STRIPE_FEE_ACCOUNT = "Stripe Fees"       # expense account for Stripe processing fees
+LUMA_FEE_ACCOUNT = "Luma Fees"           # expense account for Luma's platform fee
+DEFAULT_PAYER = "Stripe Payments"        # "Who" when a payout batches many buyers
+TAX_RATE_LABEL = "account default"       # left as the income account's default; confirm in Xero
+# Luma processes charges before the window can settle as a payout. Pull Luma
+# sales this many days before the window start so recent payouts are fully named.
+LUMA_LOOKBACK_DAYS = 45
 
 
 def _money(x) -> float:
@@ -53,12 +77,54 @@ def _load_dotenv() -> None:
         os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
 
 
+def _load_event_map() -> dict:
+    """Optional Luma-event-name -> Xero-Event-Name map (event_map.json)."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "event_map.json")
+    if os.path.exists(path):
+        try:
+            return json.load(open(path))
+        except (ValueError, OSError):
+            return {}
+    return {}
+
+
 def _month_bounds(month: str) -> tuple[int, int]:
     """'YYYY-MM' -> (start_unix, end_unix) covering that calendar month (UTC)."""
     y, m = (int(p) for p in month.split("-"))
     start = dt.datetime(y, m, 1, tzinfo=dt.timezone.utc)
     end = dt.datetime(y + (m == 12), (m % 12) + 1, 1, tzinfo=dt.timezone.utc)
     return int(start.timestamp()), int(end.timestamp())
+
+
+def _parse_date(s: str | None):
+    if not s:
+        return None
+    return dt.datetime.fromisoformat(s).replace(tzinfo=dt.timezone.utc)
+
+
+def resolve_window(args) -> tuple[int, int]:
+    """Turn --month / --since/--until / --days into a (start, end) UTC unix pair."""
+    if args.month:
+        return _month_bounds(args.month)
+    now = dt.datetime.now(dt.timezone.utc)
+    if args.since or args.until:
+        start = _parse_date(args.since) or (now - dt.timedelta(days=30))
+        end = _parse_date(args.until) or now
+    else:
+        end = now
+        start = now - dt.timedelta(days=args.days or 30)
+    return int(start.timestamp()), int(end.timestamp())
+
+
+def _fmt_date(s: str) -> str:
+    """ISO/date string -> '5 Jun 2026' for the human-facing brief."""
+    if not s:
+        return ""
+    try:
+        d = dt.datetime.fromisoformat(s.replace("Z", "+00:00"))
+        return f"{d.day} {d.strftime('%b %Y')}"
+    except (ValueError, AttributeError):
+        return s
 
 
 def _luma_get(path: str, params: dict | None = None) -> dict:
@@ -174,7 +240,7 @@ def _stripe_list(path: str, params: dict) -> list[dict]:
 
 
 def fetch_stripe_charges(start_unix: int, end_unix: int) -> list[dict]:
-    """Charges grouped by the payout that settled them."""
+    """Charges grouped by the payout that settled them (payouts in window)."""
     payouts = _stripe_list(
         "/payouts",
         {"arrival_date[gte]": start_unix, "arrival_date[lt]": end_unix},
@@ -211,39 +277,44 @@ def fetch_stripe_charges(start_unix: int, end_unix: int) -> list[dict]:
 
 
 def merge(luma_sales: list[dict], stripe_charges: list[dict]) -> list[dict]:
-    """One row per ticket sale, linked to its Stripe charge + payout."""
+    """One row per Stripe charge (payout-driven), enriched with its Luma sale.
+
+    Payout-driven means every charge in every in-window payout appears, so each
+    payout's nets sum to the exact bank deposit. A charge with no Luma match is
+    still included, labelled so its event can be picked manually.
+    """
+    by_order = {s["luma_order_id"]: s for s in luma_sales if s.get("luma_order_id")}
     by_email_amt: dict[tuple, list[dict]] = defaultdict(list)
-    for c in stripe_charges:
-        by_email_amt[(c["email"].lower(), c["gross"])].append(c)
+    for s in luma_sales:
+        by_email_amt[(s["buyer_email"].lower(), s["gross"])].append(s)
 
     rows = []
-    for s in luma_sales:
-        match = None
-        for c in stripe_charges:
-            if s["luma_order_id"] and s["luma_order_id"] in (c["description"] or ""):
-                match = c
+    for c in stripe_charges:
+        s = None
+        for oid, sale in by_order.items():
+            if oid and oid in (c["description"] or ""):
+                s = sale
                 break
-        if not match:
-            cands = by_email_amt.get((s["buyer_email"].lower(), s["gross"]), [])
-            match = cands[0] if cands else None
+        if not s:
+            cands = by_email_amt.get((c["email"].lower(), c["gross"]), [])
+            s = cands[0] if cands else None
 
-        luma_fee = (
-            _money(s["gross"] - match["net"] - match["stripe_fee"]) if match else 0.0
-        )
+        gross = s["gross"] if s else c["gross"]
+        luma_fee = _money(gross - c["net"] - c["stripe_fee"]) if s else 0.0
         rows.append(
             {
-                "date_bought": s["registered_at"],
-                "event": s["event_name"],
-                "ticket_type": s["ticket_type"],
-                "buyer": s["buyer_email"] or s["buyer_name"],
-                "gross": s["gross"],
+                "date_bought": s["registered_at"] if s else c["created"],
+                "event": s["event_name"] if s else "UNKNOWN (no Luma match)",
+                "ticket_type": s["ticket_type"] if s else "",
+                "buyer": (s["buyer_email"] or s["buyer_name"]) if s else (c["email"] or "unknown"),
+                "gross": gross,
                 "luma_fee": luma_fee,
-                "stripe_fee": match["stripe_fee"] if match else 0.0,
-                "net": match["net"] if match else s["gross"],
-                "currency": s["currency"],
-                "stripe_charge_id": match["charge_id"] if match else "UNMATCHED",
-                "payout_id": match["payout_id"] if match else "UNMATCHED",
-                "payout_arrival": match["payout_arrival"] if match else "",
+                "stripe_fee": c["stripe_fee"],
+                "net": c["net"],
+                "currency": c["currency"],
+                "stripe_charge_id": c["charge_id"],
+                "payout_id": c["payout_id"],
+                "payout_arrival": c["payout_arrival"],
             }
         )
     return rows
@@ -383,14 +454,17 @@ def write_xlsx(rows: list[dict], path: str) -> None:
     notes = [
         "MLAI — Luma → Stripe reconciliation worksheet",
         "",
-        "Sales detail : one row per ticket sale, linked to its Stripe charge and payout.",
+        "Sales detail : one row per Stripe charge, linked to its Luma sale and payout.",
         "Payout summary: one row per Stripe payout = the lump sum that lands in your bank.",
         "",
         "Reconcile in Xero against the 'Net (bank deposit)' column on Payout summary —",
-        "each payout matches one transfer out of your Stripe clearing account.",
+        "each payout matches one received line in your bank feed.",
         "",
-        "UNMATCHED in a Stripe column = a Luma sale with no matching charge found",
-        "(check email/amount, refunds, or a cross-month payout).",
+        "See the *_cowork_brief.md alongside this file for the per-payout Xero",
+        "'Create' fields (Who / What / Why / Event Name / Project Name / Tax Rate).",
+        "",
+        "UNKNOWN (no Luma match) = a Stripe charge with no matching Luma sale found",
+        "(check email/amount, refunds, or pick the event manually).",
     ]
     for n in notes:
         ws3.append([n])
@@ -399,31 +473,134 @@ def write_xlsx(rows: list[dict], path: str) -> None:
     wb.save(path)
 
 
+def write_brief(rows: list[dict], path: str, event_map: dict | None = None) -> None:
+    """Write the Cowork-facing markdown brief: one section per Stripe payout."""
+    event_map = event_map or {}
+    payouts: dict[str, list[dict]] = defaultdict(list)
+    for r in rows:
+        payouts[r["payout_id"]].append(r)
+    order = sorted(payouts, key=lambda p: payouts[p][0]["payout_arrival"])
+
+    L: list[str] = []
+    L.append("# Stripe payout reconciliation brief")
+    L.append("")
+    L.append("**For Claude Cowork.** Reconcile each Stripe deposit below in the Xero")
+    L.append("bank feed. **Only these Stripe/Luma deposits — leave every other bank")
+    L.append("line (transfers, PayID, etc.) untouched.**")
+    L.append("")
+    L.append("For each: open the bank line → **Create** tab → fill Who / Why, then")
+    L.append("**Add details** to split by event. Each split line sets **What** (account),")
+    L.append("**Event Name**, **Project Name**, **Amount**, **Tax Rate**. The split total")
+    L.append("must equal the bank line to the cent. **A human clicks OK to confirm.**")
+    L.append("")
+    L.append("> Tax Rate is left as the income account's default — confirm it in Xero.")
+    L.append("")
+
+    # Summary table.
+    L.append("## Deposits to reconcile")
+    L.append("")
+    L.append("| Payout | Arrived | Bank deposit | Events | Tickets |")
+    L.append("|---|---|---|---|---|")
+    for po in order:
+        prs = payouts[po]
+        ccy = prs[0]["currency"]
+        net = _money(sum(r["net"] for r in prs))
+        evs = ", ".join(sorted({r["event"] for r in prs}))
+        L.append(f"| `{po}` | {_fmt_date(prs[0]['payout_arrival'])} | {ccy} {net:,.2f} | {evs} | {len(prs)} |")
+    n_unknown = sum(1 for r in rows if r["event"].startswith("UNKNOWN"))
+    if n_unknown:
+        L.append("")
+        L.append(f"> ⚠ {n_unknown} charge(s) have no Luma match — event must be picked manually (marked below).")
+    L.append("")
+    L.append("---")
+    L.append("")
+
+    for po in order:
+        prs = payouts[po]
+        ccy = prs[0]["currency"]
+        arrival = _fmt_date(prs[0]["payout_arrival"])
+        net = _money(sum(r["net"] for r in prs))
+        sfee = _money(sum(r["stripe_fee"] for r in prs))
+        lfee = _money(sum(r["luma_fee"] for r in prs))
+        by_event: dict[str, float] = defaultdict(float)
+        for r in prs:
+            by_event[r["event"]] = _money(by_event[r["event"]] + r["gross"])
+        who = prs[0]["buyer"] if len(prs) == 1 else DEFAULT_PAYER
+        events_list = ", ".join(sorted(by_event))
+
+        L.append(f"## {po} — {ccy} {net:,.2f} received {arrival}")
+        L.append("")
+        L.append(f"**Match the bank line:** Received **{ccy} {net:,.2f}** on/around **{arrival}** (payer: Stripe).")
+        L.append("")
+        L.append(f"- **Who:** {who}")
+        L.append(f"- **Why:** Luma tickets — {events_list} — {len(prs)} ticket(s) — payout {po}")
+        L.append("")
+        L.append("**Create → Add details (split lines):**")
+        L.append("")
+        L.append("| What (account) | Event Name | Project Name | Amount | Tax Rate |")
+        L.append("|---|---|---|---|---|")
+        for event_name in sorted(by_event):
+            xero_ev = event_map.get(event_name, "")
+            ev_cell = xero_ev if xero_ev else f"⚠ pick — Luma: {event_name}"
+            L.append(f"| {TICKET_INCOME_ACCOUNT} | {ev_cell} | (set if used) | {by_event[event_name]:,.2f} | {TAX_RATE_LABEL} |")
+        if sfee:
+            L.append(f"| {STRIPE_FEE_ACCOUNT} | — | — | -{sfee:,.2f} | {TAX_RATE_LABEL} |")
+        if lfee:
+            L.append(f"| {LUMA_FEE_ACCOUNT} | — | — | -{lfee:,.2f} | {TAX_RATE_LABEL} |")
+        L.append(f"| **TOTAL — must equal the bank line** | | | **{net:,.2f}** | |")
+        L.append("")
+        L.append("<details><summary>Buyers in this payout (audit — not entered per line)</summary>")
+        L.append("")
+        for r in sorted(prs, key=lambda x: x["date_bought"]):
+            tt = f" / {r['ticket_type']}" if r["ticket_type"] else ""
+            L.append(f"- {r['buyer']} — {r['event']}{tt} — {ccy} {r['gross']:,.2f} — {_fmt_date(r['date_bought'])}")
+        L.append("")
+        L.append("</details>")
+        L.append("")
+        L.append("> Cowork fills the form; **a human clicks OK to confirm the reconcile.**")
+        L.append("")
+
+    with open(path, "w") as f:
+        f.write("\n".join(L))
+
+
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Luma + Stripe -> Xero reconciliation worksheet")
+    ap = argparse.ArgumentParser(description="Luma + Stripe -> Xero reconciliation pack")
     ap.add_argument("--mock", action="store_true", help="use built-in sample data (no API keys)")
-    ap.add_argument("--month", help="YYYY-MM to pull (real run). Default: last month")
+    ap.add_argument("--days", type=int, default=30, help="rolling window size in days (default 30)")
+    ap.add_argument("--since", help="window start YYYY-MM-DD (overrides --days)")
+    ap.add_argument("--until", help="window end YYYY-MM-DD")
+    ap.add_argument("--month", help="single calendar month YYYY-MM (overrides --days/--since)")
     ap.add_argument("--out", default="reconciliation.xlsx", help="output .xlsx path")
+    ap.add_argument("--brief", help="output .md brief path (default: <out>_cowork_brief.md)")
     args = ap.parse_args()
+
+    event_map = {"MLAI Workshop — June": "AI Engineer"} if args.mock else _load_event_map()
 
     if args.mock:
         rows = mock_rows()
     else:
         _load_dotenv()
-        month = args.month or (dt.date.today().replace(day=1) - dt.timedelta(days=1)).strftime("%Y-%m")
-        start, end = _month_bounds(month)
-        print(f"Pulling Luma sales for {month} ...")
-        luma = fetch_luma_sales(start, end)
-        print(f"  {len(luma)} Luma ticket sales")
-        print(f"Pulling Stripe charges/payouts for {month} ...")
+        start, end = resolve_window(args)
+        luma_start = start - LUMA_LOOKBACK_DAYS * 86400
+        win = f"{dt.datetime.fromtimestamp(start, dt.timezone.utc).date()} .. {dt.datetime.fromtimestamp(end, dt.timezone.utc).date()}"
+        print(f"Window (payout arrival): {win}")
+        print("Pulling Stripe payouts/charges ...")
         stripe = fetch_stripe_charges(start, end)
-        print(f"  {len(stripe)} Stripe charges")
+        print(f"  {len(stripe)} Stripe charges across {len({c['payout_id'] for c in stripe})} payouts")
+        print("Pulling Luma sales (with lookback) ...")
+        luma = fetch_luma_sales(luma_start, end)
+        print(f"  {len(luma)} Luma ticket sales")
         rows = merge(luma, stripe)
 
     write_xlsx(rows, args.out)
-    n_un = sum(r["payout_id"] == "UNMATCHED" for r in rows)
-    print(f"Wrote {args.out}: {len(rows)} sales, {len(payout_summary(rows))} payouts"
-          + (f", {n_un} UNMATCHED" if n_un else ""))
+    brief_path = args.brief or (os.path.splitext(args.out)[0] + "_cowork_brief.md")
+    write_brief(rows, brief_path, event_map)
+
+    n_un = sum(1 for r in rows if r["event"].startswith("UNKNOWN"))
+    print(f"Wrote {args.out} and {brief_path}: "
+          f"{len(rows)} charges, {len(payout_summary(rows))} payouts"
+          + (f", {n_un} with no Luma match" if n_un else ""))
 
 
 if __name__ == "__main__":
