@@ -57,6 +57,9 @@ to) is skipped with a warning — create/invite, then restart.
 ## v1 scope and limitations
 - **Both sides poll** (a few seconds of latency). Mirrors messages from when it
   starts **forward** — it does not backfill existing history (a separate one-off).
+- **Threaded replies are mirrored** (and re-threaded under the right parent),
+  via a per-poll sweep of recent threads — but only for threads whose parent is
+  within `THREAD_SWEEP_SECONDS` (default 3 days).
 - **Edits/deletes are not mirrored** in poll mode; **reactions** are skipped;
   **files** are re-uploaded best-effort.
 - Pick channels where Roo doesn't post automated content, or set

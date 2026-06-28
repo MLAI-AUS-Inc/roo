@@ -85,6 +85,9 @@ def test_message_map_roundtrip():
     s.map_message("TA", "CA", "10.0", "TB", "CB", "20.0")
     assert s.dst_for("TA", "CA", "10.0") == ("TB", "CB", "20.0")
     assert s.dst_for("TA", "CA", "missing") is None
+    # reverse lookup (needed to thread replies on received parents)
+    assert s.src_for("TB", "CB", "20.0") == ("TA", "CA", "10.0")
+    assert s.src_for("TB", "CB", "missing") is None
 
 
 # --- capture (poller → queue) ---------------------------------------------
@@ -162,3 +165,18 @@ def test_deliver_retries_on_failure_instead_of_dropping():
     assert s.claim_due_inbound(10, time.time()) == []
     later = s.claim_due_inbound(10, time.time() + 120)
     assert len(later) == 1 and later[0]["attempt_count"] == 1
+
+
+def test_reply_threads_under_received_parent_via_reverse_map():
+    # An MLAI message was already mirrored to the partner (parent 100 -> 200).
+    s = _store()
+    relay, mlai, remote, settings = _relay(s)
+    s.map_message("T_M", "C_M", "100.0", "T_R", "C_R", "200.0")
+    # A reply now lands in the partner channel, on the *received* parent (200).
+    asyncio.run(relay.capture("hex", True, {"ts": "205.0", "user": "U_HEX", "text": "looks good", "thread_ts": "200.0"}))
+    row = s.claim_due_inbound(10, time.time())[0]
+    asyncio.run(relay.deliver(row))
+    # It must land in MLAI threaded under the original parent (100), via the reverse map.
+    assert len(mlai.posted) == 1
+    assert mlai.posted[0]["channel"] == "C_M"
+    assert mlai.posted[0]["thread_ts"] == "100.0"

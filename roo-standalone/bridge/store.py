@@ -197,6 +197,7 @@ class BridgeStore:
             )
 
     def dst_for(self, src_team, src_channel, src_ts) -> Optional[Tuple[str, str, str]]:
+        """Forward: where did we post the copy of this source message?"""
         self._ensure_schema()
         with self._lock, self._connect() as conn:
             row = conn.execute(
@@ -205,6 +206,18 @@ class BridgeStore:
                 (src_team, src_channel, src_ts),
             ).fetchone()
             return (row["dst_team"], row["dst_channel"], row["dst_ts"]) if row else None
+
+    def src_for(self, dst_team, dst_channel, dst_ts) -> Optional[Tuple[str, str, str]]:
+        """Reverse: given a posted copy, what source message produced it? Needed
+        to thread a reply that lands on a parent which was *received* on this side."""
+        self._ensure_schema()
+        with self._lock, self._connect() as conn:
+            row = conn.execute(
+                "SELECT src_team, src_channel, src_ts FROM message_map "
+                "WHERE dst_team=? AND dst_channel=? AND dst_ts=?",
+                (dst_team, dst_channel, dst_ts),
+            ).fetchone()
+            return (row["src_team"], row["src_channel"], row["src_ts"]) if row else None
 
     # --- kv ------------------------------------------------------------------
 

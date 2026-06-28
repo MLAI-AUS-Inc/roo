@@ -89,6 +89,7 @@ async def lifespan(app: FastAPI):
                     hwm_key=f"hwm:{team}:{channel_id}",
                     handler=(lambda msg, _l=label, _t=to_mlai: relay.capture(_l, _t, msg)),
                     store=store, poll_seconds=settings.POLL_SECONDS,
+                    thread_sweep_seconds=settings.THREAD_SWEEP_SECONDS,
                     on_error=(lambda e, _n=display: poll_error_backoff(e, label=_n, relay=relay)),
                 )
             )
