@@ -110,7 +110,8 @@ class SkillExecutor:
     2. Routes to skill-specific handlers if available
     3. Falls back to generic LLM execution with skill instructions
     """
-    
+
+
     async def execute(
         self,
         skill: Skill,
@@ -7990,6 +7991,7 @@ Chunk {index} source: {label}
         cost: int,
         new_balance: Optional[int],
         admin_checkin: bool,
+        discount_applied: bool = False,
     ) -> str:
         point_word = "point" if cost == 1 else "points"
         if admin_checkin:
@@ -8004,12 +8006,24 @@ Chunk {index} source: {label}
         if new_balance is not None:
             balance_line = f" (Balance remaining: {new_balance} points)"
 
-        return (
+        message = (
             f"You beauty! 🎉\n\n"
             f"Booked you in for **{booking_date}** at the coworking space.\n"
             f"Cost: {cost} {point_word}{balance_line}\n\n"
             f"See you there, legend!"
         )
+
+        # Nudge founders who paid the standard (undiscounted) price: submitting a
+        # monthly startup update lowers the coworking cost for that month. The
+        # backend tells us whether the discount already applied.
+        if not discount_applied:
+            message += (
+                "\n\n💡 Startup founders get a discount on coworking bookings when they "
+                "submit a monthly update for their startup. Submit yours here: "
+                "https://mlai.au/platform/login?app=founder-tools&next=/founder-tools"
+            )
+
+        return message
 
     async def _format_admin_coworking_bad_request(
         self,
@@ -8094,6 +8108,9 @@ Chunk {index} source: {label}
             raise
 
         cost = result.get("points_cost", 1)
+        # The backend is the single source of truth for whether the
+        # monthly-update discount applied; we only render the nudge off this.
+        discount_applied = bool(result.get("monthly_update_discount_applied", False))
         from roo.clients.mlai_backend import MLAIBackendUnavailableError
 
         new_balance = None
@@ -8109,6 +8126,7 @@ Chunk {index} source: {label}
             cost=cost,
             new_balance=new_balance,
             admin_checkin=admin_checkin,
+            discount_applied=discount_applied,
         )
 
     async def _handle_points_action(
@@ -8493,8 +8511,8 @@ Chunk {index} source: {label}
         elif action == "check_coworking":
             check_date = params.get("date")
             days = params.get("days", 7)
-            
-            availability = await client.check_coworking(check_date, days)
+
+            availability = await client.check_coworking(check_date, days, slack_user_id=user_id)
             
             if not availability:
                 return "Couldn't check availability right now. Try again in a tick?"

@@ -1059,11 +1059,23 @@ class MLAIBackendClient:
         response.raise_for_status()
         return response.json()
 
-    async def check_coworking(self, check_date: Optional[str] = None, days: int = 7) -> List[dict]:
-        """Check coworking availability."""
+    async def check_coworking(
+        self,
+        check_date: Optional[str] = None,
+        days: int = 7,
+        slack_user_id: Optional[str] = None,
+    ) -> List[dict]:
+        """Check coworking availability.
+
+        When ``slack_user_id`` is supplied the backend quotes the price that
+        user would actually be charged (which drops with a current monthly
+        update), so the displayed cost matches the booking cost.
+        """
         params = {"days": days}
         if check_date:
             params["date"] = check_date
+        if slack_user_id:
+            params["slack_user_id"] = self._clean_slack_id(slack_user_id)
         response = await self._request(
             "GET",
             f"{self._points_base}/coworking/availability/",
