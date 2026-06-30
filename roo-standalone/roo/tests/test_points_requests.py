@@ -3168,3 +3168,103 @@ async def test_dependency_health_check_reports_degraded_backend(monkeypatch):
     assert result["dependencies"]["mlai_backend"]["status"] == "degraded"
     assert result["dependencies"]["mlai_backend"]["readiness"]["status"] == "ok"
     assert "points_error" in result["dependencies"]["mlai_backend"]
+
+
+@pytest.mark.asyncio
+async def test_check_coworking_passes_slack_user_id_for_per_user_pricing():
+    class FakeAvailabilityClient:
+        def __init__(self):
+            self.call = None
+
+        async def check_coworking(self, check_date=None, days=7, slack_user_id=None):
+            self.call = (check_date, days, slack_user_id)
+            return [
+                {
+                    "date": "2026-05-04",
+                    "available_slots": 5,
+                    "cost_points": 4,
+                    "is_bookable": True,
+                }
+            ]
+
+    client = FakeAvailabilityClient()
+    executor = SkillExecutor()
+
+    result = await executor._handle_points_action(
+        client=client,
+        action="check_coworking",
+        params={"date": "2026-05-04", "days": 7},
+        text="coworking availability",
+        user_id="U123",
+        channel_id="C123",
+        thread_ts="111.222",
+        skill=SimpleNamespace(name="mlai-points"),
+    )
+
+    # The user's slack id is forwarded so the backend can quote the discounted price.
+    assert client.call == ("2026-05-04", 7, "U123")
+    assert "4 pt" in result
+
+
+@pytest.mark.asyncio
+async def test_book_coworking_nudges_founder_when_charged_standard_price(tmp_path, monkeypatch):
+    store = coworking_module.CoworkingBookingIntentStore(tmp_path / "intents.db")
+
+    class FakeCoworkingClient:
+        async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None):
+            return {"points_cost": 8, "monthly_update_discount_applied": False}
+
+        async def get_balance(self, slack_user_id):
+            return {"balance": 12}
+
+    executor = SkillExecutor()
+    monkeypatch.setattr("roo.utils.get_current_date", lambda: date(2026, 5, 4))
+    monkeypatch.setattr(executor_module, "get_coworking_intent_store", lambda: store)
+
+    result = await executor._handle_points_action(
+        client=FakeCoworkingClient(),
+        action="book_coworking",
+        params={"date": "2026-05-04"},
+        text="book coworking today",
+        user_id="U123",
+        channel_id="C123",
+        thread_ts="111.222",
+        skill=SimpleNamespace(name="mlai-points"),
+    )
+
+    assert "Booked you in for **2026-05-04**" in result
+    assert "Cost: 8 points" in result
+    assert "submit a monthly update" in result
+    assert "https://mlai.au/platform/login?app=founder-tools&next=/founder-tools" in result
+
+
+@pytest.mark.asyncio
+async def test_book_coworking_omits_nudge_when_discount_applied(tmp_path, monkeypatch):
+    store = coworking_module.CoworkingBookingIntentStore(tmp_path / "intents.db")
+
+    class FakeCoworkingClient:
+        async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None):
+            return {"points_cost": 4, "monthly_update_discount_applied": True}
+
+        async def get_balance(self, slack_user_id):
+            return {"balance": 12}
+
+    executor = SkillExecutor()
+    monkeypatch.setattr("roo.utils.get_current_date", lambda: date(2026, 5, 4))
+    monkeypatch.setattr(executor_module, "get_coworking_intent_store", lambda: store)
+
+    result = await executor._handle_points_action(
+        client=FakeCoworkingClient(),
+        action="book_coworking",
+        params={"date": "2026-05-04"},
+        text="book coworking today",
+        user_id="U123",
+        channel_id="C123",
+        thread_ts="111.222",
+        skill=SimpleNamespace(name="mlai-points"),
+    )
+
+    assert "Booked you in for **2026-05-04**" in result
+    assert "Cost: 4 points" in result
+    assert "submit a monthly update" not in result
+    assert "founder-tools" not in result
