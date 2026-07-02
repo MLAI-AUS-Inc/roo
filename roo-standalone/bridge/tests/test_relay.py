@@ -41,18 +41,36 @@ def _store():
 
 
 def _relay(store, remote_fail=False):
-    settings = BridgeSettings(MLAI_BOT_TOKEN="xoxb-x", MLAI_TEAM_ID="T_M")
+    settings = BridgeSettings(MLAI_BOT_TOKEN="xoxb-x", MLAI_TEAM_ID="T_M", MLAI_BOT_USER_ID="B_MLAI")
     mlai = FakeClient()
     remote = FakeClient(fail=remote_fail)
     pair = ResolvedPair(
         label="hex", remote_client=remote, remote_team="T_R",
-        mlai_channel_id="C_M", remote_channel_id="C_R",
+        mlai_channel_id="C_M", remote_channel_id="C_R", remote_bot_user_id="B_REMOTE",
     )
     relay = Relay(
         settings=settings, store=store, identity=IdentityResolver(),
         mlai_client=mlai, pairs=[pair],
     )
     return relay, mlai, remote, settings
+
+
+# --- loop guard: our own posts (incl. file uploads) never re-bridge ---------
+
+def test_capture_drops_own_bot_posts_including_file_uploads():
+    s = _store()
+    relay, mlai, remote, settings = _relay(s)
+    # A file upload the bridge made in the partner channel — NOT in the registry
+    # (file-message ts isn't recorded), so it must be dropped by bot-id or the
+    # photo loops forever.
+    asyncio.run(relay.capture("hex", True, {
+        "ts": "900.0", "user": "B_REMOTE", "subtype": "file_share",
+        "files": [{"name": "IMG_0516.jpg"}],
+    }))
+    assert s.claim_due_inbound(10, time.time()) == []
+    # A *different* bot (e.g. Jeanette) is still relayed.
+    asyncio.run(relay.capture("hex", True, {"ts": "901.0", "user": "U_OTHER", "bot_id": "B_J", "text": "hi"}))
+    assert len(s.claim_due_inbound(10, time.time())) == 1
 
 
 # --- markup translation ---------------------------------------------------

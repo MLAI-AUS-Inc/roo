@@ -44,6 +44,7 @@ class ResolvedPair:
     remote_team: str
     mlai_channel_id: str
     remote_channel_id: str
+    remote_bot_user_id: str = ""  # the bridge bot's own user id in the partner workspace
 
 
 class Relay:
@@ -75,15 +76,23 @@ class Relay:
             return
         if to_mlai:
             src_team, src_channel = pair.remote_team, pair.remote_channel_id
+            own_bot_user_id = pair.remote_bot_user_id
             direction = f"{label}:to_mlai"
         else:
             src_team, src_channel = self.s.MLAI_TEAM_ID or "", pair.mlai_channel_id
+            own_bot_user_id = self.s.MLAI_BOT_USER_ID
             direction = f"{label}:to_remote"
 
         ts = msg.get("ts")
         if not ts or msg.get("subtype") not in _RELAYABLE_SUBTYPES:
             return
-        # Our own echo (we posted this) — never re-bridge.
+        # Our own post — never re-bridge. The registry catches chat posts (whose
+        # ts we record), but file uploads create a message whose ts we don't
+        # record, so also drop anything authored by our own bot user id. Safe
+        # because we run a dedicated Bridge app (its bot id is distinct from
+        # other bots we DO want to relay, e.g. Roo/Jeanette).
+        if own_bot_user_id and msg.get("user") == own_bot_user_id:
+            return
         if self.store.is_self_posted(src_team, src_channel, ts):
             return
         if msg.get("bot_id") and not self.s.BRIDGE_RELAY_BOT_MESSAGES:
