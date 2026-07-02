@@ -66,7 +66,7 @@ async def lifespan(app: FastAPI):
                   f"(invite the bot there, then restart) — skipping")
             continue
 
-        resolved.append(ResolvedPair(pair.label, remote_client, remote_team, mlai_ch, remote_ch))
+        resolved.append(ResolvedPair(pair.label, remote_client, remote_team, mlai_ch, remote_ch, who["user_id"]))
         poll_specs.append((f"MLAI#{pair.label}", mlai_client, mlai_ch, settings.MLAI_TEAM_ID, pair.label, False))
         poll_specs.append((f"{pair.label}#remote", remote_client, remote_ch, remote_team, pair.label, True))
         print(f"   pair {pair.label!r}: MLAI {mlai_ch} <-> {remote_team}/{remote_ch}")
