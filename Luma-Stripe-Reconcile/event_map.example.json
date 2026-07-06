@@ -1,0 +1,5 @@
+{
+  "_comment": "Copy to event_map.json. Maps each Luma event name (left) to the exact Xero 'Event Name' tracking option (right). Unmapped events show a 'pick' warning in the brief so Cowork chooses the dropdown value manually. Keep this updated as new events appear.",
+  "MLAI Workshop — June": "AI Engineer",
+  "MLAI Studio Mixer": "Codex Community Meetup 30 April 2026"
+}

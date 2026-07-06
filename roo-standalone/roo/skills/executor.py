@@ -179,6 +179,8 @@ class SkillExecutor:
                 result = await self._execute_watt_the_hack(skill, text, params, user_id, channel_id, thread_ts, thread_history)
             elif skill.name == "luma-events":
                 result = await self._execute_luma_events(skill, text, params, user_id, channel_id, thread_ts)
+            elif skill.name == "reconciliation-report":
+                result = await self._execute_reconciliation_report(skill, text, params, user_id, channel_id, thread_ts)
             else:
                 # Generic LLM-based execution
                 result = await self._execute_with_llm(skill, text, params, user_id, thread_history)
@@ -3704,6 +3706,171 @@ Chunk {index} source: {label}
         except (TypeError, ValueError):
             count = default
         return max(1, min(count, 10))
+
+    async def _execute_reconciliation_report(
+        self,
+        skill: Skill,
+        text: str,
+        params: dict,
+        user_id: str,
+        channel_id: Optional[str],
+        thread_ts: Optional[str],
+    ) -> Any:
+        """Execute the Luma→Stripe reconciliation report skill through mlai-backend.
+
+        Read-only and Points-Admin gated (mlai-backend enforces the role). Fetches
+        the report, posts a summary, and uploads the Cowork brief (.md) + audit
+        workbook (.xlsx) to the thread.
+        """
+        settings = get_settings()
+        if not getattr(settings, "MLAI_BACKEND_URL", None):
+            return (
+                "The reconciliation report needs mlai-backend to be configured. "
+                "Ask the team to set `MLAI_BACKEND_URL`."
+            )
+        if not channel_id:
+            return "I need a Slack channel or DM to upload the reconciliation report."
+
+        from roo.clients.mlai_backend import MLAIBackendClient, MLAIBackendUnavailableError
+
+        backend_client = MLAIBackendClient(
+            base_url=settings.MLAI_BACKEND_URL,
+            api_key=settings.ROO_API_KEY or settings.MLAI_API_KEY,
+            internal_api_key=(
+                settings.INTERNAL_API_KEY
+                or settings.ROO_API_KEY
+                or settings.MLAI_API_KEY
+            ),
+        )
+
+        days = self._resolve_reconciliation_days(params)
+        since = self._clean_optional_iso_date(params.get("since"))
+        until = self._clean_optional_iso_date(params.get("until"))
+
+        try:
+            report = await backend_client.get_reconciliation_report(
+                user_id,
+                days=days,
+                since=since,
+                until=until,
+                include_workbook=True,
+            )
+        except MLAIBackendUnavailableError:
+            return "I'm having trouble reaching mlai-backend for the reconciliation report right now. Try again in a tick."
+        except httpx.HTTPStatusError as e:
+            status_code = e.response.status_code
+            detail = self._extract_luma_http_error_detail(e)
+            if status_code == 403:
+                return (
+                    "Sorry mate, you'll need to be a Points Admin (`admin`, `committee`, "
+                    "or `portfolio_lead`) to run the reconciliation report. 🔒"
+                )
+            if status_code == 503:
+                return detail or "Stripe isn't configured in mlai-backend yet. Ask the team to set `STRIPE_SECRET_KEY` there."
+            if status_code == 429:
+                return detail or "Stripe rate-limited the reconciliation report. Try again in a minute."
+            return detail or f"mlai-backend returned HTTP {status_code} for the reconciliation report."
+
+        from ..slack_client import upload_file
+
+        uploaded: list = []
+        brief = report.get("brief") if isinstance(report, dict) else None
+        if isinstance(brief, dict) and brief.get("content_base64"):
+            try:
+                brief_text = base64.b64decode(brief["content_base64"]).decode("utf-8")
+            except Exception:
+                return "mlai-backend returned a brief I couldn't decode. Ask the team to check the reconciliation endpoint."
+            brief_name = str(brief.get("filename") or "reconciliation.md")
+            upload_file(
+                channel=channel_id,
+                content=brief_text,
+                filename=brief_name,
+                title="Reconciliation brief",
+                thread_ts=thread_ts,
+            )
+            uploaded.append(brief_name)
+
+        workbook = report.get("workbook") if isinstance(report, dict) else None
+        if isinstance(workbook, dict) and workbook.get("content_base64"):
+            try:
+                xlsx_bytes = base64.b64decode(workbook["content_base64"])
+            except Exception:
+                xlsx_bytes = None
+            if xlsx_bytes:
+                wb_name = str(workbook.get("filename") or "reconciliation.xlsx")
+                upload_file(
+                    channel=channel_id,
+                    content=xlsx_bytes,
+                    filename=wb_name,
+                    title="Reconciliation workbook",
+                    thread_ts=thread_ts,
+                )
+                uploaded.append(wb_name)
+
+        message = self._format_reconciliation_report(report, uploaded)
+        return {
+            "message": message,
+            "data": {
+                "action": "reconciliation_report",
+                "payout_count": report.get("payout_count"),
+                "charge_count": report.get("charge_count"),
+                "unmatched_charge_count": report.get("unmatched_charge_count"),
+                "uploaded_filenames": uploaded,
+            },
+        }
+
+    def _resolve_reconciliation_days(self, params: dict) -> int:
+        raw = params.get("days")
+        try:
+            days = int(raw)
+        except (TypeError, ValueError):
+            days = 30
+        return max(1, min(days, 92))
+
+    @staticmethod
+    def _clean_optional_iso_date(value: Any) -> Optional[str]:
+        if value in (None, ""):
+            return None
+        text = str(value).strip()
+        try:
+            date.fromisoformat(text)
+        except ValueError:
+            return None
+        return text
+
+    def _format_reconciliation_report(self, report: dict, uploaded: list) -> str:
+        payouts = report.get("payouts") or []
+        if not payouts:
+            return "No Stripe payouts landed in that window — nothing to reconcile. ✅"
+
+        totals = report.get("currency_totals") or {}
+        lines = [
+            f"*Luma → Stripe reconciliation* — {report.get('payout_count', len(payouts))} "
+            f"payout(s), {report.get('charge_count', 0)} charge(s)."
+        ]
+        for ccy, t in totals.items():
+            lines.append(
+                f"• {ccy}: {t.get('deposit', 0):,.2f} deposited across {t.get('payouts', 0)} "
+                f"payout(s) (gross {t.get('gross', 0):,.2f}, Stripe fees {t.get('stripe_fee', 0):,.2f})."
+            )
+
+        unmatched = report.get("unmatched_charge_count") or 0
+        if unmatched:
+            lines.append(f"⚠ {unmatched} charge(s) had no Luma event match — flagged in the brief.")
+        warn_payouts = [p for p in payouts if p.get("warnings")]
+        if warn_payouts:
+            lines.append(
+                f"⚠ {len(warn_payouts)} payout(s) have warnings (refunds/adjustments or tie-out) — see the brief."
+            )
+
+        if uploaded:
+            lines.append("")
+            lines.append(f"📎 Uploaded {len(uploaded)} file(s): {', '.join(uploaded)}.")
+            lines.append(
+                "Hand the brief to Claude Cowork to reconcile in Xero — the report only "
+                "prepares; a human clicks the final confirm."
+            )
+        return "\n".join(lines)
 
     def _luma_request_includes_csv(self, params: dict, text: str) -> bool:
         raw_value = params.get("include_csv")

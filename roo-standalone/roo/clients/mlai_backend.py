@@ -1137,6 +1137,42 @@ class MLAIBackendClient:
         self._raise_for_status_or_backend_unavailable(response)
         return response.json()
 
+    async def get_reconciliation_report(
+        self,
+        slack_user_id: str,
+        *,
+        days: int = 30,
+        since: Optional[str] = None,
+        until: Optional[str] = None,
+        include_workbook: bool = True,
+    ) -> dict:
+        """Get the Luma→Stripe reconciliation report (Points Admin only) from mlai-backend.
+
+        Returns per-payout JSON plus a base64 markdown brief and optional xlsx
+        workbook. Read-only; mlai-backend enforces the Points-Admin role.
+        """
+        params = {
+            "slack_user_id": self._clean_slack_id(slack_user_id),
+            "days": days,
+            "include_workbook": "true" if include_workbook else "false",
+        }
+        if since:
+            params["since"] = since
+        if until:
+            params["until"] = until
+
+        response = await self._request(
+            "GET",
+            "/api/v1/integrations/reconciliation/report",
+            params=params,
+            timeout=60.0,
+            transport_retries=1,
+            retry_backoff_seconds=0.25,
+            circuit_breaker=True,
+        )
+        self._raise_for_status_or_backend_unavailable(response)
+        return response.json()
+
     async def get_data_catalog(self) -> dict:
         """Get Roo's curated read-only data resource catalog."""
         response = await self._request(
