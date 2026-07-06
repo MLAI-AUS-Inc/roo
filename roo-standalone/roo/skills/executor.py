@@ -8043,6 +8043,118 @@ Chunk {index} source: {label}
                 pass
         return f"🛑 I couldn't check <@{target_user_id}> in: {error_detail}{balance_line}"
 
+    def _format_admin_coworking_batch_success(
+        self,
+        *,
+        booking_date: str,
+        batch_result: dict,
+    ) -> str:
+        results = batch_result.get("results") or []
+        created_count = int(batch_result.get("created_count") or 0)
+        already_booked_count = int(batch_result.get("already_booked_count") or 0)
+
+        lines = [
+            "You beauty! 🎉",
+            "",
+            f"Checked **{len(results)}** people for coworking on **{booking_date}**.",
+        ]
+        if created_count or already_booked_count:
+            lines.append(
+                f"Created: **{created_count}** · Already booked: **{already_booked_count}**"
+            )
+
+        for result in results:
+            slack_user_id = str(result.get("slack_user_id") or "").strip()
+            if not slack_user_id:
+                booking = result.get("booking") or {}
+                slack_user_id = str(booking.get("slack_id") or booking.get("slack_user_id") or "").strip()
+            if not slack_user_id:
+                continue
+
+            status = "already booked" if result.get("already_booked") else "booked"
+            points_cost = result.get("points_cost")
+            cost_text = f" · {points_cost} pts" if points_cost is not None else ""
+            lines.append(f"• <@{slack_user_id}>: {status}{cost_text}")
+
+        lines.extend([
+            "",
+            "Admin Roo Points were not charged; each target user's Roo Points were used.",
+        ])
+        return "\n".join(lines)
+
+    def _format_admin_coworking_batch_bad_request(
+        self,
+        *,
+        booking_date: str,
+        exc: httpx.HTTPStatusError,
+    ) -> str:
+        error_detail = self._extract_http_error_detail(exc) or "The booking request was rejected."
+        per_target_errors: list[dict] = []
+        try:
+            payload = exc.response.json()
+            if isinstance(payload, dict) and isinstance(payload.get("errors"), list):
+                per_target_errors = [
+                    item for item in payload["errors"] if isinstance(item, dict)
+                ]
+        except Exception:
+            per_target_errors = []
+
+        lines = [
+            f"🛑 No bookings were created for **{booking_date}**.",
+            error_detail,
+        ]
+        for item in per_target_errors[:10]:
+            slack_user_id = str(item.get("slack_user_id") or "").strip()
+            target_label = f"<@{slack_user_id}>" if slack_user_id else "Target"
+            reason = str(item.get("error") or item.get("detail") or item.get("message") or "Rejected").strip()
+            lines.append(f"• {target_label}: {reason}")
+        return "\n".join(lines)
+
+    async def _book_coworking_many_for_admin(
+        self,
+        *,
+        client,
+        admin_user_id: str,
+        target_user_ids: list[str],
+        booking_date: str,
+        channel_id: Optional[str],
+    ) -> str:
+        try:
+            result = await client.book_coworking_many(
+                admin_slack_user_id=admin_user_id,
+                target_slack_user_ids=target_user_ids,
+                booking_date=booking_date,
+                slack_channel_id=channel_id,
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 400:
+                return self._format_admin_coworking_batch_bad_request(
+                    booking_date=booking_date,
+                    exc=exc,
+                )
+            if exc.response.status_code == 403:
+                return self._full_points_admin_denial(None, "check people in for coworking")
+            if is_retryable_coworking_exception(exc):
+                return (
+                    "I couldn't confirm that multi-person coworking check-in because MLAI backend "
+                    "didn't respond cleanly. Please retry the same command; existing bookings are "
+                    "treated as already booked and won't be charged twice."
+                )
+            raise
+        except Exception as exc:
+            if is_retryable_coworking_exception(exc):
+                return (
+                    "I couldn't confirm that multi-person coworking check-in because MLAI backend "
+                    "didn't respond cleanly. Please retry the same command; existing bookings are "
+                    "treated as already booked and won't be charged twice."
+                )
+            raise
+
+        return self._format_admin_coworking_batch_success(
+            booking_date=str(result.get("date") or booking_date),
+            batch_result=result,
+        )
+
     async def _book_coworking_with_intent(
         self,
         *,
@@ -8473,21 +8585,28 @@ Chunk {index} source: {label}
                 bot_id=bot_id,
             )
             if not target_slack_ids:
-                return "Who should I check in? Mention exactly one user, like `check @Jasmine in today`."
-            if len(target_slack_ids) != 1:
-                return "Tag exactly one user to check them in for coworking."
+                return "Who should I check in? Mention one or more users, like `check @Jasmine @Lee in today`."
 
             admin_details = await client.get_admin_details(user_id)
             if not self._is_full_points_admin_details(admin_details):
                 return self._full_points_admin_denial(admin_details, "check people in for coworking")
 
-            target_user_id = target_slack_ids[0]
             booking_date = self._resolve_coworking_booking_date(
                 params,
                 text,
                 default_to_today=True,
             )
 
+            if len(target_slack_ids) > 1:
+                return await self._book_coworking_many_for_admin(
+                    client=client,
+                    admin_user_id=user_id,
+                    target_user_ids=target_slack_ids,
+                    booking_date=booking_date,
+                    channel_id=channel_id,
+                )
+
+            target_user_id = target_slack_ids[0]
             try:
                 return await self._book_coworking_with_intent(
                     client=client,
@@ -8540,11 +8659,45 @@ Chunk {index} source: {label}
                 bot_id=bot_id,
             )
             if target_slack_ids:
-                return (
-                    "I saw a tagged user in that coworking booking request, so I didn't book you. "
-                    "Please retry as `book @user in today` or `check @user in today` so I can run "
-                    "the admin check-in flow."
+                admin_details = await client.get_admin_details(user_id)
+                if not self._is_full_points_admin_details(admin_details):
+                    return self._full_points_admin_denial(admin_details, "check people in for coworking")
+
+                booking_date = self._resolve_coworking_booking_date(
+                    params,
+                    text,
+                    default_to_today=True,
                 )
+
+                if len(target_slack_ids) > 1:
+                    return await self._book_coworking_many_for_admin(
+                        client=client,
+                        admin_user_id=user_id,
+                        target_user_ids=target_slack_ids,
+                        booking_date=booking_date,
+                        channel_id=channel_id,
+                    )
+
+                target_user_id = target_slack_ids[0]
+                try:
+                    return await self._book_coworking_with_intent(
+                        client=client,
+                        target_user_id=target_user_id,
+                        requested_by_user_id=user_id,
+                        booking_date=booking_date,
+                        text=text,
+                        channel_id=channel_id,
+                        thread_ts=thread_ts,
+                        admin_checkin=True,
+                    )
+                except httpx.HTTPStatusError as exc:
+                    if exc.response.status_code == 400:
+                        return await self._format_admin_coworking_bad_request(
+                            client=client,
+                            target_user_id=target_user_id,
+                            exc=exc,
+                        )
+                    raise
 
             booking_date = self._resolve_coworking_booking_date(
                 params,

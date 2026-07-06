@@ -87,9 +87,10 @@ actions:
     params:
       date: {type: string}
   - name: admin_checkin_coworking
-    description: Admin — check ANOTHER member in for coworking (message mentions someone else).
+    description: Admin — check one or more OTHER members in for coworking (message mentions someone else).
     params:
       date: {type: string}
+      target_users: {type: array}
   - name: coworking_report
     description: Usage report/trends/comparisons for the coworking space.
     params:
@@ -195,7 +196,7 @@ Example responses:
 - **points**: The number of points to award (integer, positive only)
 - **reason**: A short description of why the points are being awarded or requested
 - **target_user**: A single Slack User ID (e.g., U012ABC) or mention (e.g., <@U012ABC>) of the person receiving points. For single-user awards.
-- **target_users**: A list of Slack User IDs extracted from mentions for multi-user awards. Extract ALL <@U...> patterns from the message. Example: ["U012ABC", "U034DEF"] or ["<@U012ABC>", "<@U034DEF>"]
+- **target_users**: A list of Slack User IDs extracted from mentions for multi-user awards or admin coworking check-ins. Extract ALL <@U...> patterns from the message. Example: ["U012ABC", "U034DEF"] or ["<@U012ABC>", "<@U034DEF>"]
 - **target_slack_id**: (Alias for target_user) A single Slack User ID
 - **weekly_allowance**: (Super Admin) Positive integer weekly allowance for one tagged Points Admin
 - **submission_text**: Description of work completed for task submissions
@@ -246,7 +247,7 @@ Parse user messages to identify the action and parameters:
 | `coworking report last 3/6 months` | coworking_report | "Coworking report last 3 months" |
 | `coworking report last year` | coworking_report | "Coworking report last year" |
 | `coworking book <date/today>` | book_coworking | "Book me in", "Book me in for today", "@Roo coworking book" |
-| `check/book <@USER> in <date/today>` | admin_checkin_coworking | (Admin) "Check <@U123> in", "Book <@U123> in today" |
+| `check/book <@USER...> in <date/today>` | admin_checkin_coworking | (Admin) "Check <@U123> in", "Book <@U123> <@U456> in today", "Check <@U123>, <@U456>, <@U789> in tomorrow" |
 | `coworking cancel <date>` | cancel_coworking | "Cancel my booking for Friday", "@Roo coworking cancel" |
 | `rewards`, `points rewards` | list_rewards | "What rewards are available?", "@Roo points rewards" |
 | `reward request <code>` | request_reward | "I want to get the HOTDESK_DAY reward" |
@@ -280,7 +281,7 @@ Parse the user's message to determine which action they want:
 - Treat `request ... points for ...` as `request_points`, not `award_points`
 - For admin actions, verify the Slack mention format
 - Treat coworking booking requests without a date as a booking for today
-- For admin coworking check-ins, require exactly one tagged Slack user and book that user, not the admin
+- For admin coworking check-ins, require one or more tagged Slack users and book those users, not the admin
 - For super admin actions, require exactly one tagged Slack user, never fall through into `award_points`, and require a positive numeric allowance when changing allowance
 
 ### Step 2: Permission Check
@@ -292,9 +293,10 @@ For full admin-only actions (create, edit, cancel, approve, reject, award):
 For admin coworking check-ins:
 - Roo must fail fast unless the requester is a full Points Admin
 - Partner admins are report-only and cannot check people in
-- The target user is the single non-Roo Slack mention in the message
+- The target users are the non-Roo Slack mentions in the message
 - The booking date defaults to today when omitted
-- The coworking booking must be created for the target user's Slack ID so the target user's points are deducted
+- The coworking booking must be created for each target user's Slack ID so each target user's points are deducted
+- Multiple tagged users must be booked through the backend batch flow so success/failure is all-or-nothing; admin Roo Points must not be charged
 
 For super admin actions (promote admin, revoke admin, change allowance):
 - Roo must fail fast unless the requester Slack ID is `U05QPB483K9`

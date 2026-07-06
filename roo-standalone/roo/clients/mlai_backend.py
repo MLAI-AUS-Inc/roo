@@ -1189,6 +1189,47 @@ class MLAIBackendClient:
         )
         response.raise_for_status()
         return response.json()
+
+    async def book_coworking_many(
+        self,
+        admin_slack_user_id: str,
+        target_slack_user_ids: List[str],
+        booking_date: str,
+        slack_channel_id: Optional[str] = None,
+    ) -> dict:
+        """Book multiple coworking days as a full Points Admin."""
+        try:
+            from datetime import datetime
+            current_time = datetime.now().isoformat()
+        except Exception:
+            current_time = ""
+
+        cleaned_targets: List[str] = []
+        for target in target_slack_user_ids or []:
+            cleaned = self._clean_slack_id(target)
+            if cleaned and cleaned not in cleaned_targets:
+                cleaned_targets.append(cleaned)
+
+        payload = {
+            "admin_slack_user_id": self._clean_slack_id(admin_slack_user_id),
+            "target_slack_user_ids": cleaned_targets,
+            "date": booking_date,
+            "current_time": current_time,
+        }
+        if slack_channel_id:
+            payload["slack_channel_id"] = slack_channel_id
+
+        response = await self._request(
+            "POST",
+            f"{self._points_base}/coworking/book-many/",
+            json=payload,
+            timeout=20.0,
+            transport_retries=1,
+            retry_backoff_seconds=0.5,
+            circuit_breaker=True,
+        )
+        response.raise_for_status()
+        return response.json()
     
     async def get_github_auth_url(self, slack_user_id: str, domain: Optional[str] = None) -> dict:
         """Get the GitHub OAuth URL for a user from the backend."""

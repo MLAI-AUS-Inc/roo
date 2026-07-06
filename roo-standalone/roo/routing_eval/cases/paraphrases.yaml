@@ -117,6 +117,14 @@
   text: "book a coworking spot for friday"
   expect: {skill: mlai-points, action: book_coworking}
   tags: [paraphrase]
+- id: para-points-admin-book-two-today
+  text: "book <@U123ABC> <@U456DEF> in today"
+  expect: {skill: mlai-points, action: admin_checkin_coworking}
+  tags: [paraphrase, coworking-admin]
+- id: para-points-admin-check-three-tomorrow
+  text: "check <@U123ABC>, <@U456DEF>, <@U789GHI> in tomorrow"
+  expect: {skill: mlai-points, action: admin_checkin_coworking}
+  tags: [paraphrase, coworking-admin]
 - id: para-points-cancel-tomorrow
   text: "cancel my coworking booking tomorrow"
   expect: {skill: mlai-points, action: cancel_coworking}
