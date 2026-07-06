@@ -22,6 +22,7 @@ penalty for a wrong guess here).
 from __future__ import annotations
 
 import json as _json
+import re
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Optional
@@ -35,8 +36,10 @@ from .llm import get_llm_client
 # the load works regardless of the process cwd.
 CASES_FILE = Path(__file__).resolve().parent.parent / "skills" / "medhack" / "cases.yaml"
 
-# Fields that must NEVER reach the LLM prompt (the secret the player is guessing).
-_SECRET_FIELDS = ("diagnosis", "acceptable_answers")
+# Fields that must NEVER reach the LLM prompt. `hints` is authored coaching that
+# names/points at the answer (the original Slack game only ever revealed
+# hints[:hint_level]; stateless here means hint_level 0, i.e. none).
+_SECRET_FIELDS = ("diagnosis", "acceptable_answers", "hints")
 
 # Defensive caps (also enforced at the HTTP layer, belt-and-braces here).
 MAX_HISTORY_TURNS = 12
@@ -69,6 +72,11 @@ def load_case(case_id: Optional[int]) -> dict:
         raise KeyError("no cases available")
     if case_id is None:
         return cases[0]
+    # Coerce so a string id from a JSON body (e.g. "1") still matches int ids.
+    try:
+        case_id = int(case_id)
+    except (TypeError, ValueError):
+        raise KeyError(f"invalid case_id: {case_id!r}")
     for case in cases:
         if case.get("id") == case_id:
             return case
@@ -76,8 +84,24 @@ def load_case(case_id: Optional[int]) -> dict:
 
 
 def case_for_prompt(case: dict) -> dict:
-    """Strip the secret fields (diagnosis + acceptable_answers) before the LLM sees it."""
+    """Strip the secret fields (diagnosis, acceptable_answers, hints) before the LLM sees it."""
     return {k: v for k, v in case.items() if k not in _SECRET_FIELDS}
+
+
+def _redact_answer(case_text: str, case: dict) -> str:
+    """Redact the primary diagnosis string from the serialized case text.
+
+    Defense-in-depth: some case notes editorialise the answer verbatim
+    (e.g. investigations.*.note = "...pathognomonic for salicylate toxicity"),
+    so even with the diagnosis KEY stripped the answer can sit in free text and
+    be echoed under prompt injection. We redact the primary `diagnosis` string
+    only — NOT the acceptable-answer synonyms, which can legitimately appear as
+    discoverable findings the player earns by ordering the right test.
+    """
+    dx = (case.get("diagnosis") or "").strip()
+    if not dx:
+        return case_text
+    return re.sub(re.escape(dx), "[diagnosis withheld]", case_text, flags=re.IGNORECASE)
 
 
 # ---------------------------------------------------------------------------
@@ -91,21 +115,23 @@ def check_guess(guess: str, case: dict) -> bool:
     acceptable_answers, then 0.75 SequenceMatcher against the primary diagnosis
     and each acceptable answer. We do NOT import the executor or the client.
     """
-    guess_clean = guess.strip().lower()
-    acceptable = case.get("acceptable_answers", [])
-    diagnosis = case.get("diagnosis", "").lower()
+    guess_clean = str(guess).strip().lower()
+    # Coerce defensively: a malformed case (null/non-string values) must not
+    # crash the whole turn.
+    acceptable = [str(a).lower() for a in (case.get("acceptable_answers") or [])]
+    diagnosis = (case.get("diagnosis") or "").lower()
 
     # Exact match against acceptable answers
-    if guess_clean in [a.lower() for a in acceptable]:
+    if guess_clean in acceptable:
         return True
 
     # Fuzzy match against the primary diagnosis
-    if SequenceMatcher(None, guess_clean, diagnosis).ratio() >= 0.75:
+    if diagnosis and SequenceMatcher(None, guess_clean, diagnosis).ratio() >= 0.75:
         return True
 
     # Fuzzy match against acceptable answers
     for answer in acceptable:
-        if SequenceMatcher(None, guess_clean, answer.lower()).ratio() >= 0.75:
+        if SequenceMatcher(None, guess_clean, answer).ratio() >= 0.75:
             return True
 
     return False
@@ -155,9 +181,12 @@ Respond with ONLY valid JSON, no markdown:
         parsed = _json.loads(content)
         if not isinstance(parsed, dict):
             return {"is_guess": False, "diagnosis": None}
+        diag = parsed.get("diagnosis")
         return {
             "is_guess": bool(parsed.get("is_guess")),
-            "diagnosis": parsed.get("diagnosis"),
+            # The model occasionally emits a non-string (array/number); coerce
+            # to None so check_guess never receives a non-string.
+            "diagnosis": diag if isinstance(diag, str) else None,
         }
     except (ValueError, KeyError, IndexError):
         return {"is_guess": False, "diagnosis": None}
@@ -201,6 +230,8 @@ def _format_transcript(history: Optional[list[dict]]) -> str:
         return "None"
     lines = []
     for turn in history[-MAX_HISTORY_TURNS:]:
+        if not isinstance(turn, dict):
+            continue
         role = (turn.get("role") or "").strip().lower()
         text = (turn.get("text") or "").strip()
         if not text:
@@ -222,7 +253,7 @@ async def patient_reply(
     exactly like the original _medhack_llm_response, plus an optional
     extra_instruction (used for correct/incorrect guess handling).
     """
-    case_str = yaml.dump(case_for_prompt(case), default_flow_style=False)
+    case_str = _redact_answer(yaml.dump(case_for_prompt(case), default_flow_style=False), case)
     transcript = _format_transcript(history)
 
     prompt = f"""CASE FILE (INTERNAL TRUTH - use this to answer questions):

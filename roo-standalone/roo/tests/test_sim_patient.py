@@ -209,3 +209,75 @@ def test_422_when_question_missing(monkeypatch):
     client = TestClient(app)
     resp = client.post("/api/sim-patient", json={"question": "   "})
     assert resp.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# Regression: no case may leak the diagnosis or hints into the LLM prompt
+# ---------------------------------------------------------------------------
+
+def test_no_case_leaks_diagnosis_or_hints_into_prompt():
+    """For EVERY case in cases.yaml, the case text embedded in the LLM prompt
+    (case_for_prompt → yaml → _redact_answer) must NOT contain the primary
+    diagnosis string, the secret keys, or the authored hints. Guards against
+    the deny-list gap where notes/hints named the answer verbatim."""
+    import yaml as _yaml
+
+    cases = sim_patient._load_all_cases()
+    assert cases, "expected cases to load"
+    for case in cases:
+        cid = case.get("id")
+        stripped = sim_patient.case_for_prompt(case)
+        assert "hints" not in stripped, f"case {cid} leaks hints key"
+        assert "diagnosis" not in stripped, f"case {cid} leaks diagnosis key"
+        assert "acceptable_answers" not in stripped, f"case {cid} leaks acceptable_answers key"
+
+        prompt_text = sim_patient._redact_answer(
+            _yaml.dump(stripped, default_flow_style=False), case
+        )
+        dx = case["diagnosis"]
+        assert dx.lower() not in prompt_text.lower(), (
+            f"case {cid} leaks primary diagnosis '{dx}' into the prompt"
+        )
+        # hint free-text must be gone too
+        for hint in case.get("hints", []):
+            assert str(hint) not in prompt_text, f"case {cid} leaks a hint into the prompt"
+
+
+# ---------------------------------------------------------------------------
+# Robustness: malformed input degrades gracefully instead of 502-ing
+# ---------------------------------------------------------------------------
+
+def test_malformed_history_item_does_not_crash(monkeypatch):
+    _install_fake(monkeypatch, '{"is_guess": false, "diagnosis": null}')
+    # history with a non-dict item (a direct caller could send this)
+    result = _run(
+        sim_patient.handle_question("what are her vitals?", history=["not-a-dict", None, 123])
+    )
+    assert result["is_guess"] is False
+    assert result["reply"] == "The patient blinks slowly."
+
+
+def test_non_string_classifier_diagnosis_does_not_crash(monkeypatch):
+    # classifier returns a truthy NON-string diagnosis (array) — must not crash.
+    _install_fake(monkeypatch, '{"is_guess": true, "diagnosis": ["adrenal crisis"]}')
+    result = _run(sim_patient.handle_question("is it adrenal crisis?"))
+    assert result["is_guess"] is True
+    # diagnosis coerced to None → check_guess falls back to the raw question,
+    # which fuzzy-matches "adrenal crisis" → correct.
+    assert result["correct"] is True
+    assert result["diagnosis"] == "Adrenal Crisis"
+
+
+def test_string_case_id_resolves(monkeypatch):
+    # A string id from a JSON body still resolves to the int-keyed case.
+    assert sim_patient.load_case("1")["id"] == 1
+    with pytest.raises(KeyError):
+        sim_patient.load_case("999")
+
+
+def test_check_guess_tolerates_malformed_case():
+    # A case authored with diagnosis:null / non-string acceptable answers must
+    # not crash the guess check.
+    bad = {"diagnosis": None, "acceptable_answers": [None, 123, "pneumonia"]}
+    assert sim_patient.check_guess("pneumonia", bad) is True
+    assert sim_patient.check_guess("something else", bad) is False
