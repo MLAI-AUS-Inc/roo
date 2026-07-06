@@ -77,6 +77,14 @@ class Settings(BaseSettings):
     JOBS_RETRY_DELAY_SECONDS: int = 300
     JOBS_FAILURE_STOP_AFTER_DAYS: int = 3
 
+    # Simulated patient endpoint (health-hack 3D ward "Guess the Diagnosis").
+    # All optional so nothing else breaks. Bearer auth is open when the key is
+    # unset (dev). The original Slack game used reasoning_effort="high"; the game
+    # world defaults to "low" for latency (both overridable via env).
+    SIM_PATIENT_API_KEY: Optional[str] = None
+    SIM_PATIENT_MODEL: str = "gpt-5"
+    SIM_PATIENT_REASONING_EFFORT: str = "low"
+
     @property
     def default_llm_provider(self) -> str:
         """Determine default LLM provider based on available keys."""
