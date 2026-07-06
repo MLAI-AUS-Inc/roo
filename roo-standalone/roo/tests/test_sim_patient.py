@@ -281,3 +281,79 @@ def test_check_guess_tolerates_malformed_case():
     bad = {"diagnosis": None, "acceptable_answers": [None, 123, "pneumonia"]}
     assert sim_patient.check_guess("pneumonia", bad) is True
     assert sim_patient.check_guess("something else", bad) is False
+
+
+# ---------------------------------------------------------------------------
+# Nurse role: results persona, no guess adjudication, no secret leak
+# ---------------------------------------------------------------------------
+
+def test_nurse_role_skips_classifier_and_never_adjudicates(monkeypatch):
+    # Even a blatant guess phrased at the nurse must NOT be classified or
+    # adjudicated — the classifier (gpt-4o-mini) must never be called.
+    fake = _install_fake(
+        monkeypatch,
+        '{"is_guess": true, "diagnosis": "adrenal crisis"}',  # would win if consulted
+        reply_text='"That\'s your call, doc — want me to chase anything else?"',
+    )
+
+    result = _run(sim_patient.handle_question("is it adrenal crisis?", role="nurse"))
+
+    assert result["is_guess"] is False
+    assert result["correct"] is None
+    assert result["diagnosis"] is None
+    assert result["patient_name"] == sim_patient.NURSE_NAME
+    assert result["case_id"] == 1  # same case file as the patient
+
+    classifier_calls = [c for c in fake.calls if c["kwargs"].get("model") == "gpt-4o-mini"]
+    assert not classifier_calls, "nurse role must never invoke the guess classifier"
+
+    # The reply call uses the nurse persona, not the PQM narrator.
+    reply_calls = [c for c in fake.calls if c["kwargs"].get("model") != "gpt-4o-mini"]
+    assert len(reply_calls) == 1
+    system_prompt = reply_calls[0]["messages"][0]["content"]
+    assert "Nurse Priya" in system_prompt
+    assert "Patient Quest Master" not in system_prompt
+
+
+def test_nurse_prompt_carries_case_but_no_secrets(monkeypatch):
+    fake = _install_fake(monkeypatch, "{}", reply_text='"Bloods are back: sodium 122."')
+
+    result = _run(sim_patient.handle_question("can I get the bloods?", role="nurse"))
+    assert result["reply"].startswith('"Bloods')
+
+    reply_calls = [c for c in fake.calls if c["kwargs"].get("model") != "gpt-4o-mini"]
+    user_prompt = reply_calls[0]["messages"][1]["content"]
+    # Case content present (so she can actually read results out)…
+    assert "CASE FILE" in user_prompt
+    assert "122 mmol/L" in user_prompt
+    # …but never the secret answer, keys, or hints.
+    assert "Adrenal Crisis" not in user_prompt
+    assert "acceptable_answers" not in user_prompt
+    assert "addisonian" not in user_prompt.lower()
+    assert "hints" not in user_prompt
+
+
+def test_nurse_transcript_labels_prior_npc_lines_as_nurse():
+    text = sim_patient._format_transcript(
+        [
+            {"role": "player", "text": "bloods please"},
+            {"role": "patient", "text": "Sodium's 122, potassium 6.1."},
+        ],
+        npc_label="Nurse",
+    )
+    assert "Nurse: Sodium's 122" in text
+    assert "Patient:" not in text
+
+
+def test_422_when_role_invalid(monkeypatch):
+    from fastapi.testclient import TestClient
+    from roo import config
+    from roo.main import app
+
+    real = config.get_settings()
+    monkeypatch.setattr(real, "SIM_PATIENT_API_KEY", None, raising=False)  # auth open
+    monkeypatch.setattr(config, "get_settings", lambda: real)
+
+    client = TestClient(app)
+    resp = client.post("/api/sim-patient", json={"question": "hi", "role": "doctor"})
+    assert resp.status_code == 422

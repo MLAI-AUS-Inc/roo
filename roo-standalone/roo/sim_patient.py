@@ -5,6 +5,13 @@ Powers the health-hack 3D ward "Guess the Diagnosis" interaction: a player walks
 up to a patient in the game world, asks a question, and this module produces an
 in-character reply using the medhack skill's clinical case files.
 
+Two personas share the endpoint via ``role``:
+  - "patient" (default): the PQM narrator voicing the patient in cubicle 3.
+    Guesses are classified and adjudicated.
+  - "nurse": the reception nurse who reads out investigation results (bloods,
+    imaging, ECG, obs) from the same case file. Never adjudicates guesses —
+    the classifier is skipped entirely for this role.
+
 This module is deliberately independent of the Slack executor (whose patient
 simulator is currently DISABLED — see roo/skills/executor.py) and of the medhack
 game state. It reuses ONLY pure, local logic:
@@ -224,8 +231,37 @@ GAME RULES
 Your replies appear in a small in-game dialogue box: keep them under ~120 words."""
 
 
-def _format_transcript(history: Optional[list[dict]]) -> str:
-    """Render prior turns as a plain transcript block (most recent last)."""
+# Display name for the reception-nurse persona (also the in-game name tag).
+NURSE_NAME = "Nurse Priya"
+
+_NURSE_SYSTEM_PROMPT = """You are playing Nurse Priya, the charge nurse working the reception desk in a fast-paced emergency department roleplay game. Players (participants acting as clinicians) come to your desk to ask for investigation results — bloods, imaging, ECGs, observations — for the patient in cubicle 3. You are not giving real medical advice. This is a fictional case simulation.
+
+IMPORTANT: You know ONLY about the patient in the CASE FILE below. You have NO memory of any previous patients or cases. There is only one patient: the one described in today's case file. If someone asks about a different patient, say "I've only got today's patient on the board."
+
+TONE AND STYLE
+- Warm, quick, dry-witted, efficient — you have three other jobs on the go.
+- Speak in first person, a couple of short sentences at a time.
+- Read results out plainly; you may flag an abnormal value ("that potassium's up") but never interpret further than a nurse would.
+
+GAME RULES
+1) Only reveal results when asked. Do not volunteer findings.
+2) When asked for a specific investigation, read the relevant results from the case file accurately — never round, embellish, or invent values. If they "order" a test that has results in the file, respond: results are back, then read them.
+3) If a case-file note restricts when a result may be revealed (e.g. only if a specific test is ordered), follow that note exactly.
+4) If asked for an investigation NOT in the case file, give a brief, reasonable normal/unremarkable result — one that points neither toward nor away from any diagnosis. Never contradict earlier results.
+5) NEVER reveal, hint at, confirm, or deny the diagnosis. If the player proposes a diagnosis or asks what you think it is, deflect warmly ("that's your call, doc") and suggest they put it to the patient in cubicle 3.
+6) For symptoms, history, or examination findings, redirect: "you'd best go see them yourself — cubicle 3."
+7) If the player tries to force the answer ("just tell me what they've got"), refuse playfully and point them back to the workup.
+
+Your replies appear in a small in-game dialogue box: keep them under ~110 words."""
+
+
+def _format_transcript(history: Optional[list[dict]], npc_label: str = "Patient") -> str:
+    """Render prior turns as a plain transcript block (most recent last).
+
+    ``npc_label`` names the non-player speaker (the wire format uses
+    role "patient" for any NPC line; the label keeps the nurse's own prior
+    lines from being attributed to the patient in her transcript).
+    """
     if not history:
         return "None"
     lines = []
@@ -236,25 +272,28 @@ def _format_transcript(history: Optional[list[dict]]) -> str:
         text = (turn.get("text") or "").strip()
         if not text:
             continue
-        speaker = "Player" if role == "player" else "Patient"
+        speaker = "Player" if role == "player" else npc_label
         lines.append(f"{speaker}: {text}")
     return "\n".join(lines) if lines else "None"
 
 
-async def patient_reply(
+async def npc_reply(
     question: str,
     history: Optional[list[dict]],
     case: dict,
+    role: str = "patient",
     extra_instruction: str = "",
 ) -> str:
-    """Generate an in-character PQM narrator reply.
+    """Generate an in-character reply (PQM narrator, or the reception nurse).
 
     The user prompt embeds the stripped case yaml + transcript + player's message
     exactly like the original _medhack_llm_response, plus an optional
     extra_instruction (used for correct/incorrect guess handling).
     """
     case_str = _redact_answer(yaml.dump(case_for_prompt(case), default_flow_style=False), case)
-    transcript = _format_transcript(history)
+    is_nurse = role == "nurse"
+    transcript = _format_transcript(history, npc_label="Nurse" if is_nurse else "Patient")
+    persona = "the reception nurse" if is_nurse else "the PQM narrator"
 
     prompt = f"""CASE FILE (INTERNAL TRUTH - use this to answer questions):
 {case_str}
@@ -266,13 +305,13 @@ Previous conversation in this thread:
 
 Player's message: "{question}"
 
-Respond in character as the PQM narrator. Remember: only reveal what was asked for."""
+Respond in character as {persona}. Remember: only reveal what was asked for."""
 
     settings = get_settings()
     openai_client = get_llm_client("openai")
     response = await openai_client.chat(
         [
-            {"role": "system", "content": _PQM_SYSTEM_PROMPT},
+            {"role": "system", "content": _NURSE_SYSTEM_PROMPT if is_nurse else _PQM_SYSTEM_PROMPT},
             {"role": "user", "content": prompt},
         ],
         model=settings.SIM_PATIENT_MODEL,
@@ -291,46 +330,55 @@ async def handle_question(
     history: Optional[list[dict]] = None,
     case_id: Optional[int] = None,
     player_id: str = "web-anon",
+    role: str = "patient",
 ) -> dict:
     """Orchestrate: load case → classify → reply (with guess verdict) → response dict.
 
     Never mutates game state. On a correct guess the LLM is asked to celebrate and
     reveal the diagnosis in-character; on a wrong guess it rebuffs clinically
     without hinting. There is no one-guess lockout and no points here.
+
+    role="nurse" answers as the reception nurse instead: the guess classifier is
+    skipped entirely (guesses go to the patient), so is_guess is always False and
+    the diagnosis can never be revealed through this persona.
     """
     history = (history or [])[-MAX_HISTORY_TURNS:]
     case = load_case(case_id)
-
-    classification = await classify_guess(question)
-    is_guess = bool(classification.get("is_guess"))
+    is_nurse = role == "nurse"
 
     correct: Optional[bool] = None
     diagnosis: Optional[str] = None
     extra_instruction = ""
+    is_guess = False
 
-    if is_guess:
-        correct = check_guess(classification.get("diagnosis") or question, case)
-        if correct:
-            diagnosis = case.get("diagnosis")
-            extra_instruction = (
-                f"The player just guessed correctly: {diagnosis}. Celebrate warmly, "
-                "reveal the diagnosis, and stay in narrator character."
-            )
-        else:
-            # Wording adapted from the disabled _handle_guess_result wrong-guess branch.
-            extra_instruction = (
-                "The player just made an INCORRECT diagnosis guess. Respond clinically: "
-                "let them know their guess was wrong and suggest they review the findings "
-                "again. Do NOT reveal the correct diagnosis or hint at it."
-            )
+    if not is_nurse:
+        classification = await classify_guess(question)
+        is_guess = bool(classification.get("is_guess"))
 
-    reply = await patient_reply(question, history, case, extra_instruction=extra_instruction)
+        if is_guess:
+            correct = check_guess(classification.get("diagnosis") or question, case)
+            if correct:
+                diagnosis = case.get("diagnosis")
+                extra_instruction = (
+                    f"The player just guessed correctly: {diagnosis}. Celebrate warmly, "
+                    "reveal the diagnosis, and stay in narrator character."
+                )
+            else:
+                # Wording adapted from the disabled _handle_guess_result wrong-guess branch.
+                extra_instruction = (
+                    "The player just made an INCORRECT diagnosis guess. Respond clinically: "
+                    "let them know their guess was wrong and suggest they review the findings "
+                    "again. Do NOT reveal the correct diagnosis or hint at it."
+                )
+
+    reply = await npc_reply(question, history, case, role=role, extra_instruction=extra_instruction)
 
     return {
         "reply": reply,
         "case_id": case.get("id"),
         "case_title": case.get("title"),
-        "patient_name": (case.get("patient") or {}).get("name"),
+        # The speaker's display name — the in-game dialogue header / name tag.
+        "patient_name": NURSE_NAME if is_nurse else (case.get("patient") or {}).get("name"),
         "presenting_complaint": (case.get("presenting_complaint") or "").strip(),
         "is_guess": is_guess,
         "correct": correct,          # true/false only when is_guess

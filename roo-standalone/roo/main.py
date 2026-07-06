@@ -2146,10 +2146,12 @@ async def api_sim_patient(request: Request, settings: Settings = Depends(get_set
 
     Runs the medhack "Guess the Diagnosis" case as an in-character narrator.
     Stateless: never touches medhack game state, points, or the guess lockout.
+    role="nurse" answers as the reception nurse (investigation results from the
+    same case file; never adjudicates guesses).
 
     Auth is bearer-only and applied ONLY when SIM_PATIENT_API_KEY is set (open in
     dev). Errors: 401 bad/missing token, 404 unknown case_id, 422 missing
-    question, 502 LLM failure.
+    question or bad role, 502 LLM failure.
     """
     if settings.SIM_PATIENT_API_KEY:
         auth = request.headers.get("Authorization", "")
@@ -2160,6 +2162,10 @@ async def api_sim_patient(request: Request, settings: Settings = Depends(get_set
     question = (payload.get("question") or "").strip()
     if not question:
         raise HTTPException(status_code=422, detail="question required")
+
+    role = (payload.get("role") or "patient").strip().lower()
+    if role not in ("patient", "nurse"):
+        raise HTTPException(status_code=422, detail="role must be 'patient' or 'nurse'")
 
     # Defensive caps: bound the question length and history depth server-side.
     question = question[:500]
@@ -2177,6 +2183,7 @@ async def api_sim_patient(request: Request, settings: Settings = Depends(get_set
             history=history,
             case_id=payload.get("case_id"),
             player_id=payload.get("player_id") or "web-anon",
+            role=role,
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
