@@ -2194,6 +2194,81 @@ async def api_sim_patient(request: Request, settings: Settings = Depends(get_set
         raise HTTPException(status_code=502, detail="patient unavailable")
 
 
+@app.post("/api/diagnosis-check")
+async def api_diagnosis_check(request: Request, settings: Settings = Depends(get_settings)):
+    """Ward-clerk diagnosis contest: adjudicate ONE guess and record it.
+
+    Fully scripted — no LLM anywhere in this path. The active case is pinned
+    server-side (SIM_ACTIVE_CASE_ID); clients cannot pick a case. The verdict
+    comes from the same deterministic matcher as the Slack game (check_guess)
+    and is recorded to mlai-backend BEFORE being revealed: if recording fails
+    we return 503 with no verdict, so the guess is neither leaked nor burned
+    (the backend row is what burns the player's single guess).
+
+    Auth mirrors /api/sim-patient (bearer, open when SIM_PATIENT_API_KEY unset).
+    Errors: 401 bad token, 422 validation, 503 contest/record unavailable.
+    """
+    if settings.SIM_PATIENT_API_KEY:
+        auth = request.headers.get("Authorization", "")
+        if auth != f"Bearer {settings.SIM_PATIENT_API_KEY}":
+            raise HTTPException(status_code=401, detail="bad token")
+
+    payload = await request.json()
+    guess = str(payload.get("guess") or "").strip()
+    if not guess or len(guess) > 200:
+        raise HTTPException(status_code=422, detail="guess required (1-200 chars)")
+    client_id = str(payload.get("client_id") or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9-]{8,64}", client_id):
+        raise HTTPException(status_code=422, detail="client_id must be 8-64 chars [A-Za-z0-9-]")
+
+    from .sim_patient import check_guess, load_case, record_web_guess
+
+    try:
+        case = load_case(settings.SIM_ACTIVE_CASE_ID)
+    except KeyError as exc:
+        # Server misconfiguration (bad SIM_ACTIVE_CASE_ID), not a client error.
+        print(f"⚠️ diagnosis-check: active case unavailable: {exc}")
+        raise HTTPException(status_code=503, detail="contest unavailable")
+
+    is_correct = check_guess(guess, case)
+
+    try:
+        record = await record_web_guess(
+            settings,
+            case_id=case.get("id"),
+            client_id=client_id,
+            guess_text=guess,
+            is_correct=is_correct,
+        )
+    except Exception as exc:
+        # No verdict may leak when the registry is down (free-oracle otherwise),
+        # and the guess is NOT burned — nothing was recorded.
+        print(f"⚠️ diagnosis-check: record failed: {exc}")
+        raise HTTPException(status_code=503, detail="record_failed")
+
+    already = bool(record.get("already_guessed"))
+    stored_correct = bool(record.get("is_correct"))
+    winner_taken = bool(record.get("winner_taken"))
+    if already:
+        result = "already_guessed"
+    elif stored_correct and not winner_taken:
+        result = "correct_first"
+    elif stored_correct:
+        result = "correct_beaten"
+    else:
+        result = "incorrect"
+
+    return {
+        "result": result,
+        "outcome": record.get("outcome"),
+        "winner_taken": winner_taken,
+        "case_id": case.get("id"),
+        # The STORED verdict is authoritative (covers the already_guessed resume
+        # path); the primary diagnosis is no longer secret once earned.
+        "diagnosis": case.get("diagnosis") if stored_correct else None,
+    }
+
+
 def _format_tier_display(tier: str) -> str:
     """Format tier string for display with emoji."""
     tier_lower = tier.lower().replace("_", " ")

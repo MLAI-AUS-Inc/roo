@@ -1,10 +1,11 @@
 """Hermetic tests for the simulated-patient endpoint logic (no real LLM, no network).
 
-Covers plan §2.5:
+Covers plan §2.5 (updated for the ward-clerk contest):
   (a) case loads + secrets stripped from the prompt payload
   (b) a non-guess question returns is_guess: false
-  (c) a guess matching acceptable_answers/fuzzy diagnosis returns correct: true + diagnosis
-  (d) a wrong guess returns correct: false and no diagnosis
+  (c) a guess is NEVER adjudicated in chat: deflected to the ward clerk,
+      correct/diagnosis always None (/api/diagnosis-check owns verdicts)
+  (d) right or wrong, the real answer never enters the reply prompt
   (e) 401 when SIM_PATIENT_API_KEY is set and the bearer header is missing (TestClient)
 """
 import asyncio
@@ -110,42 +111,42 @@ def test_non_guess_question(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# (c) correct guess (via acceptable_answers / fuzzy) → correct true + diagnosis
+# (c) guesses are NEVER adjudicated in chat — deflected to the ward clerk
 # ---------------------------------------------------------------------------
 
-def test_correct_guess_reveals_diagnosis(monkeypatch):
+def test_correct_guess_is_not_adjudicated_and_deflects_to_clerk(monkeypatch):
+    """Even a spot-on guess gets no verdict from the patient — the chat path
+    would otherwise be a free correctness oracle for the one-guess contest."""
     fake = _install_fake(
         monkeypatch,
         '{"is_guess": true, "diagnosis": "addisonian crisis"}',
-        reply_text="Sash grins weakly. \"Yeah… that's it.\"",
     )
 
     result = _run(sim_patient.handle_question("is it addisonian crisis?"))
 
     assert result["is_guess"] is True
-    assert result["correct"] is True
-    assert result["diagnosis"] == "Adrenal Crisis"
+    assert result["correct"] is None
+    assert result["diagnosis"] is None
 
-    # The reply prompt should carry the celebratory extra instruction with the dx.
+    # The reply prompt deflects to the clerk and never sees the real answer.
     reply_calls = [c for c in fake.calls if c["kwargs"].get("model") != "gpt-4o-mini"]
     user_prompt = reply_calls[0]["messages"][1]["content"]
-    assert "guessed correctly" in user_prompt
-    assert "Adrenal Crisis" in user_prompt  # revealed to the LLM only on a correct guess
+    assert "ward clerk" in user_prompt
+    assert "confirm or deny" in user_prompt
+    assert "Adrenal Crisis" not in user_prompt
 
 
-def test_correct_guess_via_fuzzy_match(monkeypatch):
-    # "adrenal crises" (typo) fuzzy-matches "adrenal crisis" at >= 0.75.
-    _install_fake(monkeypatch, '{"is_guess": true, "diagnosis": "adrenal crises"}')
-
-    result = _run(sim_patient.handle_question("adrenal crises?"))
-
-    assert result["is_guess"] is True
-    assert result["correct"] is True
-    assert result["diagnosis"] == "Adrenal Crisis"
+def test_check_guess_still_matches_for_the_clerk_endpoint(monkeypatch):
+    # The matcher itself stays available (the clerk endpoint uses it):
+    # exact acceptable answer, >=0.75 fuzzy typo, and a near-miss reject.
+    case = sim_patient.load_case(1)
+    assert sim_patient.check_guess("addisonian crisis", case) is True
+    assert sim_patient.check_guess("adrenal crises", case) is True  # typo, fuzzy
+    assert sim_patient.check_guess("appendicitis", case) is False
 
 
 # ---------------------------------------------------------------------------
-# (d) wrong guess → correct false, no diagnosis
+# (d) wrong guess → same deflection, answer never in the prompt
 # ---------------------------------------------------------------------------
 
 def test_wrong_guess_no_diagnosis(monkeypatch):
@@ -154,13 +155,14 @@ def test_wrong_guess_no_diagnosis(monkeypatch):
     result = _run(sim_patient.handle_question("is it appendicitis?"))
 
     assert result["is_guess"] is True
-    assert result["correct"] is False
+    assert result["correct"] is None
     assert result["diagnosis"] is None
 
-    # Wrong-guess reply prompt must NOT contain the real answer.
+    # Deflection prompt must NOT contain the real answer or a verdict.
     reply_calls = [c for c in fake.calls if c["kwargs"].get("model") != "gpt-4o-mini"]
     user_prompt = reply_calls[0]["messages"][1]["content"]
-    assert "INCORRECT" in user_prompt
+    assert "ward clerk" in user_prompt
+    assert "INCORRECT" not in user_prompt
     assert "Adrenal Crisis" not in user_prompt
 
 
@@ -262,10 +264,9 @@ def test_non_string_classifier_diagnosis_does_not_crash(monkeypatch):
     _install_fake(monkeypatch, '{"is_guess": true, "diagnosis": ["adrenal crisis"]}')
     result = _run(sim_patient.handle_question("is it adrenal crisis?"))
     assert result["is_guess"] is True
-    # diagnosis coerced to None → check_guess falls back to the raw question,
-    # which fuzzy-matches "adrenal crisis" → correct.
-    assert result["correct"] is True
-    assert result["diagnosis"] == "Adrenal Crisis"
+    # Chat never adjudicates any more — a detected guess only deflects.
+    assert result["correct"] is None
+    assert result["diagnosis"] is None
 
 
 def test_string_case_id_resolves(monkeypatch):

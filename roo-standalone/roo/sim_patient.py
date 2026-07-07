@@ -6,11 +6,18 @@ up to a patient in the game world, asks a question, and this module produces an
 in-character reply using the medhack skill's clinical case files.
 
 Two personas share the endpoint via ``role``:
-  - "patient" (default): the PQM narrator voicing the patient in cubicle 3.
-    Guesses are classified and adjudicated.
+  - "patient" (default): the patient in cubicle 3, speaking first person.
+    Guesses are classified only to DEFLECT them to the ward clerk — chat
+    NEVER adjudicates (see below).
   - "nurse": the reception nurse who reads out investigation results (bloods,
     imaging, ECG, obs) from the same case file. Never adjudicates guesses —
     the classifier is skipped entirely for this role.
+
+Diagnosis adjudication lives EXCLUSIVELY in /api/diagnosis-check (the scripted
+ward-clerk contest endpoint): it runs check_guess() and records the verdict to
+mlai-backend before revealing anything. Chat must never return a verdict —
+otherwise the patient is a free correctness oracle players can probe before
+banking a guaranteed win on their single clerk guess.
 
 This module is deliberately independent of the Slack executor (whose patient
 simulator is currently DISABLED — see roo/skills/executor.py) and of the medhack
@@ -34,6 +41,7 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Optional
 
+import httpx
 import yaml
 
 from .config import get_settings
@@ -200,6 +208,48 @@ Respond with ONLY valid JSON, no markdown:
 
 
 # ---------------------------------------------------------------------------
+# Web ward contest: record adjudicated guesses to mlai-backend
+# ---------------------------------------------------------------------------
+
+async def record_web_guess(
+    settings,
+    *,
+    case_id: int,
+    client_id: str,
+    guess_text: str,
+    is_correct: bool,
+) -> dict:
+    """POST the adjudicated guess to mlai-backend's sim-guess registry.
+
+    The backend row is the contest's source of truth (one guess per client per
+    case via a unique constraint; single winner per case). Raises on ANY
+    failure — the caller must then withhold the verdict entirely (503):
+    revealing it unrecorded would turn backend-down into a free correctness
+    oracle. Because nothing was recorded, a failed attempt does NOT burn the
+    player's one guess.
+    """
+    if not settings.MLAI_BACKEND_URL:
+        raise RuntimeError("MLAI_BACKEND_URL not configured")
+    api_key = settings.ROO_API_KEY or settings.INTERNAL_API_KEY
+    if not api_key:
+        raise RuntimeError("no service API key configured for mlai-backend")
+    url = f"{settings.MLAI_BACKEND_URL.rstrip('/')}/api/v1/hackathons/hospital/sim-guess/record/"
+    async with httpx.AsyncClient(timeout=6.0) as client:
+        resp = await client.post(
+            url,
+            json={
+                "case_id": case_id,
+                "client_id": client_id,
+                "guess_text": guess_text,
+                "is_correct": is_correct,
+            },
+            headers={"X-API-Key": api_key},
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+
+# ---------------------------------------------------------------------------
 # In-character reply
 # ---------------------------------------------------------------------------
 
@@ -223,7 +273,7 @@ GAME RULES
 1) Only reveal information if asked. Do not volunteer findings.
 2) Stay internally consistent with the case file. Never contradict earlier answers.
 3) You do NOT know your own numbers. If asked for vitals or observations (blood pressure, heart rate, temperature, oxygen or sats, blood sugar or glucose) or any test result (bloods, imaging, ECG, scans), you can't recite figures — tell them the nurse at reception has those numbers. You CAN describe how you FEEL in your own words (dizzy, faint, short of breath, cramping, weak, hot/cold) — just never the measurements.
-4) NEVER reveal or hint at the diagnosis directly. The diagnosis is checked separately.
+4) NEVER reveal or hint at the diagnosis directly, and never confirm or deny a player's diagnosis theory — you genuinely don't know what's wrong with you. Making a diagnosis official happens with Reg, the ward clerk at the reception desk, not with you.
 5) If asked about something not in the case data, give a reasonable normal/unremarkable answer about yourself.
 6) Hidden information (backstory, concealed history) stays hidden unless a player earns it by asking the right questions.
 7) If you have history_disclosure_rules in your data, follow those rules for how and when to reveal sensitive history.
@@ -598,22 +648,24 @@ async def handle_question(
     player_id: str = "web-anon",
     role: str = "patient",
 ) -> dict:
-    """Orchestrate: load case → classify → reply (with guess verdict) → response dict.
+    """Orchestrate: load case → classify → deflect/reply → response dict.
 
-    Never mutates game state. On a correct guess the LLM is asked to celebrate and
-    reveal the diagnosis in-character; on a wrong guess it rebuffs clinically
-    without hinting. There is no one-guess lockout and no points here.
+    Never mutates game state and NEVER adjudicates a diagnosis guess: when the
+    classifier detects a guess, the patient deflects to the ward clerk instead.
+    The one-guess ticket contest is adjudicated + recorded exclusively by
+    /api/diagnosis-check — returning a verdict here would make the patient a
+    free correctness oracle players could probe before banking a guaranteed
+    win at the clerk. `correct`/`diagnosis` are always None (kept in the
+    response shape for frontend compatibility).
 
     role="nurse" answers as the reception nurse instead: the guess classifier is
-    skipped entirely (guesses go to the patient), so is_guess is always False and
-    the diagnosis can never be revealed through this persona.
+    skipped entirely, so is_guess is always False and the diagnosis can never be
+    revealed through this persona.
     """
     history = (history or [])[-MAX_HISTORY_TURNS:]
     case = load_case(case_id)
     is_nurse = role == "nurse"
 
-    correct: Optional[bool] = None
-    diagnosis: Optional[str] = None
     extra_instruction = ""
     is_guess = False
 
@@ -622,20 +674,16 @@ async def handle_question(
         is_guess = bool(classification.get("is_guess"))
 
         if is_guess:
-            correct = check_guess(classification.get("diagnosis") or question, case)
-            if correct:
-                diagnosis = case.get("diagnosis")
-                extra_instruction = (
-                    f"The player just guessed correctly: {diagnosis}. Celebrate warmly, "
-                    "reveal the diagnosis, and stay in narrator character."
-                )
-            else:
-                # Wording adapted from the disabled _handle_guess_result wrong-guess branch.
-                extra_instruction = (
-                    "The player just made an INCORRECT diagnosis guess. Respond clinically: "
-                    "let them know their guess was wrong and suggest they review the findings "
-                    "again. Do NOT reveal the correct diagnosis or hint at it."
-                )
+            # ORACLE NEUTRALIZED: check_guess() is deliberately NOT consulted
+            # in the chat path. The patient doesn't know their diagnosis and
+            # steers the player to the clerk, where the contest is recorded.
+            extra_instruction = (
+                "The doctor just told you what they think is wrong with you. Do NOT "
+                "confirm or deny it — you genuinely don't know what's wrong with you. "
+                "Tell them, in character, that if they want to make their diagnosis "
+                "official they should log it with Reg, the ward clerk at the "
+                "reception desk. Do not repeat their theory back to them."
+            )
 
     raw_reply = await npc_reply(question, history, case, role=role, extra_instruction=extra_instruction)
 
@@ -658,6 +706,8 @@ async def handle_question(
         "patient_name": display_name,
         "presenting_complaint": (case.get("presenting_complaint") or "").strip(),
         "is_guess": is_guess,
-        "correct": correct,          # true/false only when is_guess
-        "diagnosis": diagnosis,      # set ONLY when is_guess && correct
+        # Deprecated pair: chat NEVER adjudicates guesses any more (the clerk
+        # endpoint owns verdicts). Always None; kept so PatientReply parses.
+        "correct": None,
+        "diagnosis": None,
     }

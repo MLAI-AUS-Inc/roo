@@ -84,6 +84,9 @@ class Settings(BaseSettings):
     SIM_PATIENT_API_KEY: Optional[str] = None
     SIM_PATIENT_MODEL: str = "gpt-5"
     SIM_PATIENT_REASONING_EFFORT: str = "low"
+    # The ward contest's active case (cases.yaml id). Pinned server-side so web
+    # clients can never pick a case and farm tickets from cases not in play.
+    SIM_ACTIVE_CASE_ID: int = 1
 
     @property
     def default_llm_provider(self) -> str:
