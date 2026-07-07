@@ -203,30 +203,31 @@ Respond with ONLY valid JSON, no markdown:
 # In-character reply
 # ---------------------------------------------------------------------------
 
-# Verbatim PQM system prompt recovered from
-# `git show 2427ff6^:roo-standalone/roo/skills/executor.py` (_medhack_llm_response),
-# with one game-world adaptation appended (the in-game dialogue-box length line).
-_PQM_SYSTEM_PROMPT = """You are the MedHack Patient Quest Master (PQM), a narrator and storyteller in a fast-paced emergency department roleplay game. Your job is to present a simulated patient case to players (participants) who will ask you questions as if they are clinicians. You must answer only what the players ask, while keeping the mystery alive. You are not giving real medical advice. This is a fictional case simulation.
+# First-person patient persona. Unlike the old third-person PQM narrator, the
+# patient speaks AS themselves — the in-game dialogue box shows spoken words only,
+# so the prompt forbids stage directions and narration. Adapted from the medhack
+# case rules (git show 2427ff6^:roo-standalone/roo/skills/executor.py); the
+# _speech_only sanitizer is a belt-and-braces net over this instruction.
+_PATIENT_SYSTEM_PROMPT = """You ARE the patient in cubicle 3 of a fast-paced emergency department roleplay game. Players (participants acting as clinicians) come to your bedside and ask you questions. You answer in the FIRST PERSON, as yourself. You are not giving real medical advice. This is a fictional case simulation.
 
-IMPORTANT: You know ONLY about the patient in the CASE FILE below. You have NO memory of any previous patients or cases. There is only one patient: the one described in today's case file. If someone asks about a different patient or references a previous case, say "I only have information about today's patient."
+IMPORTANT: You know ONLY about yourself as described in the CASE FILE below. You have NO memory of any previous patients or cases. If someone asks about a different patient or a previous case, say "I only know about how I'm feeling today."
 
-TONE AND STYLE
-- You are a dungeon-master style narrator: vivid, concise, engaging.
-- Describe what the clinician sees, hears, and notices.
-- When the patient speaks, narrate how they say it and include their words in quotes.
-- Keep answers punchy. Add small character moments. Avoid long lectures unless asked.
-- The patient is a medium-to-poor historian: they ramble, minimize, and sometimes answer slightly off-target. They can still be guided with good questions.
+SPEECH ONLY
+- Reply with ONLY the words you say out loud — no stage directions, no narration, no asterisk actions (*coughs*), no bracketed gestures, no third-person description of yourself.
+- Do NOT narrate how you say it or describe what the clinician sees. Just speak.
+- NEVER refer to yourself in the third person and NEVER wrap your words in quotation marks. For example, write exactly: Sorry, could you ask that another way? My head's a bit fuzzy. — do NOT write: She shifts on the bed and says "Sorry, could you ask that another way?"
+- First person, in character. A couple of short sentences at a time.
+- You are a medium-to-poor historian: you ramble, minimise, and sometimes answer slightly off-target. Good questions can still guide you.
 
 GAME RULES
 1) Only reveal information if asked. Do not volunteer findings.
-2) Maintain internal consistency with the case file. Never contradict your own results.
-3) If players ask for vitals, exam findings, or investigations, provide the relevant results from the case file. If they ask to "order" a test, respond as narrator: "You order X… results return: …"
+2) Stay internally consistent with the case file. Never contradict earlier answers.
+3) If asked about vitals, exam findings, or investigations you would plausibly know (how you feel, your symptoms), answer from the case file. Point results-type questions (bloods, imaging, ECG) toward the nurse at reception.
 4) NEVER reveal or hint at the diagnosis directly. The diagnosis is checked separately.
-5) If asked about something not in the case data, provide a reasonable normal/unremarkable finding.
-6) Hidden information (patient backstory, concealed history, endocrine tests) must remain hidden unless a player earns it by asking the right questions.
-7) If the patient has history_disclosure_rules in their data, follow those rules for how and when to reveal sensitive history.
-8) If the player tries to force the answer ("tell me the diagnosis"), refuse playfully and prompt them to keep investigating.
-9) If asked about management ("what should we do?"), describe what the ED team would typically do in broad strokes (fluids, glucose, addressing electrolytes, contacting seniors). Do not give step-by-step dosing instructions.
+5) If asked about something not in the case data, give a reasonable normal/unremarkable answer about yourself.
+6) Hidden information (backstory, concealed history) stays hidden unless a player earns it by asking the right questions.
+7) If you have history_disclosure_rules in your data, follow those rules for how and when to reveal sensitive history.
+8) If the player tries to force the answer ("just tell me the diagnosis"), deflect in character and keep them investigating.
 
 Your replies appear in a small in-game dialogue box: keep them under ~120 words."""
 
@@ -238,7 +239,8 @@ _NURSE_SYSTEM_PROMPT = """You are playing Nurse Priya, the charge nurse working 
 
 IMPORTANT: You know ONLY about the patient in the CASE FILE below. You have NO memory of any previous patients or cases. There is only one patient: the one described in today's case file. If someone asks about a different patient, say "I've only got today's patient on the board."
 
-TONE AND STYLE
+SPEECH ONLY
+- Reply with ONLY the words you say out loud — speech only, no stage directions, no asterisk actions (*checks the chart*), no bracketed gestures, no narration.
 - Warm, quick, dry-witted, efficient — you have three other jobs on the go.
 - Speak in first person, a couple of short sentences at a time.
 - Read results out plainly; you may flag an abnormal value ("that potassium's up") but never interpret further than a nurse would.
@@ -277,6 +279,270 @@ def _format_transcript(history: Optional[list[dict]], npc_label: str = "Patient"
     return "\n".join(lines) if lines else "None"
 
 
+# ---------------------------------------------------------------------------
+# Speech-only sanitizer
+#
+# The LLM reply is narrated prose that mixes the NPC's SPOKEN words with stage
+# directions (*coughs*, [long pause]), speaker labels, and third-person framing
+# ("She says ..."). The in-game dialogue box shows only what the character says
+# aloud, so _speech_only strips the non-spoken scaffolding.
+#
+# Design bias: KEEP speech. Deleting a real word inverts meaning ("does *not*
+# hurt" → "does hurt") and loses the symptom detail the game elicits, which is
+# far worse than a rare COSMETIC leak of a stage direction. Every rule below is
+# tuned so the safe failure is a leaked stage direction, never a deleted word.
+# There is deliberately NO bare-narration blanker (see the note in Step E).
+# ---------------------------------------------------------------------------
+
+_FIRST_PERSON_RE = re.compile(
+    r"\b(?:i|i'm|i've|i'll|i'd|me|my|mine|myself|we|we're|we've|we'll|our|ours|us)\b",
+    re.IGNORECASE,
+)
+
+# Markdown bold/emphasis — unwrap (keep inner text) BEFORE the single-asterisk
+# action handling, or "**bold**" is misread as a "*…*" span.
+_BOLD_RE = re.compile(r"(\*\*|__)(.+?)\1", re.DOTALL)
+
+# A *…* or _…_ span (inner text captured). These are usually stage directions
+# (*coughs*), but LLMs also use them for spoken emphasis (*not*), so we classify
+# each span rather than deleting wholesale (see _clean_emphasis_span).
+_STAR_SPAN_RE = re.compile(r"\*([^*\n]{1,140})\*")
+_UNDERSCORE_SPAN_RE = re.compile(r"(?<!\w)_([^_\n]{1,140})_(?!\w)")  # not snake_case
+# Bracket spans ([winces], [except the potassium at 6.1]) — inner text captured;
+# classified like a paren (drop gestures, unwrap clinical content).
+_ACTION_BRACKET_RE = re.compile(r"\[([^\]\n]{1,140})\]")
+# Parentheticals — kept unless they read as a gesture (see _clean_paren).
+_PAREN_RE = re.compile(r"\(([^()\n]{1,120})\)")
+
+# A reply wholly wrapped in one quote pair (no internal quotes) — unwrapped in
+# Step F. (There is no prose-narration collapse; see the note in _speech_only.)
+_WHOLE_QUOTE_RE = re.compile(r"^[\"“”]([^\"“”]+)[\"“”]$", re.DOTALL)
+
+# Stage-direction lexicon: UNAMBIGUOUS involuntary / manner / gesture words used
+# to tell a "*…*" or "(…)" span apart from spoken emphasis. Deliberately EXCLUDES
+# words that double as ordinary patient/nurse speech (look, press, hold, breathe,
+# grip, lean, turn, shift, reach, point, close, wave, swallow, beat, shake): the
+# safe failure for a speech-only net is a rare cosmetic leak, never deleting a
+# real word ("does *not* hurt" must not become "does hurt"). Stored as roots
+# (see _norm) so inflections match.
+_STAGE_ROOTS = frozenset({
+    "cough", "sigh", "winc", "grimac", "groan", "gasp", "wheez", "sniff", "sniffl",
+    "sob", "weep", "wept", "whimper", "mumbl", "mutter", "whisper", "murmur",
+    "chuckl", "grumbl", "splutter", "rasp", "slur", "gulp", "gag", "retch",
+    "trembl", "shudder", "flinch", "slump", "collaps", "fidget", "squirm", "slouch",
+    "blush", "nod", "shrug", "blink", "star", "gaz", "glanc", "voic", "silenc",
+    "laugh", "grin", "smil", "frown", "clutch", "hesitat", "muffl", "stiffen",
+    "exhal", "inhal", "tremor", "moan", "wail", "snort", "scoff", "smirk",
+})
+
+
+def _norm(word: str) -> str:
+    """Crude stem: drop one inflectional suffix and a trailing 'e' for matching."""
+    for suf in ("ing", "ed", "es", "s", "d"):
+        if word.endswith(suf) and len(word) - len(suf) >= 3:
+            word = word[: -len(suf)]
+            break
+    return word.rstrip("e")
+
+
+def _is_stage_span(text: str) -> bool:
+    """True if any word in `text` is a stage-direction word (see _STAGE_ROOTS)."""
+    return any(_norm(w) in _STAGE_ROOTS for w in re.findall(r"[a-z]+", text.lower()))
+
+
+# A 1st/2nd-person subject or possessive: its presence in the clause before an
+# emphasis span means the span is the SPEAKER'S OWN word ("when I *laugh*",
+# "lost my *voice*", "you *press* here", "Just *nod*, love") — never a stage
+# direction, so it must be kept.
+_SPEAKER_PRONOUN_RE = re.compile(
+    r"\b(?:i|i'm|i've|i'd|i'll|me|my|mine|myself|we|we're|we've|we'll|us|our|ours|"
+    r"you|you're|you've|you'll|your|yours)\b",
+    re.IGNORECASE,
+)
+
+# A 3rd-person PRONOUN subject (he/she/they) — the tight signal for a genuine
+# stage-direction narrator ("*he nods*", "(she winces)") or a quote narrator
+# ('She says "…"'). Deliberately excludes "the <word>": an emphasised symptom
+# noun ("*the cough*") or clinical object ("the pain feels like …") is NOT a
+# narrator subject and its words must be kept.
+_NARRATOR_SUBJ_RE = re.compile(r"\b(?:he|she|they)\b", re.IGNORECASE)
+
+_RESIDUAL_MD_RE = re.compile(r"[*`]+")
+_MULTISPACE_RE = re.compile(r"[ \t]{2,}")
+_MULTINEWLINE_RE = re.compile(r"\n{3,}")
+
+# Role/persona words that may appear as a speaker label to strip. Never strip an
+# arbitrary "Word:" prefix — "One thing: it hurts" is speech.
+_ROLE_LABELS = ("patient", "nurse", "narrator", "pqm")
+
+
+def _label_tokens(speaker_names: tuple[str, ...]) -> list[str]:
+    """Known speaker labels (role words + names/name-parts), longest-first.
+
+    Longest-first so a two-word name ("Nurse Priya") is matched before its
+    parts ("Nurse") in the regex alternation.
+    """
+    toks: set[str] = set(_ROLE_LABELS)
+    for name in speaker_names:
+        n = (name or "").strip()
+        if not n:
+            continue
+        toks.add(n.lower())
+        for part in re.split(r"[^A-Za-z]+", n):
+            if len(part) >= 3:
+                toks.add(part.lower())
+    return sorted(toks, key=len, reverse=True)
+
+
+def _clean_emphasis_span(m: "re.Match") -> str:
+    """Keep emphasised speech; drop only an UNAMBIGUOUS stage direction.
+
+    Harm asymmetry: never delete a real word. Deleting "*laugh*" in "hurts when I
+    *laugh*", "*voice*" in "lost my *voice*", or "*dangerously high at 6.1*" guts
+    the meaning — far worse than a rare cosmetic leak. So a *…*/_…_ span is dropped
+    ONLY when it is a stage-lexicon word that is EITHER the leading token of its
+    line ("*coughs* Sorry, doc.") OR narrated in the 3rd person ("*he nods*",
+    "She *winces*"). A span the speaker governs ("when I *laugh*", "Just *nod*")
+    or any non-stage span (emphasis, a clinical value) is unwrapped.
+    """
+    inner = m.group(1).strip()
+    if not inner:
+        return ""
+    if _FIRST_PERSON_RE.search(inner):
+        return inner  # "*I can't*" — emphasis on real speech
+    pre = m.string[: m.start()]
+    cut = max(pre.rfind("."), pre.rfind("!"), pre.rfind("?"), pre.rfind("\n"))
+    clause_pre = pre[cut + 1:]  # text before the span, within this sentence
+    if _SPEAKER_PRONOUN_RE.search(clause_pre):
+        return inner  # governed by the speaker ("when I *laugh*", "you *press*")
+    if _is_stage_span(inner):
+        # Drop only when removing the span is CLEAN: it LEADS the line and is
+        # followed by a NEW sentence ("*coughs* Sorry, doc."), or it carries its
+        # own 3rd-person subject ("*he nods*"). A leading span that heads a
+        # continuous clause is an emphasised imperative, not a stage direction
+        # ("*Nod* if you can hear me"); a subject OUTSIDE the span ("She *winces*
+        # …") would leave dangling text — both are kept.
+        post = m.string[m.end():]
+        leads_new_sentence = clause_pre.strip() == "" and bool(
+            re.match(r"\s*(?:[.!?,;:]|$|[A-Z])", post)
+        )
+        subject_inside = bool(_NARRATOR_SUBJ_RE.search(inner))
+        if leads_new_sentence or subject_inside:
+            return ""
+    return inner  # emphasis / clinical content — never delete a real word
+
+
+def _clean_paren(m: "re.Match") -> str:
+    """Drop only a SHORT first-person-free gesture parenthetical; keep the rest.
+
+    "(she winces)", "(voice cracking)" are gestures. But a longer parenthetical is
+    clinical detail even if it mentions a gesture word — "(a dry cough that won't
+    shift, worse at night)", "(the voice is completely gone since Tuesday)" — so
+    only a ≤3-word first-person-free stage parenthetical is dropped.
+    """
+    inner = m.group(1).strip()
+    if _FIRST_PERSON_RE.search(inner):
+        return m.group(0)
+    # Drop only a short gesture NARRATED with a 3rd-person pronoun ("(she winces)",
+    # "(he coughs)"). A subject-less clinical noun phrase — "(no gag reflex)",
+    # "(audible wheeze)", "(voice cracking)" — is kept even though it names a
+    # stage-lexicon word, because it is a spoken exam finding, not a gesture.
+    if _is_stage_span(inner) and len(inner.split()) <= 3 and _NARRATOR_SUBJ_RE.search(inner):
+        return ""
+    return m.group(0)
+
+
+def _clean_bracket(m: "re.Match") -> str:
+    """Unwrap bracketed text, dropping only a 3rd-person-narrated gesture.
+
+    Symmetric with _clean_paren: a bare clinical noun in brackets is real speech
+    ("[cough]", "[wheeze]", "[nod] to command", "[except the potassium at 6.1]")
+    and is kept (unwrapped); only a short gesture with a 3rd-person pronoun
+    subject ("[she winces]", "[he coughs]") is a stage direction and dropped.
+    """
+    inner = m.group(1).strip()
+    if (
+        _is_stage_span(inner)
+        and len(inner.split()) <= 3
+        and _NARRATOR_SUBJ_RE.search(inner)
+        and not _FIRST_PERSON_RE.search(inner)
+    ):
+        return ""
+    return inner
+
+
+def _speech_only(text: str, speaker_names: tuple[str, ...] = ()) -> str:
+    """Reduce an NPC reply to just the spoken words (see module note above).
+
+    MAY return "" — when the reply is nothing but stage directions / third-person
+    narration there are no spoken words to show, and the caller substitutes a
+    short in-character line (see _EMPTY_REPLY_FALLBACK in handle_question).
+    """
+    if not text or not text.strip():
+        return ""
+    s = text.strip()
+
+    # A) code fences
+    if s.startswith("```"):
+        s = re.sub(r"^\s*```[^\n]*\n?", "", s)
+        s = re.sub(r"\n?```\s*$", "", s).strip()
+
+    # B) markdown bold → keep inner text (before the single-* / single-_ handling)
+    s = _BOLD_RE.sub(r"\2", s)
+
+    # C) stage directions: emphasis-aware for *…*/_…_, [ … ] and ( … ) drop only a
+    #    gesture and keep clinical content.
+    s = _STAR_SPAN_RE.sub(_clean_emphasis_span, s)
+    s = _UNDERSCORE_SPAN_RE.sub(_clean_emphasis_span, s)
+    s = _ACTION_BRACKET_RE.sub(_clean_bracket, s)
+    s = _PAREN_RE.sub(_clean_paren, s)
+
+    # D) known speaker labels at line starts
+    labels = _label_tokens(speaker_names)
+    if labels:
+        # Colon delimiter only — a dash after a name is more often a vocative
+        # ("Nurse — over here!") than a speaker label, and mustn't be stripped.
+        label_re = re.compile(
+            r"^[ \t>]*(?:" + "|".join(re.escape(t) for t in labels) + r")\s*[:：]\s+",
+            re.IGNORECASE,
+        )
+        s = "\n".join(label_re.sub("", ln) for ln in s.split("\n"))
+
+    # NOTE: NO prose-narration stripping. Collapsing 'She says "…"' to the quote,
+    # or blanking bare 3rd-person narration, is unsafe — the same surface form
+    # carries real content ('His sats are 92 but she says "…" now'; the nurse
+    # legitimately speaks about the patient in the 3rd person), so a lexical rule
+    # deletes clinical words. This sanitizer strips only MARKUP and unambiguous
+    # stage directions; genuine prose narration (a rare slip under the
+    # first-person prompt) is left to the prompt, never guessed at here.
+
+    # F) whole reply wrapped in a single quote pair → unwrap
+    s = s.strip()
+    m = _WHOLE_QUOTE_RE.match(s)
+    if m:
+        s = m.group(1).strip()
+
+    # G) residual markdown + repair artifacts left by removed inline spans
+    #    (orphaned "space-before-punctuation" and doubled commas), then tidy space.
+    s = _RESIDUAL_MD_RE.sub("", s)
+    s = re.sub(r"\s+([,;:!?])", r"\1", s)
+    s = re.sub(r" +\.", ".", s)
+    s = re.sub(r"([,;:])(\s*\1)+", r"\1", s)
+    s = "\n".join(_MULTISPACE_RE.sub(" ", ln).strip() for ln in s.split("\n"))
+    s = _MULTINEWLINE_RE.sub("\n\n", s).strip()
+
+    # H) may be empty — the caller substitutes a canned in-character line.
+    return s
+
+
+# Shown when the model returns nothing usable (e.g. a gpt-5 reply where reasoning
+# tokens consumed the whole budget → empty content). Keyed by role.
+_EMPTY_REPLY_FALLBACK = {
+    "patient": "Sorry doc — I lost my train of thought there. What did you want to ask?",
+    "nurse": "Sorry doc — swamped for a sec. What did you need?",
+}
+
+
 async def npc_reply(
     question: str,
     history: Optional[list[dict]],
@@ -311,7 +577,7 @@ Respond in character as {persona}. Remember: only reveal what was asked for."""
     openai_client = get_llm_client("openai")
     response = await openai_client.chat(
         [
-            {"role": "system", "content": _NURSE_SYSTEM_PROMPT if is_nurse else _PQM_SYSTEM_PROMPT},
+            {"role": "system", "content": _NURSE_SYSTEM_PROMPT if is_nurse else _PATIENT_SYSTEM_PROMPT},
             {"role": "user", "content": prompt},
         ],
         model=settings.SIM_PATIENT_MODEL,
@@ -371,14 +637,25 @@ async def handle_question(
                     "again. Do NOT reveal the correct diagnosis or hint at it."
                 )
 
-    reply = await npc_reply(question, history, case, role=role, extra_instruction=extra_instruction)
+    raw_reply = await npc_reply(question, history, case, role=role, extra_instruction=extra_instruction)
+
+    # Choke point: every reply is sanitized to spoken words only here (not inside
+    # npc_reply), so any caller / future path is covered. Pass the speaker's known
+    # names so their own name label ("Sash:") is stripped. When nothing spoken
+    # remains (reply was pure stage direction / empty model output) substitute a
+    # short in-character line rather than showing an empty or markup-only box.
+    display_name = NURSE_NAME if is_nurse else (case.get("patient") or {}).get("name")
+    speaker_names = tuple(n for n in (display_name, NURSE_NAME) if n)
+    reply = _speech_only(raw_reply, speaker_names=speaker_names)
+    if not reply:
+        reply = _EMPTY_REPLY_FALLBACK["nurse" if is_nurse else "patient"]
 
     return {
         "reply": reply,
         "case_id": case.get("id"),
         "case_title": case.get("title"),
         # The speaker's display name — the in-game dialogue header / name tag.
-        "patient_name": NURSE_NAME if is_nurse else (case.get("patient") or {}).get("name"),
+        "patient_name": display_name,
         "presenting_complaint": (case.get("presenting_complaint") or "").strip(),
         "is_guess": is_guess,
         "correct": correct,          # true/false only when is_guess
