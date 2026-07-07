@@ -31,7 +31,7 @@ class _FakeLLMClient:
     fake serves both: gpt-4o-mini → the classifier JSON, anything else → reply.
     """
 
-    def __init__(self, classifier_json: str, reply_text: str = "The patient blinks slowly."):
+    def __init__(self, classifier_json: str, reply_text: str = "I feel awful, honestly."):
         self.classifier_json = classifier_json
         self.reply_text = reply_text
         self.calls: list[dict] = []
@@ -43,7 +43,7 @@ class _FakeLLMClient:
         return _FakeLLMResponse(self.reply_text)
 
 
-def _install_fake(monkeypatch, classifier_json, reply_text="The patient blinks slowly."):
+def _install_fake(monkeypatch, classifier_json, reply_text="I feel awful, honestly."):
     fake = _FakeLLMClient(classifier_json, reply_text)
     # sim_patient imports get_llm_client into its own namespace.
     monkeypatch.setattr(sim_patient, "get_llm_client", lambda provider=None: fake)
@@ -106,7 +106,7 @@ def test_non_guess_question(monkeypatch):
     assert result["is_guess"] is False
     assert result["correct"] is None
     assert result["diagnosis"] is None
-    assert result["reply"] == "The patient blinks slowly."
+    assert result["reply"] == "I feel awful, honestly."
 
 
 # ---------------------------------------------------------------------------
@@ -254,7 +254,7 @@ def test_malformed_history_item_does_not_crash(monkeypatch):
         sim_patient.handle_question("what are her vitals?", history=["not-a-dict", None, 123])
     )
     assert result["is_guess"] is False
-    assert result["reply"] == "The patient blinks slowly."
+    assert result["reply"] == "I feel awful, honestly."
 
 
 def test_non_string_classifier_diagnosis_does_not_crash(monkeypatch):
@@ -319,7 +319,8 @@ def test_nurse_prompt_carries_case_but_no_secrets(monkeypatch):
     fake = _install_fake(monkeypatch, "{}", reply_text='"Bloods are back: sodium 122."')
 
     result = _run(sim_patient.handle_question("can I get the bloods?", role="nurse"))
-    assert result["reply"].startswith('"Bloods')
+    # The speech-only sanitizer unwraps the model's wrapping quotes.
+    assert result["reply"] == "Bloods are back: sodium 122."
 
     reply_calls = [c for c in fake.calls if c["kwargs"].get("model") != "gpt-4o-mini"]
     user_prompt = reply_calls[0]["messages"][1]["content"]
@@ -357,3 +358,213 @@ def test_422_when_role_invalid(monkeypatch):
     client = TestClient(app)
     resp = client.post("/api/sim-patient", json={"question": "hi", "role": "doctor"})
     assert resp.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# Speech-only sanitizer: strip narration/stage-directions, keep spoken words
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "raw,expected,names",
+    [
+        # asterisk stage direction
+        ("*coughs* It hurts when I breathe.", "It hurts when I breathe.", ()),
+        # parenthetical action with no first-person voice → dropped
+        ("(She winces.) My chest is tight.", "My chest is tight.", ()),
+        # named speaker label (short name from the full patient name) → dropped
+        ("Sash: I feel dizzy, doc.", "I feel dizzy, doc.", ("Sasha 'Sash' Nguyen",)),
+        # role-word speaker label with no names supplied → dropped
+        ("Patient: It hurts.", "It hurts.", ()),
+        # a bracketed gesture NARRATED with a 3rd-person pronoun is dropped…
+        ("[she winces] It's my side.", "It's my side.", ()),
+        # …but a bare clinical noun in brackets is kept (unwrapped) — not deleted
+        ("It's a [cough] that won't shift, worse at night.",
+         "It's a cough that won't shift, worse at night.", ()),
+        ("GCS 10 — a [nod] to command, no verbal.", "GCS 10 — a nod to command, no verbal.", ()),
+        # prose narration wrapping a quote is KEPT verbatim (markup-only sanitizer:
+        # lexical narration-collapse deletes real content, so it is left to the
+        # first-person prompt — see the module note in _speech_only)
+        ('She looks up. "I\'ve been so tired, doctor."',
+         'She looks up. "I\'ve been so tired, doctor."', ()),
+        (
+            'He sighs and says "It started last week." Then he adds, "Maybe earlier."',
+            'He sighs and says "It started last week." Then he adds, "Maybe earlier."',
+            (),
+        ),
+        # whole reply wrapped in quotes → unwrap
+        ('"My head is pounding."', "My head is pounding.", ()),
+        # markdown bold → unwrap, keep text (must NOT be eaten as a *…* action)
+        ("**It hurts** — a lot.", "It hurts — a lot.", ()),
+        # --- protections: these must pass through UNCHANGED ---
+        # first-person quote inside a sentence is speech, not narration
+        (
+            'The GP said "it\'s just stress" but I don\'t buy it.',
+            'The GP said "it\'s just stress" but I don\'t buy it.',
+            (),
+        ),
+        # parenthetical containing first person is speech → kept
+        (
+            "I've been sick all morning (since Tuesday, I think).",
+            "I've been sick all morning (since Tuesday, I think).",
+            (),
+        ),
+        # "Word:" that is NOT a known label is speech → kept
+        ("One thing: it really hurts.", "One thing: it really hurts.", ()),
+        # plain speech untouched
+        (
+            "My stomach's been killing me since last night.",
+            "My stomach's been killing me since last night.",
+            (),
+        ),
+        # --- regressions found by the adversarial review (executed on real code) ---
+        # over-strip: a patient recounting a third party keeps their OWN trailing clause
+        (
+            'The doctor said "rest" but it still hurts.',
+            'The doctor said "rest" but it still hurts.',
+            (),
+        ),
+        (
+            'The label just said "one at night" so that is what she gave the kids.',
+            'The label just said "one at night" so that is what she gave the kids.',
+            (),
+        ),
+        # prose narration is KEPT verbatim (markup-only sanitizer, see above)
+        (
+            'She grips the rail and blurts "It started this morning."',
+            'She grips the rail and blurts "It started this morning."',
+            (),
+        ),
+        # single-* emphasis on a real word is UNWRAPPED, not deleted (must not invert meaning)
+        (
+            "No, it does *not* go down my arm.",
+            "No, it does not go down my arm.",
+            (),
+        ),
+        ("It hurts *right* here.", "It hurts right here.", ()),
+        # inline action between commas → no orphaned ", ," artifact
+        ("Yes, *he nods*, exactly that.", "Yes, exactly that.", ()),
+        # clinical hedge parentheticals (no first person, no gesture) are KEPT
+        (
+            "The pain started three days ago (maybe four) and has not let up.",
+            "The pain started three days ago (maybe four) and has not let up.",
+            (),
+        ),
+        (
+            "It burns when it happens (mostly at night) and then it fades.",
+            "It burns when it happens (mostly at night) and then it fades.",
+            (),
+        ),
+        # single-underscore stage direction is stripped like its *…* sibling
+        ("_winces and clutches side_ It hurts here.", "It hurts here.", ()),
+        # a terse first-person-free reply is kept (no bare-narration blanker)
+        ("Everything looks blurry.", "Everything looks blurry.", ()),
+        # --- second-pass regression fixes (executed on real code) ---
+        # emphasis on a speech-common word is UNWRAPPED, never deleted
+        ("Can you *press* here? That's where it hurts.", "Can you press here? That's where it hurts.", ()),
+        ("Just *breathe*, that's what they told me.", "Just breathe, that's what they told me.", ()),
+        ("The pain does *shift* around a lot.", "The pain does shift around a lot.", ()),
+        # a leading stage word is still dropped
+        ("*mumbles* I dunno.", "I dunno.", ()),
+        ("*sniffles* I've had a runny nose too.", "I've had a runny nose too.", ()),
+        # a gesture NARRATED with a 3rd-person pronoun is dropped
+        ("Okay. (she winces)", "Okay.", ()),
+        # clinical hedge kept (first-person-free)
+        ("It's a seven out of ten (maybe eight).", "It's a seven out of ten (maybe eight).", ()),
+        # nurse speaking about the patient in third person is KEPT (no over-blank)
+        ("He looks stable now, breathing's better.", "He looks stable now, breathing's better.", ()),
+        ("The patient keeps clutching his side, go see him.", "The patient keeps clutching his side, go see him.", ()),
+        # prose narration wrapping a quote is KEPT verbatim (markup-only sanitizer)
+        ('She says "sit down" quietly.', 'She says "sit down" quietly.', ()),
+        # --- third-pass fixes: NEVER delete a real word governed by the speaker ---
+        # a stage-lexicon word governed by a 1st/2nd-person subject is kept
+        ("It only hurts when I *laugh*.", "It only hurts when I laugh.", ()),
+        ("I can't *gulp* the water down, it just won't go.", "I can't gulp the water down, it just won't go.", ()),
+        ("I've completely lost my *voice*.", "I've completely lost my voice.", ()),
+        ("I need a bit of *silence*, my head's pounding.", "I need a bit of silence, my head's pounding.", ()),
+        ("Just *nod* if you can hear me, love.", "Just nod if you can hear me, love.", ()),
+        ("It made me want to *gag*.", "It made me want to gag.", ()),
+        # a multi-word emphasised clinical value is kept, not dropped as "narration"
+        ("Her potassium is *dangerously high at 6.1*.", "Her potassium is dangerously high at 6.1.", ()),
+        # a leading stage word still drops; a 3rd-person subject OUTSIDE the span
+        # is kept (dropping just the verb would leave dangling text)
+        ("*sighs* Fine, whatever you say.", "Fine, whatever you say.", ()),
+        ("She *winces* and looks away.", "She winces and looks away.", ()),
+        # a longer clinical parenthetical survives even with a gesture word in it
+        ("Been sick all week (a dry cough that won't shift, worse at night).",
+         "Been sick all week (a dry cough that won't shift, worse at night).", ()),
+        ("Throat's raw (just a rasp when talking now).",
+         "Throat's raw (just a rasp when talking now).", ()),
+        # the speaker's own recounted account is NOT collapsed to the bare quote
+        ('Kept shouting "help me" again and again.', 'Kept shouting "help me" again and again.', ()),
+        # --- fourth-pass fixes: "the <noun>" / clinical parens / relayed requests ---
+        # an emphasised symptom noun phrase ("*the cough*") is kept, not narration
+        ("Nothing helps *the cough*, honestly.", "Nothing helps the cough, honestly.", ()),
+        ("Worse than *the wheeze* I had before.", "Worse than the wheeze I had before.", ()),
+        # subject-less clinical parentheticals with a stage-lexicon word are kept
+        ("She's not responding (no gag reflex).", "She's not responding (no gag reflex).", ()),
+        ("His breathing's noisy (audible wheeze).", "His breathing's noisy (audible wheeze).", ()),
+        # a quote that is the OBJECT of a desire/request verb is not collapsed
+        ('He wants "bloods and an ECG".', 'He wants "bloods and an ECG".', ()),
+    ],
+)
+def test_speech_only(raw, expected, names):
+    assert sim_patient._speech_only(raw, speaker_names=names) == expected
+
+
+def test_speech_only_all_action_returns_empty(monkeypatch):
+    # A reply that is ENTIRELY a stage direction has no spoken words: the
+    # sanitizer returns "" and the CALLER substitutes a canned in-character line
+    # (better than showing raw "*collapses...*" markup).
+    assert sim_patient._speech_only("*collapses back onto the pillow*") == ""
+
+    async def action_only(*args, **kwargs):
+        return "*collapses back onto the pillow*"
+
+    monkeypatch.setattr(sim_patient, "npc_reply", action_only)
+    result = _run(sim_patient.handle_question("how are you?", role="nurse"))
+    assert result["reply"] == sim_patient._EMPTY_REPLY_FALLBACK["nurse"]
+
+
+def test_speech_only_empty_input():
+    assert sim_patient._speech_only("") == ""
+    assert sim_patient._speech_only("   \n  ") == ""
+
+
+def test_handle_question_sanitizes_reply_at_choke_point(monkeypatch):
+    # Prove sanitization happens in handle_question for ALL replies: mock the LLM
+    # reply with narration and confirm the returned reply is speech only. Nurse
+    # role → the guess classifier is skipped, so no LLM stub needed for it.
+    async def fake_npc_reply(*args, **kwargs):
+        return "*sighs* The bloods aren't back yet, love."
+
+    monkeypatch.setattr(sim_patient, "npc_reply", fake_npc_reply)
+    result = _run(sim_patient.handle_question("bloods?", role="nurse"))
+    assert result["reply"] == "The bloods aren't back yet, love."
+
+
+def test_empty_model_reply_falls_back_to_canned_line(monkeypatch):
+    async def empty_reply(*args, **kwargs):
+        return ""
+
+    monkeypatch.setattr(sim_patient, "npc_reply", empty_reply)
+
+    nurse = _run(sim_patient.handle_question("bloods?", role="nurse"))
+    assert nurse["reply"] == sim_patient._EMPTY_REPLY_FALLBACK["nurse"]
+
+    # Patient role runs the classifier first — stub it to a non-guess so no LLM.
+    async def not_a_guess(_question):
+        return {"is_guess": False, "diagnosis": None}
+
+    monkeypatch.setattr(sim_patient, "classify_guess", not_a_guess)
+    patient = _run(sim_patient.handle_question("how are you feeling?", role="patient"))
+    assert patient["reply"] == sim_patient._EMPTY_REPLY_FALLBACK["patient"]
+
+
+def test_system_prompts_declare_speech_only():
+    # Contract-presence: guard against an accidental revert to the narrator prompt.
+    assert "SPEECH ONLY" in sim_patient._PATIENT_SYSTEM_PROMPT
+    assert "no stage directions" in sim_patient._PATIENT_SYSTEM_PROMPT.lower()
+    assert "speech only" in sim_patient._NURSE_SYSTEM_PROMPT.lower()
+    # The patient is now first-person, not the third-person PQM narrator.
+    assert "Patient Quest Master" not in sim_patient._PATIENT_SYSTEM_PROMPT
+    assert "narrate how they say it" not in sim_patient._PATIENT_SYSTEM_PROMPT
