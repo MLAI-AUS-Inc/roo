@@ -2136,8 +2136,62 @@ async def api_mention(request: Request):
         channel_id=channel_id,
         thread_ts=thread_ts
     )
-    
+
     return result
+
+
+@app.post("/api/sim-patient")
+async def api_sim_patient(request: Request, settings: Settings = Depends(get_settings)):
+    """Simulated-patient roleplay for the health-hack 3D ward.
+
+    Runs the medhack "Guess the Diagnosis" case as an in-character narrator.
+    Stateless: never touches medhack game state, points, or the guess lockout.
+    role="nurse" answers as the reception nurse (investigation results from the
+    same case file; never adjudicates guesses).
+
+    Auth is bearer-only and applied ONLY when SIM_PATIENT_API_KEY is set (open in
+    dev). Errors: 401 bad/missing token, 404 unknown case_id, 422 missing
+    question or bad role, 502 LLM failure.
+    """
+    if settings.SIM_PATIENT_API_KEY:
+        auth = request.headers.get("Authorization", "")
+        if auth != f"Bearer {settings.SIM_PATIENT_API_KEY}":
+            raise HTTPException(status_code=401, detail="bad token")
+
+    payload = await request.json()
+    question = (payload.get("question") or "").strip()
+    if not question:
+        raise HTTPException(status_code=422, detail="question required")
+
+    role = (payload.get("role") or "patient").strip().lower()
+    if role not in ("patient", "nurse"):
+        raise HTTPException(status_code=422, detail="role must be 'patient' or 'nurse'")
+
+    # Defensive caps: bound the question length and history depth server-side.
+    question = question[:500]
+    history = payload.get("history") or []
+    if isinstance(history, list):
+        history = history[-12:]
+    else:
+        history = []
+
+    from .sim_patient import handle_question
+
+    try:
+        return await handle_question(
+            question=question,
+            history=history,
+            case_id=payload.get("case_id"),
+            player_id=payload.get("player_id") or "web-anon",
+            role=role,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except HTTPException:
+        raise
+    except Exception as exc:
+        print(f"⚠️ sim-patient LLM failure: {exc}")
+        raise HTTPException(status_code=502, detail="patient unavailable")
 
 
 def _format_tier_display(tier: str) -> str:
