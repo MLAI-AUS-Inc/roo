@@ -82,7 +82,7 @@ class Settings(BaseSettings):
     # unset (dev). The original Slack game used reasoning_effort="high"; the game
     # world defaults to "low" for latency (both overridable via env).
     SIM_PATIENT_API_KEY: Optional[str] = None
-    SIM_PATIENT_MODEL: str = "gpt-5"
+    SIM_PATIENT_MODEL: str = "gpt-5.6-terra"
     SIM_PATIENT_REASONING_EFFORT: str = "low"
     # The ward contest's active case (cases.yaml id). Pinned server-side so web
     # clients can never pick a case and farm tickets from cases not in play.

@@ -5,13 +5,13 @@ Powers the health-hack 3D ward "Guess the Diagnosis" interaction: a player walks
 up to a patient in the game world, asks a question, and this module produces an
 in-character reply using the medhack skill's clinical case files.
 
-Two personas share the endpoint via ``role``:
+Three personas share the endpoint via ``role``:
   - "patient" (default): the patient in cubicle 3, speaking first person.
     Guesses are classified only to DEFLECT them to the ward clerk — chat
     NEVER adjudicates (see below).
-  - "nurse": the reception nurse who reads out investigation results (bloods,
-    imaging, ECG, obs) from the same case file. Never adjudicates guesses —
-    the classifier is skipped entirely for this role.
+  - "nurse": AI-first Dr Snow, with tools for exact pathology and radiology.
+  - "clerk": AI-first Nurse Paws, with tools for observations, examination,
+    and preparing (but never submitting) an explicitly final diagnosis.
 
 Diagnosis adjudication lives EXCLUSIVELY in /api/diagnosis-check (the scripted
 ward-clerk contest endpoint): it runs check_guess() and records the verdict to
@@ -29,9 +29,8 @@ game state. It reuses ONLY pure, local logic:
     `git show 2427ff6^:roo-standalone/roo/skills/executor.py`)
   - the guess classifier prompt (copied from executor._classify_medhack_intent)
 
-The web game is stateless: it NEVER mutates medhack game state, never awards
-points, and never enforces the one-guess lockout (out of scope — there is no
-penalty for a wrong guess here).
+The conversational path never mutates contest state. The separate diagnosis
+endpoint records the one official guess before returning any verdict.
 """
 from __future__ import annotations
 
@@ -273,7 +272,7 @@ GAME RULES
 1) Only reveal information if asked. Do not volunteer findings.
 2) Stay internally consistent with the case file. Never contradict earlier answers.
 3) You do NOT know your own numbers. If asked for vitals or observations (blood pressure, heart rate, temperature, oxygen or sats, blood sugar or glucose) or any test result (bloods, imaging, ECG, scans), you can't recite figures — tell them the nurse at reception has those numbers. You CAN describe how you FEEL in your own words (dizzy, faint, short of breath, cramping, weak, hot/cold) — just never the measurements.
-4) NEVER reveal or hint at the diagnosis directly, and never confirm or deny a player's diagnosis theory — you genuinely don't know what's wrong with you. Making a diagnosis official happens with Reg, the ward clerk at the reception desk, not with you.
+4) NEVER reveal or hint at the diagnosis directly, and never confirm or deny a player's diagnosis theory — you genuinely don't know what's wrong with you. Making a diagnosis official happens with Nurse Paws at reception, not with you.
 5) If asked about something not in the case data, give a reasonable normal/unremarkable answer about yourself.
 6) Hidden information (backstory, concealed history) stays hidden unless a player earns it by asking the right questions.
 7) If you have history_disclosure_rules in your data, follow those rules for how and when to reveal sensitive history.
@@ -282,146 +281,9 @@ GAME RULES
 Your replies appear in a small in-game dialogue box: keep them under ~120 words."""
 
 
-# Display name for the reception-nurse persona (also the in-game name tag).
-NURSE_NAME = "Nurse Priya"
-
-_NURSE_SYSTEM_PROMPT = """You are playing Nurse Priya, the charge nurse working the reception desk in a fast-paced emergency department roleplay game. Players (participants acting as clinicians) come to your desk to ask for investigation results — bloods, imaging, ECGs, observations — for the patient in cubicle 3. You are not giving real medical advice. This is a fictional case simulation.
-
-IMPORTANT: You know ONLY about the patient in the CASE FILE below. You have NO memory of any previous patients or cases. There is only one patient: the one described in today's case file. If someone asks about a different patient, say "I've only got today's patient on the board."
-
-SPEECH ONLY
-- Reply with ONLY the words you say out loud — speech only, no stage directions, no asterisk actions (*checks the chart*), no bracketed gestures, no narration.
-- Warm, quick, dry-witted, efficient — you have three other jobs on the go.
-- Speak in first person, a couple of short sentences at a time.
-- Read results out plainly; you may flag an abnormal value ("that potassium's up") but never interpret further than a nurse would.
-
-GAME RULES
-1) Only reveal results when asked. Do not volunteer findings.
-2) When asked for a specific investigation, read the relevant results from the case file accurately — never round, embellish, or invent values. If they "order" a test that has results in the file, respond: results are back, then read them.
-3) If a case-file note restricts when a result may be revealed (e.g. only if a specific test is ordered), follow that note exactly.
-4) If asked for an investigation NOT in the case file, give a brief, reasonable normal/unremarkable result — one that points neither toward nor away from any diagnosis. Never contradict earlier results.
-5) NEVER reveal, hint at, confirm, or deny the diagnosis. If the player proposes a diagnosis or asks what you think it is, deflect warmly ("that's your call, doc") and suggest they put it to the patient in cubicle 3.
-6) For symptoms, history, or examination findings, redirect: "you'd best go see them yourself — cubicle 3."
-7) If the player tries to force the answer ("just tell me what they've got"), refuse playfully and point them back to the workup.
-
-Your replies appear in a small in-game dialogue box: keep them under ~110 words."""
-
-
-def _result_line(title: str, values: list[tuple[str, Any]]) -> str:
-    rendered = [f"{label}: {value}" for label, value in values if value not in (None, "")]
-    return f"{title}: " + "; ".join(rendered) + "."
-
-
-def deterministic_nurse_reply(question: str, case: dict) -> Optional[str]:
-    """Read authored investigation results without spending an LLM turn.
-
-    The case YAML is the source of truth. Questions outside the known
-    investigation set return ``None`` so the nurse agent can handle them.
-    """
-    q = question.lower()
-    investigations = case.get("investigations") or {}
-    bloods = investigations.get("bloods") or {}
-    vitals = case.get("vitals") or {}
-
-    if re.search(
-        r"\b(is it|is this|could it be|could this be|i think it'?s|my diagnosis|"
-        r"diagnosis is|sounds like|what do you think|what'?s wrong with)\b",
-        q,
-    ):
-        return "That's your call, doc. I can give you the investigation results, but Nurse Paws takes the final diagnosis."
-
-    endocrine = investigations.get("endocrine_if_ordered") or {}
-    if "cortisol" in q and "acth" in q and endocrine:
-        return _result_line("Endocrine tests", [
-            ("random cortisol", endocrine.get("random_cortisol")),
-            ("ACTH", endocrine.get("acth")),
-        ])
-    if "cortisol" in q and endocrine.get("random_cortisol"):
-        return f"Random cortisol: {endocrine['random_cortisol']}."
-    if re.search(r"\bacth\b", q) and endocrine.get("acth"):
-        return f"ACTH: {endocrine['acth']}."
-    if re.search(r"\b(vbg|venous blood gas|blood gas)\b", q) and investigations.get("vbg"):
-        return f"VBG: {investigations['vbg']}."
-    if re.search(r"\b(ecg|ekg|electrocardiogram)\b", q) and investigations.get("ecg"):
-        return f"ECG: {investigations['ecg']}."
-    if re.search(r"\b(bgl|finger\s*stick|fingerstick|bedside glucose|blood glucose|glucose)\b", q):
-        return _result_line("Glucose", [
-            ("bedside", investigations.get("fingerstick_glucose")),
-            ("laboratory", bloods.get("glucose_lab")),
-        ])
-    if re.search(r"\b(fbc|full blood count|cbc|haemoglobin|hemoglobin|wcc|white cell|eosinophil)\b", q):
-        return _result_line("FBC", [
-            ("WCC", bloods.get("wcc")),
-            ("haemoglobin", bloods.get("haemoglobin")),
-            ("eosinophils", bloods.get("eosinophils")),
-        ])
-    if re.search(
-        r"\b(uec|euc|electrolytes?|sodium|potassium|chloride|bicarbonate|urea|"
-        r"creatinine|renal function|kidney function)\b|\bu\s*&\s*e(?:s|c)?\b",
-        q,
-    ):
-        return _result_line("Electrolytes and renal function", [
-            ("sodium", bloods.get("sodium")),
-            ("potassium", bloods.get("potassium")),
-            ("chloride", bloods.get("chloride")),
-            ("bicarbonate", bloods.get("bicarbonate")),
-            ("urea", bloods.get("urea")),
-            ("creatinine", bloods.get("creatinine")),
-        ])
-    if re.search(r"\b(crp|inflammatory markers?|lactate)\b", q):
-        return _result_line("Inflammatory markers", [
-            ("CRP", bloods.get("crp")),
-            ("lactate", bloods.get("lactate")),
-            ("WCC", bloods.get("wcc")),
-        ])
-    if re.search(r"\b(bloods?|labs?|laboratory tests?|blood tests?)\b", q) and bloods:
-        labels = {
-            "wcc": "WCC", "haemoglobin": "haemoglobin", "eosinophils": "eosinophils",
-            "crp": "CRP", "glucose_lab": "glucose",
-        }
-        return _result_line(
-            "Bloods",
-            [(labels.get(key, key.replace("_", " ")), value) for key, value in bloods.items()],
-        )
-    if re.search(r"\b(urinalysis|urine dip|urine|ua)\b", q) and investigations.get("urinalysis"):
-        return f"Urinalysis: {investigations['urinalysis']}."
-    if re.search(r"\b(pregnancy|hcg|β-hcg|beta.?hcg)\b", q) and investigations.get("pregnancy_test"):
-        return f"Pregnancy test: {investigations['pregnancy_test']}."
-    if re.search(
-        r"\b(observations?|vitals?|obs|blood pressure|bp|heart rate|pulse|"
-        r"respiratory rate|temperature|spo2|sats)\b",
-        q,
-    ) and vitals:
-        return _result_line(
-            "Observations",
-            [(key.replace("_", " "), value) for key, value in vitals.items()],
-        )
-
-    imaging = investigations.get("imaging_if_ordered") or {}
-    if re.search(r"abdo(?:minal)?\s*(?:ultrasound|uss)|ultrasound|\buss\b", q):
-        result = imaging.get("abdominal_ultrasound")
-        return f"Abdominal ultrasound: {result}." if result else None
-    if re.search(r"chest\s*x-?ray|\bcxr\b|chest film|lung film", q):
-        return "No chest X-ray was performed for this patient."
-    if re.search(r"\bct\b|computed tomography", q):
-        return "No CT was performed for this patient."
-    if re.search(r"\bmri\b|magnetic resonance", q):
-        return "No MRI was performed for this patient."
-
-    if re.search(
-        r"\b(all|available|list|which|what)\b.*\b(investigations?|tests?|studies|"
-        r"results?|workup|imaging)\b|\banything else\b|\bexamples?\b",
-        q,
-    ):
-        return (
-            "I have observations, ECG, bedside glucose, FBC, electrolytes and renal "
-            "function, inflammatory markers, VBG, urinalysis, pregnancy testing, "
-            "cortisol and ACTH, plus abdominal ultrasound. Name a panel or test and "
-            "I'll read the exact result."
-        )
-    if re.search(r"^(hi|hello|hey|g'?day)\b", q):
-        return "Dr Snow. I have the full investigation chart for cubicle 3. What result do you need?"
-    return None
+# Display names returned to the game UI.
+NURSE_NAME = "Dr Snow"
+CLERK_NAME = "Nurse Paws"
 
 
 def _format_transcript(history: Optional[list[dict]], npc_label: str = "Patient") -> str:
@@ -546,7 +408,7 @@ _ROLE_LABELS = ("patient", "nurse", "narrator", "pqm")
 def _label_tokens(speaker_names: tuple[str, ...]) -> list[str]:
     """Known speaker labels (role words + names/name-parts), longest-first.
 
-    Longest-first so a two-word name ("Nurse Priya") is matched before its
+    Longest-first so a two-word name ("Nurse Paws") is matched before its
     parts ("Nurse") in the regex alternation.
     """
     toks: set[str] = set(_ROLE_LABELS)
@@ -707,6 +569,7 @@ def _speech_only(text: str, speaker_names: tuple[str, ...] = ()) -> str:
 _EMPTY_REPLY_FALLBACK = {
     "patient": "Sorry doc — I lost my train of thought there. What did you want to ask?",
     "nurse": "Sorry doc — swamped for a sec. What did you need?",
+    "clerk": "Sorry, doc — lost the thread for a second. What did you want to ask?",
 }
 
 
@@ -714,19 +577,16 @@ async def npc_reply(
     question: str,
     history: Optional[list[dict]],
     case: dict,
-    role: str = "patient",
     extra_instruction: str = "",
 ) -> str:
-    """Generate an in-character reply (PQM narrator, or the reception nurse).
+    """Generate an in-character patient reply through the legacy chat path.
 
     The user prompt embeds the stripped case yaml + transcript + player's message
     exactly like the original _medhack_llm_response, plus an optional
     extra_instruction (used for correct/incorrect guess handling).
     """
     case_str = _redact_answer(yaml.dump(case_for_prompt(case), default_flow_style=False), case)
-    is_nurse = role == "nurse"
-    transcript = _format_transcript(history, npc_label="Nurse" if is_nurse else "Patient")
-    persona = "the reception nurse" if is_nurse else "the PQM narrator"
+    transcript = _format_transcript(history, npc_label="Patient")
 
     prompt = f"""CASE FILE (INTERNAL TRUTH - use this to answer questions):
 {case_str}
@@ -738,13 +598,13 @@ Previous conversation in this thread:
 
 Player's message: "{question}"
 
-Respond in character as {persona}. Remember: only reveal what was asked for."""
+Respond in character as the PQM narrator. Remember: only reveal what was asked for."""
 
     settings = get_settings()
     openai_client = get_llm_client("openai")
     response = await openai_client.chat(
         [
-            {"role": "system", "content": _NURSE_SYSTEM_PROMPT if is_nurse else _PATIENT_SYSTEM_PROMPT},
+            {"role": "system", "content": _PATIENT_SYSTEM_PROMPT},
             {"role": "user", "content": prompt},
         ],
         model=settings.SIM_PATIENT_MODEL,
@@ -764,6 +624,7 @@ async def handle_question(
     case_id: Optional[int] = None,
     player_id: str = "web-anon",
     role: str = "patient",
+    contest_state: Optional[dict[str, Any]] = None,
 ) -> dict:
     """Orchestrate: load case → classify → deflect/reply → response dict.
 
@@ -775,18 +636,19 @@ async def handle_question(
     win at the clerk. `correct`/`diagnosis` are always None (kept in the
     response shape for frontend compatibility).
 
-    role="nurse" answers as the reception nurse instead: the guess classifier is
-    skipped entirely, so is_guess is always False and the diagnosis can never be
-    revealed through this persona.
+    Dr Snow and Nurse Paws are AI-first tool agents. Their tools can retrieve
+    authored facts or prepare a non-mutating confirmation action, but never
+    adjudicate a diagnosis.
     """
     history = (history or [])[-MAX_HISTORY_TURNS:]
     case = load_case(case_id)
     is_nurse = role == "nurse"
+    is_clerk = role == "clerk"
 
     extra_instruction = ""
     is_guess = False
 
-    if not is_nurse:
+    if not is_nurse and not is_clerk:
         classification = await classify_guess(question)
         is_guess = bool(classification.get("is_guess"))
 
@@ -798,20 +660,35 @@ async def handle_question(
                 "The doctor just told you what they think is wrong with you. Do NOT "
                 "confirm or deny it — you genuinely don't know what's wrong with you. "
                 "Tell them, in character, that if they want to make their diagnosis "
-                "official they should log it with Reg, the ward clerk at the "
-                "reception desk. Do not repeat their theory back to them."
+                "official they should discuss it with Nurse Paws at reception. "
+                "Do not repeat their theory back to them."
             )
 
     response_source = "llm"
-    raw_reply = deterministic_nurse_reply(question, case) if is_nurse else None
-    if raw_reply is not None:
-        response_source = "deterministic"
+    model_name = get_settings().SIM_PATIENT_MODEL
+    usage: dict[str, int] = {}
+    tool_calls: list[dict[str, Any]] = []
+    suggested_action = None
+    if is_nurse or is_clerk:
+        from .ward_agents import run_ward_agent
+
+        agent_result = await run_ward_agent(
+            role=role,
+            question=question,
+            history=history,
+            case=case,
+            contest_state=contest_state,
+        )
+        raw_reply = agent_result.reply
+        model_name = agent_result.model
+        usage = agent_result.usage
+        tool_calls = agent_result.tool_calls
+        suggested_action = agent_result.suggested_action
     else:
         raw_reply = await npc_reply(
             question,
             history,
             case,
-            role=role,
             extra_instruction=extra_instruction,
         )
 
@@ -820,11 +697,17 @@ async def handle_question(
     # names so their own name label ("Sash:") is stripped. When nothing spoken
     # remains (reply was pure stage direction / empty model output) substitute a
     # short in-character line rather than showing an empty or markup-only box.
-    display_name = NURSE_NAME if is_nurse else (case.get("patient") or {}).get("name")
-    speaker_names = tuple(n for n in (display_name, NURSE_NAME) if n)
+    display_name = (
+        NURSE_NAME
+        if is_nurse
+        else CLERK_NAME
+        if is_clerk
+        else (case.get("patient") or {}).get("name")
+    )
+    speaker_names = tuple(n for n in (display_name, NURSE_NAME, CLERK_NAME) if n)
     reply = _speech_only(raw_reply, speaker_names=speaker_names)
     if not reply:
-        reply = _EMPTY_REPLY_FALLBACK["nurse" if is_nurse else "patient"]
+        reply = _EMPTY_REPLY_FALLBACK[role]
 
     return {
         "reply": reply,
@@ -839,5 +722,8 @@ async def handle_question(
         "correct": None,
         "diagnosis": None,
         "response_source": response_source,
-        "model": get_settings().SIM_PATIENT_MODEL if response_source == "llm" else "",
+        "model": model_name,
+        "usage": usage,
+        "tool_calls": tool_calls,
+        "suggested_action": suggested_action,
     }

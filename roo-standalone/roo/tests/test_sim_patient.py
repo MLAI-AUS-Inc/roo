@@ -16,7 +16,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from roo import sim_patient
+from roo import sim_patient, ward_agents
+from roo.llm import AgentResponse
 
 
 class _FakeLLMResponse:
@@ -32,10 +33,18 @@ class _FakeLLMClient:
     fake serves both: gpt-4o-mini → the classifier JSON, anything else → reply.
     """
 
-    def __init__(self, classifier_json: str, reply_text: str = "I feel awful, honestly."):
+    def __init__(
+        self,
+        classifier_json: str,
+        reply_text: str = "I feel awful, honestly.",
+        agent_tool: tuple[str, dict] | None = None,
+    ):
         self.classifier_json = classifier_json
         self.reply_text = reply_text
+        self.agent_tool = agent_tool
         self.calls: list[dict] = []
+        self.agent_calls: list[dict] = []
+        self.tool_results: list[object] = []
 
     async def chat(self, messages, **kwargs):
         self.calls.append({"messages": messages, "kwargs": kwargs})
@@ -43,11 +52,31 @@ class _FakeLLMClient:
             return _FakeLLMResponse(self.classifier_json)
         return _FakeLLMResponse(self.reply_text)
 
+    async def agent_with_tools(self, messages, tools, execute_tool, **kwargs):
+        self.agent_calls.append({"messages": messages, "tools": tools, "kwargs": kwargs})
+        trace = []
+        if self.agent_tool is not None:
+            name, arguments = self.agent_tool
+            self.tool_results.append(execute_tool(name, arguments))
+            trace.append({"name": name, "arguments": arguments})
+        return AgentResponse(
+            content=self.reply_text,
+            model=kwargs.get("model", "gpt-5.6-terra"),
+            usage={"prompt_tokens": 20, "completion_tokens": 8},
+            tool_calls=trace,
+        )
 
-def _install_fake(monkeypatch, classifier_json, reply_text="I feel awful, honestly."):
-    fake = _FakeLLMClient(classifier_json, reply_text)
+
+def _install_fake(
+    monkeypatch,
+    classifier_json,
+    reply_text="I feel awful, honestly.",
+    agent_tool=None,
+):
+    fake = _FakeLLMClient(classifier_json, reply_text, agent_tool)
     # sim_patient imports get_llm_client into its own namespace.
     monkeypatch.setattr(sim_patient, "get_llm_client", lambda provider=None: fake)
+    monkeypatch.setattr(ward_agents, "get_llm_client", lambda provider=None: fake)
     return fake
 
 
@@ -131,7 +160,7 @@ def test_correct_guess_is_not_adjudicated_and_deflects_to_clerk(monkeypatch):
     # The reply prompt deflects to the clerk and never sees the real answer.
     reply_calls = [c for c in fake.calls if c["kwargs"].get("model") != "gpt-4o-mini"]
     user_prompt = reply_calls[0]["messages"][1]["content"]
-    assert "ward clerk" in user_prompt
+    assert "Nurse Paws" in user_prompt
     assert "confirm or deny" in user_prompt
     assert "Adrenal Crisis" not in user_prompt
 
@@ -161,7 +190,7 @@ def test_wrong_guess_no_diagnosis(monkeypatch):
     # Deflection prompt must NOT contain the real answer or a verdict.
     reply_calls = [c for c in fake.calls if c["kwargs"].get("model") != "gpt-4o-mini"]
     user_prompt = reply_calls[0]["messages"][1]["content"]
-    assert "ward clerk" in user_prompt
+    assert "Nurse Paws" in user_prompt
     assert "INCORRECT" not in user_prompt
     assert "Adrenal Crisis" not in user_prompt
 
@@ -308,21 +337,50 @@ def test_nurse_role_skips_classifier_and_never_adjudicates(monkeypatch):
     classifier_calls = [c for c in fake.calls if c["kwargs"].get("model") == "gpt-4o-mini"]
     assert not classifier_calls, "nurse role must never invoke the guess classifier"
 
-    # Diagnosis deflection is deterministic and never spends an LLM call.
-    reply_calls = [c for c in fake.calls if c["kwargs"].get("model") != "gpt-4o-mini"]
-    assert not reply_calls
-    assert result["response_source"] == "deterministic"
+    assert fake.calls == []
+    assert len(fake.agent_calls) == 1
+    assert fake.agent_calls[0]["kwargs"]["model"] == "gpt-5.6-terra"
+    assert result["response_source"] == "llm"
 
 
-def test_known_nurse_investigation_is_deterministic(monkeypatch):
-    fake = _install_fake(monkeypatch, "{}", reply_text='"Bloods are back: sodium 122."')
+def test_known_nurse_investigation_is_ai_first_and_tool_grounded(monkeypatch):
+    fake = _install_fake(
+        monkeypatch,
+        "{}",
+        reply_text="Bloods are back: sodium 122 and potassium 6.1.",
+        agent_tool=("get_results", {"test_ids": ["bloods"]}),
+    )
 
     result = _run(sim_patient.handle_question("can I get the bloods?", role="nurse"))
-    assert result["reply"].startswith("Bloods:")
-    assert "122 mmol/L" in result["reply"]
-    assert "6.1 mmol/L" in result["reply"]
-    assert result["response_source"] == "deterministic"
+    assert "sodium 122" in result["reply"]
+    assert result["response_source"] == "llm"
+    assert result["tool_calls"] == [
+        {"name": "get_results", "arguments": {"test_ids": ["bloods"]}},
+    ]
     assert fake.calls == []
+    assert len(fake.agent_calls) == 1
+    tool_results = fake.tool_results[0]["results"]
+    assert any(item["id"] == "bloods.sodium" and "122 mmol/L" in item["value"] for item in tool_results)
+    assert any(item["id"] == "bloods.potassium" and "6.1 mmol/L" in item["value"] for item in tool_results)
+
+
+def test_dr_snow_catalog_includes_case_specific_tests_but_not_history_clues():
+    case = {
+        "investigations": {
+            "bloods": {"sodium": "118 mmol/L"},
+            "key_diagnostic_test": {"ct_venogram": "Venous sinus thrombosis", "note": "secret routing note"},
+            "confirmatory_test_if_ordered": {"urine_porphobilinogen": "Markedly elevated"},
+            "substance_history_if_asked_nonjudgmentally": {"cannabis_use": "Daily use"},
+        }
+    }
+
+    catalog = ward_agents.investigation_catalog(case)
+
+    assert catalog["bloods.sodium"]["category"] == "pathology"
+    assert catalog["confirmatory_test_if_ordered.urine_porphobilinogen"]["category"] == "pathology"
+    assert catalog["key_diagnostic_test.ct_venogram"]["category"] == "radiology"
+    assert all("note" not in identifier for identifier in catalog)
+    assert all("substance_history" not in identifier for identifier in catalog)
 
 
 def test_unmatched_nurse_conversation_uses_redacted_agent_context(monkeypatch):
@@ -331,17 +389,100 @@ def test_unmatched_nurse_conversation_uses_redacted_agent_context(monkeypatch):
     result = _run(sim_patient.handle_question("How is your day going?", role="nurse"))
     assert result["response_source"] == "llm"
 
-    reply_calls = [c for c in fake.calls if c["kwargs"].get("model") != "gpt-4o-mini"]
-    assert len(reply_calls) == 1
-    user_prompt = reply_calls[0]["messages"][1]["content"]
-    # Case content present (so she can actually read results out)…
-    assert "CASE FILE" in user_prompt
-    assert "122 mmol/L" in user_prompt
-    # …but never the secret answer, keys, or hints.
-    assert "Adrenal Crisis" not in user_prompt
-    assert "acceptable_answers" not in user_prompt
-    assert "addisonian" not in user_prompt.lower()
-    assert "hints" not in user_prompt
+    assert len(fake.agent_calls) == 1
+    serialized = repr(fake.agent_calls[0])
+    assert "122 mmol/L" not in serialized
+    assert "Adrenal Crisis" not in serialized
+    assert "acceptable_answers" not in serialized
+    assert "hints" not in serialized
+
+
+def test_dr_snow_can_offer_one_authored_scan_when_player_is_stuck(monkeypatch):
+    fake = _install_fake(
+        monkeypatch,
+        "{}",
+        reply_text="One useful clue: the abdominal ultrasound is unremarkable.",
+        agent_tool=("offer_imaging_clue", {}),
+    )
+
+    result = _run(sim_patient.handle_question("I'm stuck. Give me a useful scan.", role="nurse"))
+
+    assert result["response_source"] == "llm"
+    clue = fake.tool_results[0]
+    assert clue["available"] is True
+    assert clue["result"]["id"] == "imaging_if_ordered.abdominal_ultrasound"
+
+
+def test_nurse_paws_observations_and_examination_are_tool_grounded(monkeypatch):
+    observations = _install_fake(
+        monkeypatch,
+        "{}",
+        reply_text="Heart rate 128, blood pressure 84 over 48.",
+        agent_tool=("get_observations", {}),
+    )
+    result = _run(sim_patient.handle_question(
+        "Can I have all the observations?",
+        role="clerk",
+        contest_state={"state": "eligible", "outcome": None},
+    ))
+    assert result["patient_name"] == "Nurse Paws"
+    assert observations.tool_results[0]["observations"]["heart_rate"] == 128
+    assert observations.tool_results[0]["observations"]["blood_pressure"] == "84/48"
+
+    examination = _install_fake(
+        monkeypatch,
+        "{}",
+        reply_text="The abdomen is soft and mildly tender diffusely.",
+        agent_tool=("get_examination", {"system": "abdominal"}),
+    )
+    result = _run(sim_patient.handle_question(
+        "What did you find on abdominal examination?",
+        role="clerk",
+        contest_state={"state": "eligible", "outcome": None},
+    ))
+    assert "mildly tender" in examination.tool_results[0]["examination"]["abdominal"]
+    assert result["suggested_action"] is None
+
+
+def test_nurse_paws_prepares_but_never_submits_final_guess(monkeypatch):
+    fake = _install_fake(
+        monkeypatch,
+        "{}",
+        reply_text="Review that carefully, then press the confirmation button if you're sure.",
+        agent_tool=("prepare_final_guess", {"diagnosis": "adrenal crisis"}),
+    )
+
+    result = _run(sim_patient.handle_question(
+        "My final diagnosis is adrenal crisis.",
+        role="clerk",
+        contest_state={"state": "eligible", "outcome": None},
+    ))
+
+    assert result["suggested_action"] == {
+        "type": "confirm_diagnosis",
+        "diagnosis": "adrenal crisis",
+    }
+    assert fake.tool_results[0]["prepared"] is True
+    assert result["correct"] is None
+    assert result["diagnosis"] is None
+
+
+def test_nurse_paws_cannot_prepare_when_contest_is_locked(monkeypatch):
+    fake = _install_fake(
+        monkeypatch,
+        "{}",
+        reply_text="The diagnosis book is already closed for this case.",
+        agent_tool=("prepare_final_guess", {"diagnosis": "adrenal crisis"}),
+    )
+
+    result = _run(sim_patient.handle_question(
+        "Submit adrenal crisis.",
+        role="clerk",
+        contest_state={"state": "locked", "outcome": "incorrect"},
+    ))
+
+    assert result["suggested_action"] is None
+    assert fake.tool_results[0]["prepared"] is False
 
 
 def test_nurse_transcript_labels_prior_npc_lines_as_nurse():
@@ -368,6 +509,34 @@ def test_422_when_role_invalid(monkeypatch):
     client = TestClient(app)
     resp = client.post("/api/sim-patient", json={"question": "hi", "role": "doctor"})
     assert resp.status_code == 422
+
+
+def test_clerk_http_role_forwards_contest_state(monkeypatch):
+    from fastapi.testclient import TestClient
+    from roo import config
+    from roo.main import app
+
+    _install_fake(
+        monkeypatch,
+        "{}",
+        reply_text="Review it, then press confirm.",
+        agent_tool=("prepare_final_guess", {"diagnosis": "adrenal crisis"}),
+    )
+    real = config.get_settings()
+    monkeypatch.setattr(real, "SIM_PATIENT_API_KEY", None, raising=False)
+    monkeypatch.setattr(config, "get_settings", lambda: real)
+
+    response = TestClient(app).post("/api/sim-patient", json={
+        "question": "My final diagnosis is adrenal crisis.",
+        "role": "clerk",
+        "contest_state": {"state": "eligible", "outcome": None},
+    })
+
+    assert response.status_code == 200
+    assert response.json()["suggested_action"] == {
+        "type": "confirm_diagnosis",
+        "diagnosis": "adrenal crisis",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -527,10 +696,7 @@ def test_speech_only_all_action_returns_empty(monkeypatch):
     # (better than showing raw "*collapses...*" markup).
     assert sim_patient._speech_only("*collapses back onto the pillow*") == ""
 
-    async def action_only(*args, **kwargs):
-        return "*collapses back onto the pillow*"
-
-    monkeypatch.setattr(sim_patient, "npc_reply", action_only)
+    _install_fake(monkeypatch, "{}", reply_text="*collapses back onto the pillow*")
     result = _run(sim_patient.handle_question("how are you?", role="nurse"))
     assert result["reply"] == sim_patient._EMPTY_REPLY_FALLBACK["nurse"]
 
@@ -544,19 +710,13 @@ def test_handle_question_sanitizes_reply_at_choke_point(monkeypatch):
     # Prove sanitization happens in handle_question for ALL replies: mock the LLM
     # reply with narration and confirm the returned reply is speech only. Nurse
     # role → the guess classifier is skipped, so no LLM stub needed for it.
-    async def fake_npc_reply(*args, **kwargs):
-        return "*sighs* The bloods aren't back yet, love."
-
-    monkeypatch.setattr(sim_patient, "npc_reply", fake_npc_reply)
+    _install_fake(monkeypatch, "{}", reply_text="*sighs* The bloods aren't back yet, love.")
     result = _run(sim_patient.handle_question("How is your shift going?", role="nurse"))
     assert result["reply"] == "The bloods aren't back yet, love."
 
 
 def test_empty_model_reply_falls_back_to_canned_line(monkeypatch):
-    async def empty_reply(*args, **kwargs):
-        return ""
-
-    monkeypatch.setattr(sim_patient, "npc_reply", empty_reply)
+    _install_fake(monkeypatch, "{}", reply_text="")
 
     nurse = _run(sim_patient.handle_question("How is your shift going?", role="nurse"))
     assert nurse["reply"] == sim_patient._EMPTY_REPLY_FALLBACK["nurse"]
@@ -574,7 +734,8 @@ def test_system_prompts_declare_speech_only():
     # Contract-presence: guard against an accidental revert to the narrator prompt.
     assert "SPEECH ONLY" in sim_patient._PATIENT_SYSTEM_PROMPT
     assert "no stage directions" in sim_patient._PATIENT_SYSTEM_PROMPT.lower()
-    assert "speech only" in sim_patient._NURSE_SYSTEM_PROMPT.lower()
+    assert "only dr snow's spoken words" in ward_agents.DR_SNOW_PROMPT.lower()
+    assert "only nurse paws' spoken words" in ward_agents.NURSE_PAWS_PROMPT.lower()
     # The patient is now first-person, not the third-person PQM narrator.
     assert "Patient Quest Master" not in sim_patient._PATIENT_SYSTEM_PROMPT
     assert "narrate how they say it" not in sim_patient._PATIENT_SYSTEM_PROMPT
