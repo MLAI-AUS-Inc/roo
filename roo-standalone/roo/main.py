@@ -2248,10 +2248,11 @@ async def api_diagnosis_check(request: Request, settings: Settings = Depends(get
 
     already = bool(record.get("already_guessed"))
     stored_correct = bool(record.get("is_correct"))
+    is_first_solver = bool(record.get("is_first_solver"))
     winner_taken = bool(record.get("winner_taken"))
     if already:
         result = "already_guessed"
-    elif stored_correct and not winner_taken:
+    elif stored_correct and is_first_solver:
         result = "correct_first"
     elif stored_correct:
         result = "correct_beaten"
@@ -2261,6 +2262,7 @@ async def api_diagnosis_check(request: Request, settings: Settings = Depends(get
     return {
         "result": result,
         "outcome": record.get("outcome"),
+        "prize_kind": record.get("prize_kind"),
         "winner_taken": winner_taken,
         "case_id": case.get("id"),
         # The STORED verdict is authoritative (covers the already_guessed resume

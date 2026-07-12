@@ -307,6 +307,123 @@ GAME RULES
 Your replies appear in a small in-game dialogue box: keep them under ~110 words."""
 
 
+def _result_line(title: str, values: list[tuple[str, Any]]) -> str:
+    rendered = [f"{label}: {value}" for label, value in values if value not in (None, "")]
+    return f"{title}: " + "; ".join(rendered) + "."
+
+
+def deterministic_nurse_reply(question: str, case: dict) -> Optional[str]:
+    """Read authored investigation results without spending an LLM turn.
+
+    The case YAML is the source of truth. Questions outside the known
+    investigation set return ``None`` so the nurse agent can handle them.
+    """
+    q = question.lower()
+    investigations = case.get("investigations") or {}
+    bloods = investigations.get("bloods") or {}
+    vitals = case.get("vitals") or {}
+
+    if re.search(
+        r"\b(is it|is this|could it be|could this be|i think it'?s|my diagnosis|"
+        r"diagnosis is|sounds like|what do you think|what'?s wrong with)\b",
+        q,
+    ):
+        return "That's your call, doc. I can give you the investigation results, but Nurse Paws takes the final diagnosis."
+
+    endocrine = investigations.get("endocrine_if_ordered") or {}
+    if "cortisol" in q and "acth" in q and endocrine:
+        return _result_line("Endocrine tests", [
+            ("random cortisol", endocrine.get("random_cortisol")),
+            ("ACTH", endocrine.get("acth")),
+        ])
+    if "cortisol" in q and endocrine.get("random_cortisol"):
+        return f"Random cortisol: {endocrine['random_cortisol']}."
+    if re.search(r"\bacth\b", q) and endocrine.get("acth"):
+        return f"ACTH: {endocrine['acth']}."
+    if re.search(r"\b(vbg|venous blood gas|blood gas)\b", q) and investigations.get("vbg"):
+        return f"VBG: {investigations['vbg']}."
+    if re.search(r"\b(ecg|ekg|electrocardiogram)\b", q) and investigations.get("ecg"):
+        return f"ECG: {investigations['ecg']}."
+    if re.search(r"\b(bgl|finger\s*stick|fingerstick|bedside glucose|blood glucose|glucose)\b", q):
+        return _result_line("Glucose", [
+            ("bedside", investigations.get("fingerstick_glucose")),
+            ("laboratory", bloods.get("glucose_lab")),
+        ])
+    if re.search(r"\b(fbc|full blood count|cbc|haemoglobin|hemoglobin|wcc|white cell|eosinophil)\b", q):
+        return _result_line("FBC", [
+            ("WCC", bloods.get("wcc")),
+            ("haemoglobin", bloods.get("haemoglobin")),
+            ("eosinophils", bloods.get("eosinophils")),
+        ])
+    if re.search(
+        r"\b(uec|euc|electrolytes?|sodium|potassium|chloride|bicarbonate|urea|"
+        r"creatinine|renal function|kidney function)\b|\bu\s*&\s*e(?:s|c)?\b",
+        q,
+    ):
+        return _result_line("Electrolytes and renal function", [
+            ("sodium", bloods.get("sodium")),
+            ("potassium", bloods.get("potassium")),
+            ("chloride", bloods.get("chloride")),
+            ("bicarbonate", bloods.get("bicarbonate")),
+            ("urea", bloods.get("urea")),
+            ("creatinine", bloods.get("creatinine")),
+        ])
+    if re.search(r"\b(crp|inflammatory markers?|lactate)\b", q):
+        return _result_line("Inflammatory markers", [
+            ("CRP", bloods.get("crp")),
+            ("lactate", bloods.get("lactate")),
+            ("WCC", bloods.get("wcc")),
+        ])
+    if re.search(r"\b(bloods?|labs?|laboratory tests?|blood tests?)\b", q) and bloods:
+        labels = {
+            "wcc": "WCC", "haemoglobin": "haemoglobin", "eosinophils": "eosinophils",
+            "crp": "CRP", "glucose_lab": "glucose",
+        }
+        return _result_line(
+            "Bloods",
+            [(labels.get(key, key.replace("_", " ")), value) for key, value in bloods.items()],
+        )
+    if re.search(r"\b(urinalysis|urine dip|urine|ua)\b", q) and investigations.get("urinalysis"):
+        return f"Urinalysis: {investigations['urinalysis']}."
+    if re.search(r"\b(pregnancy|hcg|β-hcg|beta.?hcg)\b", q) and investigations.get("pregnancy_test"):
+        return f"Pregnancy test: {investigations['pregnancy_test']}."
+    if re.search(
+        r"\b(observations?|vitals?|obs|blood pressure|bp|heart rate|pulse|"
+        r"respiratory rate|temperature|spo2|sats)\b",
+        q,
+    ) and vitals:
+        return _result_line(
+            "Observations",
+            [(key.replace("_", " "), value) for key, value in vitals.items()],
+        )
+
+    imaging = investigations.get("imaging_if_ordered") or {}
+    if re.search(r"abdo(?:minal)?\s*(?:ultrasound|uss)|ultrasound|\buss\b", q):
+        result = imaging.get("abdominal_ultrasound")
+        return f"Abdominal ultrasound: {result}." if result else None
+    if re.search(r"chest\s*x-?ray|\bcxr\b|chest film|lung film", q):
+        return "No chest X-ray was performed for this patient."
+    if re.search(r"\bct\b|computed tomography", q):
+        return "No CT was performed for this patient."
+    if re.search(r"\bmri\b|magnetic resonance", q):
+        return "No MRI was performed for this patient."
+
+    if re.search(
+        r"\b(all|available|list|which|what)\b.*\b(investigations?|tests?|studies|"
+        r"results?|workup|imaging)\b|\banything else\b|\bexamples?\b",
+        q,
+    ):
+        return (
+            "I have observations, ECG, bedside glucose, FBC, electrolytes and renal "
+            "function, inflammatory markers, VBG, urinalysis, pregnancy testing, "
+            "cortisol and ACTH, plus abdominal ultrasound. Name a panel or test and "
+            "I'll read the exact result."
+        )
+    if re.search(r"^(hi|hello|hey|g'?day)\b", q):
+        return "Dr Snow. I have the full investigation chart for cubicle 3. What result do you need?"
+    return None
+
+
 def _format_transcript(history: Optional[list[dict]], npc_label: str = "Patient") -> str:
     """Render prior turns as a plain transcript block (most recent last).
 
@@ -685,7 +802,18 @@ async def handle_question(
                 "reception desk. Do not repeat their theory back to them."
             )
 
-    raw_reply = await npc_reply(question, history, case, role=role, extra_instruction=extra_instruction)
+    response_source = "llm"
+    raw_reply = deterministic_nurse_reply(question, case) if is_nurse else None
+    if raw_reply is not None:
+        response_source = "deterministic"
+    else:
+        raw_reply = await npc_reply(
+            question,
+            history,
+            case,
+            role=role,
+            extra_instruction=extra_instruction,
+        )
 
     # Choke point: every reply is sanitized to spoken words only here (not inside
     # npc_reply), so any caller / future path is covered. Pass the speaker's known
@@ -710,4 +838,6 @@ async def handle_question(
         # endpoint owns verdicts). Always None; kept so PatientReply parses.
         "correct": None,
         "diagnosis": None,
+        "response_source": response_source,
+        "model": get_settings().SIM_PATIENT_MODEL if response_source == "llm" else "",
     }

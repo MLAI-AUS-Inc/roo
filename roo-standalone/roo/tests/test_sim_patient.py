@@ -308,22 +308,31 @@ def test_nurse_role_skips_classifier_and_never_adjudicates(monkeypatch):
     classifier_calls = [c for c in fake.calls if c["kwargs"].get("model") == "gpt-4o-mini"]
     assert not classifier_calls, "nurse role must never invoke the guess classifier"
 
-    # The reply call uses the nurse persona, not the PQM narrator.
+    # Diagnosis deflection is deterministic and never spends an LLM call.
     reply_calls = [c for c in fake.calls if c["kwargs"].get("model") != "gpt-4o-mini"]
-    assert len(reply_calls) == 1
-    system_prompt = reply_calls[0]["messages"][0]["content"]
-    assert "Nurse Priya" in system_prompt
-    assert "Patient Quest Master" not in system_prompt
+    assert not reply_calls
+    assert result["response_source"] == "deterministic"
 
 
-def test_nurse_prompt_carries_case_but_no_secrets(monkeypatch):
+def test_known_nurse_investigation_is_deterministic(monkeypatch):
     fake = _install_fake(monkeypatch, "{}", reply_text='"Bloods are back: sodium 122."')
 
     result = _run(sim_patient.handle_question("can I get the bloods?", role="nurse"))
-    # The speech-only sanitizer unwraps the model's wrapping quotes.
-    assert result["reply"] == "Bloods are back: sodium 122."
+    assert result["reply"].startswith("Bloods:")
+    assert "122 mmol/L" in result["reply"]
+    assert "6.1 mmol/L" in result["reply"]
+    assert result["response_source"] == "deterministic"
+    assert fake.calls == []
+
+
+def test_unmatched_nurse_conversation_uses_redacted_agent_context(monkeypatch):
+    fake = _install_fake(monkeypatch, "{}", reply_text="Busy, but surviving. What result do you need?")
+
+    result = _run(sim_patient.handle_question("How is your day going?", role="nurse"))
+    assert result["response_source"] == "llm"
 
     reply_calls = [c for c in fake.calls if c["kwargs"].get("model") != "gpt-4o-mini"]
+    assert len(reply_calls) == 1
     user_prompt = reply_calls[0]["messages"][1]["content"]
     # Case content present (so she can actually read results out)…
     assert "CASE FILE" in user_prompt
@@ -539,7 +548,7 @@ def test_handle_question_sanitizes_reply_at_choke_point(monkeypatch):
         return "*sighs* The bloods aren't back yet, love."
 
     monkeypatch.setattr(sim_patient, "npc_reply", fake_npc_reply)
-    result = _run(sim_patient.handle_question("bloods?", role="nurse"))
+    result = _run(sim_patient.handle_question("How is your shift going?", role="nurse"))
     assert result["reply"] == "The bloods aren't back yet, love."
 
 
@@ -549,7 +558,7 @@ def test_empty_model_reply_falls_back_to_canned_line(monkeypatch):
 
     monkeypatch.setattr(sim_patient, "npc_reply", empty_reply)
 
-    nurse = _run(sim_patient.handle_question("bloods?", role="nurse"))
+    nurse = _run(sim_patient.handle_question("How is your shift going?", role="nurse"))
     assert nurse["reply"] == sim_patient._EMPTY_REPLY_FALLBACK["nurse"]
 
     # Patient role runs the classifier first — stub it to a non-guess so no LLM.
