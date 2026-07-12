@@ -78,7 +78,7 @@ def test_correct_first_records_then_reveals(monkeypatch):
     assert body["diagnosis"] == "Adrenal Crisis"
     # Adjudicated deterministically and recorded with the pinned case.
     assert calls == [{
-        "case_id": 1, "client_id": VALID_CLIENT,
+        "case_id": 1, "case_title": "Salt & Static", "client_id": VALID_CLIENT,
         "guess_text": "adrenal crisis", "is_correct": True,
     }]
 

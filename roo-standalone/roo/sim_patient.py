@@ -214,6 +214,7 @@ async def record_web_guess(
     settings,
     *,
     case_id: int,
+    case_title: str,
     client_id: str,
     guess_text: str,
     is_correct: bool,
@@ -238,6 +239,7 @@ async def record_web_guess(
             url,
             json={
                 "case_id": case_id,
+                "case_title": case_title,
                 "client_id": client_id,
                 "guess_text": guess_text,
                 "is_correct": is_correct,

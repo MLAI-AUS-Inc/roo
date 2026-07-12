@@ -2244,6 +2244,7 @@ async def api_diagnosis_check(request: Request, settings: Settings = Depends(get
         record = await record_web_guess(
             settings,
             case_id=case.get("id"),
+            case_title=str(case.get("title") or f"Case {case.get('id')}"),
             client_id=client_id,
             guess_text=guess,
             is_correct=is_correct,
