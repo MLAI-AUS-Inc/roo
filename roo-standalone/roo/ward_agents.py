@@ -137,8 +137,6 @@ def investigation_catalog(case: dict) -> dict[str, dict[str, Any]]:
 
 
 def _dr_snow_tools(case: dict) -> list[dict[str, Any]]:
-    ids = sorted(investigation_catalog(case))
-    selectable_ids = ids + ["bloods", "pathology", "radiology", "imaging"]
     return [
         _strict_tool(
             "list_available_results",
@@ -158,10 +156,17 @@ def _dr_snow_tools(case: dict) -> list[dict[str, Any]]:
             {
                 "test_ids": {
                     "type": "array",
-                    "items": {"type": "string", "enum": selectable_ids},
+                    "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 100,
+                    },
                     "minItems": 1,
                     "maxItems": 20,
-                    "description": "Stable test ids or group aliases to retrieve.",
+                    "description": (
+                        "Names of tests the player explicitly requested, or a "
+                        "generic group alias such as bloods or imaging."
+                    ),
                 },
             },
             ["test_ids"],
@@ -255,6 +260,32 @@ def _explicit_clue_request(question: str) -> bool:
     return bool(re.search(r"\b(?:clue|hint|help|stuck|lost)\b", query))
 
 
+def _requested_result_list_category(question: str) -> Optional[str]:
+    """Derive list authority and scope solely from the raw player request."""
+    query = _query_text(question)
+    asks_what_exists = bool(
+        re.search(r"\b(?:available|availability)\b", query)
+        or (
+            re.search(
+                r"\b(?:which|what|examples?|list|had|done|performed|ordered)\b",
+                query,
+            )
+            and re.search(
+                r"\b(?:results?|investigations?|studies|tests?|bloods?|labs?|"
+                r"pathology|radiology|imaging|scans?)\b",
+                query,
+            )
+        )
+    )
+    if not asks_what_exists:
+        return None
+    if re.search(r"\b(?:radiology|imaging|scans?)\b", query):
+        return "radiology"
+    if re.search(r"\b(?:pathology|bloods?|labs?)\b", query):
+        return "pathology"
+    return "all"
+
+
 _FINAL_DIAGNOSIS_RE = re.compile(
     r"""^\s*(?:
         (?:my\s+)?final\s+(?:answer|diagnosis|guess)(?:\s+is)?
@@ -302,34 +333,24 @@ def _execute_dr_snow_tool(
 ) -> dict[str, Any]:
     catalog = investigation_catalog(case)
     if name == "list_available_results":
-        category = arguments.get("category")
+        category = _requested_result_list_category(question)
+        if category is None:
+            return {
+                "authorized": False,
+                "reason": "The player did not ask which investigations are available.",
+            }
         results = [
             {"id": identifier, "label": item["label"], "category": item["category"]}
             for identifier, item in catalog.items()
             if category == "all" or item["category"] == category
         ][:2]
-        return {"results": results}
+        return {"authorized": True, "results": results}
 
     if name == "get_results":
-        authorized = _authorized_result_ids(question, catalog)
-        requested = arguments.get("test_ids") or []
-        expanded: list[str] = []
-        for identifier in requested:
-            if identifier in {"bloods"}:
-                expanded.extend(key for key in catalog if key.startswith("bloods."))
-            elif identifier in {"pathology", "radiology", "imaging"}:
-                target = "radiology" if identifier in {"radiology", "imaging"} else identifier
-                expanded.extend(
-                    key for key, item in catalog.items()
-                    if item["category"] == target
-                )
-            else:
-                expanded.append(identifier)
-        unique = [
-            identifier
-            for identifier in dict.fromkeys(expanded)
-            if identifier in authorized
-        ][:30]
+        # The model's test_ids are routing hints only. Resolve the actual result
+        # set exclusively from the player's raw words so an injected tool call
+        # can neither widen nor narrow the authorized disclosure.
+        unique = sorted(_authorized_result_ids(question, catalog))[:30]
         if not unique:
             return {
                 "authorized": False,
