@@ -782,14 +782,28 @@ def test_clerk_final_echo_cannot_leak_a_different_diagnosis(monkeypatch):
     assert result["reply"] == sim_patient._LEAK_GUARD_FALLBACK["clerk"]
 
 
-def test_clerk_may_echo_only_the_player_supplied_protected_final_term(monkeypatch):
+def test_clerk_model_never_echoes_even_player_supplied_hidden_final_term(monkeypatch):
     _install_fake(monkeypatch, "{}", reply_text="Adrenal crisis.")
     result = _run(sim_patient.handle_question(
         "My final diagnosis is adrenal crisis",
         role="clerk",
         contest_state=_ELIGIBLE,
     ))
-    assert result["reply"] == "Adrenal crisis."
+    assert result["reply"] == sim_patient._LEAK_GUARD_FALLBACK["clerk"]
+
+
+def test_clerk_multi_diagnosis_final_cannot_become_a_correctness_oracle(monkeypatch):
+    _install_fake(monkeypatch, "{}", reply_text="Adrenal crisis.")
+    result = _run(sim_patient.handle_question(
+        "My final diagnosis is appendicitis or adrenal crisis",
+        role="clerk",
+        contest_state=_ELIGIBLE,
+    ))
+    assert result["suggested_action"] == {
+        "type": "confirm_diagnosis",
+        "diagnosis": "appendicitis or adrenal crisis",
+    }
+    assert result["reply"] == sim_patient._LEAK_GUARD_FALLBACK["clerk"]
 
 
 def test_clerk_tentative_diagnosis_never_arms_confirmation(monkeypatch):

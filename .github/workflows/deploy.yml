@@ -76,11 +76,12 @@ jobs:
         env:
           SIM_PATIENT_API_KEY: ${{ secrets.SIM_PATIENT_API_KEY }}
           SIM_PATIENT_SAFETY_SALT: ${{ secrets.SIM_PATIENT_SAFETY_SALT }}
+          ROO_PRIVATE_BASE_URL: ${{ vars.ROO_PRIVATE_BASE_URL }}
         with:
           host: ${{ secrets.DO_HOST }}
           username: ${{ secrets.DO_USERNAME }}
           key: ${{ secrets.DO_SSH_KEY }}
-          envs: SIM_PATIENT_API_KEY,SIM_PATIENT_SAFETY_SALT
+          envs: SIM_PATIENT_API_KEY,SIM_PATIENT_SAFETY_SALT,ROO_PRIVATE_BASE_URL
           script: |
             # Stop if any command fails
             set -eu
@@ -144,17 +145,21 @@ jobs:
               sleep 5
             done
 
-            # Traverse the private VPC and authenticate successfully, then fail
-            # at schema validation before any model call can be created.
-            private_status="$(curl --silent --show-error --max-time 8 \
-              --output /dev/null --write-out '%{http_code}' \
-              --request POST http://10.126.0.5/api/sim-patient \
-              --header "Authorization: Bearer $SIM_PATIENT_API_KEY" \
-              --header 'Content-Type: application/json' \
-              --data '{"question":""}')"
-            if [ "$private_status" != "422" ]; then
-              echo "Private authenticated validation check failed (status $private_status)" >&2
-              exit 1
+            # When configured, traverse the same private-VPC base URL used by
+            # MLAI Backend. The malformed schema fails before any model call.
+            # Cross-service integration smoke owns this check when the variable
+            # is intentionally absent.
+            if [ -n "${ROO_PRIVATE_BASE_URL:-}" ]; then
+              private_status="$(curl --silent --show-error --max-time 8 \
+                --output /dev/null --write-out '%{http_code}' \
+                --request POST "${ROO_PRIVATE_BASE_URL%/}/api/sim-patient" \
+                --header "Authorization: Bearer $SIM_PATIENT_API_KEY" \
+                --header 'Content-Type: application/json' \
+                --data '{"question":""}')"
+              if [ "$private_status" != "422" ]; then
+                echo "Private authenticated validation check failed (status $private_status)" >&2
+                exit 1
+              fi
             fi
             
             # Clean up space

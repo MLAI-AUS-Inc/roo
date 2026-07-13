@@ -635,9 +635,29 @@ def _leaked_diagnosis_terms(reply: str, case: dict) -> list[str]:
         obfuscated_long_form = bool(
             len(term_compact) >= 6 and term_compact in reply_compact
         )
-        if complete_phrase or obfuscated_long_form:
+        separator_spelled_alias = _separator_spelled_alias_present(
+            reply_words, term_words
+        )
+        if complete_phrase or obfuscated_long_form or separator_spelled_alias:
             leaked.append(term)
     return leaked
+
+
+def _separator_spelled_alias_present(reply_words: str, term_words: str) -> bool:
+    """Catch short aliases spelled with punctuation/spaces without substrings."""
+    term_tokens = term_words.split()
+    if len(term_tokens) != 1:
+        return False
+    alias = term_tokens[0]
+    if not (2 <= len(alias) <= 5 and alias.isascii() and alias.isalnum()):
+        return False
+    reply_tokens = reply_words.split()
+    letters = list(alias)
+    width = len(letters)
+    return any(
+        reply_tokens[index:index + width] == letters
+        for index in range(len(reply_tokens) - width + 1)
+    )
 
 
 def _bounded_plain_reply(text: Any, speaker_names: tuple[str, ...]) -> str:
@@ -830,23 +850,12 @@ async def handle_question(
     if not reply:
         reply = _EMPTY_REPLY_FALLBACK[role]
 
-    # A correct diagnosis may be echoed only by Nurse Paws while preparing the
-    # exact final answer the player themselves explicitly supplied. It is never
-    # allowed in Sash/Dr Snow output or an ordinary Paws chat response.
+    # Hidden answer terms are never permitted in model-authored speech, including
+    # Paws' pre-confirmation turn. The separately validated suggested_action can
+    # carry exactly what the player typed without letting the model choose among
+    # multiple candidates and accidentally become a correctness oracle.
     leaked_terms = _leaked_diagnosis_terms(reply, case)
-    final_words = _guard_normalized(
-        suggested_action.get("diagnosis") if suggested_action else ""
-    )[0]
-    allow_final_echo = bool(
-        is_clerk
-        and suggested_action
-        and leaked_terms
-        and all(
-            _guard_phrase_present(final_words, _guard_normalized(term)[0])
-            for term in leaked_terms
-        )
-    )
-    if leaked_terms and not allow_final_echo:
+    if leaked_terms:
         print(
             "⚠️ sim-patient output leakage guard "
             f"role={role} case_id={case.get('id')}"

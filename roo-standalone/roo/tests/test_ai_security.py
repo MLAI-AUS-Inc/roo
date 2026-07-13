@@ -259,9 +259,13 @@ def test_sash_diagnosis_leak_guard_handles_unicode_obfuscation(monkeypatch, mode
 
 @pytest.mark.parametrize("case_id,reply", [
     (2, "It is AIP."),
+    (2, "It is A.I.P."),
     (3, "This is DKA."),
+    (3, "This is D K A."),
     (5, "It sounds like CHS."),
+    (5, "It sounds like C-H-S."),
     (7, "I think CVST."),
+    (7, "I think C.V.S.T."),
     (3, "It is DкA."),  # Cyrillic k confusable
 ])
 def test_short_authored_diagnosis_aliases_are_guarded(case_id, reply):
@@ -377,6 +381,7 @@ def test_deploy_workflow_requires_and_secretly_upserts_security_values():
     assert "secrets.SIM_PATIENT_API_KEY" in workflow
     assert "secrets.SIM_PATIENT_SAFETY_SALT" in workflow
     assert "envs: SIM_PATIENT_API_KEY,SIM_PATIENT_SAFETY_SALT" in workflow
+    assert "envs: SIM_PATIENT_API_KEY,SIM_PATIENT_SAFETY_SALT,ROO_PRIVATE_BASE_URL" in workflow
     assert 'upsert_env "ROO_ENVIRONMENT" "production"' in workflow
     assert 'upsert_env "SIM_PATIENT_API_KEY" "$SIM_PATIENT_API_KEY"' in workflow
     assert 'upsert_env "SIM_PATIENT_SAFETY_SALT" "$SIM_PATIENT_SAFETY_SALT"' in workflow
@@ -384,7 +389,9 @@ def test_deploy_workflow_requires_and_secretly_upserts_security_values():
     assert 'echo "$SIM_PATIENT_API_KEY"' not in workflow
     assert 'echo "$SIM_PATIENT_SAFETY_SALT"' not in workflow
     assert "http://127.0.0.1/healthz/ready" in workflow
-    assert "http://10.126.0.5/api/sim-patient" in workflow
+    assert "vars.ROO_PRIVATE_BASE_URL" in workflow
+    assert '"${ROO_PRIVATE_BASE_URL%/}/api/sim-patient"' in workflow
+    assert "http://10.126.0.5/api/sim-patient" not in workflow
     assert 'if [ "$private_status" != "422" ]' in workflow
     assert "Verify public Roo containment" in workflow
     assert "expect_status 404 GET /docs" in workflow
