@@ -2207,15 +2207,18 @@ async def api_sim_patient(request: Request, settings: Settings = Depends(get_set
 async def api_diagnosis_check(request: Request, settings: Settings = Depends(get_settings)):
     """Ward-clerk diagnosis contest: adjudicate ONE guess and record it.
 
-    Fully scripted — no LLM anywhere in this path. The active case is pinned
-    server-side (SIM_ACTIVE_CASE_ID); clients cannot pick a case. The verdict
+    Fully scripted — no LLM anywhere in this path. The case defaults to the
+    server-pinned SIM_ACTIVE_CASE_ID; the authenticated gateway may target a
+    specific ward patient by sending case_id (mlai-backend validates which
+    cases are open — this endpoint only checks the case exists). The verdict
     comes from the same deterministic matcher as the Slack game (check_guess)
     and is recorded to mlai-backend BEFORE being revealed: if recording fails
     we return 503 with no verdict, so the guess is neither leaked nor burned
     (the backend row is what burns the player's single guess).
 
     Auth mirrors /api/sim-patient (bearer, open when SIM_PATIENT_API_KEY unset).
-    Errors: 401 bad token, 422 validation, 503 contest/record unavailable.
+    Errors: 401 bad token, 404 unknown case_id, 422 validation, 503
+    contest/record unavailable.
     """
     if settings.SIM_PATIENT_API_KEY:
         auth = request.headers.get("Authorization", "")
@@ -2229,12 +2232,22 @@ async def api_diagnosis_check(request: Request, settings: Settings = Depends(get
     client_id = str(payload.get("client_id") or "").strip()
     if not re.fullmatch(r"[A-Za-z0-9-]{8,64}", client_id):
         raise HTTPException(status_code=422, detail="client_id must be 8-64 chars [A-Za-z0-9-]")
+    raw_case_id = payload.get("case_id")
+    if raw_case_id is not None and (
+        isinstance(raw_case_id, bool)
+        or not isinstance(raw_case_id, int)
+        or raw_case_id < 1
+    ):
+        raise HTTPException(status_code=422, detail="case_id must be a positive integer")
 
     from .sim_patient import check_guess, load_case, record_web_guess
 
     try:
-        case = load_case(settings.SIM_ACTIVE_CASE_ID)
+        case = load_case(raw_case_id if raw_case_id is not None else settings.SIM_ACTIVE_CASE_ID)
     except KeyError as exc:
+        if raw_case_id is not None:
+            # The caller asked for a case that doesn't exist — client error.
+            raise HTTPException(status_code=404, detail="unknown case_id")
         # Server misconfiguration (bad SIM_ACTIVE_CASE_ID), not a client error.
         print(f"⚠️ diagnosis-check: active case unavailable: {exc}")
         raise HTTPException(status_code=503, detail="contest unavailable")
@@ -2248,6 +2261,7 @@ async def api_diagnosis_check(request: Request, settings: Settings = Depends(get
             client_id=client_id,
             guess_text=guess,
             is_correct=is_correct,
+            case_title=str(case.get("title") or ""),
         )
     except Exception as exc:
         # No verdict may leak when the registry is down (free-oracle otherwise),
@@ -2257,10 +2271,14 @@ async def api_diagnosis_check(request: Request, settings: Settings = Depends(get
 
     already = bool(record.get("already_guessed"))
     stored_correct = bool(record.get("is_correct"))
+    # winner_taken flips to True the moment the winner slot is claimed —
+    # including by THIS guess — so first-solver status comes from the record's
+    # own is_first_solver/prize assignment, never from "not winner_taken".
+    is_first_solver = bool(record.get("is_first_solver"))
     winner_taken = bool(record.get("winner_taken"))
     if already:
         result = "already_guessed"
-    elif stored_correct and not winner_taken:
+    elif stored_correct and is_first_solver:
         result = "correct_first"
     elif stored_correct:
         result = "correct_beaten"
@@ -2270,6 +2288,7 @@ async def api_diagnosis_check(request: Request, settings: Settings = Depends(get
     return {
         "result": result,
         "outcome": record.get("outcome"),
+        "prize_kind": record.get("prize_kind"),
         "winner_taken": winner_taken,
         "case_id": case.get("id"),
         # The STORED verdict is authoritative (covers the already_guessed resume

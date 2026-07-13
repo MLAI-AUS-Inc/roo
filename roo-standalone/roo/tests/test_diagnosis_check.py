@@ -7,7 +7,8 @@ recorder is monkeypatched). Invariants under test:
   - result mapping: correct_first / correct_beaten / incorrect / already_guessed
   - the STORED verdict is authoritative on the already_guessed resume path
   - record failure → 503 with NO verdict fields (no free oracle, guess not burned)
-  - the active case is pinned server-side (client case_id ignored)
+  - the case defaults to the server pin; an explicit case_id targets that ward
+    patient (unknown case → 404; which cases are OPEN is backend policy)
   - bearer auth mirrors /api/sim-patient
 """
 import sys
@@ -58,9 +59,13 @@ def _install_llm_bomb(monkeypatch):
 
 def test_correct_first_records_then_reveals(monkeypatch):
     _install_llm_bomb(monkeypatch)
+    # The backend's record response: claiming the winner slot flips
+    # winner_taken to True for the winner THEMSELVES — first-solver status
+    # comes from is_first_solver/prize assignment, never "not winner_taken".
     calls = _install_recorder(monkeypatch, response={
         "already_guessed": False, "is_correct": True,
-        "outcome": "pending_claim", "winner_taken": False,
+        "outcome": "pending_claim", "prize_kind": "free_ticket",
+        "is_first_solver": True, "winner_taken": True,
     })
     client = _client(monkeypatch)
 
@@ -71,12 +76,13 @@ def test_correct_first_records_then_reveals(monkeypatch):
     body = resp.json()
     assert body["result"] == "correct_first"
     assert body["outcome"] == "pending_claim"
-    assert body["winner_taken"] is False
+    assert body["prize_kind"] == "free_ticket"
+    assert body["winner_taken"] is True
     assert body["case_id"] == 1
     assert body["diagnosis"] == "Adrenal Crisis"
     # Adjudicated deterministically and recorded with the pinned case.
     assert calls == [{
-        "case_id": 1, "client_id": VALID_CLIENT,
+        "case_id": 1, "case_title": "Salt & Static", "client_id": VALID_CLIENT,
         "guess_text": "adrenal crisis", "is_correct": True,
     }]
 
@@ -84,7 +90,8 @@ def test_correct_first_records_then_reveals(monkeypatch):
 def test_correct_beaten_when_winner_taken(monkeypatch):
     _install_recorder(monkeypatch, response={
         "already_guessed": False, "is_correct": True,
-        "outcome": "pending_claim", "winner_taken": True,
+        "outcome": "pending_claim", "prize_kind": "discount_30",
+        "is_first_solver": False, "winner_taken": True,
     })
     client = _client(monkeypatch)
 
@@ -92,6 +99,7 @@ def test_correct_beaten_when_winner_taken(monkeypatch):
                        json={"guess": "addisonian crisis", "client_id": VALID_CLIENT}).json()
 
     assert body["result"] == "correct_beaten"
+    assert body["prize_kind"] == "discount_30"
     assert body["winner_taken"] is True
     assert body["diagnosis"] == "Adrenal Crisis"
 
@@ -99,7 +107,8 @@ def test_correct_beaten_when_winner_taken(monkeypatch):
 def test_incorrect_guess_reveals_nothing(monkeypatch):
     calls = _install_recorder(monkeypatch, response={
         "already_guessed": False, "is_correct": False,
-        "outcome": "incorrect", "winner_taken": False,
+        "outcome": "incorrect", "prize_kind": "none",
+        "is_first_solver": False, "winner_taken": False,
     })
     client = _client(monkeypatch)
 
@@ -107,6 +116,7 @@ def test_incorrect_guess_reveals_nothing(monkeypatch):
                        json={"guess": "banana allergy", "client_id": VALID_CLIENT}).json()
 
     assert body["result"] == "incorrect"
+    assert body["prize_kind"] == "none"
     assert body["diagnosis"] is None
     assert calls[0]["is_correct"] is False
 
@@ -116,7 +126,8 @@ def test_already_guessed_resume_uses_stored_verdict(monkeypatch):
     # after losing local state) — the stored verdict wins and the dx re-reveals.
     _install_recorder(monkeypatch, response={
         "already_guessed": True, "is_correct": True,
-        "outcome": "pending_claim", "winner_taken": True,
+        "outcome": "pending_claim", "prize_kind": "discount_30",
+        "is_first_solver": False, "winner_taken": True,
     })
     client = _client(monkeypatch)
 
@@ -125,6 +136,7 @@ def test_already_guessed_resume_uses_stored_verdict(monkeypatch):
 
     assert body["result"] == "already_guessed"
     assert body["outcome"] == "pending_claim"
+    assert body["prize_kind"] == "discount_30"
     assert body["diagnosis"] == "Adrenal Crisis"
 
 
@@ -142,24 +154,40 @@ def test_record_failure_503_leaks_no_verdict_and_burns_nothing(monkeypatch):
         assert verdict_key not in body
 
 
-def test_client_cannot_pick_the_case(monkeypatch):
-    # A payload case_id must be ignored — the server pin decides.
+def test_case_id_targets_that_ward_patient(monkeypatch):
+    # The authenticated gateway may pin a specific ward patient (two-patient
+    # ward): roo adjudicates and records against THAT case. Which cases are
+    # open to players is the backend gateway's policy, not roo's.
     calls = _install_recorder(monkeypatch, response={
-        "already_guessed": False, "is_correct": False,
-        "outcome": "incorrect", "winner_taken": False,
+        "already_guessed": False, "is_correct": True,
+        "outcome": "pending_claim", "prize_kind": "free_ticket",
+        "is_first_solver": True, "winner_taken": True,
     })
     client = _client(monkeypatch, active_case=1)
 
     body = client.post("/api/diagnosis-check", json={
         "guess": "cerebral venous sinus thrombosis",
         "client_id": VALID_CLIENT,
-        "case_id": 7,  # attempted farm of a case not in play
+        "case_id": 7,
     }).json()
 
-    assert calls[0]["case_id"] == 1
-    assert body["case_id"] == 1
-    # Correct for case 7, but adjudicated against case 1 → incorrect here.
-    assert body["result"] == "incorrect"
+    assert calls[0]["case_id"] == 7
+    assert calls[0]["is_correct"] is True  # matched against case 7, not case 1
+    assert body["case_id"] == 7
+    assert body["result"] == "correct_first"
+    assert body["diagnosis"] == "Cerebral Venous Sinus Thrombosis (CVST)"
+
+
+def test_unknown_case_id_404s_and_records_nothing(monkeypatch):
+    calls = _install_recorder(monkeypatch, response={})
+    client = _client(monkeypatch)
+
+    resp = client.post("/api/diagnosis-check", json={
+        "guess": "adrenal crisis", "client_id": VALID_CLIENT, "case_id": 999,
+    })
+
+    assert resp.status_code == 404
+    assert calls == []  # nothing recorded, nothing revealed
 
 
 def test_misconfigured_active_case_503s(monkeypatch):
@@ -195,6 +223,9 @@ def test_auth_mirrors_sim_patient(monkeypatch):
     {"guess": "gastro"},                                      # client_id missing
     {"guess": "gastro", "client_id": "short"},                # client_id too short
     {"guess": "gastro", "client_id": "bad chars!" + "a" * 8}, # client_id bad chars
+    {"guess": "gastro", "client_id": VALID_CLIENT, "case_id": True},   # bool is not a case
+    {"guess": "gastro", "client_id": VALID_CLIENT, "case_id": "2"},    # string case_id
+    {"guess": "gastro", "client_id": VALID_CLIENT, "case_id": 0},      # below minimum
 ])
 def test_validation_422(monkeypatch, payload):
     calls = _install_recorder(monkeypatch, response={})
