@@ -113,6 +113,20 @@ jobs:
             # Go to the sub-project directory
             cd "$DEPLOY_DIR/roo-standalone"
 
+            # The Roo -> MLAI Backend contest-registry direction has a
+            # dedicated credential that already lives on the Droplet. Validate
+            # it before restarting so a missing/stale bootstrap cannot turn
+            # final diagnoses into an outage. Never print the value.
+            ROO_API_KEY="$(sed -n 's/^ROO_API_KEY=//p' .env 2>/dev/null | tail -n 1)"
+            if [ "${#ROO_API_KEY}" -lt 32 ]; then
+              echo "ROO_API_KEY is missing or shorter than 32 characters" >&2
+              exit 1
+            fi
+            if [ "$ROO_API_KEY" = "$SIM_PATIENT_API_KEY" ] || [ "$ROO_API_KEY" = "$SIM_PATIENT_SAFETY_SALT" ]; then
+              echo "Roo service credentials must be distinct" >&2
+              exit 1
+            fi
+
             # Update security settings without printing secret values. Rebuild
             # the file atomically so duplicate/stale keys cannot win.
             umask 077

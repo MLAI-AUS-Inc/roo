@@ -24,6 +24,7 @@ from roo.main import app
 PLAYER_ID = "aaaaaaaa-1111-4111-8111-111111111111"
 STRONG_KEY = "k" * 48
 STRONG_SALT = "s" * 48
+STRONG_ROO_KEY = "r" * 48
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
@@ -41,23 +42,30 @@ def _settings(monkeypatch, *, production=False, key=None):
 
 
 @pytest.mark.parametrize(
-    "key,salt,openai_key,timeout",
+    "key,salt,roo_key,openai_key,timeout",
     [
-        (None, STRONG_SALT, "openai-test", 20),
-        ("short", STRONG_SALT, "openai-test", 20),
-        (STRONG_KEY, None, "openai-test", 20),
-        (STRONG_KEY, "short", "openai-test", 20),
-        (STRONG_KEY, STRONG_KEY, "openai-test", 20),
-        (STRONG_KEY, STRONG_SALT, None, 20),
-        (STRONG_KEY, STRONG_SALT, "openai-test", 0),
-        (STRONG_KEY, STRONG_SALT, "openai-test", 21),
+        (None, STRONG_SALT, STRONG_ROO_KEY, "openai-test", 20),
+        ("short", STRONG_SALT, STRONG_ROO_KEY, "openai-test", 20),
+        (STRONG_KEY, None, STRONG_ROO_KEY, "openai-test", 20),
+        (STRONG_KEY, "short", STRONG_ROO_KEY, "openai-test", 20),
+        (STRONG_KEY, STRONG_KEY, STRONG_ROO_KEY, "openai-test", 20),
+        (STRONG_KEY, STRONG_SALT, None, "openai-test", 20),
+        (STRONG_KEY, STRONG_SALT, "short", "openai-test", 20),
+        (STRONG_KEY, STRONG_SALT, STRONG_KEY, "openai-test", 20),
+        (STRONG_KEY, STRONG_SALT, STRONG_SALT, "openai-test", 20),
+        (STRONG_KEY, STRONG_SALT, STRONG_ROO_KEY, None, 20),
+        (STRONG_KEY, STRONG_SALT, STRONG_ROO_KEY, "openai-test", 0),
+        (STRONG_KEY, STRONG_SALT, STRONG_ROO_KEY, "openai-test", 21),
     ],
 )
-def test_production_security_configuration_fails_closed(key, salt, openai_key, timeout):
+def test_production_security_configuration_fails_closed(
+    key, salt, roo_key, openai_key, timeout,
+):
     settings = SimpleNamespace(
         is_production=True,
         SIM_PATIENT_API_KEY=key,
         SIM_PATIENT_SAFETY_SALT=salt,
+        ROO_API_KEY=roo_key,
         OPENAI_API_KEY=openai_key,
         SIM_PATIENT_OPENAI_TIMEOUT_SECONDS=timeout,
     )
@@ -70,6 +78,7 @@ def test_strong_production_configuration_passes_and_development_stays_easy():
         is_production=True,
         SIM_PATIENT_API_KEY=STRONG_KEY,
         SIM_PATIENT_SAFETY_SALT=STRONG_SALT,
+        ROO_API_KEY=STRONG_ROO_KEY,
         OPENAI_API_KEY="openai-test",
         SIM_PATIENT_OPENAI_TIMEOUT_SECONDS=20,
     ))
@@ -397,9 +406,13 @@ def test_deploy_workflow_requires_and_secretly_upserts_security_values():
     assert 'upsert_env "ROO_ENVIRONMENT" "production"' in workflow
     assert 'upsert_env "SIM_PATIENT_API_KEY" "$SIM_PATIENT_API_KEY"' in workflow
     assert 'upsert_env "SIM_PATIENT_SAFETY_SALT" "$SIM_PATIENT_SAFETY_SALT"' in workflow
+    assert 'ROO_API_KEY="$(sed -n' in workflow
+    assert 'if [ "${#ROO_API_KEY}" -lt 32 ]' in workflow
+    assert workflow.index('ROO_API_KEY="$(sed -n') < workflow.index("docker compose up")
     assert workflow.index("upsert_env \"SIM_PATIENT_API_KEY\"") < workflow.index("docker compose up")
     assert 'echo "$SIM_PATIENT_API_KEY"' not in workflow
     assert 'echo "$SIM_PATIENT_SAFETY_SALT"' not in workflow
+    assert 'echo "$ROO_API_KEY"' not in workflow
     assert "http://127.0.0.1/healthz/ready" in workflow
     assert "vars.ROO_PRIVATE_BASE_URL" in workflow
     assert '"${ROO_PRIVATE_BASE_URL%/}/api/sim-patient"' in workflow

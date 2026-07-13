@@ -153,6 +153,21 @@ def validate_runtime_security(settings: Settings) -> None:
             "SIM_PATIENT_API_KEY and SIM_PATIENT_SAFETY_SALT must be distinct"
         )
 
+    registry_key = (settings.ROO_API_KEY or "").strip()
+    if len(registry_key) < 32:
+        raise RuntimeError(
+            "ROO_API_KEY must be configured with at least 32 characters "
+            "when ROO_ENVIRONMENT=production"
+        )
+    if any(
+        hmac.compare_digest(registry_key.encode("utf-8"), other.encode("utf-8"))
+        for other in (api_key, safety_salt)
+    ):
+        raise RuntimeError(
+            "ROO_API_KEY must be distinct from SIM_PATIENT_API_KEY and "
+            "SIM_PATIENT_SAFETY_SALT"
+        )
+
     if not (settings.OPENAI_API_KEY or "").strip():
         raise RuntimeError(
             "OPENAI_API_KEY must be configured when ROO_ENVIRONMENT=production"
