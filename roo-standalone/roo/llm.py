@@ -4,9 +4,10 @@ Model-Agnostic LLM Client
 Supports multiple LLM providers with a unified async interface.
 """
 import json
+import inspect
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Callable
 from enum import Enum
 import base64
 
@@ -36,6 +37,16 @@ class ToolCall:
     model: str = ""
 
 
+@dataclass
+class AgentResponse:
+    """Final text plus the tool trace from a Responses API agent turn."""
+
+    content: str
+    model: str
+    usage: Optional[Dict[str, int]] = None
+    tool_calls: List[Dict[str, Any]] = field(default_factory=list)
+
+
 class ToolCallParseError(ValueError):
     """The model produced no tool call or unparsable arguments."""
 
@@ -63,6 +74,19 @@ class BaseLLMClient(ABC):
         raise NotImplementedError(
             f"{type(self).__name__} does not support tool calling yet; "
             "use an OpenAI-compatible provider (openai/gemini) for the router."
+        )
+
+    async def agent_with_tools(
+        self,
+        messages: List[Dict[str, str]],
+        tools: List[Dict[str, Any]],
+        execute_tool: Callable[[str, Dict[str, Any]], Any],
+        **kwargs,
+    ) -> AgentResponse:
+        """Run model → tool → model until the model emits final text."""
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support Responses API agents; "
+            "use the OpenAI provider for the ward NPCs."
         )
 
 
@@ -159,6 +183,93 @@ class OpenAIClient(BaseLLMClient):
                 f"tool arguments for {call.function.name} are not an object: {raw_arguments[:200]}"
             )
         return ToolCall(name=call.function.name, arguments=arguments, model=response.model)
+
+    async def agent_with_tools(
+        self,
+        messages: List[Dict[str, str]],
+        tools: List[Dict[str, Any]],
+        execute_tool: Callable[[str, Dict[str, Any]], Any],
+        **kwargs,
+    ) -> AgentResponse:
+        """Run a bounded Responses API function-calling loop.
+
+        Response output items (including GPT-5 reasoning items) are fed back
+        unchanged alongside each function result, as required by the API.
+        """
+        model = kwargs.get("model", self.model)
+        instructions = "\n\n".join(
+            message["content"] for message in messages if message.get("role") == "system"
+        )
+        input_items: List[Any] = [
+            {"role": message["role"], "content": message["content"]}
+            for message in messages
+            if message.get("role") != "system"
+        ]
+        prompt_tokens = 0
+        completion_tokens = 0
+        tool_trace: List[Dict[str, Any]] = []
+        max_tool_rounds = max(0, min(int(kwargs.get("max_tool_rounds", 2)), 4))
+
+        for round_index in range(max_tool_rounds + 1):
+            create_kwargs: Dict[str, Any] = {
+                "model": model,
+                "instructions": instructions,
+                "input": input_items,
+                "tools": tools,
+                "tool_choice": kwargs.get("tool_choice", "auto"),
+                "parallel_tool_calls": False,
+                "max_output_tokens": kwargs.get("max_tokens", 700),
+            }
+            reasoning_effort = kwargs.get("reasoning_effort")
+            if reasoning_effort:
+                create_kwargs["reasoning"] = {"effort": reasoning_effort}
+
+            response = await self.client.responses.create(**create_kwargs)
+            usage = getattr(response, "usage", None)
+            prompt_tokens += int(getattr(usage, "input_tokens", 0) or 0)
+            completion_tokens += int(getattr(usage, "output_tokens", 0) or 0)
+            model = getattr(response, "model", model)
+            function_calls = [
+                item for item in (getattr(response, "output", None) or [])
+                if getattr(item, "type", None) == "function_call"
+            ]
+            if not function_calls:
+                return AgentResponse(
+                    content=getattr(response, "output_text", "") or "",
+                    model=model,
+                    usage={
+                        "prompt_tokens": prompt_tokens,
+                        "completion_tokens": completion_tokens,
+                    },
+                    tool_calls=tool_trace,
+                )
+            if round_index >= max_tool_rounds:
+                raise RuntimeError("ward NPC exceeded the maximum tool-call rounds")
+
+            # Preserve all output items, especially reasoning items from GPT-5.
+            input_items.extend(response.output)
+            for call in function_calls:
+                try:
+                    arguments = json.loads(call.arguments or "{}")
+                except json.JSONDecodeError as exc:
+                    raise ToolCallParseError(
+                        f"unparsable tool arguments for {call.name}: {call.arguments!r:.200}"
+                    ) from exc
+                if not isinstance(arguments, dict):
+                    raise ToolCallParseError(
+                        f"tool arguments for {call.name} are not an object"
+                    )
+                tool_trace.append({"name": call.name, "arguments": arguments})
+                result = execute_tool(call.name, arguments)
+                if inspect.isawaitable(result):
+                    result = await result
+                input_items.append({
+                    "type": "function_call_output",
+                    "call_id": call.call_id,
+                    "output": json.dumps(result, ensure_ascii=False, default=str),
+                })
+
+        raise RuntimeError("ward NPC did not produce a final response")
 
     async def embed(self, text: str) -> List[float]:
         """Generate embeddings using OpenAI."""

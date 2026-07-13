@@ -2146,12 +2146,8 @@ async def api_sim_patient(request: Request, settings: Settings = Depends(get_set
 
     Runs the medhack "Guess the Diagnosis" case as an in-character narrator.
     Stateless: never touches medhack game state, points, or the guess lockout.
-    role="nurse" answers as the reception nurse (investigation results from the
-    same case file; never adjudicates guesses). role="clerk" answers as Nurse
-    Paws at the diagnosis desk: she prepares the game's confirm-diagnosis step
-    (suggested_action) for eligible players but never adjudicates — verdicts
-    live exclusively in /api/diagnosis-check. The optional ``contest_state``
-    object is the backend gateway's read-only contest context for the clerk.
+    role="nurse" runs Dr Snow's results agent and role="clerk" runs Nurse
+    Paws' observations, examination, and final-guess preparation agent.
 
     Auth is bearer-only and applied ONLY when SIM_PATIENT_API_KEY is set (open in
     dev). Errors: 401 bad/missing token, 404 unknown case_id, 422 missing
@@ -2169,11 +2165,10 @@ async def api_sim_patient(request: Request, settings: Settings = Depends(get_set
 
     role = (payload.get("role") or "patient").strip().lower()
     if role not in ("patient", "nurse", "clerk"):
-        raise HTTPException(status_code=422, detail="role must be 'patient', 'nurse' or 'clerk'")
-
-    contest_state = payload.get("contest_state")
-    if not isinstance(contest_state, dict):
-        contest_state = None
+        raise HTTPException(
+            status_code=422,
+            detail="role must be 'patient', 'nurse', or 'clerk'",
+        )
 
     # Defensive caps: bound the question length and history depth server-side.
     question = question[:500]
@@ -2192,7 +2187,11 @@ async def api_sim_patient(request: Request, settings: Settings = Depends(get_set
             case_id=payload.get("case_id"),
             player_id=payload.get("player_id") or "web-anon",
             role=role,
-            contest_state=contest_state,
+            contest_state=(
+                payload.get("contest_state")
+                if isinstance(payload.get("contest_state"), dict)
+                else None
+            ),
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
@@ -2245,6 +2244,7 @@ async def api_diagnosis_check(request: Request, settings: Settings = Depends(get
         record = await record_web_guess(
             settings,
             case_id=case.get("id"),
+            case_title=str(case.get("title") or f"Case {case.get('id')}"),
             client_id=client_id,
             guess_text=guess,
             is_correct=is_correct,
@@ -2257,10 +2257,11 @@ async def api_diagnosis_check(request: Request, settings: Settings = Depends(get
 
     already = bool(record.get("already_guessed"))
     stored_correct = bool(record.get("is_correct"))
+    is_first_solver = bool(record.get("is_first_solver"))
     winner_taken = bool(record.get("winner_taken"))
     if already:
         result = "already_guessed"
-    elif stored_correct and not winner_taken:
+    elif stored_correct and is_first_solver:
         result = "correct_first"
     elif stored_correct:
         result = "correct_beaten"
@@ -2270,6 +2271,7 @@ async def api_diagnosis_check(request: Request, settings: Settings = Depends(get
     return {
         "result": result,
         "outcome": record.get("outcome"),
+        "prize_kind": record.get("prize_kind"),
         "winner_taken": winner_taken,
         "case_id": case.get("id"),
         # The STORED verdict is authoritative (covers the already_guessed resume

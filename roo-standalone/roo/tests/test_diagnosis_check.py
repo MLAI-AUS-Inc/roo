@@ -60,7 +60,8 @@ def test_correct_first_records_then_reveals(monkeypatch):
     _install_llm_bomb(monkeypatch)
     calls = _install_recorder(monkeypatch, response={
         "already_guessed": False, "is_correct": True,
-        "outcome": "pending_claim", "winner_taken": False,
+        "outcome": "pending_claim", "prize_kind": "free_ticket",
+        "is_first_solver": True, "winner_taken": True,
     })
     client = _client(monkeypatch)
 
@@ -71,20 +72,22 @@ def test_correct_first_records_then_reveals(monkeypatch):
     body = resp.json()
     assert body["result"] == "correct_first"
     assert body["outcome"] == "pending_claim"
-    assert body["winner_taken"] is False
+    assert body["prize_kind"] == "free_ticket"
+    assert body["winner_taken"] is True
     assert body["case_id"] == 1
     assert body["diagnosis"] == "Adrenal Crisis"
     # Adjudicated deterministically and recorded with the pinned case.
     assert calls == [{
-        "case_id": 1, "client_id": VALID_CLIENT,
+        "case_id": 1, "case_title": "Salt & Static", "client_id": VALID_CLIENT,
         "guess_text": "adrenal crisis", "is_correct": True,
     }]
 
 
-def test_correct_beaten_when_winner_taken(monkeypatch):
+def test_correct_beaten_when_backend_assigns_discount(monkeypatch):
     _install_recorder(monkeypatch, response={
         "already_guessed": False, "is_correct": True,
-        "outcome": "pending_claim", "winner_taken": True,
+        "outcome": "pending_claim", "prize_kind": "discount_30",
+        "is_first_solver": False, "winner_taken": True,
     })
     client = _client(monkeypatch)
 
@@ -92,6 +95,7 @@ def test_correct_beaten_when_winner_taken(monkeypatch):
                        json={"guess": "addisonian crisis", "client_id": VALID_CLIENT}).json()
 
     assert body["result"] == "correct_beaten"
+    assert body["prize_kind"] == "discount_30"
     assert body["winner_taken"] is True
     assert body["diagnosis"] == "Adrenal Crisis"
 
@@ -99,7 +103,8 @@ def test_correct_beaten_when_winner_taken(monkeypatch):
 def test_incorrect_guess_reveals_nothing(monkeypatch):
     calls = _install_recorder(monkeypatch, response={
         "already_guessed": False, "is_correct": False,
-        "outcome": "incorrect", "winner_taken": False,
+        "outcome": "incorrect", "prize_kind": "none",
+        "is_first_solver": False, "winner_taken": False,
     })
     client = _client(monkeypatch)
 
@@ -116,7 +121,8 @@ def test_already_guessed_resume_uses_stored_verdict(monkeypatch):
     # after losing local state) — the stored verdict wins and the dx re-reveals.
     _install_recorder(monkeypatch, response={
         "already_guessed": True, "is_correct": True,
-        "outcome": "pending_claim", "winner_taken": True,
+        "outcome": "pending_claim", "prize_kind": "free_ticket",
+        "is_first_solver": True, "winner_taken": True,
     })
     client = _client(monkeypatch)
 
@@ -146,7 +152,8 @@ def test_client_cannot_pick_the_case(monkeypatch):
     # A payload case_id must be ignored — the server pin decides.
     calls = _install_recorder(monkeypatch, response={
         "already_guessed": False, "is_correct": False,
-        "outcome": "incorrect", "winner_taken": False,
+        "outcome": "incorrect", "prize_kind": "none",
+        "is_first_solver": False, "winner_taken": False,
     })
     client = _client(monkeypatch, active_case=1)
 
@@ -176,7 +183,8 @@ def test_misconfigured_active_case_503s(monkeypatch):
 def test_auth_mirrors_sim_patient(monkeypatch):
     _install_recorder(monkeypatch, response={
         "already_guessed": False, "is_correct": False,
-        "outcome": "incorrect", "winner_taken": False,
+        "outcome": "incorrect", "prize_kind": "none",
+        "is_first_solver": False, "winner_taken": False,
     })
     client = _client(monkeypatch, api_key="secret-key")
 
