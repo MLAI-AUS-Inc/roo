@@ -161,7 +161,13 @@ cases:
         Intense, articulate, fast-talking when anxious. Uses precise language and tries
         to stay "high functioning," even while suffering.
       historian_quality: >
-        Good historian. Gives timelines well. Misses the "why" unless guided to triggers.
+        Moderately reliable. Precise and articulate about facts she has rehearsed -
+        her job, her medication names, what previous doctors told her - but only
+        approximate about timings ("a few days… maybe closer to a week?") unless the
+        clinician pins her down, and she never volunteers the connections: the
+        recently changed pill, the antibiotic course, the skipped meals, and her
+        cycle only come out when asked about each directly. Mid pain-wave she goes
+        terse and loses her thread for a line or two, then apologises and continues.
       motivation: >
         Terrified of being dismissed again. Overcompensates by sounding calm and competent.
         If the clinician is kind, she becomes more vulnerable and admits how lonely and
@@ -184,10 +190,15 @@ cases:
       social_history: "Works in professional office setting. High stress. Non-smoker."
       history_disclosure_rules: >
         Patient will NOT say "porphyria" - she does not know the diagnosis. She only
-        provides symptom details. Will reveal medication history if asked about new
-        medications. Will mention poor intake and stress if asked about diet/triggers.
-        Will describe dark urine if asked about urine colour. Will reveal family history
-        only if specifically asked about family illness patterns.
+        provides symptom details. Timings stay approximate ("recently", "a few days")
+        until the clinician pins her down a second time, then she commits to a number.
+        Will reveal the contraception change and the antibiotic course only if asked
+        directly about new, changed, or recent medications - a vague "any medications?"
+        gets the list without the recency. Will mention poor intake and stress if asked
+        about diet/triggers. Will describe dark urine only if asked about urine colour
+        or appearance. Will reveal family history only if specifically asked about
+        family illness patterns. Volunteers nothing from this list unprompted, however
+        kind the clinician is.
     symptoms:
       main:
         - "Severe diffuse abdominal pain (deep, cramping, constant with waves), 18 hours, 9/10"
