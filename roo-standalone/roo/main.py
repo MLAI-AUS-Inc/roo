@@ -16,13 +16,13 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Any, Optional
 from urllib.parse import urljoin, urlparse
-from uuid import uuid4
+from uuid import UUID, uuid4
 import httpx
 
 from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.responses import JSONResponse
 
-from .config import get_settings, Settings
+from .config import get_settings, Settings, validate_runtime_security
 from .agent import RooAgent, get_agent
 from .content_factory_progress import (
     CONTENT_FACTORY_REQUEST_SOURCE,
@@ -1504,6 +1504,7 @@ async def _jobs_daily_run_loop() -> None:
 async def lifespan(app: FastAPI):
     """Application lifespan handler for startup/shutdown."""
     settings = get_settings()
+    validate_runtime_security(settings)
     app.state.startup_complete = False
     coworking_retry_task: Optional[asyncio.Task] = None
     link_love_task: Optional[asyncio.Task] = None
@@ -1557,31 +1558,44 @@ async def lifespan(app: FastAPI):
     print("🦘 Roo Standalone shutting down...")
 
 
+_docs_enabled = not get_settings().is_production
+
 app = FastAPI(
     title="Roo Standalone",
     description="AI Agent Service with Skills-based Architecture",
     version="1.0.0",
-    lifespan=lifespan
+    lifespan=lifespan,
+    docs_url="/docs" if _docs_enabled else None,
+    redoc_url="/redoc" if _docs_enabled else None,
+    openapi_url="/openapi.json" if _docs_enabled else None,
 )
 
 
-def verify_slack_signature(
+async def verify_slack_signature(
     request: Request,
     settings: Settings = Depends(get_settings)
-) -> bool:
-    """Verify Slack request signature."""
+) -> None:
+    """Verify every internet-facing Slack webhook before parsing its body."""
     timestamp = request.headers.get("X-Slack-Request-Timestamp", "")
     signature = request.headers.get("X-Slack-Signature", "")
-    
+
     # Check timestamp is recent (within 5 minutes)
     try:
         ts = int(timestamp)
         if abs(time.time() - ts) > 300:
-            raise HTTPException(status_code=403, detail="Request timestamp too old")
-    except ValueError:
-        raise HTTPException(status_code=403, detail="Invalid timestamp")
-    
-    return True  # Full verification in middleware
+            raise ValueError("stale")
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=403, detail="unauthorized")
+
+    body = await request.body()
+    signed = b"v0:" + timestamp.encode("utf-8") + b":" + body
+    expected = "v0=" + hmac.new(
+        settings.SLACK_SIGNING_SECRET.encode("utf-8"),
+        signed,
+        hashlib.sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(signature, expected):
+        raise HTTPException(status_code=403, detail="unauthorized")
 
 
 @app.get("/health")
@@ -1665,7 +1679,10 @@ async def dependency_health_check():
 
 
 @app.post("/slack/events")
-async def slack_events(request: Request):
+async def slack_events(
+    request: Request,
+    _: None = Depends(verify_slack_signature),
+):
     """
     Slack Events API webhook.
     
@@ -2040,7 +2057,10 @@ async def _handle_reaction_added(event: dict):
 
 
 @app.post("/slack/commands")
-async def slack_commands(request: Request):
+async def slack_commands(
+    request: Request,
+    _: None = Depends(verify_slack_signature),
+):
     """Slack Slash Commands webhook."""
     form = await request.form()
     command = form.get("command", "")
@@ -2115,29 +2135,116 @@ async def slack_commands(request: Request):
     }
 
 
-@app.post("/api/mention")
-async def api_mention(request: Request):
-    """
-    Direct API endpoint for triggering Roo mentions.
-    
-    Can be called from mlai-backend or other services.
-    """
-    payload = await request.json()
-    
-    text = payload.get("text", "")
-    user_id = payload.get("user_id", "")
-    channel_id = payload.get("channel_id")
-    thread_ts = payload.get("thread_ts")
-    
-    agent = get_agent()
-    result = await agent.handle_mention(
-        text=text,
-        user_id=user_id,
-        channel_id=channel_id,
-        thread_ts=thread_ts
-    )
+_INTERNAL_AI_BODY_LIMIT = 16 * 1024
+_ALLOWED_CONTEST_STATES = {"eligible", "locked", "awaiting_claim", "completed"}
 
+
+def _require_sim_patient_bearer(request: Request, settings: Settings) -> None:
+    """Authenticate the MLAI Backend -> Roo service hop in constant time."""
+    expected = (settings.SIM_PATIENT_API_KEY or "").strip()
+    authentication_required = settings.is_production or bool(expected)
+    if not authentication_required:
+        return
+
+    header = request.headers.get("Authorization", "")
+    scheme, separator, candidate = header.partition(" ")
+    valid = bool(
+        expected
+        and separator
+        and scheme.lower() == "bearer"
+        and hmac.compare_digest(candidate.encode("utf-8"), expected.encode("utf-8"))
+    )
+    if not valid:
+        # Missing and invalid credentials intentionally have one generic shape.
+        raise HTTPException(status_code=401, detail="unauthorized")
+
+
+async def _read_internal_json(request: Request) -> dict[str, Any]:
+    """Read a small JSON object without allowing an unbounded request body."""
+    content_type = request.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+    if content_type != "application/json":
+        raise HTTPException(status_code=415, detail="application/json required")
+
+    declared_length = request.headers.get("Content-Length")
+    if declared_length:
+        try:
+            if int(declared_length) > _INTERNAL_AI_BODY_LIMIT:
+                raise HTTPException(status_code=413, detail="request too large")
+        except ValueError:
+            raise HTTPException(status_code=400, detail="invalid content length")
+
+    body = await request.body()
+    if len(body) > _INTERNAL_AI_BODY_LIMIT:
+        raise HTTPException(status_code=413, detail="request too large")
+    try:
+        payload = json.loads(body)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise HTTPException(status_code=400, detail="invalid json")
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=422, detail="json object required")
+    return payload
+
+
+def _validated_player_id(value: Any) -> str:
+    """Require the UUID minted and authenticated by MLAI Backend."""
+    try:
+        return str(UUID(str(value)))
+    except (ValueError, TypeError, AttributeError):
+        raise HTTPException(status_code=422, detail="player_id must be a UUID")
+
+
+def _validated_question(value: Any, *, maximum: int) -> str:
+    if not isinstance(value, str):
+        raise HTTPException(status_code=422, detail="question required")
+    question = value.strip()
+    if not question or len(question) > maximum:
+        raise HTTPException(status_code=422, detail=f"question required (1-{maximum} chars)")
+    if any(ord(char) < 32 and char not in {"\n", "\r", "\t"} for char in question):
+        raise HTTPException(status_code=422, detail="question contains control characters")
+    return question
+
+
+def _validated_history(value: Any) -> list[dict[str, str]]:
+    """Bound the canonical gateway transcript and discard unknown fields."""
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise HTTPException(status_code=422, detail="history must be a list")
+    result: list[dict[str, str]] = []
+    for turn in value[-12:]:
+        if not isinstance(turn, dict):
+            raise HTTPException(status_code=422, detail="invalid history turn")
+        role = str(turn.get("role") or "").strip().lower()
+        text = turn.get("text")
+        if role not in {"player", "patient"} or not isinstance(text, str):
+            raise HTTPException(status_code=422, detail="invalid history turn")
+        text = text.strip()
+        if not text or len(text) > 1500:
+            raise HTTPException(status_code=422, detail="invalid history turn")
+        if any(ord(char) < 32 and char not in {"\n", "\r", "\t"} for char in text):
+            raise HTTPException(status_code=422, detail="invalid history turn")
+        result.append({"role": role, "text": text})
     return result
+
+
+def _validated_contest_state(value: Any) -> Optional[dict[str, Optional[str]]]:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise HTTPException(status_code=422, detail="invalid contest_state")
+    state = str(value.get("state") or "").strip().lower()
+    if state not in _ALLOWED_CONTEST_STATES:
+        raise HTTPException(status_code=422, detail="invalid contest_state")
+    outcome = value.get("outcome")
+    if outcome is not None and (not isinstance(outcome, str) or len(outcome) > 64):
+        raise HTTPException(status_code=422, detail="invalid contest_state")
+    return {"state": state, "outcome": outcome}
+
+
+# The legacy /api/mention endpoint was intentionally removed. Repository-wide
+# caller inventory found no consumer, and accepting a JSON user_id let an
+# unauthenticated caller exercise Roo's broader, privileged agent. Verified
+# Slack traffic continues to enter through /slack/events.
 
 
 @app.post("/api/sim-patient")
@@ -2146,42 +2253,30 @@ async def api_sim_patient(request: Request, settings: Settings = Depends(get_set
 
     Runs the medhack "Guess the Diagnosis" case as an in-character narrator.
     Stateless: never touches medhack game state, points, or the guess lockout.
-    role="nurse" answers as the reception nurse (investigation results from the
-    same case file; never adjudicates guesses). role="clerk" answers as Nurse
-    Paws at the diagnosis desk: she prepares the game's confirm-diagnosis step
-    (suggested_action) for eligible players but never adjudicates — verdicts
-    live exclusively in /api/diagnosis-check. The optional ``contest_state``
-    object is the backend gateway's read-only contest context for the clerk.
+    role="nurse" runs Dr Snow's results agent and role="clerk" runs Nurse
+    Paws' observations, examination, and final-guess preparation agent.
 
-    Auth is bearer-only and applied ONLY when SIM_PATIENT_API_KEY is set (open in
-    dev). Errors: 401 bad/missing token, 404 unknown case_id, 422 missing
+    Auth is mandatory and fail-closed in production (optional in local dev).
+    Errors: 401 bad/missing token, 404 unknown case_id, 422 missing
     question or bad role, 502 LLM failure.
     """
-    if settings.SIM_PATIENT_API_KEY:
-        auth = request.headers.get("Authorization", "")
-        if auth != f"Bearer {settings.SIM_PATIENT_API_KEY}":
-            raise HTTPException(status_code=401, detail="bad token")
+    _require_sim_patient_bearer(request, settings)
+    payload = await _read_internal_json(request)
+    question = _validated_question(payload.get("question"), maximum=500)
+    player_id = _validated_player_id(payload.get("player_id"))
 
-    payload = await request.json()
-    question = (payload.get("question") or "").strip()
-    if not question:
-        raise HTTPException(status_code=422, detail="question required")
-
-    role = (payload.get("role") or "patient").strip().lower()
+    raw_role = payload.get("role") or "patient"
+    if not isinstance(raw_role, str):
+        raise HTTPException(status_code=422, detail="invalid role")
+    role = raw_role.strip().lower()
     if role not in ("patient", "nurse", "clerk"):
-        raise HTTPException(status_code=422, detail="role must be 'patient', 'nurse' or 'clerk'")
+        raise HTTPException(
+            status_code=422,
+            detail="role must be 'patient', 'nurse', or 'clerk'",
+        )
 
-    contest_state = payload.get("contest_state")
-    if not isinstance(contest_state, dict):
-        contest_state = None
-
-    # Defensive caps: bound the question length and history depth server-side.
-    question = question[:500]
-    history = payload.get("history") or []
-    if isinstance(history, list):
-        history = history[-12:]
-    else:
-        history = []
+    history = _validated_history(payload.get("history"))
+    contest_state = _validated_contest_state(payload.get("contest_state"))
 
     from .sim_patient import handle_question
 
@@ -2189,8 +2284,10 @@ async def api_sim_patient(request: Request, settings: Settings = Depends(get_set
         return await handle_question(
             question=question,
             history=history,
-            case_id=payload.get("case_id"),
-            player_id=payload.get("player_id") or "web-anon",
+            # The active case is pinned at Roo as a second boundary. A gateway
+            # payload cannot select a hidden/old contest case.
+            case_id=settings.SIM_ACTIVE_CASE_ID,
+            player_id=player_id,
             role=role,
             contest_state=contest_state,
         )
@@ -2199,7 +2296,10 @@ async def api_sim_patient(request: Request, settings: Settings = Depends(get_set
     except HTTPException:
         raise
     except Exception as exc:
-        print(f"⚠️ sim-patient LLM failure: {exc}")
+        print(
+            "⚠️ sim-patient LLM failure "
+            f"error_type={exc.__class__.__name__}"
+        )
         raise HTTPException(status_code=502, detail="patient unavailable")
 
 
@@ -2207,47 +2307,31 @@ async def api_sim_patient(request: Request, settings: Settings = Depends(get_set
 async def api_diagnosis_check(request: Request, settings: Settings = Depends(get_settings)):
     """Ward-clerk diagnosis contest: adjudicate ONE guess and record it.
 
-    Fully scripted — no LLM anywhere in this path. The case defaults to the
-    server-pinned SIM_ACTIVE_CASE_ID; the authenticated gateway may target a
-    specific ward patient by sending case_id (mlai-backend validates which
-    cases are open — this endpoint only checks the case exists). The verdict
+    Fully scripted — no LLM anywhere in this path. The active case is pinned
+    server-side (SIM_ACTIVE_CASE_ID); clients cannot pick a case. The verdict
     comes from the same deterministic matcher as the Slack game (check_guess)
     and is recorded to mlai-backend BEFORE being revealed: if recording fails
     we return 503 with no verdict, so the guess is neither leaked nor burned
     (the backend row is what burns the player's single guess).
 
-    Auth mirrors /api/sim-patient (bearer, open when SIM_PATIENT_API_KEY unset).
-    Errors: 401 bad token, 404 unknown case_id, 422 validation, 503
-    contest/record unavailable.
+    Auth mirrors /api/sim-patient (mandatory in production).
+    Errors: 401 bad token, 422 validation, 503 contest/record unavailable.
     """
-    if settings.SIM_PATIENT_API_KEY:
-        auth = request.headers.get("Authorization", "")
-        if auth != f"Bearer {settings.SIM_PATIENT_API_KEY}":
-            raise HTTPException(status_code=401, detail="bad token")
-
-    payload = await request.json()
-    guess = str(payload.get("guess") or "").strip()
+    _require_sim_patient_bearer(request, settings)
+    payload = await _read_internal_json(request)
+    raw_guess = payload.get("guess")
+    if not isinstance(raw_guess, str):
+        raise HTTPException(status_code=422, detail="guess required (1-200 chars)")
+    guess = raw_guess.strip()
     if not guess or len(guess) > 200:
         raise HTTPException(status_code=422, detail="guess required (1-200 chars)")
-    client_id = str(payload.get("client_id") or "").strip()
-    if not re.fullmatch(r"[A-Za-z0-9-]{8,64}", client_id):
-        raise HTTPException(status_code=422, detail="client_id must be 8-64 chars [A-Za-z0-9-]")
-    raw_case_id = payload.get("case_id")
-    if raw_case_id is not None and (
-        isinstance(raw_case_id, bool)
-        or not isinstance(raw_case_id, int)
-        or raw_case_id < 1
-    ):
-        raise HTTPException(status_code=422, detail="case_id must be a positive integer")
+    client_id = _validated_player_id(payload.get("client_id"))
 
     from .sim_patient import check_guess, load_case, record_web_guess
 
     try:
-        case = load_case(raw_case_id if raw_case_id is not None else settings.SIM_ACTIVE_CASE_ID)
+        case = load_case(settings.SIM_ACTIVE_CASE_ID)
     except KeyError as exc:
-        if raw_case_id is not None:
-            # The caller asked for a case that doesn't exist — client error.
-            raise HTTPException(status_code=404, detail="unknown case_id")
         # Server misconfiguration (bad SIM_ACTIVE_CASE_ID), not a client error.
         print(f"⚠️ diagnosis-check: active case unavailable: {exc}")
         raise HTTPException(status_code=503, detail="contest unavailable")
@@ -2258,6 +2342,7 @@ async def api_diagnosis_check(request: Request, settings: Settings = Depends(get
         record = await record_web_guess(
             settings,
             case_id=case.get("id"),
+            case_title=str(case.get("title") or f"Case {case.get('id')}"),
             client_id=client_id,
             guess_text=guess,
             is_correct=is_correct,
@@ -2270,10 +2355,11 @@ async def api_diagnosis_check(request: Request, settings: Settings = Depends(get
 
     already = bool(record.get("already_guessed"))
     stored_correct = bool(record.get("is_correct"))
+    is_first_solver = bool(record.get("is_first_solver"))
     winner_taken = bool(record.get("winner_taken"))
     if already:
         result = "already_guessed"
-    elif stored_correct and not winner_taken:
+    elif stored_correct and is_first_solver:
         result = "correct_first"
     elif stored_correct:
         result = "correct_beaten"
@@ -2283,6 +2369,7 @@ async def api_diagnosis_check(request: Request, settings: Settings = Depends(get
     return {
         "result": result,
         "outcome": record.get("outcome"),
+        "prize_kind": record.get("prize_kind"),
         "winner_taken": winner_taken,
         "case_id": case.get("id"),
         # The STORED verdict is authoritative (covers the already_guessed resume
@@ -3371,7 +3458,10 @@ from .slack_client import open_dm as from_slack_client_open_dm
 
 
 @app.post("/slack/actions")
-async def slack_actions(request: Request):
+async def slack_actions(
+    request: Request,
+    _: None = Depends(verify_slack_signature),
+):
     """Handle interactive actions (e.g. button clicks)."""
     form = await request.form()
     payload_json = form.get("payload")

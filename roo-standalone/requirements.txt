@@ -14,7 +14,8 @@ alembic>=1.12.0
 slack-sdk>=3.21.0
 
 # LLM Providers
-openai>=1.3.0
+# safety_identifier + bounded Responses API support used by Health Hack agents.
+openai>=2.14.0,<3.0.0
 anthropic>=0.18.0
 google-generativeai>=0.3.0
 

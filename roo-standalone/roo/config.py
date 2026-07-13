@@ -3,6 +3,7 @@ Roo Standalone Configuration
 
 Pydantic Settings for environment-based configuration.
 """
+import hmac
 from typing import Optional
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -41,6 +42,9 @@ class Settings(BaseSettings):
     SLACK_APP_URL: Optional[str] = None  # e.g. https://api.yourbot.com
     
     # Application
+    # Explicit deployment environment. Security-sensitive routes fail closed
+    # only when this is "production"; local development remains frictionless.
+    ROO_ENVIRONMENT: str = "development"
     DEBUG: bool = False
     LOG_LEVEL: str = "INFO"
     SKILLS_DIR: str = "skills"
@@ -78,15 +82,23 @@ class Settings(BaseSettings):
     JOBS_FAILURE_STOP_AFTER_DAYS: int = 3
 
     # Simulated patient endpoint (health-hack 3D ward "Guess the Diagnosis").
-    # All optional so nothing else breaks. Bearer auth is open when the key is
-    # unset (dev). The original Slack game used reasoning_effort="high"; the game
-    # world defaults to "low" for latency (both overridable via env).
+    # Bearer auth may be omitted only in local development. Production startup
+    # validation below requires a strong key and a separate safety-id salt.
     SIM_PATIENT_API_KEY: Optional[str] = None
-    SIM_PATIENT_MODEL: str = "gpt-5"
+    SIM_PATIENT_SAFETY_SALT: Optional[str] = None
+    SIM_PATIENT_MODEL: str = "gpt-5.6-terra"
     SIM_PATIENT_REASONING_EFFORT: str = "low"
+    # Must remain below MLAI Backend's 24s read timeout so abandoned model
+    # calls do not outlive their authenticated gateway request.
+    SIM_PATIENT_OPENAI_TIMEOUT_SECONDS: float = 20.0
     # The ward contest's active case (cases.yaml id). Pinned server-side so web
     # clients can never pick a case and farm tickets from cases not in play.
     SIM_ACTIVE_CASE_ID: int = 1
+
+    @property
+    def is_production(self) -> bool:
+        """Whether production-only fail-closed controls must be enforced."""
+        return self.ROO_ENVIRONMENT.strip().lower() in {"production", "prod"}
 
     @property
     def default_llm_provider(self) -> str:
@@ -110,3 +122,59 @@ def get_settings() -> Settings:
     if _settings is None:
         _settings = Settings()
     return _settings
+
+
+def validate_runtime_security(settings: Settings) -> None:
+    """Reject an unsafe production configuration before the app serves traffic.
+
+    This is deliberately a startup check rather than a permissive route-time
+    fallback: a production instance must never silently expose the Health Hack
+    model endpoints because an environment variable was omitted.
+    """
+    if not settings.is_production:
+        return
+
+    api_key = (settings.SIM_PATIENT_API_KEY or "").strip()
+    if len(api_key) < 32:
+        raise RuntimeError(
+            "SIM_PATIENT_API_KEY must be configured with at least 32 characters "
+            "when ROO_ENVIRONMENT=production"
+        )
+
+    safety_salt = (settings.SIM_PATIENT_SAFETY_SALT or "").strip()
+    if len(safety_salt) < 32:
+        raise RuntimeError(
+            "SIM_PATIENT_SAFETY_SALT must be configured with at least 32 characters "
+            "when ROO_ENVIRONMENT=production"
+        )
+
+    if hmac.compare_digest(api_key.encode("utf-8"), safety_salt.encode("utf-8")):
+        raise RuntimeError(
+            "SIM_PATIENT_API_KEY and SIM_PATIENT_SAFETY_SALT must be distinct"
+        )
+
+    registry_key = (settings.ROO_API_KEY or "").strip()
+    if len(registry_key) < 32:
+        raise RuntimeError(
+            "ROO_API_KEY must be configured with at least 32 characters "
+            "when ROO_ENVIRONMENT=production"
+        )
+    if any(
+        hmac.compare_digest(registry_key.encode("utf-8"), other.encode("utf-8"))
+        for other in (api_key, safety_salt)
+    ):
+        raise RuntimeError(
+            "ROO_API_KEY must be distinct from SIM_PATIENT_API_KEY and "
+            "SIM_PATIENT_SAFETY_SALT"
+        )
+
+    if not (settings.OPENAI_API_KEY or "").strip():
+        raise RuntimeError(
+            "OPENAI_API_KEY must be configured when ROO_ENVIRONMENT=production"
+        )
+
+    timeout = float(settings.SIM_PATIENT_OPENAI_TIMEOUT_SECONDS)
+    if timeout <= 0 or timeout > 20:
+        raise RuntimeError(
+            "SIM_PATIENT_OPENAI_TIMEOUT_SECONDS must be greater than 0 and no more than 20"
+        )

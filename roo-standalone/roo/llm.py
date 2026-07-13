@@ -4,9 +4,10 @@ Model-Agnostic LLM Client
 Supports multiple LLM providers with a unified async interface.
 """
 import json
+import inspect
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Callable
 from enum import Enum
 import base64
 
@@ -34,6 +35,16 @@ class ToolCall:
     name: str
     arguments: Dict[str, Any] = field(default_factory=dict)
     model: str = ""
+
+
+@dataclass
+class AgentResponse:
+    """Final text plus the tool trace from a Responses API agent turn."""
+
+    content: str
+    model: str
+    usage: Optional[Dict[str, int]] = None
+    tool_calls: List[Dict[str, Any]] = field(default_factory=list)
 
 
 class ToolCallParseError(ValueError):
@@ -65,6 +76,19 @@ class BaseLLMClient(ABC):
             "use an OpenAI-compatible provider (openai/gemini) for the router."
         )
 
+    async def agent_with_tools(
+        self,
+        messages: List[Dict[str, str]],
+        tools: List[Dict[str, Any]],
+        execute_tool: Callable[[str, Dict[str, Any]], Any],
+        **kwargs,
+    ) -> AgentResponse:
+        """Run model → tool → model until the model emits final text."""
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support Responses API agents; "
+            "use the OpenAI provider for the ward NPCs."
+        )
+
 
 class OpenAIClient(BaseLLMClient):
     """Client for OpenAI API (also used for Gemini via compatibility layer)."""
@@ -74,6 +98,14 @@ class OpenAIClient(BaseLLMClient):
         
         self.model = model
         self.client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+
+    def _request_client(self, kwargs: Dict[str, Any]):
+        """Apply explicit request bounds without changing unrelated callers."""
+        timeout = kwargs.get("timeout")
+        if timeout is None or not hasattr(self.client, "with_options"):
+            return self.client
+        retries = max(0, min(int(kwargs.get("max_retries", 0)), 2))
+        return self.client.with_options(timeout=float(timeout), max_retries=retries)
     
     async def chat(self, messages: List[Dict[str, str]], **kwargs) -> LLMResponse:
         """Send chat completion request."""
@@ -85,6 +117,7 @@ class OpenAIClient(BaseLLMClient):
             "model": model,
             "messages": messages,
             max_tokens_key: kwargs.get("max_tokens", 2048),
+            "n": 1,
         }
         # Reasoning models only support temperature=1 (the default), so omit it
         if not is_reasoning_model:
@@ -93,8 +126,10 @@ class OpenAIClient(BaseLLMClient):
             create_kwargs["extra_body"] = kwargs["extra_body"]
         if "reasoning_effort" in kwargs:
             create_kwargs["reasoning_effort"] = kwargs["reasoning_effort"]
+        if kwargs.get("safety_identifier"):
+            create_kwargs["safety_identifier"] = kwargs["safety_identifier"]
 
-        response = await self.client.chat.completions.create(**create_kwargs)
+        response = await self._request_client(kwargs).chat.completions.create(**create_kwargs)
         
         return LLMResponse(
             content=response.choices[0].message.content or "",
@@ -129,6 +164,7 @@ class OpenAIClient(BaseLLMClient):
             "tools": tools,
             "tool_choice": kwargs.get("tool_choice", "required"),
             max_tokens_key: kwargs.get("max_tokens", default_max_tokens),
+            "n": 1,
         }
         if not is_reasoning_model:
             create_kwargs["temperature"] = kwargs.get("temperature", 0.2)
@@ -138,27 +174,111 @@ class OpenAIClient(BaseLLMClient):
         if "reasoning_effort" in kwargs and not model.startswith("gpt-5"):
             create_kwargs["reasoning_effort"] = kwargs["reasoning_effort"]
 
-        response = await self.client.chat.completions.create(**create_kwargs)
+        if kwargs.get("safety_identifier"):
+            create_kwargs["safety_identifier"] = kwargs["safety_identifier"]
+
+        response = await self._request_client(kwargs).chat.completions.create(**create_kwargs)
 
         message = response.choices[0].message
         tool_calls = getattr(message, "tool_calls", None) or []
         if not tool_calls:
-            raise ToolCallParseError(
-                f"model returned no tool call (content={message.content!r:.200})"
-            )
+            raise ToolCallParseError("model_tool_call_missing")
         call = tool_calls[0]
         raw_arguments = call.function.arguments or "{}"
         try:
             arguments = json.loads(raw_arguments)
         except json.JSONDecodeError as exc:
-            raise ToolCallParseError(
-                f"unparsable tool arguments for {call.function.name}: {raw_arguments[:200]}"
-            ) from exc
+            raise ToolCallParseError("model_tool_arguments_invalid_json") from exc
         if not isinstance(arguments, dict):
-            raise ToolCallParseError(
-                f"tool arguments for {call.function.name} are not an object: {raw_arguments[:200]}"
-            )
+            raise ToolCallParseError("model_tool_arguments_not_object")
         return ToolCall(name=call.function.name, arguments=arguments, model=response.model)
+
+    async def agent_with_tools(
+        self,
+        messages: List[Dict[str, str]],
+        tools: List[Dict[str, Any]],
+        execute_tool: Callable[[str, Dict[str, Any]], Any],
+        **kwargs,
+    ) -> AgentResponse:
+        """Run a bounded Responses API function-calling loop.
+
+        Response output items (including GPT-5 reasoning items) are fed back
+        unchanged alongside each function result, as required by the API.
+        """
+        model = kwargs.get("model", self.model)
+        instructions = "\n\n".join(
+            message["content"] for message in messages if message.get("role") == "system"
+        )
+        input_items: List[Any] = [
+            {"role": message["role"], "content": message["content"]}
+            for message in messages
+            if message.get("role") != "system"
+        ]
+        prompt_tokens = 0
+        completion_tokens = 0
+        tool_trace: List[Dict[str, Any]] = []
+        max_tool_rounds = max(0, min(int(kwargs.get("max_tool_rounds", 2)), 4))
+
+        for round_index in range(max_tool_rounds + 1):
+            create_kwargs: Dict[str, Any] = {
+                "model": model,
+                "instructions": instructions,
+                "input": input_items,
+                "tools": tools,
+                "tool_choice": kwargs.get("tool_choice", "auto"),
+                "parallel_tool_calls": False,
+                "max_output_tokens": kwargs.get("max_tokens", 700),
+            }
+            reasoning_effort = kwargs.get("reasoning_effort")
+            if reasoning_effort:
+                create_kwargs["reasoning"] = {"effort": reasoning_effort}
+            if kwargs.get("safety_identifier"):
+                create_kwargs["safety_identifier"] = kwargs["safety_identifier"]
+
+            response = await self._request_client(kwargs).responses.create(**create_kwargs)
+            usage = getattr(response, "usage", None)
+            prompt_tokens += int(getattr(usage, "input_tokens", 0) or 0)
+            completion_tokens += int(getattr(usage, "output_tokens", 0) or 0)
+            model = getattr(response, "model", model)
+            function_calls = [
+                item for item in (getattr(response, "output", None) or [])
+                if getattr(item, "type", None) == "function_call"
+            ]
+            if not function_calls:
+                return AgentResponse(
+                    content=getattr(response, "output_text", "") or "",
+                    model=model,
+                    usage={
+                        "prompt_tokens": prompt_tokens,
+                        "completion_tokens": completion_tokens,
+                    },
+                    tool_calls=tool_trace,
+                )
+            if round_index >= max_tool_rounds:
+                raise RuntimeError("ward NPC exceeded the maximum tool-call rounds")
+
+            # Preserve all output items, especially reasoning items from GPT-5.
+            input_items.extend(response.output)
+            for call in function_calls:
+                try:
+                    arguments = json.loads(call.arguments or "{}")
+                except json.JSONDecodeError as exc:
+                    raise ToolCallParseError(
+                        "ward_tool_arguments_invalid_json"
+                    ) from exc
+                if not isinstance(arguments, dict):
+                    raise ToolCallParseError("ward_tool_arguments_not_object")
+                tool_trace.append({"name": call.name, "arguments": arguments})
+                result = execute_tool(call.name, arguments)
+                if inspect.isawaitable(result):
+                    result = await result
+                input_items.append({
+                    "type": "function_call_output",
+                    "call_id": call.call_id,
+                    "output": json.dumps(result, ensure_ascii=False, default=str),
+                })
+
+        raise RuntimeError("ward NPC did not produce a final response")
 
     async def embed(self, text: str) -> List[float]:
         """Generate embeddings using OpenAI."""
