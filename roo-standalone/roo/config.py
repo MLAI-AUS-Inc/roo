@@ -94,6 +94,28 @@ class Settings(BaseSettings):
     # The ward contest's active case (cases.yaml id). Pinned server-side so web
     # clients can never pick a case and farm tickets from cases not in play.
     SIM_ACTIVE_CASE_ID: int = 1
+    # Contest cases the authenticated gateway may target (comma-separated
+    # cases.yaml ids). Two wards run concurrently, so the gateway forwards the
+    # player's chosen case; anything outside this set is refused so hidden or
+    # retired cases can never leak dialogue or verdicts. Mirrors MLAI
+    # Backend's HEALTH_HACK_OPEN_CASE_IDS default.
+    SIM_OPEN_CASE_IDS: str = "1,2"
+
+    @property
+    def sim_open_case_ids(self) -> frozenset[int]:
+        """Open contest cases. Malformed tokens are skipped and the active
+        case is always included, so a bad env value narrows the set at worst —
+        it can never brick the default (active-case) path."""
+        ids = {self.SIM_ACTIVE_CASE_ID}
+        for token in self.SIM_OPEN_CASE_IDS.split(","):
+            token = token.strip()
+            if not token:
+                continue
+            try:
+                ids.add(int(token))
+            except ValueError:
+                continue
+        return frozenset(ids)
 
     @property
     def is_production(self) -> bool:

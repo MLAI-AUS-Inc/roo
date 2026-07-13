@@ -162,24 +162,38 @@ def test_internal_body_limit_is_enforced(monkeypatch):
     assert response.status_code == 413
 
 
-def test_client_case_selection_is_ignored_and_history_is_canonicalized(monkeypatch):
-    _settings(monkeypatch, key=None)
+def test_client_case_selection_is_bounded_and_history_is_canonicalized(monkeypatch):
+    settings = _settings(monkeypatch, key=None)
+    monkeypatch.setattr(settings, "SIM_ACTIVE_CASE_ID", 1, raising=False)
+    monkeypatch.setattr(settings, "SIM_OPEN_CASE_IDS", "1,2", raising=False)
     seen = {}
 
     async def fake_handle_question(**kwargs):
         seen.update(kwargs)
-        return {"reply": "Hello", "case_id": 1}
+        return {"reply": "Hello", "case_id": kwargs.get("case_id")}
 
     monkeypatch.setattr(sim_patient, "handle_question", fake_handle_question)
-    response = TestClient(app).post("/api/sim-patient", json={
+    client = TestClient(app)
+
+    # A hidden/retired case is refused outright — stronger than ignored: the
+    # narrator is never invoked for it.
+    response = client.post("/api/sim-patient", json={
+        "question": "hello", "player_id": PLAYER_ID, "case_id": 99,
+    })
+    assert response.status_code == 404
+    assert seen == {}
+
+    # An open case is honored; unknown fields are discarded and the gateway
+    # transcript is canonicalized.
+    response = client.post("/api/sim-patient", json={
         "question": "hello",
         "player_id": PLAYER_ID,
-        "case_id": 99,
+        "case_id": 2,
         "unknown": "discard me",
         "history": [{"role": "player", "text": " prior ", "hidden": "discard"}],
     })
     assert response.status_code == 200
-    assert seen["case_id"] == 1
+    assert seen["case_id"] == 2
     assert seen["history"] == [{"role": "player", "text": "prior"}]
 
 

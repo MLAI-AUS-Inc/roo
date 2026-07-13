@@ -1103,6 +1103,54 @@ def test_endpoint_accepts_clerk_role_and_passes_contest_state(monkeypatch):
     assert resp.status_code == 422
 
 
+def test_endpoint_honors_open_case_id(monkeypatch):
+    """Two wards run concurrently: the gateway's case_id is honored within
+    SIM_OPEN_CASE_IDS, absent keeps the active pin, and hidden or malformed
+    cases never reach the narrator."""
+    from fastapi.testclient import TestClient
+    from roo import config
+    from roo.main import app
+
+    real = config.get_settings()
+    monkeypatch.setattr(real, "SIM_PATIENT_API_KEY", None, raising=False)  # auth open
+    monkeypatch.setattr(real, "SIM_ACTIVE_CASE_ID", 1, raising=False)
+    monkeypatch.setattr(real, "SIM_OPEN_CASE_IDS", "1,2", raising=False)
+    monkeypatch.setattr(config, "get_settings", lambda: real)
+
+    seen = {}
+
+    async def fake_handle_question(**kwargs):
+        seen.update(kwargs)
+        return {
+            "reply": "ok",
+            "case_id": kwargs.get("case_id"),
+            "case_title": "t",
+            "patient_name": "Leila Farouk",
+            "presenting_complaint": "p",
+            "is_guess": False,
+            "correct": None,
+            "diagnosis": None,
+        }
+
+    monkeypatch.setattr(sim_patient, "handle_question", fake_handle_question)
+
+    client = TestClient(app)
+    base = {"question": "hello", "player_id": "aaaaaaaa-1111-4111-8111-111111111111"}
+
+    resp = client.post("/api/sim-patient", json={**base, "case_id": 2})
+    assert resp.status_code == 200
+    assert seen["case_id"] == 2
+
+    resp = client.post("/api/sim-patient", json=base)
+    assert resp.status_code == 200
+    assert seen["case_id"] == 1
+
+    seen.clear()
+    assert client.post("/api/sim-patient", json={**base, "case_id": 3}).status_code == 404
+    assert client.post("/api/sim-patient", json={**base, "case_id": "2"}).status_code == 422
+    assert seen == {}  # refused requests never reached handle_question
+
+
 # ---------------------------------------------------------------------------
 # Persona contract: historian dial, one-question-at-a-time, injection immunity
 # ---------------------------------------------------------------------------

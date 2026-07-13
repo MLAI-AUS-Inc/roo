@@ -7,7 +7,8 @@ recorder is monkeypatched). Invariants under test:
   - result mapping: correct_first / correct_beaten / incorrect / already_guessed
   - the STORED verdict is authoritative on the already_guessed resume path
   - record failure → 503 with NO verdict fields (no free oracle, guess not burned)
-  - the active case is pinned server-side (client case_id ignored)
+  - only SIM_OPEN_CASE_IDS are playable: the gateway's case_id picks among
+    open cases (absent = the pinned active case); hidden cases 404 unrecorded
   - bearer auth mirrors /api/sim-patient
   - the recorder authenticates only with the dedicated ROO_API_KEY
 """
@@ -29,11 +30,12 @@ from roo.main import app
 VALID_CLIENT = "aaaaaaaa-1111-4111-8111-111111111111"
 
 
-def _client(monkeypatch, *, api_key=None, active_case=1):
+def _client(monkeypatch, *, api_key=None, active_case=1, open_cases="1,2"):
     """TestClient with a pinned Settings singleton (no lifespan — bare client)."""
     real = config.get_settings()
     monkeypatch.setattr(real, "SIM_PATIENT_API_KEY", api_key, raising=False)
     monkeypatch.setattr(real, "SIM_ACTIVE_CASE_ID", active_case, raising=False)
+    monkeypatch.setattr(real, "SIM_OPEN_CASE_IDS", open_cases, raising=False)
     monkeypatch.setattr(config, "get_settings", lambda: real)
     return TestClient(app)
 
@@ -151,8 +153,11 @@ def test_record_failure_503_leaks_no_verdict_and_burns_nothing(monkeypatch):
         assert verdict_key not in body
 
 
-def test_client_cannot_pick_the_case(monkeypatch):
-    # A payload case_id must be ignored — the server pin decides.
+def test_gateway_picks_an_open_case(monkeypatch):
+    # Two wards run concurrently: case_id=2 must adjudicate AND record case 2.
+    # The guess is case 1's correct answer, so a pass proves the verdict came
+    # from case 2's matcher, not the active-case pin.
+    _install_llm_bomb(monkeypatch)
     calls = _install_recorder(monkeypatch, response={
         "already_guessed": False, "is_correct": False,
         "outcome": "incorrect", "prize_kind": "none",
@@ -161,15 +166,56 @@ def test_client_cannot_pick_the_case(monkeypatch):
     client = _client(monkeypatch, active_case=1)
 
     body = client.post("/api/diagnosis-check", json={
-        "guess": "cerebral venous sinus thrombosis",
+        "guess": "adrenal crisis",
         "client_id": VALID_CLIENT,
-        "case_id": 7,
+        "case_id": 2,
     }).json()
 
-    assert calls[0]["case_id"] == 1
-    assert calls[0]["is_correct"] is False
-    assert body["case_id"] == 1
+    assert calls == [{
+        "case_id": 2, "case_title": "The Violet Trial", "client_id": VALID_CLIENT,
+        "guess_text": "adrenal crisis", "is_correct": False,
+    }]
+    assert body["case_id"] == 2
     assert body["result"] == "incorrect"
+    assert body["diagnosis"] is None
+
+
+def test_hidden_case_is_refused_and_unrecorded(monkeypatch):
+    # Cases that exist in cases.yaml but are not open must 404 with nothing
+    # recorded — indistinguishable from ids that do not exist at all, so the
+    # endpoint never confirms which future cases are authored.
+    calls = _install_recorder(monkeypatch, response={})
+    client = _client(monkeypatch, active_case=1)
+
+    for hidden in (3, 7):
+        resp = client.post("/api/diagnosis-check", json={
+            "guess": "adrenal crisis", "client_id": VALID_CLIENT, "case_id": hidden,
+        })
+        assert resp.status_code == 404
+        assert resp.json() == {"detail": "unknown case_id"}
+    assert calls == []
+
+
+def test_case_id_type_is_strict(monkeypatch):
+    calls = _install_recorder(monkeypatch, response={})
+    client = _client(monkeypatch)
+
+    for bad in ("2", 2.5, True, [2]):
+        resp = client.post("/api/diagnosis-check", json={
+            "guess": "adrenal crisis", "client_id": VALID_CLIENT, "case_id": bad,
+        })
+        assert resp.status_code == 422, f"case_id={bad!r} should 422"
+    assert calls == []
+
+
+def test_open_case_ids_parse_leniently(monkeypatch):
+    real = config.get_settings()
+    monkeypatch.setattr(real, "SIM_ACTIVE_CASE_ID", 1, raising=False)
+    monkeypatch.setattr(real, "SIM_OPEN_CASE_IDS", " 1, 2 ,banana,", raising=False)
+    assert real.sim_open_case_ids == frozenset({1, 2})
+    # A misconfigured empty list still keeps the active case playable.
+    monkeypatch.setattr(real, "SIM_OPEN_CASE_IDS", "", raising=False)
+    assert real.sim_open_case_ids == frozenset({1})
 
 
 def test_misconfigured_active_case_503s(monkeypatch):

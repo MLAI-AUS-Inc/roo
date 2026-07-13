@@ -2241,6 +2241,25 @@ def _validated_contest_state(value: Any) -> Optional[dict[str, Optional[str]]]:
     return {"state": state, "outcome": outcome}
 
 
+def _validated_case_id(value: Any, settings: Settings) -> int:
+    """Resolve which contest case this request plays.
+
+    Two wards run concurrently, so the authenticated gateway forwards the
+    player's chosen case. Roo stays a second boundary: only cases in
+    SIM_OPEN_CASE_IDS are selectable, and anything else is refused exactly
+    like an unknown id, so hidden or retired cases can never leak dialogue
+    or verdicts. An absent field keeps the pinned active case (older
+    gateway payloads).
+    """
+    if value is None:
+        return settings.SIM_ACTIVE_CASE_ID
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise HTTPException(status_code=422, detail="case_id must be an integer")
+    if value not in settings.sim_open_case_ids:
+        raise HTTPException(status_code=404, detail="unknown case_id")
+    return value
+
+
 # The legacy /api/mention endpoint was intentionally removed. Repository-wide
 # caller inventory found no consumer, and accepting a JSON user_id let an
 # unauthenticated caller exercise Roo's broader, privileged agent. Verified
@@ -2277,6 +2296,10 @@ async def api_sim_patient(request: Request, settings: Settings = Depends(get_set
 
     history = _validated_history(payload.get("history"))
     contest_state = _validated_contest_state(payload.get("contest_state"))
+    # Roo stays a second boundary: the gateway's case_id is honored only
+    # within SIM_OPEN_CASE_IDS, so a payload cannot select a hidden/old
+    # contest case.
+    case_id = _validated_case_id(payload.get("case_id"), settings)
 
     from .sim_patient import handle_question
 
@@ -2284,9 +2307,7 @@ async def api_sim_patient(request: Request, settings: Settings = Depends(get_set
         return await handle_question(
             question=question,
             history=history,
-            # The active case is pinned at Roo as a second boundary. A gateway
-            # payload cannot select a hidden/old contest case.
-            case_id=settings.SIM_ACTIVE_CASE_ID,
+            case_id=case_id,
             player_id=player_id,
             role=role,
             contest_state=contest_state,
@@ -2307,15 +2328,18 @@ async def api_sim_patient(request: Request, settings: Settings = Depends(get_set
 async def api_diagnosis_check(request: Request, settings: Settings = Depends(get_settings)):
     """Ward-clerk diagnosis contest: adjudicate ONE guess and record it.
 
-    Fully scripted — no LLM anywhere in this path. The active case is pinned
-    server-side (SIM_ACTIVE_CASE_ID); clients cannot pick a case. The verdict
+    Fully scripted — no LLM anywhere in this path. The playable cases are
+    pinned server-side (the SIM_OPEN_CASE_IDS allowlist): the gateway forwards
+    the player's chosen open case, defaulting to SIM_ACTIVE_CASE_ID, and
+    hidden/retired cases are refused before anything is recorded. The verdict
     comes from the same deterministic matcher as the Slack game (check_guess)
     and is recorded to mlai-backend BEFORE being revealed: if recording fails
     we return 503 with no verdict, so the guess is neither leaked nor burned
     (the backend row is what burns the player's single guess).
 
     Auth mirrors /api/sim-patient (mandatory in production).
-    Errors: 401 bad token, 422 validation, 503 contest/record unavailable.
+    Errors: 401 bad token, 404 non-open case_id, 422 validation, 503
+    contest/record unavailable.
     """
     _require_sim_patient_bearer(request, settings)
     payload = await _read_internal_json(request)
@@ -2326,14 +2350,16 @@ async def api_diagnosis_check(request: Request, settings: Settings = Depends(get
     if not guess or len(guess) > 200:
         raise HTTPException(status_code=422, detail="guess required (1-200 chars)")
     client_id = _validated_player_id(payload.get("client_id"))
+    case_id = _validated_case_id(payload.get("case_id"), settings)
 
     from .sim_patient import check_guess, load_case, record_web_guess
 
     try:
-        case = load_case(settings.SIM_ACTIVE_CASE_ID)
+        case = load_case(case_id)
     except KeyError as exc:
-        # Server misconfiguration (bad SIM_ACTIVE_CASE_ID), not a client error.
-        print(f"⚠️ diagnosis-check: active case unavailable: {exc}")
+        # Server misconfiguration (an open case missing from cases.yaml), not
+        # a client error.
+        print(f"⚠️ diagnosis-check: case unavailable: {exc}")
         raise HTTPException(status_code=503, detail="contest unavailable")
 
     is_correct = check_guess(guess, case)
