@@ -10,10 +10,14 @@ recorder is monkeypatched). Invariants under test:
   - the case defaults to the server pin; an explicit case_id targets that ward
     patient (unknown case → 404; which cases are OPEN is backend policy)
   - bearer auth mirrors /api/sim-patient
+  - the recorder authenticates with ROO_API_KEY → INTERNAL_API_KEY →
+    MLAI_API_KEY (deployments may set only MLAI_API_KEY)
 """
+import asyncio
 import sys
 from pathlib import Path
 
+import httpx
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -223,3 +227,86 @@ def test_validation_422(monkeypatch, payload):
 
     assert resp.status_code == 422
     assert calls == []  # nothing recorded on validation failure
+
+
+def _recorder_settings(monkeypatch, **keys):
+    """The real Settings singleton with only the given service keys set.
+
+    Mutates the real object (not a stub) so a renamed settings field fails
+    here instead of silently passing against attributes that no longer exist.
+    """
+    real = config.get_settings()
+    monkeypatch.setattr(real, "MLAI_BACKEND_URL", "http://mlai-backend.test")
+    for name in ("ROO_API_KEY", "INTERNAL_API_KEY", "MLAI_API_KEY"):
+        monkeypatch.setattr(real, name, keys.get(name))
+    return real
+
+
+def _install_fake_httpx(monkeypatch):
+    """Replace httpx.AsyncClient; returns the captured outbound POST."""
+    sent: dict = {}
+
+    class FakeAsyncClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return False
+
+        async def post(self, url, json=None, headers=None):
+            sent.update({"url": url, "json": json, "headers": headers})
+            return httpx.Response(
+                200,
+                json={"already_guessed": False},
+                request=httpx.Request("POST", url),
+            )
+
+    monkeypatch.setattr(sim_patient.httpx, "AsyncClient", FakeAsyncClient)
+    return sent
+
+
+def test_recorder_falls_back_to_mlai_api_key(monkeypatch):
+    # Regression: deployments holding the shared backend secret only under
+    # MLAI_API_KEY must still authenticate the record call — this config shape
+    # made every prod guess submission 503 ("record_failed") → 502 to the game.
+    sent = _install_fake_httpx(monkeypatch)
+    settings = _recorder_settings(monkeypatch, MLAI_API_KEY="mlai-secret")
+
+    result = asyncio.run(sim_patient.record_web_guess(
+        settings, case_id=1, client_id=VALID_CLIENT,
+        guess_text="adrenal crisis", is_correct=True,
+    ))
+
+    assert sent["headers"] == {"X-API-Key": "mlai-secret"}
+    assert sent["url"].endswith("/api/v1/hackathons/hospital/sim-guess/record/")
+    assert result == {"already_guessed": False}
+
+
+def test_recorder_prefers_roo_key_over_mlai_key(monkeypatch):
+    sent = _install_fake_httpx(monkeypatch)
+    settings = _recorder_settings(
+        monkeypatch, ROO_API_KEY="roo-secret", MLAI_API_KEY="mlai-secret",
+    )
+
+    asyncio.run(sim_patient.record_web_guess(
+        settings, case_id=1, client_id=VALID_CLIENT,
+        guess_text="gastro", is_correct=False,
+    ))
+
+    assert sent["headers"] == {"X-API-Key": "roo-secret"}
+
+
+def test_recorder_with_no_key_raises_without_posting(monkeypatch):
+    sent = _install_fake_httpx(monkeypatch)
+    settings = _recorder_settings(monkeypatch)
+
+    with pytest.raises(RuntimeError, match="no service API key"):
+        asyncio.run(sim_patient.record_web_guess(
+            settings, case_id=1, client_id=VALID_CLIENT,
+            guess_text="gastro", is_correct=False,
+        ))
+
+    assert sent == {}  # never reached the network
