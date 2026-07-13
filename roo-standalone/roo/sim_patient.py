@@ -230,7 +230,9 @@ async def record_web_guess(
     """
     if not settings.MLAI_BACKEND_URL:
         raise RuntimeError("MLAI_BACKEND_URL not configured")
-    api_key = settings.ROO_API_KEY or settings.INTERNAL_API_KEY
+    # Deployments hold the shared backend secret under MLAI_API_KEY (the other
+    # two names may be absent) — same fallback chain as every other backend call.
+    api_key = settings.ROO_API_KEY or settings.INTERNAL_API_KEY or settings.MLAI_API_KEY
     if not api_key:
         raise RuntimeError("no service API key configured for mlai-backend")
     url = f"{settings.MLAI_BACKEND_URL.rstrip('/')}/api/v1/hackathons/hospital/sim-guess/record/"
