@@ -615,14 +615,29 @@ def _diagnosis_terms(case: dict) -> list[str]:
 
 
 def _reply_leaks_diagnosis(reply: str, case: dict) -> bool:
+    return bool(_leaked_diagnosis_terms(reply, case))
+
+
+def _guard_phrase_present(haystack_words: str, needle_words: str) -> bool:
+    return bool(
+        needle_words
+        and f" {needle_words} " in f" {haystack_words} "
+    )
+
+
+def _leaked_diagnosis_terms(reply: str, case: dict) -> list[str]:
+    """Return authored answer terms present in output, including short aliases."""
     reply_words, reply_compact = _guard_normalized(reply)
+    leaked: list[str] = []
     for term in _diagnosis_terms(case):
         term_words, term_compact = _guard_normalized(term)
-        if len(term_compact) < 6:
-            continue
-        if term_words in reply_words or term_compact in reply_compact:
-            return True
-    return False
+        complete_phrase = _guard_phrase_present(reply_words, term_words)
+        obfuscated_long_form = bool(
+            len(term_compact) >= 6 and term_compact in reply_compact
+        )
+        if complete_phrase or obfuscated_long_form:
+            leaked.append(term)
+    return leaked
 
 
 def _bounded_plain_reply(text: Any, speaker_names: tuple[str, ...]) -> str:
@@ -818,13 +833,20 @@ async def handle_question(
     # A correct diagnosis may be echoed only by Nurse Paws while preparing the
     # exact final answer the player themselves explicitly supplied. It is never
     # allowed in Sash/Dr Snow output or an ordinary Paws chat response.
+    leaked_terms = _leaked_diagnosis_terms(reply, case)
+    final_words = _guard_normalized(
+        suggested_action.get("diagnosis") if suggested_action else ""
+    )[0]
     allow_final_echo = bool(
         is_clerk
         and suggested_action
-        and _guard_normalized(suggested_action.get("diagnosis"))[1]
-        in _guard_normalized(question)[1]
+        and leaked_terms
+        and all(
+            _guard_phrase_present(final_words, _guard_normalized(term)[0])
+            for term in leaked_terms
+        )
     )
-    if _reply_leaks_diagnosis(reply, case) and not allow_final_echo:
+    if leaked_terms and not allow_final_echo:
         print(
             "⚠️ sim-patient output leakage guard "
             f"role={role} case_id={case.get('id')}"

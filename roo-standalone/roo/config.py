@@ -3,6 +3,7 @@ Roo Standalone Configuration
 
 Pydantic Settings for environment-based configuration.
 """
+import hmac
 from typing import Optional
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -147,8 +148,18 @@ def validate_runtime_security(settings: Settings) -> None:
             "when ROO_ENVIRONMENT=production"
         )
 
-    timeout = float(settings.SIM_PATIENT_OPENAI_TIMEOUT_SECONDS)
-    if timeout <= 0 or timeout > 22:
+    if hmac.compare_digest(api_key.encode("utf-8"), safety_salt.encode("utf-8")):
         raise RuntimeError(
-            "SIM_PATIENT_OPENAI_TIMEOUT_SECONDS must be greater than 0 and no more than 22"
+            "SIM_PATIENT_API_KEY and SIM_PATIENT_SAFETY_SALT must be distinct"
+        )
+
+    if not (settings.OPENAI_API_KEY or "").strip():
+        raise RuntimeError(
+            "OPENAI_API_KEY must be configured when ROO_ENVIRONMENT=production"
+        )
+
+    timeout = float(settings.SIM_PATIENT_OPENAI_TIMEOUT_SECONDS)
+    if timeout <= 0 or timeout > 20:
+        raise RuntimeError(
+            "SIM_PATIENT_OPENAI_TIMEOUT_SECONDS must be greater than 0 and no more than 20"
         )

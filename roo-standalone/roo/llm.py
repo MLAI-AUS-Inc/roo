@@ -182,21 +182,15 @@ class OpenAIClient(BaseLLMClient):
         message = response.choices[0].message
         tool_calls = getattr(message, "tool_calls", None) or []
         if not tool_calls:
-            raise ToolCallParseError(
-                f"model returned no tool call (content={message.content!r:.200})"
-            )
+            raise ToolCallParseError("model_tool_call_missing")
         call = tool_calls[0]
         raw_arguments = call.function.arguments or "{}"
         try:
             arguments = json.loads(raw_arguments)
         except json.JSONDecodeError as exc:
-            raise ToolCallParseError(
-                f"unparsable tool arguments for {call.function.name}: {raw_arguments[:200]}"
-            ) from exc
+            raise ToolCallParseError("model_tool_arguments_invalid_json") from exc
         if not isinstance(arguments, dict):
-            raise ToolCallParseError(
-                f"tool arguments for {call.function.name} are not an object: {raw_arguments[:200]}"
-            )
+            raise ToolCallParseError("model_tool_arguments_not_object")
         return ToolCall(name=call.function.name, arguments=arguments, model=response.model)
 
     async def agent_with_tools(
@@ -270,12 +264,10 @@ class OpenAIClient(BaseLLMClient):
                     arguments = json.loads(call.arguments or "{}")
                 except json.JSONDecodeError as exc:
                     raise ToolCallParseError(
-                        f"unparsable tool arguments for {call.name}: {call.arguments!r:.200}"
+                        "ward_tool_arguments_invalid_json"
                     ) from exc
                 if not isinstance(arguments, dict):
-                    raise ToolCallParseError(
-                        f"tool arguments for {call.name} are not an object"
-                    )
+                    raise ToolCallParseError("ward_tool_arguments_not_object")
                 tool_trace.append({"name": call.name, "arguments": arguments})
                 result = execute_tool(call.name, arguments)
                 if inspect.isawaitable(result):

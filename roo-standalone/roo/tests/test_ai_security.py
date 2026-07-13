@@ -41,21 +41,24 @@ def _settings(monkeypatch, *, production=False, key=None):
 
 
 @pytest.mark.parametrize(
-    "key,salt,timeout",
+    "key,salt,openai_key,timeout",
     [
-        (None, STRONG_SALT, 20),
-        ("short", STRONG_SALT, 20),
-        (STRONG_KEY, None, 20),
-        (STRONG_KEY, "short", 20),
-        (STRONG_KEY, STRONG_SALT, 0),
-        (STRONG_KEY, STRONG_SALT, 23),
+        (None, STRONG_SALT, "openai-test", 20),
+        ("short", STRONG_SALT, "openai-test", 20),
+        (STRONG_KEY, None, "openai-test", 20),
+        (STRONG_KEY, "short", "openai-test", 20),
+        (STRONG_KEY, STRONG_KEY, "openai-test", 20),
+        (STRONG_KEY, STRONG_SALT, None, 20),
+        (STRONG_KEY, STRONG_SALT, "openai-test", 0),
+        (STRONG_KEY, STRONG_SALT, "openai-test", 21),
     ],
 )
-def test_production_security_configuration_fails_closed(key, salt, timeout):
+def test_production_security_configuration_fails_closed(key, salt, openai_key, timeout):
     settings = SimpleNamespace(
         is_production=True,
         SIM_PATIENT_API_KEY=key,
         SIM_PATIENT_SAFETY_SALT=salt,
+        OPENAI_API_KEY=openai_key,
         SIM_PATIENT_OPENAI_TIMEOUT_SECONDS=timeout,
     )
     with pytest.raises(RuntimeError):
@@ -67,6 +70,7 @@ def test_strong_production_configuration_passes_and_development_stays_easy():
         is_production=True,
         SIM_PATIENT_API_KEY=STRONG_KEY,
         SIM_PATIENT_SAFETY_SALT=STRONG_SALT,
+        OPENAI_API_KEY="openai-test",
         SIM_PATIENT_OPENAI_TIMEOUT_SECONDS=20,
     ))
     config.validate_runtime_security(SimpleNamespace(is_production=False))
@@ -205,14 +209,16 @@ def test_public_slack_route_requires_a_valid_fresh_signature(monkeypatch):
     assert accepted.json() == {"challenge": "verified"}
 
 
-def test_production_import_does_not_mount_docs_or_schema():
+def test_production_dotenv_does_not_mount_docs_or_schema(tmp_path):
     env = os.environ.copy()
-    env.update({
-        "ROO_ENVIRONMENT": "production",
-        "SLACK_BOT_TOKEN": "test",
-        "SLACK_SIGNING_SECRET": "test",
-        "OPENAI_API_KEY": "test",
-    })
+    env.pop("ROO_ENVIRONMENT", None)
+    env["PYTHONPATH"] = str(REPO_ROOT / "roo-standalone")
+    (tmp_path / ".env").write_text(
+        "ROO_ENVIRONMENT=production\n"
+        "SLACK_BOT_TOKEN=test\n"
+        "SLACK_SIGNING_SECRET=test\n"
+        "OPENAI_API_KEY=test\n"
+    )
     code = (
         "from roo.main import app; "
         "p={r.path for r in app.routes}; "
@@ -220,7 +226,7 @@ def test_production_import_does_not_mount_docs_or_schema():
     )
     result = subprocess.run(
         [sys.executable, "-c", code],
-        cwd=REPO_ROOT / "roo-standalone",
+        cwd=tmp_path,
         env=env,
         capture_output=True,
         text=True,
@@ -249,6 +255,23 @@ def test_sash_diagnosis_leak_guard_handles_unicode_obfuscation(monkeypatch, mode
     ))
     assert result["reply"] == sim_patient._LEAK_GUARD_FALLBACK["patient"]
     assert "adrenal" not in result["reply"].lower()
+
+
+@pytest.mark.parametrize("case_id,reply", [
+    (2, "It is AIP."),
+    (3, "This is DKA."),
+    (5, "It sounds like CHS."),
+    (7, "I think CVST."),
+    (3, "It is DкA."),  # Cyrillic k confusable
+])
+def test_short_authored_diagnosis_aliases_are_guarded(case_id, reply):
+    assert sim_patient._reply_leaks_diagnosis(reply, sim_patient.load_case(case_id))
+
+
+def test_short_aliases_require_complete_words():
+    assert not sim_patient._reply_leaks_diagnosis(
+        "The painting is on the wall.", sim_patient.load_case(2)
+    )
 
 
 def test_output_guard_rejects_json_and_strips_active_html_content():
@@ -324,6 +347,26 @@ def test_nurse_paws_tool_authority_ignores_model_supplied_diagnosis():
     assert arbitrary_exam["authorized"] is False
 
 
+def test_ward_agent_has_one_total_deadline(monkeypatch):
+    import asyncio
+
+    class SlowAgentClient:
+        async def agent_with_tools(self, *args, **kwargs):
+            await asyncio.sleep(1)
+
+    settings = config.get_settings()
+    monkeypatch.setattr(settings, "SIM_PATIENT_OPENAI_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(ward_agents, "get_llm_client", lambda provider=None: SlowAgentClient())
+    with pytest.raises(asyncio.TimeoutError):
+        asyncio.run(ward_agents.run_ward_agent(
+            role="nurse",
+            question="What is the sodium?",
+            history=[],
+            case=sim_patient.load_case(1),
+            player_id=PLAYER_ID,
+        ))
+
+
 def test_deploy_workflow_requires_and_secretly_upserts_security_values():
     workflow = (REPO_ROOT / ".github/workflows/deploy.yml").read_text()
     assert "security-checks:" in workflow
@@ -340,6 +383,13 @@ def test_deploy_workflow_requires_and_secretly_upserts_security_values():
     assert workflow.index("upsert_env \"SIM_PATIENT_API_KEY\"") < workflow.index("docker compose up")
     assert 'echo "$SIM_PATIENT_API_KEY"' not in workflow
     assert 'echo "$SIM_PATIENT_SAFETY_SALT"' not in workflow
+    assert "http://127.0.0.1/healthz/ready" in workflow
+    assert "http://10.126.0.5/api/sim-patient" in workflow
+    assert 'if [ "$private_status" != "422" ]' in workflow
+    assert "Verify public Roo containment" in workflow
+    assert "expect_status 404 GET /docs" in workflow
+    assert "expect_status 404 POST /api/mention" in workflow
+    assert "expect_status 403 POST /api/sim-patient" in workflow
 
 
 def test_nginx_exposes_only_slack_health_and_vpc_service_routes():

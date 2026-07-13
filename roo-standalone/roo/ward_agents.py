@@ -7,6 +7,7 @@ No tool in this module can adjudicate or persist a diagnosis guess.
 
 from __future__ import annotations
 
+import asyncio
 import re
 from dataclasses import dataclass, field
 from typing import Any, Optional
@@ -506,17 +507,22 @@ async def run_ward_agent(
             + question
         ),
     })
-    response = await client.agent_with_tools(
-        messages,
-        tools,
-        execute,
-        model=settings.SIM_PATIENT_MODEL,
-        reasoning_effort=settings.SIM_PATIENT_REASONING_EFFORT,
-        max_tokens=700,
-        max_tool_rounds=2,
-        tool_choice="auto",
-        safety_identifier=make_safety_identifier(
-            player_id, settings.SIM_PATIENT_SAFETY_SALT
+    # One deadline covers every Responses API round and local tool execution;
+    # per-request timeouts alone would multiply the budget across rounds.
+    response = await asyncio.wait_for(
+        client.agent_with_tools(
+            messages,
+            tools,
+            execute,
+            model=settings.SIM_PATIENT_MODEL,
+            reasoning_effort=settings.SIM_PATIENT_REASONING_EFFORT,
+            max_tokens=700,
+            max_tool_rounds=2,
+            tool_choice="auto",
+            safety_identifier=make_safety_identifier(
+                player_id, settings.SIM_PATIENT_SAFETY_SALT
+            ),
+            timeout=settings.SIM_PATIENT_OPENAI_TIMEOUT_SECONDS,
         ),
         timeout=settings.SIM_PATIENT_OPENAI_TIMEOUT_SECONDS,
     )

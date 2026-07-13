@@ -66,6 +66,10 @@ jobs:
             echo "SIM_PATIENT_SAFETY_SALT is missing or shorter than 32 characters" >&2
             exit 1
           fi
+          if [ "$SIM_PATIENT_API_KEY" = "$SIM_PATIENT_SAFETY_SALT" ]; then
+            echo "Roo API key and safety salt must be distinct" >&2
+            exit 1
+          fi
 
       - name: Deploy via SSH
         uses: appleboy/ssh-action@v1.0.3
@@ -85,6 +89,10 @@ jobs:
             # misconfigured. Values are intentionally never printed.
             if [ "${#SIM_PATIENT_API_KEY}" -lt 32 ] || [ "${#SIM_PATIENT_SAFETY_SALT}" -lt 32 ]; then
               echo "Required Roo security secrets were not forwarded" >&2
+              exit 1
+            fi
+            if [ "$SIM_PATIENT_API_KEY" = "$SIM_PATIENT_SAFETY_SALT" ]; then
+              echo "Roo API key and safety salt must be distinct" >&2
               exit 1
             fi
             
@@ -123,6 +131,55 @@ jobs:
             
             # Restart the app
             docker compose up -d --build --remove-orphans
+
+            # Bounded readiness check. Never wait forever on a broken release.
+            ready_attempt=0
+            until curl --silent --show-error --fail --max-time 5 \
+              http://127.0.0.1/healthz/ready >/dev/null; do
+              ready_attempt=$((ready_attempt + 1))
+              if [ "$ready_attempt" -ge 18 ]; then
+                echo "Roo readiness check timed out" >&2
+                exit 1
+              fi
+              sleep 5
+            done
+
+            # Traverse the private VPC and authenticate successfully, then fail
+            # at schema validation before any model call can be created.
+            private_status="$(curl --silent --show-error --max-time 8 \
+              --output /dev/null --write-out '%{http_code}' \
+              --request POST http://10.126.0.5/api/sim-patient \
+              --header "Authorization: Bearer $SIM_PATIENT_API_KEY" \
+              --header 'Content-Type: application/json' \
+              --data '{"question":""}')"
+            if [ "$private_status" != "422" ]; then
+              echo "Private authenticated validation check failed (status $private_status)" >&2
+              exit 1
+            fi
             
             # Clean up space
             docker image prune -f
+
+      - name: Verify public Roo containment
+        env:
+          ROO_PUBLIC_HOST: ${{ secrets.DO_HOST }}
+        run: |
+          set -eu
+          base_url="http://${ROO_PUBLIC_HOST}"
+          expect_status() {
+            expected="$1"
+            method="$2"
+            path="$3"
+            actual="$(curl --silent --show-error --max-time 8 \
+              --output /dev/null --write-out '%{http_code}' \
+              --request "$method" "${base_url}${path}")"
+            if [ "$actual" != "$expected" ]; then
+              echo "Public containment failed for $path (status $actual)" >&2
+              exit 1
+            fi
+          }
+          expect_status 200 GET /healthz/ready
+          expect_status 404 GET /docs
+          expect_status 404 POST /api/mention
+          expect_status 403 POST /api/sim-patient
+          expect_status 403 POST /api/diagnosis-check

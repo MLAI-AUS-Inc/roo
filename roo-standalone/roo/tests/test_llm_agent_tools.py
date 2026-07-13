@@ -5,9 +5,11 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from roo.llm import OpenAIClient
+from roo.llm import OpenAIClient, ToolCallParseError
 
 
 def _run(coro):
@@ -129,3 +131,58 @@ def test_reasoning_chat_uses_completion_bound_and_safety_identifier():
         "n": 1,
         "safety_identifier": "health-hack-test",
     }]
+
+
+def test_missing_tool_exception_never_contains_raw_model_content():
+    raw_secret = "RAW_MODEL_CONTENT_MUST_NOT_APPEAR"
+
+    class FakeCompletions:
+        async def create(self, **kwargs):
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(
+                    content=raw_secret,
+                    tool_calls=[],
+                ))],
+                model="gpt-5.6-terra",
+            )
+
+    client = OpenAIClient.__new__(OpenAIClient)
+    client.model = "gpt-5.6-terra"
+    client.client = SimpleNamespace(
+        chat=SimpleNamespace(completions=FakeCompletions())
+    )
+    with pytest.raises(ToolCallParseError) as captured:
+        _run(client.chat_tools(
+            [{"role": "user", "content": "hello"}],
+            [{"type": "function", "name": "safe_tool"}],
+        ))
+    assert str(captured.value) == "model_tool_call_missing"
+    assert raw_secret not in str(captured.value)
+
+
+def test_malformed_tool_exception_never_contains_raw_arguments_or_name():
+    raw_secret = "RAW_ARGUMENT_MUST_NOT_APPEAR"
+    call = SimpleNamespace(
+        type="function_call",
+        name=f"unsafe-{raw_secret}",
+        arguments='{"value":"' + raw_secret,
+        call_id="call-unsafe",
+    )
+    response = SimpleNamespace(
+        output=[call],
+        output_text="",
+        model="gpt-5.6-terra",
+        usage=None,
+    )
+    client = OpenAIClient.__new__(OpenAIClient)
+    client.model = "gpt-5.6-terra"
+    client.client = SimpleNamespace(responses=FakeResponses([response]))
+
+    with pytest.raises(ToolCallParseError) as captured:
+        _run(client.agent_with_tools(
+            [{"role": "user", "content": "hello"}],
+            [{"type": "function", "name": "safe_tool"}],
+            lambda name, arguments: {},
+        ))
+    assert str(captured.value) == "ward_tool_arguments_invalid_json"
+    assert raw_secret not in str(captured.value)

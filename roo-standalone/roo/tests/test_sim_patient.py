@@ -767,6 +767,31 @@ def test_clerk_final_answer_action_is_deterministically_derived_from_raw_text(mo
     assert result["reply"]
 
 
+def test_clerk_final_echo_cannot_leak_a_different_diagnosis(monkeypatch):
+    _install_fake(
+        monkeypatch,
+        "{}",
+        reply_text="Adrenal crisis.",
+    )
+    result = _run(sim_patient.handle_question(
+        "My final diagnosis is appendicitis",
+        role="clerk",
+        contest_state=_ELIGIBLE,
+    ))
+    assert result["suggested_action"]["diagnosis"] == "appendicitis"
+    assert result["reply"] == sim_patient._LEAK_GUARD_FALLBACK["clerk"]
+
+
+def test_clerk_may_echo_only_the_player_supplied_protected_final_term(monkeypatch):
+    _install_fake(monkeypatch, "{}", reply_text="Adrenal crisis.")
+    result = _run(sim_patient.handle_question(
+        "My final diagnosis is adrenal crisis",
+        role="clerk",
+        contest_state=_ELIGIBLE,
+    ))
+    assert result["reply"] == "Adrenal crisis."
+
+
 def test_clerk_tentative_diagnosis_never_arms_confirmation(monkeypatch):
     fake = _install_fake(monkeypatch, '{"is_guess": true, "diagnosis": "addisonian crisis"}')
 

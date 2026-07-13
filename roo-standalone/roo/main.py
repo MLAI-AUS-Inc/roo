@@ -9,7 +9,6 @@ import asyncio
 import json
 import hmac
 import hashlib
-import os
 import re
 import time
 from contextlib import asynccontextmanager, suppress
@@ -1559,10 +1558,7 @@ async def lifespan(app: FastAPI):
     print("🦘 Roo Standalone shutting down...")
 
 
-_docs_enabled = os.getenv("ROO_ENVIRONMENT", "development").strip().lower() not in {
-    "production",
-    "prod",
-}
+_docs_enabled = not get_settings().is_production
 
 app = FastAPI(
     title="Roo Standalone",
@@ -2300,7 +2296,10 @@ async def api_sim_patient(request: Request, settings: Settings = Depends(get_set
     except HTTPException:
         raise
     except Exception as exc:
-        print(f"⚠️ sim-patient LLM failure: {exc}")
+        print(
+            "⚠️ sim-patient LLM failure "
+            f"error_type={exc.__class__.__name__}"
+        )
         raise HTTPException(status_code=502, detail="patient unavailable")
 
 
