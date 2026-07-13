@@ -6,18 +6,87 @@ on:
       - main
 
 jobs:
-  deploy:
+  security-checks:
     runs-on: ubuntu-latest
     steps:
+      - name: Check out release candidate
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: roo-standalone/requirements.txt
+
+      - name: Install Roo dependencies
+        run: python -m pip install -r roo-standalone/requirements.txt
+
+      - name: Run Health Hack security and AI regressions
+        working-directory: roo-standalone
+        env:
+          SLACK_BOT_TOKEN: test
+          SLACK_SIGNING_SECRET: test
+          OPENAI_API_KEY: test
+        run: |
+          python -m pytest \
+            roo/tests/test_ai_security.py \
+            roo/tests/test_sim_patient.py \
+            roo/tests/test_diagnosis_check.py \
+            roo/tests/test_llm_agent_tools.py \
+            -q
+          python -m compileall -q roo
+
+      - name: Validate production Compose configuration
+        working-directory: roo-standalone
+        run: |
+          cp .env.example .env
+          trap 'rm -f .env' EXIT
+          docker compose config --quiet
+          docker run --rm --add-host roo:127.0.0.1 \
+            -v "$PWD/nginx/roo.conf:/etc/nginx/conf.d/default.conf:ro" \
+            -v "$PWD/nginx/roo-proxy.conf:/etc/nginx/roo-proxy.conf:ro" \
+            nginx:1.28.3-alpine nginx -t
+
+  deploy:
+    needs: security-checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate required Roo security secrets
+        env:
+          SIM_PATIENT_API_KEY: ${{ secrets.SIM_PATIENT_API_KEY }}
+          SIM_PATIENT_SAFETY_SALT: ${{ secrets.SIM_PATIENT_SAFETY_SALT }}
+        run: |
+          set -eu
+          if [ "${#SIM_PATIENT_API_KEY}" -lt 32 ]; then
+            echo "SIM_PATIENT_API_KEY is missing or shorter than 32 characters" >&2
+            exit 1
+          fi
+          if [ "${#SIM_PATIENT_SAFETY_SALT}" -lt 32 ]; then
+            echo "SIM_PATIENT_SAFETY_SALT is missing or shorter than 32 characters" >&2
+            exit 1
+          fi
+
       - name: Deploy via SSH
         uses: appleboy/ssh-action@v1.0.3
+        env:
+          SIM_PATIENT_API_KEY: ${{ secrets.SIM_PATIENT_API_KEY }}
+          SIM_PATIENT_SAFETY_SALT: ${{ secrets.SIM_PATIENT_SAFETY_SALT }}
         with:
           host: ${{ secrets.DO_HOST }}
           username: ${{ secrets.DO_USERNAME }}
           key: ${{ secrets.DO_SSH_KEY }}
+          envs: SIM_PATIENT_API_KEY,SIM_PATIENT_SAFETY_SALT
           script: |
             # Stop if any command fails
-            set -e
+            set -eu
+
+            # Fail before touching the existing environment if forwarding was
+            # misconfigured. Values are intentionally never printed.
+            if [ "${#SIM_PATIENT_API_KEY}" -lt 32 ] || [ "${#SIM_PATIENT_SAFETY_SALT}" -lt 32 ]; then
+              echo "Required Roo security secrets were not forwarded" >&2
+              exit 1
+            fi
             
             # Define deployment directory
             DEPLOY_DIR="/root/roo"
@@ -34,6 +103,23 @@ jobs:
             
             # Go to the sub-project directory
             cd "$DEPLOY_DIR/roo-standalone"
+
+            # Update security settings without printing secret values. Rebuild
+            # the file atomically so duplicate/stale keys cannot win.
+            umask 077
+            touch .env
+            upsert_env() {
+              key="$1"
+              value="$2"
+              tmp_file="$(mktemp .env.tmp.XXXXXX)"
+              grep -v "^${key}=" .env > "$tmp_file" || true
+              printf '%s=%s\n' "$key" "$value" >> "$tmp_file"
+              chmod 600 "$tmp_file"
+              mv "$tmp_file" .env
+            }
+            upsert_env "ROO_ENVIRONMENT" "production"
+            upsert_env "SIM_PATIENT_API_KEY" "$SIM_PATIENT_API_KEY"
+            upsert_env "SIM_PATIENT_SAFETY_SALT" "$SIM_PATIENT_SAFETY_SALT"
             
             # Restart the app
             docker compose up -d --build --remove-orphans

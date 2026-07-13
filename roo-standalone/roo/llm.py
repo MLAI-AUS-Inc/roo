@@ -98,6 +98,14 @@ class OpenAIClient(BaseLLMClient):
         
         self.model = model
         self.client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+
+    def _request_client(self, kwargs: Dict[str, Any]):
+        """Apply explicit request bounds without changing unrelated callers."""
+        timeout = kwargs.get("timeout")
+        if timeout is None or not hasattr(self.client, "with_options"):
+            return self.client
+        retries = max(0, min(int(kwargs.get("max_retries", 0)), 2))
+        return self.client.with_options(timeout=float(timeout), max_retries=retries)
     
     async def chat(self, messages: List[Dict[str, str]], **kwargs) -> LLMResponse:
         """Send chat completion request."""
@@ -109,6 +117,7 @@ class OpenAIClient(BaseLLMClient):
             "model": model,
             "messages": messages,
             max_tokens_key: kwargs.get("max_tokens", 2048),
+            "n": 1,
         }
         # Reasoning models only support temperature=1 (the default), so omit it
         if not is_reasoning_model:
@@ -117,8 +126,10 @@ class OpenAIClient(BaseLLMClient):
             create_kwargs["extra_body"] = kwargs["extra_body"]
         if "reasoning_effort" in kwargs:
             create_kwargs["reasoning_effort"] = kwargs["reasoning_effort"]
+        if kwargs.get("safety_identifier"):
+            create_kwargs["safety_identifier"] = kwargs["safety_identifier"]
 
-        response = await self.client.chat.completions.create(**create_kwargs)
+        response = await self._request_client(kwargs).chat.completions.create(**create_kwargs)
         
         return LLMResponse(
             content=response.choices[0].message.content or "",
@@ -153,6 +164,7 @@ class OpenAIClient(BaseLLMClient):
             "tools": tools,
             "tool_choice": kwargs.get("tool_choice", "required"),
             max_tokens_key: kwargs.get("max_tokens", default_max_tokens),
+            "n": 1,
         }
         if not is_reasoning_model:
             create_kwargs["temperature"] = kwargs.get("temperature", 0.2)
@@ -162,7 +174,10 @@ class OpenAIClient(BaseLLMClient):
         if "reasoning_effort" in kwargs and not model.startswith("gpt-5"):
             create_kwargs["reasoning_effort"] = kwargs["reasoning_effort"]
 
-        response = await self.client.chat.completions.create(**create_kwargs)
+        if kwargs.get("safety_identifier"):
+            create_kwargs["safety_identifier"] = kwargs["safety_identifier"]
+
+        response = await self._request_client(kwargs).chat.completions.create(**create_kwargs)
 
         message = response.choices[0].message
         tool_calls = getattr(message, "tool_calls", None) or []
@@ -223,8 +238,10 @@ class OpenAIClient(BaseLLMClient):
             reasoning_effort = kwargs.get("reasoning_effort")
             if reasoning_effort:
                 create_kwargs["reasoning"] = {"effort": reasoning_effort}
+            if kwargs.get("safety_identifier"):
+                create_kwargs["safety_identifier"] = kwargs["safety_identifier"]
 
-            response = await self.client.responses.create(**create_kwargs)
+            response = await self._request_client(kwargs).responses.create(**create_kwargs)
             usage = getattr(response, "usage", None)
             prompt_tokens += int(getattr(usage, "input_tokens", 0) or 0)
             completion_tokens += int(getattr(usage, "output_tokens", 0) or 0)
