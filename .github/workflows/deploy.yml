@@ -56,6 +56,7 @@ jobs:
         env:
           SIM_PATIENT_API_KEY: ${{ secrets.SIM_PATIENT_API_KEY }}
           SIM_PATIENT_SAFETY_SALT: ${{ secrets.SIM_PATIENT_SAFETY_SALT }}
+          ROO_API_KEY: ${{ secrets.ROO_API_KEY }}
         run: |
           set -eu
           if [ "${#SIM_PATIENT_API_KEY}" -lt 32 ]; then
@@ -66,8 +67,12 @@ jobs:
             echo "SIM_PATIENT_SAFETY_SALT is missing or shorter than 32 characters" >&2
             exit 1
           fi
-          if [ "$SIM_PATIENT_API_KEY" = "$SIM_PATIENT_SAFETY_SALT" ]; then
-            echo "Roo API key and safety salt must be distinct" >&2
+          if [ "${#ROO_API_KEY}" -lt 32 ]; then
+            echo "ROO_API_KEY is missing or shorter than 32 characters" >&2
+            exit 1
+          fi
+          if [ "$SIM_PATIENT_API_KEY" = "$SIM_PATIENT_SAFETY_SALT" ] || [ "$SIM_PATIENT_API_KEY" = "$ROO_API_KEY" ] || [ "$SIM_PATIENT_SAFETY_SALT" = "$ROO_API_KEY" ]; then
+            echo "Roo service credentials must be distinct" >&2
             exit 1
           fi
 
@@ -76,24 +81,25 @@ jobs:
         env:
           SIM_PATIENT_API_KEY: ${{ secrets.SIM_PATIENT_API_KEY }}
           SIM_PATIENT_SAFETY_SALT: ${{ secrets.SIM_PATIENT_SAFETY_SALT }}
+          ROO_API_KEY: ${{ secrets.ROO_API_KEY }}
           ROO_PRIVATE_BASE_URL: ${{ vars.ROO_PRIVATE_BASE_URL }}
         with:
           host: ${{ secrets.DO_HOST }}
           username: ${{ secrets.DO_USERNAME }}
           key: ${{ secrets.DO_SSH_KEY }}
-          envs: SIM_PATIENT_API_KEY,SIM_PATIENT_SAFETY_SALT,ROO_PRIVATE_BASE_URL
+          envs: SIM_PATIENT_API_KEY,SIM_PATIENT_SAFETY_SALT,ROO_API_KEY,ROO_PRIVATE_BASE_URL
           script: |
             # Stop if any command fails
             set -eu
 
             # Fail before touching the existing environment if forwarding was
             # misconfigured. Values are intentionally never printed.
-            if [ "${#SIM_PATIENT_API_KEY}" -lt 32 ] || [ "${#SIM_PATIENT_SAFETY_SALT}" -lt 32 ]; then
+            if [ "${#SIM_PATIENT_API_KEY}" -lt 32 ] || [ "${#SIM_PATIENT_SAFETY_SALT}" -lt 32 ] || [ "${#ROO_API_KEY}" -lt 32 ]; then
               echo "Required Roo security secrets were not forwarded" >&2
               exit 1
             fi
-            if [ "$SIM_PATIENT_API_KEY" = "$SIM_PATIENT_SAFETY_SALT" ]; then
-              echo "Roo API key and safety salt must be distinct" >&2
+            if [ "$SIM_PATIENT_API_KEY" = "$SIM_PATIENT_SAFETY_SALT" ] || [ "$SIM_PATIENT_API_KEY" = "$ROO_API_KEY" ] || [ "$SIM_PATIENT_SAFETY_SALT" = "$ROO_API_KEY" ]; then
+              echo "Roo service credentials must be distinct" >&2
               exit 1
             fi
             
@@ -113,20 +119,6 @@ jobs:
             # Go to the sub-project directory
             cd "$DEPLOY_DIR/roo-standalone"
 
-            # The Roo -> MLAI Backend contest-registry direction has a
-            # dedicated credential that already lives on the Droplet. Validate
-            # it before restarting so a missing/stale bootstrap cannot turn
-            # final diagnoses into an outage. Never print the value.
-            ROO_API_KEY="$(sed -n 's/^ROO_API_KEY=//p' .env 2>/dev/null | tail -n 1)"
-            if [ "${#ROO_API_KEY}" -lt 32 ]; then
-              echo "ROO_API_KEY is missing or shorter than 32 characters" >&2
-              exit 1
-            fi
-            if [ "$ROO_API_KEY" = "$SIM_PATIENT_API_KEY" ] || [ "$ROO_API_KEY" = "$SIM_PATIENT_SAFETY_SALT" ]; then
-              echo "Roo service credentials must be distinct" >&2
-              exit 1
-            fi
-
             # Update security settings without printing secret values. Rebuild
             # the file atomically so duplicate/stale keys cannot win.
             umask 077
@@ -143,6 +135,7 @@ jobs:
             upsert_env "ROO_ENVIRONMENT" "production"
             upsert_env "SIM_PATIENT_API_KEY" "$SIM_PATIENT_API_KEY"
             upsert_env "SIM_PATIENT_SAFETY_SALT" "$SIM_PATIENT_SAFETY_SALT"
+            upsert_env "ROO_API_KEY" "$ROO_API_KEY"
             
             # Restart the app
             docker compose up -d --build --remove-orphans

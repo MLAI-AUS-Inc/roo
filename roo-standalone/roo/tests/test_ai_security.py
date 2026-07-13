@@ -401,14 +401,15 @@ def test_deploy_workflow_requires_and_secretly_upserts_security_values():
     assert "nginx:1.28.3-alpine nginx -t" in workflow
     assert "secrets.SIM_PATIENT_API_KEY" in workflow
     assert "secrets.SIM_PATIENT_SAFETY_SALT" in workflow
+    assert "secrets.ROO_API_KEY" in workflow
     assert "envs: SIM_PATIENT_API_KEY,SIM_PATIENT_SAFETY_SALT" in workflow
-    assert "envs: SIM_PATIENT_API_KEY,SIM_PATIENT_SAFETY_SALT,ROO_PRIVATE_BASE_URL" in workflow
+    assert "envs: SIM_PATIENT_API_KEY,SIM_PATIENT_SAFETY_SALT,ROO_API_KEY,ROO_PRIVATE_BASE_URL" in workflow
     assert 'upsert_env "ROO_ENVIRONMENT" "production"' in workflow
     assert 'upsert_env "SIM_PATIENT_API_KEY" "$SIM_PATIENT_API_KEY"' in workflow
     assert 'upsert_env "SIM_PATIENT_SAFETY_SALT" "$SIM_PATIENT_SAFETY_SALT"' in workflow
-    assert 'ROO_API_KEY="$(sed -n' in workflow
+    assert 'upsert_env "ROO_API_KEY" "$ROO_API_KEY"' in workflow
     assert 'if [ "${#ROO_API_KEY}" -lt 32 ]' in workflow
-    assert workflow.index('ROO_API_KEY="$(sed -n') < workflow.index("docker compose up")
+    assert workflow.index('upsert_env "ROO_API_KEY"') < workflow.index("docker compose up")
     assert workflow.index("upsert_env \"SIM_PATIENT_API_KEY\"") < workflow.index("docker compose up")
     assert 'echo "$SIM_PATIENT_API_KEY"' not in workflow
     assert 'echo "$SIM_PATIENT_SAFETY_SALT"' not in workflow
