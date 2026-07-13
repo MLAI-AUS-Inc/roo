@@ -569,3 +569,194 @@ def test_system_prompts_declare_speech_only():
     # The patient is now first-person, not the third-person PQM narrator.
     assert "Patient Quest Master" not in sim_patient._PATIENT_SYSTEM_PROMPT
     assert "narrate how they say it" not in sim_patient._PATIENT_SYSTEM_PROMPT
+
+
+# ---------------------------------------------------------------------------
+# role="clerk" — Nurse Paws at the diagnosis desk (2026-07-13 prod 422 fix:
+# the deployed game's clerk chats were rejected because this role didn't exist)
+# ---------------------------------------------------------------------------
+
+_ELIGIBLE = {"state": "eligible", "outcome": None}
+
+
+def test_clerk_final_answer_is_deterministic_no_llm(monkeypatch):
+    """The game's highest-stakes turn must not depend on the LLM at all: an
+    explicit final answer is detected by the narrow regex, armed as a
+    suggested_action, and answered with a canned confirmation ask."""
+    fake = _install_fake(monkeypatch, '{"is_guess": true, "diagnosis": "unused"}')
+
+    result = _run(sim_patient.handle_question(
+        "My final answer is adrenal crisis!",
+        role="clerk",
+        contest_state=_ELIGIBLE,
+    ))
+
+    assert fake.calls == []  # neither classifier nor narrator was consulted
+    assert result["patient_name"] == "Nurse Paws"
+    assert result["is_guess"] is True
+    assert result["correct"] is None
+    assert result["diagnosis"] is None
+    assert result["response_source"] == "deterministic"
+    assert result["suggested_action"] == {
+        "type": "confirm_diagnosis",
+        "diagnosis": "adrenal crisis",
+    }
+    assert "adrenal crisis" in result["reply"]
+    assert "one official guess" in result["reply"]
+
+
+def test_clerk_classifier_guess_arms_confirmation(monkeypatch):
+    """Looser phrasings fall through to the LLM classifier; a positive
+    classification arms the same deterministic confirmation."""
+    fake = _install_fake(monkeypatch, '{"is_guess": true, "diagnosis": "addisonian crisis"}')
+
+    result = _run(sim_patient.handle_question(
+        "could it be addisonian crisis?",
+        role="clerk",
+        contest_state=_ELIGIBLE,
+    ))
+
+    # Exactly one LLM call — the gpt-4o-mini classifier; no narrator call.
+    assert [c["kwargs"].get("model") for c in fake.calls] == ["gpt-4o-mini"]
+    assert result["suggested_action"]["diagnosis"] == "addisonian crisis"
+    assert result["is_guess"] is True
+    assert result["response_source"] == "deterministic"
+
+
+def test_clerk_classifier_guess_without_name_falls_back_to_raw_text(monkeypatch):
+    _install_fake(monkeypatch, '{"is_guess": true, "diagnosis": null}')
+
+    result = _run(sim_patient.handle_question(
+        "surely this is  an addisonian   crisis",
+        role="clerk",
+        contest_state=_ELIGIBLE,
+    ))
+
+    assert result["suggested_action"]["diagnosis"] == "surely this is an addisonian crisis"
+
+
+def test_clerk_chitchat_gets_llm_reply_with_no_case_file(monkeypatch):
+    """Paws' prompt must contain NO case material: a persona never given the
+    chart cannot be prompt-injected into reading from it."""
+    fake = _install_fake(
+        monkeypatch,
+        '{"is_guess": false, "diagnosis": null}',
+        reply_text="Hi doc! Bring me your final answer when you're ready.",
+    )
+
+    result = _run(sim_patient.handle_question(
+        "hi paws, how do I win?",
+        role="clerk",
+        contest_state=_ELIGIBLE,
+    ))
+
+    assert "suggested_action" not in result
+    assert result["is_guess"] is False
+    assert result["reply"].startswith("Hi doc!")
+    assert result["response_source"] == "llm"
+
+    narrator_calls = [c for c in fake.calls if c["kwargs"].get("model") != "gpt-4o-mini"]
+    assert narrator_calls, "expected a persona reply LLM call"
+    system_prompt = narrator_calls[0]["messages"][0]["content"]
+    user_prompt = narrator_calls[0]["messages"][1]["content"]
+    assert system_prompt == sim_patient._CLERK_SYSTEM_PROMPT
+    assert "CASE FILE" not in user_prompt
+    assert "84/48" not in user_prompt  # case 1 vitals must never reach Paws
+    assert "Adrenal Crisis" not in user_prompt
+    assert "hydrocortisone" not in user_prompt.lower()
+    assert "NOT used their one official guess" in user_prompt
+
+
+def test_clerk_locked_state_never_takes_a_guess(monkeypatch):
+    """A locked player stating a fresh final answer gets sympathy, not a new
+    confirmation: no classifier call, no suggested_action."""
+    fake = _install_fake(
+        monkeypatch,
+        '{"is_guess": true, "diagnosis": "should not be consulted"}',
+        reply_text="Aw, doc — the book's closed for you on this one.",
+    )
+
+    result = _run(sim_patient.handle_question(
+        "my final answer is appendicitis",
+        role="clerk",
+        contest_state={"state": "locked", "outcome": "incorrect"},
+    ))
+
+    assert "suggested_action" not in result
+    assert result["is_guess"] is False
+    models = [c["kwargs"].get("model") for c in fake.calls]
+    assert "gpt-4o-mini" not in models  # classifier skipped entirely
+    narrator_calls = [c for c in fake.calls if c["kwargs"].get("model") != "gpt-4o-mini"]
+    user_prompt = narrator_calls[0]["messages"][1]["content"]
+    assert "ALREADY used" in user_prompt
+
+
+def test_clerk_unknown_contest_state_degrades_to_eligible(monkeypatch):
+    _install_fake(monkeypatch, '{"is_guess": false, "diagnosis": null}')
+
+    result = _run(sim_patient.handle_question(
+        "final answer: euglycemic dka",
+        role="clerk",
+        contest_state={"state": "banana"},
+    ))
+
+    assert result["suggested_action"]["diagnosis"] == "euglycemic dka"
+
+    result = _run(sim_patient.handle_question(
+        "final answer: euglycemic dka",
+        role="clerk",
+        contest_state=None,
+    ))
+    assert result["suggested_action"]["diagnosis"] == "euglycemic dka"
+
+
+def test_clerk_system_prompt_contract():
+    assert "speech only" in sim_patient._CLERK_SYSTEM_PROMPT.lower()
+    assert "NEVER reveal" in sim_patient._CLERK_SYSTEM_PROMPT
+    # She must not be handed the case file by any future refactor: the prompt
+    # itself declares she has no chart.
+    assert "never saw the chart" in sim_patient._CLERK_SYSTEM_PROMPT
+
+
+def test_endpoint_accepts_clerk_role_and_passes_contest_state(monkeypatch):
+    from fastapi.testclient import TestClient
+    from roo import config
+    from roo.main import app
+
+    real = config.get_settings()
+    monkeypatch.setattr(real, "SIM_PATIENT_API_KEY", None, raising=False)  # auth open
+    monkeypatch.setattr(config, "get_settings", lambda: real)
+
+    seen = {}
+
+    async def fake_handle_question(**kwargs):
+        seen.update(kwargs)
+        return {
+            "reply": "ok",
+            "case_id": 1,
+            "case_title": "t",
+            "patient_name": "Nurse Paws",
+            "presenting_complaint": "p",
+            "is_guess": False,
+            "correct": None,
+            "diagnosis": None,
+        }
+
+    monkeypatch.setattr(sim_patient, "handle_question", fake_handle_question)
+
+    client = TestClient(app)
+    resp = client.post(
+        "/api/sim-patient",
+        json={
+            "question": "hello",
+            "role": "clerk",
+            "contest_state": {"state": "locked", "outcome": "incorrect"},
+        },
+    )
+    assert resp.status_code == 200
+    assert seen["role"] == "clerk"
+    assert seen["contest_state"] == {"state": "locked", "outcome": "incorrect"}
+
+    # An unknown role still 422s.
+    resp = client.post("/api/sim-patient", json={"question": "hello", "role": "cleric"})
+    assert resp.status_code == 422
