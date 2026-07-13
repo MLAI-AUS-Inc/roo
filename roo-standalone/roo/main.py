@@ -2147,7 +2147,11 @@ async def api_sim_patient(request: Request, settings: Settings = Depends(get_set
     Runs the medhack "Guess the Diagnosis" case as an in-character narrator.
     Stateless: never touches medhack game state, points, or the guess lockout.
     role="nurse" answers as the reception nurse (investigation results from the
-    same case file; never adjudicates guesses).
+    same case file; never adjudicates guesses). role="clerk" answers as Nurse
+    Paws at the diagnosis desk: she prepares the game's confirm-diagnosis step
+    (suggested_action) for eligible players but never adjudicates — verdicts
+    live exclusively in /api/diagnosis-check. The optional ``contest_state``
+    object is the backend gateway's read-only contest context for the clerk.
 
     Auth is bearer-only and applied ONLY when SIM_PATIENT_API_KEY is set (open in
     dev). Errors: 401 bad/missing token, 404 unknown case_id, 422 missing
@@ -2164,8 +2168,12 @@ async def api_sim_patient(request: Request, settings: Settings = Depends(get_set
         raise HTTPException(status_code=422, detail="question required")
 
     role = (payload.get("role") or "patient").strip().lower()
-    if role not in ("patient", "nurse"):
-        raise HTTPException(status_code=422, detail="role must be 'patient' or 'nurse'")
+    if role not in ("patient", "nurse", "clerk"):
+        raise HTTPException(status_code=422, detail="role must be 'patient', 'nurse' or 'clerk'")
+
+    contest_state = payload.get("contest_state")
+    if not isinstance(contest_state, dict):
+        contest_state = None
 
     # Defensive caps: bound the question length and history depth server-side.
     question = question[:500]
@@ -2184,6 +2192,7 @@ async def api_sim_patient(request: Request, settings: Settings = Depends(get_set
             case_id=payload.get("case_id"),
             player_id=payload.get("player_id") or "web-anon",
             role=role,
+            contest_state=contest_state,
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
