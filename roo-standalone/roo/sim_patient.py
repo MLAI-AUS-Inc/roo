@@ -108,6 +108,26 @@ def load_case(case_id: Optional[int]) -> dict:
     raise KeyError(f"unknown case_id: {case_id}")
 
 
+def _open_cases_for_targeting(pinned_case: dict) -> list[dict]:
+    """The pinned case plus every other OPEN case, for patient-name targeting.
+
+    Lets Nurse Paws resolve "my final diagnosis for Leila is …" typed from
+    Sash's thread. Closed/unknown ids are skipped; the pinned case always
+    stays first so single-book deployments behave exactly as before.
+    """
+    cases = [pinned_case]
+    seen = {pinned_case.get("id")}
+    for case_id in sorted(get_settings().sim_open_case_ids):
+        if case_id in seen:
+            continue
+        try:
+            cases.append(load_case(case_id))
+        except KeyError:
+            continue
+        seen.add(case_id)
+    return cases
+
+
 def patient_knowable_context(case: dict) -> dict[str, Any]:
     """Return only authored facts a regular patient could reasonably know.
 
@@ -152,6 +172,13 @@ def check_guess(guess: str, case: dict) -> bool:
     and each acceptable answer. We do NOT import the executor or the client.
     """
     guess_clean = str(guess).strip().lower()
+    # Historical burnt-guess shape ("for sash is addisonian crisis"): a
+    # leading target clause must never drag a correct answer under the fuzzy
+    # threshold. The parser now strips these before recording, but stored or
+    # replayed strings keep working too.
+    guess_clean = re.sub(
+        r"^for\s+[a-z'’.-]{2,30}\s+(?:is\s+)?", "", guess_clean,
+    ).strip()
     # Coerce defensively: a malformed case (null/non-string values) must not
     # crash the whole turn.
     acceptable = [str(a).lower() for a in (case.get("acceptable_answers") or [])]
@@ -949,9 +976,12 @@ async def handle_question(
     tool_calls: list[dict[str, Any]] = []
     suggested_action = None
     if is_nurse or is_clerk:
-        from .ward_agents import _explicit_final_diagnosis, run_ward_agent
+        from .ward_agents import parse_final_diagnosis, run_ward_agent
 
-        is_explicit_final = bool(_explicit_final_diagnosis(question))
+        open_cases = _open_cases_for_targeting(case)
+        is_explicit_final = (
+            parse_final_diagnosis(question, open_cases, history) is not None
+        )
 
         agent_result = await run_ward_agent(
             role=role,
@@ -960,6 +990,7 @@ async def handle_question(
             case=case,
             player_id=player_id,
             contest_state=contest_state,
+            open_cases=open_cases,
         )
         raw_reply = agent_result.reply
         model_name = agent_result.model
@@ -1050,6 +1081,16 @@ async def handle_question(
             {
                 "type": "confirm_diagnosis",
                 "diagnosis": str(suggested_action.get("diagnosis") or "")[:200],
+                # Which open one-guess book the player named ("for Leila").
+                # Only ever a member of the open-case allowlist.
+                **(
+                    {"case_id": suggested_action["case_id"]}
+                    if isinstance(suggested_action.get("case_id"), int)
+                    and not isinstance(suggested_action.get("case_id"), bool)
+                    and suggested_action["case_id"]
+                    in get_settings().sim_open_case_ids
+                    else {}
+                ),
             }
             if isinstance(suggested_action, dict)
             and suggested_action.get("type") == "confirm_diagnosis"

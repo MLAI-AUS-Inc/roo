@@ -12,6 +12,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+from difflib import SequenceMatcher
+
 from .ai_security import make_safety_identifier
 from .config import get_settings
 from .llm import get_llm_client
@@ -286,22 +288,209 @@ def _requested_result_list_category(question: str) -> Optional[str]:
     return "all"
 
 
-_FINAL_DIAGNOSIS_RE = re.compile(
+# The declaration frame. Target clauses ("for Leila", "Sash has") are peeled
+# off separately by parse_final_diagnosis so they can resolve which one-guess
+# book the player means instead of polluting the recorded guess text — the
+# exact failure that burnt both books on 2026-07-14 ("for sash is addisonian
+# crisis" missed the 0.75 fuzzy threshold that "addisonian crisis" clears).
+_FINAL_INTENT_RE = re.compile(
     r"""^\s*(?:
         (?:my\s+)?final\s+(?:answer|diagnosis|guess)(?:\s+is)?
-      | (?:please\s+)?(?:submit|record|lock\s+in)\s+(?:my\s+)?(?:diagnosis\s+as\s+)?
+      | my\s+diagnosis\s+is
+      | (?:please\s+)?(?:submit|record|lock\s+in)\s+(?:my\s+)?
+        (?:(?:final\s+)?(?:diagnosis|answer|guess)\b\s*(?:as|of|is|[:,-])?\s*)?
+      | i\s+diagnose
       | i(?:'|’)?m\s+going\s+(?:to\s+go\s+)?with
     )\s*[:,-]?\s*(?P<diagnosis>.{2,200}?)\s*[.!?]*\s*$""",
     re.IGNORECASE | re.VERBOSE,
 )
 
+# "<diagnosis> is my final answer[, for <patient>]".
+_FINAL_INTENT_REVERSE_RE = re.compile(
+    r"^\s*(?P<diagnosis>.{2,200}?)\s+is\s+my\s+final\s+(?:answer|diagnosis|guess)\s*[.!?]*\s*$",
+    re.IGNORECASE,
+)
+
+_ANAPHORIC_DIAGNOSIS_RE = re.compile(r"^(?:that|this|it)(?:\s+one)?$", re.IGNORECASE)
+
+_TARGET_NAME = r"(?P<name>[A-Za-z][A-Za-z'’.-]{1,30})"
+_LEADING_TARGET_RE = re.compile(
+    rf"^(?:for|of)\s+{_TARGET_NAME}\s*[,:]?\s*(?:is\s+|it'?s\s+|i\s+diagnose\s+)?",
+    re.IGNORECASE,
+)
+# Question-level variant: peel "for Sash," off the front of the whole message
+# WITHOUT consuming the declaration verb ("for sash i diagnose …").
+_QUESTION_LEAD_TARGET_RE = re.compile(
+    rf"^(?:for|of)\s+{_TARGET_NAME}\s*[,:]?\s+", re.IGNORECASE,
+)
+_LEADING_HAS_RE = re.compile(
+    rf"^(?:that\s+)?{_TARGET_NAME}\s+has\s+", re.IGNORECASE,
+)
+_TRAILING_TARGET_RE = re.compile(
+    rf"\s+(?:for|of)\s+{_TARGET_NAME}\s*$", re.IGNORECASE,
+)
+
+# Theory phrasings mined for the anaphora path ("that's my final diagnosis").
+_THEORY_EXTRACT_RES = (
+    re.compile(
+        r"^\s*i\s+(?:guess|think|suspect|reckon|believe)\s+(?:it\s+is\s+|it'?s\s+|that\s+)?(?P<rest>.+?)\s*[.!?]*\s*$",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^\s*(?:is\s+(?:it|this)|could\s+(?:it|this)\s+be|might\s+(?:it\s+)?be)\s+(?P<rest>.+?)\s*\??\s*$",
+        re.IGNORECASE,
+    ),
+    re.compile(r"^\s*it'?s\s+(?P<rest>.+?)\s*[.!?]*\s*$", re.IGNORECASE),
+)
+
+
+def _case_name_index(open_cases: Optional[list[dict]]) -> dict[str, int]:
+    """Lowercased patient-name tokens -> case id, for every open book."""
+    index: dict[str, int] = {}
+    for entry in open_cases or []:
+        case_id = entry.get("id") if isinstance(entry, dict) else None
+        if not isinstance(case_id, int) or isinstance(case_id, bool):
+            continue
+        name = str(((entry.get("patient") or {}).get("name")) or "")
+        for token in re.split(r"[^a-z]+", name.lower()):
+            if len(token) >= 3:
+                index.setdefault(token, case_id)
+    return index
+
+
+def _match_case_token(raw: str, index: dict[str, int]) -> Optional[int]:
+    token = re.sub(r"[^a-z]", "", str(raw or "").lower())
+    if len(token) < 3:
+        return None
+    if token in index:
+        return index[token]
+    for known, case_id in index.items():
+        if SequenceMatcher(None, token, known).ratio() >= 0.8:
+            return case_id
+    return None
+
+
+def _strip_target_clauses(
+    diagnosis: str, index: dict[str, int], target: Optional[int],
+) -> tuple[str, Optional[int]]:
+    """Peel patient-target clauses off the edges of a captured diagnosis.
+
+    Only clauses whose name resolves to an open case are removed, so ordinary
+    words after "for"/"of" ("pain for weeks") stay part of the diagnosis.
+    """
+    for _ in range(3):
+        changed = False
+        for pattern, trailing in (
+            (_LEADING_TARGET_RE, False),
+            (_LEADING_HAS_RE, False),
+            (_TRAILING_TARGET_RE, True),
+        ):
+            match = pattern.search(diagnosis) if trailing else pattern.match(diagnosis)
+            if not match:
+                continue
+            case_id = _match_case_token(match.group("name"), index)
+            if case_id is None:
+                continue
+            if target is None:
+                target = case_id
+            diagnosis = (
+                diagnosis[: match.start()] if trailing else diagnosis[match.end():]
+            ).strip()
+            changed = True
+        if not changed:
+            break
+    return diagnosis, target
+
+
+def _recover_theory_from_history(
+    history: Optional[list[dict]], open_cases: Optional[list[dict]],
+) -> Optional[dict]:
+    """Resolve "that's my final diagnosis" from the player's latest theory."""
+    for turn in reversed(history or []):
+        if not isinstance(turn, dict) or turn.get("role") != "player":
+            continue
+        text = re.sub(r"\s+", " ", str(turn.get("text") or "")).strip()
+        if not text:
+            continue
+        parsed = parse_final_diagnosis(text, open_cases, history=None)
+        if parsed:
+            return parsed
+        index = _case_name_index(open_cases)
+        for pattern in _THEORY_EXTRACT_RES:
+            match = pattern.match(text)
+            if not match:
+                continue
+            rest, target = _strip_target_clauses(
+                match.group("rest").strip(" \"'“”"), index, None,
+            )
+            rest = rest.strip(" \"'“”")
+            if len(rest) >= 2 and not _ANAPHORIC_DIAGNOSIS_RE.match(rest):
+                return {"diagnosis": rest[:200], "case_id": target}
+    return None
+
+
+def parse_final_diagnosis(
+    question: str,
+    open_cases: Optional[list[dict]] = None,
+    history: Optional[list[dict]] = None,
+) -> Optional[dict]:
+    """Deterministically parse an explicit final-diagnosis declaration.
+
+    Returns {"diagnosis": <clean text>, "case_id": <open case id or None>} or
+    None when the message is not an unmistakably final declaration. Never
+    consults the model: this feeds the recorded one-shot guess.
+    """
+    text = re.sub(r"\s+", " ", str(question or "")).strip()
+    if not text:
+        return None
+    # Normalise the contraction so the reverse frame can see the anaphor.
+    text = re.sub(r"^(?:that|this)'?s\b", "that is", text, flags=re.IGNORECASE)
+    index = _case_name_index(open_cases)
+    target: Optional[int] = None
+
+    # A leading "for <patient>," frame before the declaration itself.
+    lead = _QUESTION_LEAD_TARGET_RE.match(text)
+    if lead:
+        case_id = _match_case_token(lead.group("name"), index)
+        if case_id is not None:
+            target = case_id
+            text = text[lead.end():].strip()
+
+    match = _FINAL_INTENT_RE.match(text)
+    diagnosis = match.group("diagnosis") if match else None
+    if diagnosis is None:
+        reverse = _FINAL_INTENT_REVERSE_RE.match(text)
+        if reverse:
+            diagnosis = reverse.group("diagnosis")
+    if diagnosis is None:
+        return None
+
+    diagnosis = diagnosis.strip(" \"'“”")
+    diagnosis, target = _strip_target_clauses(diagnosis, index, target)
+    diagnosis = re.sub(r"^(?:is|as)\s+", "", diagnosis, flags=re.IGNORECASE)
+    diagnosis = diagnosis.strip(" \"'“”:,-")
+
+    if not diagnosis or _ANAPHORIC_DIAGNOSIS_RE.match(diagnosis):
+        recovered = _recover_theory_from_history(history, open_cases)
+        if recovered is None:
+            return None
+        diagnosis = recovered["diagnosis"]
+        if target is None:
+            target = recovered["case_id"]
+
+    diagnosis = diagnosis[:200].strip()
+    if len(diagnosis) < 2:
+        return None
+    return {"diagnosis": diagnosis, "case_id": target}
+
+
+_UNSET = object()
+
 
 def _explicit_final_diagnosis(question: str) -> Optional[str]:
-    match = _FINAL_DIAGNOSIS_RE.match(str(question or "").strip())
-    if not match:
-        return None
-    diagnosis = re.sub(r"\s+", " ", match.group("diagnosis")).strip(" \"'“”")
-    return diagnosis[:200] or None
+    """Back-compat shim: the bare diagnosis text of a final declaration."""
+    parsed = parse_final_diagnosis(question)
+    return parsed["diagnosis"] if parsed else None
 
 
 def _authorized_examination_systems(question: str, case: dict) -> set[str]:
@@ -407,6 +596,7 @@ def _execute_paws_tool(
     contest_state: dict[str, Any],
     action_holder: dict[str, Any],
     question: str = "",
+    parsed_final: Any = _UNSET,
 ) -> dict[str, Any]:
     if name == "get_observations":
         if not _observations_requested(question):
@@ -429,27 +619,36 @@ def _execute_paws_tool(
 
     if name == "prepare_final_guess":
         # Never trust the model-proposed tool argument as authority. The only
-        # permitted diagnosis is extracted directly from an unmistakably final
-        # raw player message.
-        diagnosis = _explicit_final_diagnosis(question)
+        # permitted diagnosis is parsed directly from an unmistakably final
+        # raw player message (with any patient-target clause peeled off).
+        parsed = (
+            parse_final_diagnosis(question, [case])
+            if parsed_final is _UNSET
+            else parsed_final
+        )
         if contest_state.get("state") != "eligible":
             return {
                 "prepared": False,
                 "contest_state": contest_state.get("state", "unavailable"),
                 "reason": "The one-shot contest is not eligible for a new submission.",
             }
-        if not diagnosis:
+        if not parsed:
             return {
                 "prepared": False,
                 "reason": "The player did not explicitly declare a final diagnosis.",
             }
         action_holder["value"] = {
             "type": "confirm_diagnosis",
-            "diagnosis": diagnosis,
+            "diagnosis": parsed["diagnosis"],
+            **(
+                {"case_id": parsed["case_id"]}
+                if parsed.get("case_id") is not None
+                else {}
+            ),
         }
         return {
             "prepared": True,
-            "diagnosis": diagnosis,
+            "diagnosis": parsed["diagnosis"],
             "instruction": "Ask the player to review and press the confirmation button.",
         }
 
@@ -479,11 +678,14 @@ async def run_ward_agent(
     case: dict,
     player_id: str = "00000000-0000-4000-8000-000000000000",
     contest_state: Optional[dict[str, Any]] = None,
+    open_cases: Optional[list[dict]] = None,
 ) -> WardAgentResult:
     """Run one AI-first Dr Snow or Nurse Paws turn."""
     settings = get_settings()
     client = get_llm_client("openai")
     action_holder: dict[str, Any] = {}
+    # Parsed once per turn: the executor and the no-tool fallback must agree.
+    parsed_final = parse_final_diagnosis(question, open_cases or [case], history)
 
     if role == "nurse":
         npc_name = DR_SNOW_NAME
@@ -503,7 +705,8 @@ async def run_ward_agent(
 
         def execute(name: str, arguments: dict[str, Any]):
             return _execute_paws_tool(
-                name, arguments, case, state, action_holder, question
+                name, arguments, case, state, action_holder, question,
+                parsed_final,
             )
     else:
         raise ValueError(f"unsupported ward agent role: {role}")
@@ -548,12 +751,16 @@ async def run_ward_agent(
         timeout=settings.SIM_PATIENT_OPENAI_TIMEOUT_SECONDS,
     )
     if role == "clerk" and not action_holder.get("value"):
-        diagnosis = _explicit_final_diagnosis(question)
         state = contest_state or {"state": "unavailable"}
-        if diagnosis and state.get("state") == "eligible":
+        if parsed_final and state.get("state") == "eligible":
             action_holder["value"] = {
                 "type": "confirm_diagnosis",
-                "diagnosis": diagnosis,
+                "diagnosis": parsed_final["diagnosis"],
+                **(
+                    {"case_id": parsed_final["case_id"]}
+                    if parsed_final.get("case_id") is not None
+                    else {}
+                ),
             }
     return WardAgentResult(
         reply=response.content,
