@@ -498,6 +498,32 @@ def test_nurse_paws_prepares_but_never_submits_final_guess(monkeypatch):
     assert result["diagnosis"] is None
 
 
+def test_nurse_paws_resolves_named_patient_into_case_target(monkeypatch):
+    # The 2026-07-14 burnt-guess transcript: naming Leila from Sash's pinned
+    # thread must produce a CLEAN diagnosis targeted at Leila's open book.
+    fake = _install_fake(
+        monkeypatch,
+        "{}",
+        reply_text="Review it, then press the confirmation button if you're sure.",
+        agent_tool=("prepare_final_guess", {"diagnosis": "ignored model arg"}),
+    )
+
+    result = _run(sim_patient.handle_question(
+        "My final diagnosis for leila is crohns disease",
+        role="clerk",
+        case_id=1,
+        contest_state={"state": "eligible", "outcome": None},
+    ))
+
+    assert result["suggested_action"] == {
+        "type": "confirm_diagnosis",
+        "diagnosis": "crohns disease",
+        "case_id": 2,
+    }
+    assert fake.tool_results[0]["prepared"] is True
+    assert fake.tool_results[0]["diagnosis"] == "crohns disease"
+
+
 def test_nurse_paws_cannot_prepare_when_contest_is_locked(monkeypatch):
     fake = _install_fake(
         monkeypatch,
