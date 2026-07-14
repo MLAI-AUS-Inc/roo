@@ -34,13 +34,20 @@ You do not know the hidden diagnosis and must never confirm or reject a proposed
 Speak warmly and efficiently in one or two short paragraphs. Return only Dr Snow's spoken words: no labels, narration, stage directions, markdown, JSON, or tool names."""
 
 
-NURSE_PAWS_PROMPT = """You are Nurse Paws, the senior ward nurse at reception. You help the player synthesize the case, provide the complete observations and physical examination, and prepare their ONE official diagnosis for explicit confirmation.
+NURSE_PAWS_PROMPT = """You are Nurse Paws, the senior ward nurse at reception. Your MAIN job is preparing each player's ONE official final diagnosis per ward patient for explicit confirmation; you also provide the complete observations and physical examination and help the player reason.
 
-You are the first conversational responder for every message. Clinical observations and examination findings MUST come from your tools in this turn or from the supplied prior conversation. Never invent or round a finding. You may reason with the player about patterns and differentials using only facts already disclosed, but you do not know the hidden diagnosis or acceptable answers and must never say whether a proposed diagnosis is correct.
+You are the first conversational responder for every message. Clinical observations and examination findings MUST come from your tools in this turn or from the supplied prior conversation. Never invent or round a finding. You may reason with the player about patterns and differentials using only facts already disclosed, but you do not know the hidden diagnosis or acceptable answers and must never say or hint whether any proposed diagnosis is right, wrong, likely, or close.
 
-Use get_observations for vital signs and get_examination for physical findings. Call prepare_final_guess only when the player clearly declares a final diagnosis or explicitly asks to submit it. Never call it for tentative language such as "could it be" or "what about". prepare_final_guess does not submit anything; after it succeeds, tell the player to review and press the confirmation button. If the contest is not eligible, do not invite another submission.
+LOCKING IN A DIAGNOSIS
+- Call prepare_final_guess the moment the player wants to lock in, submit, or finalise a diagnosis — including indirect wording like "submit that", "lock it in", "that's my answer", a bare diagnosis given right after you asked for their final answer, or restating an earlier theory as final.
+- diagnosis argument: the condition in the player's own words ONLY — no framing words like "final diagnosis" or "submit", and no patient name inside it.
+- patient argument: the ward patient's name exactly as the player referred to them; empty string if they did not say which patient.
+- The tool never submits, adjudicates, or burns anything. After it succeeds, tell the player to check the confirmation button just below and press it if they are sure.
+- If the tool declines, relay the reason in your own words and coach them on what to say.
+- For a tentative theory (a question, "could it be", thinking out loud): never confirm, deny, or hint. Remind them they can lock it in any time by saying: submit <their diagnosis> for <patient name>.
+- If the contest is not eligible, say the diagnosis book is closed and do not invite another submission.
 
-Speak like a warm, quick, slightly playful senior nurse in one or two short paragraphs. Return only Nurse Paws' spoken words: no labels, narration, stage directions, markdown, JSON, or tool names."""
+Use get_observations for vital signs and get_examination for physical findings. Speak like a warm, quick, slightly playful senior nurse in one or two short sentences. Never repeat your previous reply word-for-word — always move the player forward. Return only Nurse Paws' spoken words: no labels, narration, stage directions, markdown, JSON, or tool names."""
 
 
 @dataclass
@@ -205,16 +212,31 @@ def _paws_tools(case: dict) -> list[dict[str, Any]]:
         ),
         _strict_tool(
             "prepare_final_guess",
-            "Prepare an explicitly final diagnosis for a separate player confirmation. This never submits, adjudicates, or burns the attempt.",
+            "Prepare the player's final diagnosis for a separate player confirmation. "
+            "Call it whenever the player wants to lock in or submit a diagnosis, "
+            "including indirect wording like 'submit that'. This never submits, "
+            "adjudicates, or burns the attempt.",
             {
                 "diagnosis": {
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 200,
-                    "description": "The diagnosis the player explicitly declared as final.",
+                    "description": (
+                        "The diagnosis itself, in the player's own words, with no "
+                        "framing ('final diagnosis', 'submit') and no patient name."
+                    ),
+                },
+                "patient": {
+                    "type": "string",
+                    "maxLength": 80,
+                    "description": (
+                        "The ward patient this diagnosis is for, exactly as the "
+                        "player referred to them; empty string when they did not "
+                        "say which patient."
+                    ),
                 },
             },
-            ["diagnosis"],
+            ["diagnosis", "patient"],
         ),
     ]
 
@@ -429,23 +451,8 @@ def _recover_theory_from_history(
     return None
 
 
-def parse_final_diagnosis(
-    question: str,
-    open_cases: Optional[list[dict]] = None,
-    history: Optional[list[dict]] = None,
-) -> Optional[dict]:
-    """Deterministically parse an explicit final-diagnosis declaration.
-
-    Returns {"diagnosis": <clean text>, "case_id": <open case id or None>} or
-    None when the message is not an unmistakably final declaration. Never
-    consults the model: this feeds the recorded one-shot guess.
-    """
-    text = re.sub(r"\s+", " ", str(question or "")).strip()
-    if not text:
-        return None
-    # Normalise the contraction so the reverse frame can see the anaphor.
-    text = re.sub(r"^(?:that|this)'?s\b", "that is", text, flags=re.IGNORECASE)
-    index = _case_name_index(open_cases)
+def _parse_declaration(text: str, index: dict[str, int]) -> Optional[tuple[str, Optional[int]]]:
+    """Frame-match one candidate text. Returns (diagnosis, target); no anaphora."""
     target: Optional[int] = None
 
     # A leading "for <patient>," frame before the declaration itself.
@@ -466,22 +473,146 @@ def parse_final_diagnosis(
         return None
 
     diagnosis = diagnosis.strip(" \"'“”")
-    diagnosis, target = _strip_target_clauses(diagnosis, index, target)
+    # Interleave target and frame trims: either may expose the other
+    # ("… as final diagnosis for sash").
+    for _ in range(3):
+        before = diagnosis
+        diagnosis, target = _strip_target_clauses(diagnosis, index, target)
+        diagnosis = _trim_declaration_frame(diagnosis)
+        if diagnosis == before:
+            break
     diagnosis = re.sub(r"^(?:is|as)\s+", "", diagnosis, flags=re.IGNORECASE)
     diagnosis = diagnosis.strip(" \"'“”:,-")
+    return diagnosis, target
 
-    if not diagnosis or _ANAPHORIC_DIAGNOSIS_RE.match(diagnosis):
-        recovered = _recover_theory_from_history(history, open_cases)
-        if recovered is None:
-            return None
-        diagnosis = recovered["diagnosis"]
-        if target is None:
-            target = recovered["case_id"]
 
-    diagnosis = diagnosis[:200].strip()
+def _normalize_anaphor(text: str) -> str:
+    # Normalise the contraction so the reverse frame can see the anaphor.
+    return re.sub(r"^(?:that|this)'?s\b", "that is", text, flags=re.IGNORECASE)
+
+
+def parse_final_diagnosis(
+    question: str,
+    open_cases: Optional[list[dict]] = None,
+    history: Optional[list[dict]] = None,
+) -> Optional[dict]:
+    """Deterministically parse an explicit final-diagnosis declaration.
+
+    Returns {"diagnosis": <clean text>, "case_id": <open case id or None>} or
+    None when the message is not an unmistakably final declaration. Never
+    consults the model: this feeds the recorded one-shot guess. Multi-sentence
+    messages are handled per sentence ("I think sash has X. Submit that"), and
+    an anaphoric declaration recovers its antecedent first from the message's
+    own sentences, then from the player's recent history.
+    """
+    text = re.sub(r"\s+", " ", str(question or "")).strip()
+    if not text:
+        return None
+    index = _case_name_index(open_cases)
+
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
+    candidates = [_normalize_anaphor(text)]
+    if len(sentences) > 1:
+        candidates.extend(_normalize_anaphor(s) for s in sentences)
+
+    anaphoric_target: Optional[int] = None
+    saw_anaphoric = False
+    for candidate in candidates:
+        parsed = _parse_declaration(candidate, index)
+        if parsed is None:
+            continue
+        diagnosis, target = parsed
+        if diagnosis and not _ANAPHORIC_DIAGNOSIS_RE.match(diagnosis):
+            diagnosis = diagnosis[:200].strip()
+            if len(diagnosis) >= 2:
+                return {"diagnosis": diagnosis, "case_id": target}
+        elif not saw_anaphoric:
+            saw_anaphoric = True
+            anaphoric_target = target
+
+    if not saw_anaphoric:
+        return None
+
+    # Antecedent search: this message's other sentences first, then history
+    # (most recent last in the list — _recover walks it in reverse).
+    pool: list[dict] = list(history or [])
+    if len(sentences) > 1:
+        pool.extend({"role": "player", "text": s} for s in sentences)
+    recovered = _recover_theory_from_history(pool, open_cases)
+    if recovered is None:
+        return None
+    diagnosis = str(recovered["diagnosis"])[:200].strip()
     if len(diagnosis) < 2:
         return None
+    target = anaphoric_target if anaphoric_target is not None else recovered["case_id"]
     return {"diagnosis": diagnosis, "case_id": target}
+
+
+# Declaration vocabulary the recorded guess must never carry — trailing
+# ("… as my final diagnosis") or leading ("submit …") frames burnt real
+# correct answers by dragging fuzzy matches under the 0.75 threshold.
+_FRAME_EDGE_RES = (
+    re.compile(
+        r"\s+(?:as|is)?\s*(?:my\s+|the\s+)?(?:one\s+)?(?:official\s+|final\s+)+"
+        r"(?:diagnosis|answer|guess)\s*$",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^\s*(?:please\s+)?(?:submit|record|lock\s+in|confirm)\s+",
+        re.IGNORECASE,
+    ),
+)
+
+
+def _trim_declaration_frame(diagnosis: str) -> str:
+    """Deterministically shave declaration vocabulary off a proposal's edges."""
+    text = re.sub(r"\s+", " ", str(diagnosis or "")).strip(" \"'“”")
+    for _ in range(3):
+        before = text
+        for pattern in _FRAME_EDGE_RES:
+            text = pattern.sub("", text).strip(" \"'“”:,-")
+        if text == before:
+            break
+    return text
+
+
+# Obvious questions must never arm the confirmation even if the model calls
+# the tool: "Could it be adrenal crisis?" is a theory, not a declaration.
+_TENTATIVE_QUESTION_RE = re.compile(
+    r"^\s*(?:could|can|might|may|would|is|isn'?t|was|what\s+about|do\s+you\s+think|"
+    r"any\s+chance)\b[^.!]*\?\s*$",
+    re.IGNORECASE,
+)
+
+
+def _grounded_in_player_text(
+    proposal: str, question: str, history: Optional[list[dict]],
+) -> bool:
+    """True when the proposal is a near-verbatim span of the player's own words.
+
+    The model may only quote the player back — never introduce a diagnosis the
+    player has not typed in this conversation. Fuzzy windows (>= 0.85)
+    tolerate punctuation and small typo drift, nothing more.
+    """
+    words = _query_text(proposal).split()
+    if not words:
+        return False
+    target = " ".join(words)
+    sources = [question]
+    for turn in reversed(history or []):
+        if isinstance(turn, dict) and turn.get("role") == "player":
+            sources.append(str(turn.get("text") or ""))
+    span = len(words)
+    for source in sources[:13]:
+        source_words = _query_text(source).split()
+        if not source_words:
+            continue
+        for size in {span, span + 1, max(1, span - 1)}:
+            for start in range(0, max(0, len(source_words) - size) + 1):
+                window = " ".join(source_words[start:start + size])
+                if SequenceMatcher(None, target, window).ratio() >= 0.85:
+                    return True
+    return False
 
 
 _UNSET = object()
@@ -597,6 +728,8 @@ def _execute_paws_tool(
     action_holder: dict[str, Any],
     question: str = "",
     parsed_final: Any = _UNSET,
+    open_cases: Optional[list[dict]] = None,
+    history: Optional[list[dict]] = None,
 ) -> dict[str, Any]:
     if name == "get_observations":
         if not _observations_requested(question):
@@ -618,37 +751,69 @@ def _execute_paws_tool(
         return {"examination": {system: examination[system]}}
 
     if name == "prepare_final_guess":
-        # Never trust the model-proposed tool argument as authority. The only
-        # permitted diagnosis is parsed directly from an unmistakably final
-        # raw player message (with any patient-target clause peeled off).
-        parsed = (
-            parse_final_diagnosis(question, [case])
-            if parsed_final is _UNSET
-            else parsed_final
-        )
         if contest_state.get("state") != "eligible":
             return {
                 "prepared": False,
                 "contest_state": contest_state.get("state", "unavailable"),
                 "reason": "The one-shot contest is not eligible for a new submission.",
             }
-        if not parsed:
+        # The model judges INTENT (so "submit that" or a bare answer works),
+        # but its proposal is only accepted when it quotes the player's own
+        # words back: an obvious question never arms, grounding blocks
+        # invention, and a deterministic frame/target trim keeps declaration
+        # vocabulary out of the recorded guess (polluted text burnt two real
+        # correct answers on 2026-07-14).
+        if _TENTATIVE_QUESTION_RE.match(str(question or "")):
             return {
                 "prepared": False,
-                "reason": "The player did not explicitly declare a final diagnosis.",
+                "reason": (
+                    "The player was asking a question, not declaring a final "
+                    "diagnosis. Coach them without confirming or denying."
+                ),
             }
+        cases = open_cases or [case]
+        index = _case_name_index(cases)
+        proposal = _trim_declaration_frame(str(arguments.get("diagnosis") or ""))
+        proposal, clause_target = _strip_target_clauses(proposal, index, None)
+        proposal = proposal.strip(" \"'“”:,-")
+        target = _match_case_token(str(arguments.get("patient") or ""), index)
+        if target is None:
+            target = clause_target
+
+        if len(proposal) < 2 or not _grounded_in_player_text(
+            proposal, question, history
+        ):
+            # Model proposal not grounded in the player's words: fall back to
+            # the deterministic declaration parser before giving up.
+            parsed = (
+                parse_final_diagnosis(question, cases, history)
+                if parsed_final is _UNSET
+                else parsed_final
+            )
+            if not parsed:
+                return {
+                    "prepared": False,
+                    "reason": (
+                        "That diagnosis is not something the player has typed in "
+                        "this conversation. Ask them to state their diagnosis in "
+                        "their own words."
+                    ),
+                }
+            proposal = parsed["diagnosis"]
+            if target is None:
+                target = parsed["case_id"]
+
+        if target is None:
+            pinned = case.get("id")
+            target = pinned if isinstance(pinned, int) and not isinstance(pinned, bool) else None
         action_holder["value"] = {
             "type": "confirm_diagnosis",
-            "diagnosis": parsed["diagnosis"],
-            **(
-                {"case_id": parsed["case_id"]}
-                if parsed.get("case_id") is not None
-                else {}
-            ),
+            "diagnosis": proposal[:200],
+            **({"case_id": target} if target is not None else {}),
         }
         return {
             "prepared": True,
-            "diagnosis": parsed["diagnosis"],
+            "diagnosis": proposal[:200],
             "instruction": "Ask the player to review and press the confirmation button.",
         }
 
@@ -706,7 +871,7 @@ async def run_ward_agent(
         def execute(name: str, arguments: dict[str, Any]):
             return _execute_paws_tool(
                 name, arguments, case, state, action_holder, question,
-                parsed_final,
+                parsed_final, open_cases, history,
             )
     else:
         raise ValueError(f"unsupported ward agent role: {role}")
@@ -753,12 +918,17 @@ async def run_ward_agent(
     if role == "clerk" and not action_holder.get("value"):
         state = contest_state or {"state": "unavailable"}
         if parsed_final and state.get("state") == "eligible":
+            fallback_target = parsed_final.get("case_id")
+            if fallback_target is None:
+                pinned = case.get("id")
+                if isinstance(pinned, int) and not isinstance(pinned, bool):
+                    fallback_target = pinned
             action_holder["value"] = {
                 "type": "confirm_diagnosis",
                 "diagnosis": parsed_final["diagnosis"],
                 **(
-                    {"case_id": parsed_final["case_id"]}
-                    if parsed_final.get("case_id") is not None
+                    {"case_id": fallback_target}
+                    if fallback_target is not None
                     else {}
                 ),
             }

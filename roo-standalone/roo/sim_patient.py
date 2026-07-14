@@ -179,6 +179,12 @@ def check_guess(guess: str, case: dict) -> bool:
     guess_clean = re.sub(
         r"^for\s+[a-z'’.-]{2,30}\s+(?:is\s+)?", "", guess_clean,
     ).strip()
+    guess_clean = re.sub(
+        r"\s+(?:as|is)?\s*(?:my\s+|the\s+)?(?:one\s+)?(?:official\s+|final\s+)+"
+        r"(?:diagnosis|answer|guess)\s*$",
+        "",
+        guess_clean,
+    ).strip()
     # Coerce defensively: a malformed case (null/non-string values) must not
     # crash the whole turn.
     acceptable = [str(a).lower() for a in (case.get("acceptable_answers") or [])]
@@ -328,51 +334,22 @@ _DIAGNOSIS_NEUTRAL_REPLY = {
         "That's your call, doc. Nurse Paws handles final diagnoses — tell me "
         "which investigation result you need."
     ),
-    "clerk_tentative": (
-        "I can't confirm or rule out a theory, doc. When you've decided, tell "
-        "me your final diagnosis explicitly."
-    ),
-    "clerk_final_eligible": (
-        "I've written down the final diagnosis you chose. Review it, then press "
-        "the confirmation button if you're sure."
-    ),
-    "clerk_final_closed": (
-        "The diagnosis book is already closed for this case, doc."
-    ),
-    "clerk_final_unavailable": (
-        "I can't open the diagnosis book right now, doc. Please try again shortly."
-    ),
 }
 
 
-def _diagnosis_neutral_reply(
-    *,
-    role: str,
-    is_theory: bool,
-    is_explicit_final: bool,
-    contest_state: Optional[dict[str, Any]],
-) -> Optional[str]:
-    """Return a model-independent reply for any diagnosis-theory path.
+def _diagnosis_neutral_reply(*, role: str, is_theory: bool) -> Optional[str]:
+    """Return a model-independent reply for a bedside diagnosis-theory turn.
 
-    The choice depends only on the raw request classification and the supplied
-    contest state. It deliberately does not inspect the case, the model output,
-    or whether the player's theory is correct.
+    Patient and nurse theory turns stay scripted (in character, and those
+    personas must never engage with a diagnosis at all). Nurse Paws' replies
+    are AI-authored: answer-independence there rests on the model never
+    knowing the hidden diagnosis plus the output leakage guard, and the
+    recorded guess text is validated separately from anything the model says.
     """
     if role == "patient" and is_theory:
         return _DIAGNOSIS_NEUTRAL_REPLY["patient"]
     if role == "nurse" and is_theory:
         return _DIAGNOSIS_NEUTRAL_REPLY["nurse"]
-    if role != "clerk":
-        return None
-    if is_explicit_final:
-        state = str((contest_state or {}).get("state") or "unavailable")
-        if state == "eligible":
-            return _DIAGNOSIS_NEUTRAL_REPLY["clerk_final_eligible"]
-        if state in {"locked", "awaiting_redemption", "completed"}:
-            return _DIAGNOSIS_NEUTRAL_REPLY["clerk_final_closed"]
-        return _DIAGNOSIS_NEUTRAL_REPLY["clerk_final_unavailable"]
-    if is_theory:
-        return _DIAGNOSIS_NEUTRAL_REPLY["clerk_tentative"]
     return None
 
 
@@ -788,6 +765,17 @@ def _reply_leaks_diagnosis(reply: str, case: dict) -> bool:
     return bool(_leaked_diagnosis_terms(reply, case))
 
 
+def _term_in_player_text(term: str, player_texts: tuple[str, ...]) -> bool:
+    term_words, term_compact = _guard_normalized(term)
+    for text in player_texts:
+        text_words, text_compact = _guard_normalized(text)
+        if _guard_phrase_present(text_words, term_words):
+            return True
+        if len(term_compact) >= 6 and term_compact in text_compact:
+            return True
+    return False
+
+
 def _guard_phrase_present(haystack_words: str, needle_words: str) -> bool:
     return bool(
         needle_words
@@ -795,11 +783,21 @@ def _guard_phrase_present(haystack_words: str, needle_words: str) -> bool:
     )
 
 
-def _leaked_diagnosis_terms(reply: str, case: dict) -> list[str]:
-    """Return authored answer terms present in output, including short aliases."""
+def _leaked_diagnosis_terms(
+    reply: str, case: dict, player_texts: tuple[str, ...] = (),
+) -> list[str]:
+    """Return authored answer terms present in output, including short aliases.
+
+    Terms the PLAYER has already typed (player_texts) are exempt: echoing the
+    player's own words back reveals nothing they don't know — and scrubbing
+    only-correct terms would itself become a correctness oracle (the reply
+    style would flip exactly when the player names a right answer).
+    """
     reply_words, reply_compact = _guard_normalized(reply)
     leaked: list[str] = []
     for term in _diagnosis_terms(case):
+        if player_texts and _term_in_player_text(term, player_texts):
+            continue
         term_words, term_compact = _guard_normalized(term)
         complete_phrase = _guard_phrase_present(reply_words, term_words)
         obfuscated_long_form = bool(
@@ -950,7 +948,6 @@ async def handle_question(
     is_nurse = role == "nurse"
     is_clerk = role == "clerk"
     is_theory = looks_like_diagnosis_guess(question)
-    is_explicit_final = False
 
     extra_instruction = ""
     is_guess = False
@@ -976,13 +973,9 @@ async def handle_question(
     tool_calls: list[dict[str, Any]] = []
     suggested_action = None
     if is_nurse or is_clerk:
-        from .ward_agents import parse_final_diagnosis, run_ward_agent
+        from .ward_agents import run_ward_agent
 
         open_cases = _open_cases_for_targeting(case)
-        is_explicit_final = (
-            parse_final_diagnosis(question, open_cases, history) is not None
-        )
-
         agent_result = await run_ward_agent(
             role=role,
             question=question,
@@ -1024,12 +1017,7 @@ async def handle_question(
         else (case.get("patient") or {}).get("name")
     )
     speaker_names = tuple(n for n in (display_name, NURSE_NAME, CLERK_NAME) if n)
-    fixed_reply = _diagnosis_neutral_reply(
-        role=role,
-        is_theory=is_theory,
-        is_explicit_final=is_explicit_final,
-        contest_state=contest_state,
-    )
+    fixed_reply = _diagnosis_neutral_reply(role=role, is_theory=is_theory)
     if fixed_reply is not None:
         reply = fixed_reply
     else:
@@ -1037,11 +1025,20 @@ async def handle_question(
         if not reply:
             reply = _EMPTY_REPLY_FALLBACK[role]
 
-    # Hidden answer terms are never permitted in model-authored speech, including
-    # Paws' pre-confirmation turn. The separately validated suggested_action can
-    # carry exactly what the player typed without letting the model choose among
-    # multiple candidates and accidentally become a correctness oracle.
-    leaked_terms = _leaked_diagnosis_terms(reply, case)
+    # Hidden answer terms are never permitted in model-authored speech UNLESS
+    # the player already typed them (echoing their own words back is not a
+    # leak, and selective scrubbing would itself signal correctness). The
+    # separately validated suggested_action carries exactly what the player
+    # typed either way.
+    player_texts = (
+        question,
+        *(
+            str(turn.get("text") or "")
+            for turn in history
+            if isinstance(turn, dict) and turn.get("role") == "player"
+        ),
+    )
+    leaked_terms = _leaked_diagnosis_terms(reply, case, player_texts)
     if leaked_terms:
         print(
             "⚠️ sim-patient output leakage guard "

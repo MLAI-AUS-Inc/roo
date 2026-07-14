@@ -41,6 +41,11 @@ OPEN_CASES = [SASH, LEILA]
     ("my final diagnosis is crohns disease for leila", "crohns disease", 2),
     # Typo in the name still resolves (fuzzy ≥ 0.8).
     ("my final diagnosis for leela is crohns disease", "crohns disease", 2),
+    # The 2026-07-14 second burn: trailing declaration frames must be shaved.
+    ("submit addisonian crisis as final diagnosis for sash", "addisonian crisis", 1),
+    ("lock in crohns disease as my final answer", "crohns disease", None),
+    # Same-message anaphora: the declaration's antecedent is one sentence back.
+    ("I think sash has addisonian crisis. submit that", "addisonian crisis", 1),
 ])
 def test_final_declarations_parse_clean(question, diagnosis, case_id):
     parsed = parse_final_diagnosis(question, OPEN_CASES)
@@ -110,7 +115,8 @@ def test_check_guess_ignores_historical_target_pollution():
         "diagnosis": "Adrenal Crisis",
         "acceptable_answers": ["adrenal crisis", "addisonian crisis"],
     }
-    # The exact burnt string from prod — must now match.
+    # The exact burnt strings from prod — both pollution shapes must match.
     assert check_guess("for sash is addisonian crisis", case) is True
+    assert check_guess("addisonian crisis as final diagnosis", case) is True
     assert check_guess("addisonian crisis", case) is True
     assert check_guess("gastroenteritis", case) is False

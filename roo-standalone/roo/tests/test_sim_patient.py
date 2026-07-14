@@ -492,6 +492,7 @@ def test_nurse_paws_prepares_but_never_submits_final_guess(monkeypatch):
     assert result["suggested_action"] == {
         "type": "confirm_diagnosis",
         "diagnosis": "adrenal crisis",
+        "case_id": 1,
     }
     assert fake.tool_results[0]["prepared"] is True
     assert result["correct"] is None
@@ -522,6 +523,114 @@ def test_nurse_paws_resolves_named_patient_into_case_target(monkeypatch):
     }
     assert fake.tool_results[0]["prepared"] is True
     assert fake.tool_results[0]["diagnosis"] == "crohns disease"
+
+
+def test_clerk_model_extraction_is_grounded_and_trimmed(monkeypatch):
+    # The 2026-07-14 second burn: the model judges INTENT ("submit that"),
+    # grounding forces the recorded text to be the player's own words, and the
+    # frame trim keeps declaration vocabulary out of the guess.
+    fake = _install_fake(
+        monkeypatch,
+        "{}",
+        reply_text="It's on the button below when you're ready, doc.",
+        agent_tool=("prepare_final_guess", {
+            "diagnosis": "addisonian crisis as final diagnosis",
+            "patient": "sash",
+        }),
+    )
+    result = _run(sim_patient.handle_question(
+        "I think sash has Addisonian crisis. submit that",
+        role="clerk",
+        contest_state=_ELIGIBLE,
+    ))
+    assert result["suggested_action"] == {
+        "type": "confirm_diagnosis",
+        "diagnosis": "addisonian crisis",
+        "case_id": 1,
+    }
+    assert fake.tool_results[0]["prepared"] is True
+
+
+def test_clerk_model_cannot_invent_a_diagnosis(monkeypatch):
+    # A proposal the player never typed (and no parsable declaration in the
+    # message) must never arm the confirmation.
+    fake = _install_fake(
+        monkeypatch,
+        "{}",
+        reply_text="Tell me the diagnosis in your own words first, doc.",
+        agent_tool=("prepare_final_guess", {"diagnosis": "lupus", "patient": ""}),
+    )
+    result = _run(sim_patient.handle_question(
+        "go ahead and put it in the book",
+        role="clerk",
+        contest_state=_ELIGIBLE,
+    ))
+    assert result["suggested_action"] is None
+    assert fake.tool_results[0]["prepared"] is False
+
+
+def test_clerk_grounding_reaches_recent_player_history(monkeypatch):
+    # "submit that" with the actual diagnosis two turns back: the model
+    # resolves the anaphor; grounding verifies it against player history.
+    fake = _install_fake(
+        monkeypatch,
+        "{}",
+        reply_text="Check the button below, doc.",
+        agent_tool=("prepare_final_guess", {
+            "diagnosis": "methemoglobinemia",
+            "patient": "",
+        }),
+    )
+    result = _run(sim_patient.handle_question(
+        "submit that",
+        role="clerk",
+        history=[
+            {"role": "player", "text": "i reckon it's methemoglobinemia"},
+            {"role": "patient", "text": "That is your call to make, doc."},
+        ],
+        contest_state=_ELIGIBLE,
+    ))
+    assert result["suggested_action"] == {
+        "type": "confirm_diagnosis",
+        "diagnosis": "methemoglobinemia",
+        "case_id": 1,
+    }
+    assert fake.tool_results[0]["prepared"] is True
+
+
+def test_clerk_tentative_question_never_arms_even_via_the_tool(monkeypatch):
+    # Defense in depth: if the model calls the tool for an obvious question,
+    # the executor still declines.
+    fake = _install_fake(
+        monkeypatch,
+        "{}",
+        reply_text="I can't confirm theories, doc — but you can lock it in any time.",
+        agent_tool=("prepare_final_guess", {
+            "diagnosis": "adrenal crisis",
+            "patient": "sash",
+        }),
+    )
+    result = _run(sim_patient.handle_question(
+        "Could it be adrenal crisis?",
+        role="clerk",
+        contest_state=_ELIGIBLE,
+    ))
+    assert result["suggested_action"] is None
+    assert fake.tool_results[0]["prepared"] is False
+
+
+def test_clerk_theory_reply_is_model_authored(monkeypatch):
+    # The frustrating fixed deflection is gone: Paws' own coaching words reach
+    # the player (scrubbed only by the echo-aware leakage guard).
+    coaching = "Happy to hear theories, doc — say submit gastritis for Leila to make it official."
+    _install_fake(monkeypatch, "{}", reply_text=coaching)
+    result = _run(sim_patient.handle_question(
+        "i guess leila has gastritis",
+        role="clerk",
+        contest_state=_ELIGIBLE,
+    ))
+    assert result["reply"] == coaching
+    assert result["suggested_action"] is None
 
 
 def test_nurse_paws_cannot_prepare_when_contest_is_locked(monkeypatch):
@@ -594,6 +703,7 @@ def test_clerk_http_role_forwards_contest_state(monkeypatch):
     assert response.json()["suggested_action"] == {
         "type": "confirm_diagnosis",
         "diagnosis": "adrenal crisis",
+        "case_id": 1,
     }
 
 
@@ -822,6 +932,7 @@ def test_clerk_final_answer_action_is_deterministically_derived_from_raw_text(mo
     assert result["suggested_action"] == {
         "type": "confirm_diagnosis",
         "diagnosis": "adrenal crisis",
+        "case_id": 1,
     }
     assert result["reply"]
 
@@ -838,20 +949,28 @@ def test_clerk_final_echo_cannot_leak_a_different_diagnosis(monkeypatch):
         contest_state=_ELIGIBLE,
     ))
     assert result["suggested_action"]["diagnosis"] == "appendicitis"
-    assert result["reply"] == sim_patient._DIAGNOSIS_NEUTRAL_REPLY["clerk_final_eligible"]
+    # The model volunteered a hidden answer term the player never typed —
+    # the output guard scrubs it.
+    assert result["reply"] == sim_patient._LEAK_GUARD_FALLBACK["clerk"]
 
 
-def test_clerk_model_never_echoes_even_player_supplied_hidden_final_term(monkeypatch):
+def test_clerk_may_echo_terms_the_player_already_typed(monkeypatch):
+    # Echoing the player's own words reveals nothing they don't know — and
+    # scrubbing ONLY correct player-typed terms would itself be a correctness
+    # oracle (the reply style would flip exactly on right answers).
     _install_fake(monkeypatch, "{}", reply_text="Adrenal crisis.")
     result = _run(sim_patient.handle_question(
         "My final diagnosis is adrenal crisis",
         role="clerk",
         contest_state=_ELIGIBLE,
     ))
-    assert result["reply"] == sim_patient._DIAGNOSIS_NEUTRAL_REPLY["clerk_final_eligible"]
+    assert result["reply"] == "Adrenal crisis."
 
 
 def test_clerk_multi_diagnosis_final_cannot_become_a_correctness_oracle(monkeypatch):
+    # Both candidates are the player's own words: the recorded guess keeps
+    # BOTH (never the model's pick), and echoing either is uncorrelated with
+    # correctness because the model does not know the answer.
     _install_fake(monkeypatch, "{}", reply_text="Adrenal crisis.")
     result = _run(sim_patient.handle_question(
         "My final diagnosis is appendicitis or adrenal crisis",
@@ -861,15 +980,18 @@ def test_clerk_multi_diagnosis_final_cannot_become_a_correctness_oracle(monkeypa
     assert result["suggested_action"] == {
         "type": "confirm_diagnosis",
         "diagnosis": "appendicitis or adrenal crisis",
+        "case_id": 1,
     }
-    assert result["reply"] == sim_patient._DIAGNOSIS_NEUTRAL_REPLY["clerk_final_eligible"]
+    assert result["reply"] == "Adrenal crisis."
 
 
 def test_theory_replies_are_identical_for_correct_and_incorrect_candidates(monkeypatch):
+    # Clerk theory replies are AI-authored now: their answer-independence
+    # rests on the model never seeing the answer (payload-secrecy tests) and
+    # the echo-aware leakage guard, not on a fixed string.
     pairs = [
         ("patient", "is it adrenal crisis?", "is it appendicitis?", None),
         ("nurse", "could it be adrenal crisis?", "could it be appendicitis?", None),
-        ("clerk", "could it be adrenal crisis?", "could it be appendicitis?", _ELIGIBLE),
     ]
     for role, correct_text, incorrect_text, state in pairs:
         correct_fake = _install_fake(
@@ -897,10 +1019,11 @@ def test_theory_replies_are_identical_for_correct_and_incorrect_candidates(monke
 
 
 def test_transform_replies_are_identical_for_correct_and_incorrect_terms(monkeypatch):
+    # Clerk omitted: both terms are player-typed, so echoing either is
+    # permitted and symmetric (see the echo-aware guard tests).
     for role, state in (
         ("patient", None),
         ("nurse", None),
-        ("clerk", _ELIGIBLE),
     ):
         correct_fake = _install_fake(
             monkeypatch, "{}", reply_text="Adrenal crisis."
@@ -949,12 +1072,13 @@ def test_sash_theory_reply_is_answer_independent_for_every_case(monkeypatch):
         assert len(correct_fake.calls) == len(incorrect_fake.calls) == 1
 
 
-def test_paws_final_reply_is_identical_for_correct_and_incorrect_candidates(monkeypatch):
-    replies = []
+def test_paws_final_action_is_player_derived_regardless_of_model_reply(monkeypatch):
+    # Whatever the model says, the RECORDED guess text comes only from the
+    # player's words: an opinionated reply can never alter the submission.
     actions = []
     for question, model_reply in (
-        ("My final diagnosis is adrenal crisis", "Perfect, that's correct."),
-        ("My final diagnosis is appendicitis", "No, that's incorrect."),
+        ("My final diagnosis is adrenal crisis", "Noted — press the button."),
+        ("My final diagnosis is appendicitis", "All set. Confirm below."),
     ):
         fake = _install_fake(monkeypatch, "{}", reply_text=model_reply)
         result = _run(sim_patient.handle_question(
@@ -962,14 +1086,12 @@ def test_paws_final_reply_is_identical_for_correct_and_incorrect_candidates(monk
             role="clerk",
             contest_state=_ELIGIBLE,
         ))
-        replies.append(result["reply"])
         actions.append(result["suggested_action"])
         assert len(fake.agent_calls) == 1
 
-    assert replies[0] == replies[1]
     assert actions == [
-        {"type": "confirm_diagnosis", "diagnosis": "adrenal crisis"},
-        {"type": "confirm_diagnosis", "diagnosis": "appendicitis"},
+        {"type": "confirm_diagnosis", "diagnosis": "adrenal crisis", "case_id": 1},
+        {"type": "confirm_diagnosis", "diagnosis": "appendicitis", "case_id": 1},
     ]
 
 
@@ -1075,9 +1197,14 @@ def test_clerk_unknown_or_missing_contest_state_fails_closed(monkeypatch):
 
 
 def test_clerk_system_prompt_contract():
-    assert "spoken words" in ward_agents.NURSE_PAWS_PROMPT.lower()
-    assert "must never say whether" in ward_agents.NURSE_PAWS_PROMPT.lower()
-    assert "prepare_final_guess only" in ward_agents.NURSE_PAWS_PROMPT
+    prompt = ward_agents.NURSE_PAWS_PROMPT
+    assert "spoken words" in prompt.lower()
+    assert "must never say or hint whether" in prompt.lower()
+    assert "do not know the hidden diagnosis" in prompt.lower()
+    # The coaching template players are told to use, verbatim.
+    assert "submit <their diagnosis> for <patient name>" in prompt
+    assert "never repeat your previous reply" in prompt.lower()
+    assert "patient argument" in prompt.lower()
 
 
 def test_endpoint_accepts_clerk_role_and_passes_contest_state(monkeypatch):
