@@ -167,6 +167,41 @@ async def test_get_coworking_report_uses_canonical_endpoint(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_book_coworking_many_uses_canonical_endpoint_and_deduped_payload(monkeypatch):
+    captured = {}
+
+    async def fake_request(method, endpoint, **kwargs):
+        captured["method"] = method
+        captured["endpoint"] = endpoint
+        captured["json"] = kwargs["json"]
+        request = httpx.Request(method, f"https://backend.test{endpoint}")
+        return httpx.Response(201, request=request, json={"created_count": 2, "results": []})
+
+    client = MLAIBackendClient(
+        base_url="https://backend.test",
+        api_key="roo-api-key",
+        internal_api_key="roo-api-key",
+    )
+    monkeypatch.setattr(client, "_request", fake_request)
+
+    result = await client.book_coworking_many(
+        admin_slack_user_id="<@UADMIN>",
+        target_slack_user_ids=["<@U1>", "U2", "<@U1>"],
+        booking_date="2026-07-04",
+        slack_channel_id="C123",
+    )
+
+    assert result == {"created_count": 2, "results": []}
+    assert captured["method"] == "POST"
+    assert captured["endpoint"] == "/api/v1/points/coworking/book-many/"
+    assert captured["json"]["admin_slack_user_id"] == "UADMIN"
+    assert captured["json"]["target_slack_user_ids"] == ["U1", "U2"]
+    assert captured["json"]["date"] == "2026-07-04"
+    assert captured["json"]["slack_channel_id"] == "C123"
+    assert captured["json"]["current_time"]
+
+
+@pytest.mark.asyncio
 async def test_get_data_catalog_uses_canonical_endpoint(monkeypatch):
     captured = {}
 
