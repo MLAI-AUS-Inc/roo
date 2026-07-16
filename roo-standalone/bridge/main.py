@@ -9,6 +9,7 @@ inbound queue and posts into the destination workspace.
 No inbound webhooks; runs as its own process on the droplet, independent of Roo.
 A minimal FastAPI app exposes GET /healthz for nginx/monitoring.
 """
+
 import asyncio
 from contextlib import asynccontextmanager, suppress
 from typing import List
@@ -21,6 +22,33 @@ from .poller import channel_poll_loop, delivery_loop, poll_error_backoff
 from .relay import Relay, ResolvedPair
 from .slack import make_bot_client, resolve_channel_id, resolve_identity
 from .store import get_store
+
+
+async def _refresh_identity_directories(identity, workspace_clients) -> None:
+    """Refresh each unique workspace without blocking message delivery."""
+    for team, client in workspace_clients.items():
+        try:
+            directory = await asyncio.to_thread(
+                identity.refresh_workspace, client, team
+            )
+            print(
+                f"👥 identity directory {team}: {len(directory.by_id)} active users, "
+                f"{directory.email_count} with email"
+            )
+        except Exception as e:
+            # Existing directories remain in place after a failed refresh. If
+            # this is the first load, mention rendering safely falls back to
+            # inert text until a later refresh succeeds.
+            print(f"⚠️ identity directory refresh failed for {team}: {e}")
+
+
+async def _identity_refresh_loop(
+    identity, workspace_clients, refresh_seconds: float
+) -> None:
+    interval = max(60.0, float(refresh_seconds))
+    while True:
+        await asyncio.sleep(interval)
+        await _refresh_identity_directories(identity, workspace_clients)
 
 
 @asynccontextmanager
@@ -36,7 +64,9 @@ async def lifespan(app: FastAPI):
         me = resolve_identity(mlai_client)
         settings.MLAI_BOT_USER_ID = settings.MLAI_BOT_USER_ID or me["user_id"]
         settings.MLAI_TEAM_ID = settings.MLAI_TEAM_ID or me["team_id"]
-        print(f"   MLAI hub: bot {settings.MLAI_BOT_USER_ID} @ team {settings.MLAI_TEAM_ID}")
+        print(
+            f"   MLAI hub: bot {settings.MLAI_BOT_USER_ID} @ team {settings.MLAI_TEAM_ID}"
+        )
     except Exception as e:
         print(f"❌ MLAI bot auth.test failed — check MLAI_BOT_TOKEN: {e}")
         raise
@@ -58,47 +88,121 @@ async def lifespan(app: FastAPI):
         mlai_ch = resolve_channel_id(mlai_client, pair.mlai_channel)
         remote_ch = resolve_channel_id(remote_client, pair.remote_channel)
         if not mlai_ch:
-            print(f"⚠️ pair {pair.label!r}: MLAI channel {pair.mlai_channel!r} not found "
-                  f"(create it + invite the bot, then restart) — skipping")
+            print(
+                f"⚠️ pair {pair.label!r}: MLAI channel {pair.mlai_channel!r} not found "
+                f"(create it + invite the bot, then restart) — skipping"
+            )
             continue
         if not remote_ch:
-            print(f"⚠️ pair {pair.label!r}: partner channel {pair.remote_channel!r} not found "
-                  f"(invite the bot there, then restart) — skipping")
+            print(
+                f"⚠️ pair {pair.label!r}: partner channel {pair.remote_channel!r} not found "
+                f"(invite the bot there, then restart) — skipping"
+            )
             continue
 
-        resolved.append(ResolvedPair(pair.label, remote_client, remote_team, mlai_ch, remote_ch, who["user_id"]))
-        poll_specs.append((f"MLAI#{pair.label}", mlai_client, mlai_ch, settings.MLAI_TEAM_ID, pair.label, False))
-        poll_specs.append((f"{pair.label}#remote", remote_client, remote_ch, remote_team, pair.label, True))
-        print(f"   pair {pair.label!r}: MLAI {mlai_ch} <-> {remote_team}/{remote_ch}")
+        mention_alias = (pair.mention_alias or "").strip() or pair.label
+        resolved.append(
+            ResolvedPair(
+                pair.label,
+                remote_client,
+                remote_team,
+                mlai_ch,
+                remote_ch,
+                who["user_id"],
+                mention_alias,
+                dict(pair.user_map),
+            )
+        )
+        poll_specs.append(
+            (
+                f"MLAI#{pair.label}",
+                mlai_client,
+                mlai_ch,
+                settings.MLAI_TEAM_ID,
+                pair.label,
+                False,
+            )
+        )
+        poll_specs.append(
+            (
+                f"{pair.label}#remote",
+                remote_client,
+                remote_ch,
+                remote_team,
+                pair.label,
+                True,
+            )
+        )
+        print(
+            f"   pair {pair.label!r}: MLAI {mlai_ch} <-> {remote_team}/{remote_ch} "
+            f"(mentions @{mention_alias}:handle)"
+        )
 
     if not resolved:
-        print("⚠️ no usable pairs — bridge is idle until BRIDGE_PAIRS is configured + channels exist")
+        print(
+            "⚠️ no usable pairs — bridge is idle until BRIDGE_PAIRS is configured + channels exist"
+        )
+
+    workspace_clients = {settings.MLAI_TEAM_ID or "": mlai_client}
+    workspace_clients.update(
+        {pair.remote_team: pair.remote_client for pair in resolved}
+    )
+    if settings.BRIDGE_MENTION_MODE != "plain":
+        await _refresh_identity_directories(identity, workspace_clients)
 
     relay = Relay(
-        settings=settings, store=store, identity=identity,
-        mlai_client=mlai_client, pairs=resolved,
+        settings=settings,
+        store=store,
+        identity=identity,
+        mlai_client=mlai_client,
+        pairs=resolved,
     )
     app.state.ready = True
+    app.state.identity = identity
+    app.state.mention_mode = settings.BRIDGE_MENTION_MODE
 
     tasks: List[asyncio.Task] = []
     for display, client, channel_id, team, label, to_mlai in poll_specs:
         tasks.append(
             asyncio.create_task(
                 channel_poll_loop(
-                    label=f"📥 {display}", client=client, channel_id=channel_id,
+                    label=f"📥 {display}",
+                    client=client,
+                    channel_id=channel_id,
                     hwm_key=f"hwm:{team}:{channel_id}",
-                    handler=(lambda msg, _l=label, _t=to_mlai: relay.capture(_l, _t, msg)),
-                    store=store, poll_seconds=settings.POLL_SECONDS,
+                    handler=(
+                        lambda msg, _l=label, _t=to_mlai: relay.capture(_l, _t, msg)
+                    ),
+                    store=store,
+                    poll_seconds=settings.POLL_SECONDS,
                     thread_sweep_seconds=settings.THREAD_SWEEP_SECONDS,
-                    on_error=(lambda e, _n=display: poll_error_backoff(e, label=_n, relay=relay)),
+                    on_error=(
+                        lambda e, _n=display: poll_error_backoff(
+                            e, label=_n, relay=relay
+                        )
+                    ),
                 )
             )
         )
     tasks.append(
         asyncio.create_task(
-            delivery_loop(relay=relay, store=store, poll_seconds=settings.BRIDGE_DELIVERY_POLL_SECONDS)
+            delivery_loop(
+                relay=relay,
+                store=store,
+                poll_seconds=settings.BRIDGE_DELIVERY_POLL_SECONDS,
+            )
         )
     )
+    if settings.BRIDGE_MENTION_MODE != "plain":
+        tasks.append(
+            asyncio.create_task(
+                _identity_refresh_loop(
+                    identity,
+                    workspace_clients,
+                    settings.BRIDGE_IDENTITY_REFRESH_SECONDS,
+                )
+            )
+        )
 
     try:
         yield
@@ -111,9 +215,16 @@ async def lifespan(app: FastAPI):
         print("🌉 Slack bridge shutting down...")
 
 
-app = FastAPI(title="Slack Cross-Org Bridge", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="Slack Cross-Org Bridge", version="0.2.0", lifespan=lifespan)
 
 
 @app.get("/healthz")
 async def healthz():
-    return {"status": "ok" if getattr(app.state, "ready", False) else "starting"}
+    payload = {
+        "status": "ok" if getattr(app.state, "ready", False) else "starting",
+        "mention_mode": getattr(app.state, "mention_mode", "plain"),
+    }
+    identity = getattr(app.state, "identity", None)
+    if identity is not None:
+        payload["identity"] = identity.health()
+    return payload

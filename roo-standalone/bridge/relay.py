@@ -19,10 +19,11 @@ Loop prevention is authoritative via the posted_registry, keyed by (team,
 channel, ts) so it works across all pairs. Edits/deletes are not mirrored in
 poll mode. See SLACK_BRIDGE_PLAN.md.
 """
+
 import json
 import time
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -32,7 +33,14 @@ from .identity import IdentityResolver
 from .slack import is_auth_error
 from .store import BridgeStore
 
-_RELAYABLE_SUBTYPES = {None, "", "bot_message", "file_share", "thread_broadcast", "me_message"}
+_RELAYABLE_SUBTYPES = {
+    None,
+    "",
+    "bot_message",
+    "file_share",
+    "thread_broadcast",
+    "me_message",
+}
 
 
 @dataclass
@@ -44,7 +52,25 @@ class ResolvedPair:
     remote_team: str
     mlai_channel_id: str
     remote_channel_id: str
-    remote_bot_user_id: str = ""  # the bridge bot's own user id in the partner workspace
+    # The bridge bot's own user id in the partner workspace.
+    remote_bot_user_id: str = ""
+    mention_alias: str = ""
+    # Direction is MLAI user id -> remote user id. The reverse direction is
+    # derived while dropping ambiguous duplicate destination ids.
+    user_map: Dict[str, str] = field(default_factory=dict)
+
+    def reverse_user_map(self) -> Dict[str, str]:
+        result: Dict[str, str] = {}
+        ambiguous = set()
+        for mlai_id, remote_id in self.user_map.items():
+            if remote_id in ambiguous:
+                continue
+            if remote_id in result and result[remote_id] != mlai_id:
+                result.pop(remote_id, None)
+                ambiguous.add(remote_id)
+            else:
+                result[remote_id] = mlai_id
+        return result
 
 
 class Relay:
@@ -97,7 +123,9 @@ class Relay:
             return
         if msg.get("bot_id") and not self.s.BRIDGE_RELAY_BOT_MESSAGES:
             return
-        if self.store.enqueue_inbound(direction, src_team, src_channel, ts, json.dumps(msg)):
+        if self.store.enqueue_inbound(
+            direction, src_team, src_channel, ts, json.dumps(msg)
+        ):
             print(f"📥 captured {direction} {ts}")
 
     # ========================================================================
@@ -118,21 +146,54 @@ class Relay:
             return
 
         if way == "to_mlai":
-            src_client, src_team, src_channel = pair.remote_client, pair.remote_team, pair.remote_channel_id
-            dst_client, dst_team, dst_channel = self.mlai, self.s.MLAI_TEAM_ID or "", pair.mlai_channel_id
+            src_client, src_team, src_channel = (
+                pair.remote_client,
+                pair.remote_team,
+                pair.remote_channel_id,
+            )
+            dst_client, dst_team, dst_channel = (
+                self.mlai,
+                self.s.MLAI_TEAM_ID or "",
+                pair.mlai_channel_id,
+            )
+            src_alias, dst_alias = pair.mention_alias, self.s.MLAI_MENTION_ALIAS
+            user_map = pair.reverse_user_map()
             arrow = f"⬅️  {label}→MLAI"
         else:
-            src_client, src_team, src_channel = self.mlai, self.s.MLAI_TEAM_ID or "", pair.mlai_channel_id
-            dst_client, dst_team, dst_channel = pair.remote_client, pair.remote_team, pair.remote_channel_id
+            src_client, src_team, src_channel = (
+                self.mlai,
+                self.s.MLAI_TEAM_ID or "",
+                pair.mlai_channel_id,
+            )
+            dst_client, dst_team, dst_channel = (
+                pair.remote_client,
+                pair.remote_team,
+                pair.remote_channel_id,
+            )
+            src_alias, dst_alias = self.s.MLAI_MENTION_ALIAS, pair.mention_alias
+            user_map = pair.user_map
             arrow = f"➡️  MLAI→{label}"
 
         # Circuit breaker — leave the row pending and try again shortly.
         if not self._allow_post():
-            self.store.mark_retry(row["id"], "circuit breaker", time.time() + 5, row["attempt_count"])
+            self.store.mark_retry(
+                row["id"], "circuit breaker", time.time() + 5, row["attempt_count"]
+            )
             return
 
         try:
-            dst_ts = self._post(src_client, src_team, src_channel, dst_client, dst_channel, msg)
+            dst_ts = self._post(
+                src_client,
+                src_team,
+                src_channel,
+                dst_client,
+                dst_channel,
+                msg,
+                dst_team=dst_team,
+                src_alias=src_alias,
+                dst_alias=dst_alias,
+                user_map=user_map,
+            )
         except Exception as e:
             print(f"❌ post {arrow} error: {e}")
             self._fail_or_retry(row, e)
@@ -143,19 +204,36 @@ class Relay:
             return
 
         self.store.record_posted(dst_team, dst_channel, dst_ts)
-        self.store.map_message(src_team, src_channel, msg["ts"], dst_team, dst_channel, dst_ts)
+        self.store.map_message(
+            src_team, src_channel, msg["ts"], dst_team, dst_channel, dst_ts
+        )
         self.store.mark_delivered(row["id"])
         print(f"{arrow} delivered {msg['ts']} → {dst_ts}")
 
         if self.s.BRIDGE_RELAY_FILES and msg.get("files"):
             dst_thread_ts = self._dst_thread_ts(src_team, src_channel, msg)
             self._relay_files(
-                src_client=src_client, files=msg["files"],
-                dst_client=dst_client, dst_channel=dst_channel,
+                src_client=src_client,
+                files=msg["files"],
+                dst_client=dst_client,
+                dst_channel=dst_channel,
                 dst_thread_ts=dst_thread_ts or dst_ts,
             )
 
-    def _post(self, src_client, src_team, src_channel, dst_client, dst_channel, msg) -> Optional[str]:
+    def _post(
+        self,
+        src_client,
+        src_team,
+        src_channel,
+        dst_client,
+        dst_channel,
+        msg,
+        *,
+        dst_team: str,
+        src_alias: str,
+        dst_alias: str,
+        user_map: Dict[str, str],
+    ) -> Optional[str]:
         """Render + post one message. Returns the destination ts, or None."""
         if msg.get("bot_id"):
             name = self._bot_name(msg)
@@ -165,7 +243,16 @@ class Relay:
             name = self.identity.display_name(src_client, author_id, src_team)
             avatar = self.identity.avatar(src_client, author_id, src_team)
 
-        body = self.identity.translate(src_client, msg.get("text", ""), src_team)
+        body = self.identity.translate(
+            src_client,
+            msg.get("text", ""),
+            src_team,
+            dst_team=dst_team,
+            src_alias=src_alias,
+            dst_alias=dst_alias,
+            user_map=user_map,
+            mention_mode=self.s.BRIDGE_MENTION_MODE,
+        )
         dst_thread_ts = self._dst_thread_ts(src_team, src_channel, msg)
 
         kwargs: Dict[str, Any] = {
@@ -189,15 +276,25 @@ class Relay:
         attempt = (row["attempt_count"] or 0) + 1
         if attempt >= self.s.BRIDGE_MAX_DELIVERY_ATTEMPTS:
             self.store.mark_failed(row["id"], str(e))
-            print(f"❌ delivery permanently failed id={row['id']} after {attempt} tries: {e}")
+            print(
+                f"❌ delivery permanently failed id={row['id']} after {attempt} tries: {e}"
+            )
             import asyncio
-            asyncio.create_task(self._alert(f"❌ Bridge gave up on a message after {attempt} tries: {e}"))
+
+            asyncio.create_task(
+                self._alert(
+                    f"❌ Bridge gave up on a message after {attempt} tries: {e}"
+                )
+            )
         else:
-            backoff = min(60.0, float(2 ** attempt))
+            backoff = min(60.0, float(2**attempt))
             self.store.mark_retry(row["id"], str(e), time.time() + backoff, attempt)
-            print(f"⏳ delivery retry id={row['id']} attempt={attempt} in {backoff:.0f}s: {e}")
+            print(
+                f"⏳ delivery retry id={row['id']} attempt={attempt} in {backoff:.0f}s: {e}"
+            )
         if is_auth_error(e):
             import asyncio
+
             asyncio.create_task(self._alert(f"⚠️ Bridge delivery auth error: {e}"))
 
     # ========================================================================
@@ -206,9 +303,15 @@ class Relay:
 
     @staticmethod
     def _bot_name(msg: Dict[str, Any]) -> str:
-        return msg.get("username") or (msg.get("bot_profile", {}) or {}).get("name") or "bot"
+        return (
+            msg.get("username")
+            or (msg.get("bot_profile", {}) or {}).get("name")
+            or "bot"
+        )
 
-    def _dst_thread_ts(self, src_team: str, src_channel: str, msg: Dict[str, Any]) -> Optional[str]:
+    def _dst_thread_ts(
+        self, src_team: str, src_channel: str, msg: Dict[str, Any]
+    ) -> Optional[str]:
         """Map a reply's parent to its counterpart on the destination side.
 
         The parent may have been sent FROM this side (forward map) or RECEIVED on
@@ -232,10 +335,12 @@ class Relay:
                 self._paused = True
                 print("🛑 Bridge circuit breaker tripped — pausing posts")
                 import asyncio
+
                 asyncio.create_task(
                     self._alert(
                         "🛑 Bridge circuit breaker tripped (>%d posts/min) — paused. "
-                        "Messages stay queued; check for a loop and restart." % self.s.BRIDGE_MAX_POSTS_PER_MIN
+                        "Messages stay queued; check for a loop and restart."
+                        % self.s.BRIDGE_MAX_POSTS_PER_MIN
                     )
                 )
             return False
@@ -243,7 +348,9 @@ class Relay:
         self._recent_posts.append(now)
         return True
 
-    def _relay_files(self, *, src_client, files, dst_client, dst_channel, dst_thread_ts) -> None:
+    def _relay_files(
+        self, *, src_client, files, dst_client, dst_channel, dst_thread_ts
+    ) -> None:
         """Best-effort cross-workspace file copy: file URLs are not portable
         between workspaces, so download with the source creds and re-upload."""
         for f in files:

@@ -33,19 +33,56 @@ pairs; a circuit breaker pauses posting if it ever floods.
 ### 1. Bridge app + scopes
 Create one app (or one per workspace — see SLACK_BRIDGE_PLAN.md) with bot scopes
 `channels:history`, `channels:read`, `chat:write`, `chat:write.customize`,
-`users:read`, `files:read`, `files:write` (add `groups:history`, `groups:read`
-for private channels). Install it in MLAI and each partner workspace, and
+`users:read`, `users:read.email`, `files:read`, `files:write` (add
+`groups:history`, `groups:read` for private channels). Install or reinstall it
+in MLAI and each partner workspace after adding the email scope, and
 **invite the bot to every bridged channel** (`/invite @MLAI Bridge`).
 
 ### 2. Configure `.env`
 ```
 MLAI_BOT_TOKEN=xoxb-…               # MLAI install
-BRIDGE_PAIRS=[{"label":"hex","mlai_channel":"exp-victor-ai","remote_token":"xoxb-…","remote_channel":"exp-victor-ai"}]
+BRIDGE_PAIRS=[{"label":"hex","mlai_channel":"exp-victor-ai","remote_token":"xoxb-…","remote_channel":"exp-victor-ai","mention_alias":"hex","user_map":{}}]
+BRIDGE_MENTION_MODE=observe         # plain | observe | native
 ```
 `mlai_channel` / `remote_channel` accept a channel **name** (resolved at startup)
 or an ID. Add a partner workspace by appending another object to the JSON list.
 
-### 3. Run / deploy
+### 3. Cross-workspace mentions
+
+Slack user IDs are workspace-specific, so the bridge maintains an in-memory
+directory for every connected workspace. It maps a native source mention to a
+destination user using:
+
+1. `user_map` (MLAI user ID -> partner user ID), when configured;
+2. an exact case-insensitive email match;
+3. inert `@Name (MLAI)` / `@Name (HEX)` text when no safe match exists.
+
+To notify someone who exists **only** in the other workspace, write a qualified
+plain-text handle:
+
+- In MLAI, `@hex:alice` becomes Alice's native HEX mention.
+- In HEX, `@mlai:sam` becomes Sam's native MLAI mention.
+- Spaces in a unique display name become hyphens, so `Alice Smith` can be
+  addressed as `@hex:alice-smith`. An exact destination member ID also works.
+
+Ambiguous, unknown, deleted, and bot identities are never guessed. Mentions
+inside code or links stay literal, and `@here`, `@channel`, `@everyone`, and
+user groups never fan out across organizations.
+
+Roll out with `BRIDGE_MENTION_MODE=observe`: candidates are counted and logged
+by workspace/user ID, but messages remain inert. Once verified, switch to
+`native`. `plain` retains the legacy no-notification behavior. Directory health
+and aggregate mention counters are included in `GET /healthz`; profile emails
+are neither persisted nor logged.
+
+If the same person uses different emails, add the explicit mapping inside that
+pair:
+
+```json
+"user_map":{"U_MLAI_ID":"U_HEX_ID"}
+```
+
+### 4. Run / deploy
 ```bash
 cd roo-standalone
 docker compose -f docker-compose.bridge.yml up -d --build

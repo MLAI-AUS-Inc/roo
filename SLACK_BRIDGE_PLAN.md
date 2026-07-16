@@ -1,6 +1,6 @@
 # Slack Cross-Org Channel Bridge — Implementation Plan
 
-> **Status (2026-06-21):** Building as a **dedicated "Bridge" Slack app installed in both workspaces** — the symmetric two-bot design (a.k.a. Path A). S&C turned out to allow app installs, so the session-token (Path S), reuse-Roo, and asymmetric-Path-B approaches discussed below are **superseded** and kept only for context. Final shape: one bot token per side, both channels polled, `chat:write.customize` in both directions so every author shows their real name + avatar. Roo is untouched. Code lives in `roo-standalone/bridge/`.
+> **Status (updated 2026-07-16):** Running as a **dedicated "Bridge" Slack app installed in both workspaces** — the symmetric two-bot design (a.k.a. Path A). Both channels are polled and `chat:write.customize` preserves author name/avatar. Destination-aware native mentions are supported through explicit ID overrides, exact email matching, and qualified handles such as `@hex:alice`; unresolved identities remain inert. Roo is untouched. Code lives in `roo-standalone/bridge/`.
 
 **Goal:** Bidirectional sync between one channel in the MLAI Slack workspace (where Roo lives) and one channel in the Stone & Chalk (S&C) Slack workspace, relayed by the existing DigitalOcean droplet. Members of each org read and write entirely from their own workspace.
 
@@ -77,7 +77,7 @@ Sam is the one human with real accounts in both orgs. With his user tokens on bo
 | | App 1: "Bridge" (MLAI) | App 2: "Bridge" (S&C) |
 |---|---|---|
 | Install type | Bot (Sam is admin) | Path A: bot · Path B: Sam's user OAuth only |
-| Bot scopes | `channels:history`, `chat:write`, `chat:write.customize`, `users:read`, `files:read`, `files:write` | Path A: same list |
+| Bot scopes | `channels:history`, `chat:write`, `chat:write.customize`, `users:read`, `users:read.email`, `files:read`, `files:write` | Path A: same list |
 | User scopes (Sam) | `chat:write` (self-puppet, optional) | Path B: `channels:history`, `chat:write`, `users:read`, `files:read`, `files:write` |
 | Event subscriptions | Bot events: `message.channels` | Path A: bot events `message.channels` · Path B: same as *user* events |
 | Request URL | `https://<droplet>/bridge/events/mlai` | `https://<droplet>/bridge/events/snc` |
@@ -153,7 +153,7 @@ CREATE TABLE seen_events (event_id TEXT PRIMARY KEY, seen_at REAL);
    - Author is Sam (either side) and self-puppet enabled → post with his opposite-side user token, no prefix.
    - Path A or into-MLAI → bot post with `username` + `icon_url`.
    - Path B into-S&C → Sam's user token with `*Name:* ` prefix.
-7. **Translate:** rewrite `<@U…>` mentions to plain `@Display Name` (no cross-org pings until puppets exist); leave `:emoji:` as text; map `thread_ts` through `message_map` for replies.
+7. **Translate:** map `<@source-user>` to `<@destination-user>` using manual ID overrides first and exact normalized email second. Resolve qualified destination-only handles such as `@hex:alice`; use labeled inert text when no safe mapping exists. Keep mass mentions inert; map `thread_ts` through `message_map` for replies.
 8. **Post, then record** mapping + registry. On `429`, honor `Retry-After` (volume makes this rare).
 
 ### Files
@@ -194,7 +194,7 @@ Skip in v1. Bot-mirrored reactions collapse attribution (everything from one ide
 
 ## Future upgrades (when wanted)
 
-1. **Puppets in MLAI for S&C regulars** — Sam is MLAI admin, so the full double-puppeting plan applies one-directionally: catch-all email domain, invite + OAuth each puppet, S&C folks appear as real MLAI accounts with working mentions. The fallback-first design means this layers on without rearchitecting.
+1. **Puppets in MLAI for S&C regulars** — optional higher-fidelity identities that remove the APP badge and make cross-org members directly discoverable in MLAI's native mention picker. Working notifications no longer require puppets: the bridge can emit the destination user's real ID when mapped.
 2. **S&C bot via admin approval** — converts Path B to Path A; delete the prefix code path.
 3. **More channels** — schema already keys on channel; add a channel-pair table instead of env vars.
 

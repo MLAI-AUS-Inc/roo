@@ -9,19 +9,27 @@ token + channel, so adding a workspace is just one more entry in BRIDGE_PAIRS.
 Channels may be given as an ID (e.g. C0123ABCD) or a name (e.g. exp-victor-ai),
 which is resolved at startup. Both sides are POLLED (no webhooks, no secret).
 """
-from typing import List, Optional
 
-from pydantic import BaseModel
+from typing import Dict, List, Literal, Optional
+
+from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class BridgePair(BaseModel):
     """One mirrored channel: an MLAI channel <-> a channel in a partner workspace."""
 
-    label: str                 # short id, no ':' (e.g. "hex", "stone-and-chalk")
-    mlai_channel: str          # name or ID in the MLAI workspace
-    remote_token: str          # the Bridge bot token for the partner workspace
-    remote_channel: str        # name or ID in the partner workspace
+    label: str  # short id, no ':' (e.g. "hex", "stone-and-chalk")
+    mlai_channel: str  # name or ID in the MLAI workspace
+    remote_token: str  # the Bridge bot token for the partner workspace
+    remote_channel: str  # name or ID in the partner workspace
+    # Plain-text cross-workspace mention prefix. With label="hex", people in
+    # MLAI can write @hex:alice to ping Alice in the partner workspace.
+    mention_alias: Optional[str] = None
+    # Explicit MLAI user id -> partner user id mappings. These take precedence
+    # over automatic email matching (useful when the two accounts use different
+    # email addresses).
+    user_map: Dict[str, str] = Field(default_factory=dict)
 
 
 class BridgeSettings(BaseSettings):
@@ -35,8 +43,8 @@ class BridgeSettings(BaseSettings):
 
     # --- Hub (MLAI) ---
     MLAI_BOT_TOKEN: str
-    MLAI_TEAM_ID: Optional[str] = None       # resolved at startup
-    MLAI_BOT_USER_ID: Optional[str] = None   # resolved at startup
+    MLAI_TEAM_ID: Optional[str] = None  # resolved at startup
+    MLAI_BOT_USER_ID: Optional[str] = None  # resolved at startup
 
     # --- Spokes ---
     # JSON list in the env var, e.g.
@@ -61,6 +69,17 @@ class BridgeSettings(BaseSettings):
     BRIDGE_ALERT_DM_USER_ID: Optional[str] = None
     # Prune dedupe/registry rows older than this many days.
     BRIDGE_PRUNE_AFTER_DAYS: int = 7
+
+    # --- Cross-workspace mentions ---
+    # The corresponding plain-text prefix for users who exist only in MLAI.
+    MLAI_MENTION_ALIAS: str = "mlai"
+    # plain: legacy inert @Name rendering
+    # observe: resolve candidates and record counters, but do not notify
+    # native: emit <@destination-user-id> and trigger a real Slack mention
+    BRIDGE_MENTION_MODE: Literal["plain", "observe", "native"] = "plain"
+    # Refresh active-user directories without requiring a service restart when
+    # people join, leave, rename themselves, or change profile email.
+    BRIDGE_IDENTITY_REFRESH_SECONDS: float = 3600.0
 
     DEBUG: bool = False
 
