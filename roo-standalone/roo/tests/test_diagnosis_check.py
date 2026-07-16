@@ -181,11 +181,13 @@ def test_gateway_picks_an_open_case(monkeypatch):
 
 
 def test_hidden_case_is_refused_and_unrecorded(monkeypatch):
-    # Cases that exist in cases.yaml but are not open must 404 with nothing
-    # recorded — indistinguishable from ids that do not exist at all, so the
-    # endpoint never confirms which future cases are authored.
+    # Cases outside the *pinned* open set must 404 with nothing recorded —
+    # indistinguishable from ids that do not exist at all, so the endpoint
+    # never confirms which future cases are authored. Case 3 is open by
+    # DEFAULT now, so pinning "1,2" here also proves the allowlist beats both
+    # the default and yaml existence.
     calls = _install_recorder(monkeypatch, response={})
-    client = _client(monkeypatch, active_case=1)
+    client = _client(monkeypatch, active_case=1, open_cases="1,2")
 
     for hidden in (3, 7):
         resp = client.post("/api/diagnosis-check", json={
@@ -194,6 +196,33 @@ def test_hidden_case_is_refused_and_unrecorded(monkeypatch):
         assert resp.status_code == 404
         assert resp.json() == {"detail": "unknown case_id"}
     assert calls == []
+
+
+def test_case_3_adjudicates_under_the_default_open_set(monkeypatch):
+    # The shipped default opens the third ward. The guess below is case 1's
+    # CORRECT answer, so an "incorrect" verdict proves the matcher ran against
+    # case 3, and the record carries case 3's id/title.
+    assert config.Settings.model_fields["SIM_OPEN_CASE_IDS"].default == "1,2,3"
+
+    _install_llm_bomb(monkeypatch)
+    calls = _install_recorder(monkeypatch, response={
+        "already_guessed": False, "is_correct": False,
+        "outcome": "incorrect", "prize_kind": "none",
+        "is_first_solver": False, "winner_taken": False,
+    })
+    client = _client(monkeypatch, active_case=1, open_cases="1,2,3")
+
+    body = client.post("/api/diagnosis-check", json={
+        "guess": "adrenal crisis", "client_id": VALID_CLIENT, "case_id": 3,
+    }).json()
+
+    assert calls == [{
+        "case_id": 3, "case_title": "Keto Cut Catastrophe", "client_id": VALID_CLIENT,
+        "guess_text": "adrenal crisis", "is_correct": False,
+    }]
+    assert body["case_id"] == 3
+    assert body["result"] == "incorrect"
+    assert body["diagnosis"] is None
 
 
 def test_case_id_type_is_strict(monkeypatch):

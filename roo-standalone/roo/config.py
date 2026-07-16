@@ -95,11 +95,11 @@ class Settings(BaseSettings):
     # clients can never pick a case and farm tickets from cases not in play.
     SIM_ACTIVE_CASE_ID: int = 1
     # Contest cases the authenticated gateway may target (comma-separated
-    # cases.yaml ids). Two wards run concurrently, so the gateway forwards the
-    # player's chosen case; anything outside this set is refused so hidden or
-    # retired cases can never leak dialogue or verdicts. Mirrors MLAI
-    # Backend's HEALTH_HACK_OPEN_CASE_IDS default.
-    SIM_OPEN_CASE_IDS: str = "1,2"
+    # cases.yaml ids). Three wards run concurrently (Sash, Leila, Jordo), so
+    # the gateway forwards the player's chosen case; anything outside this set
+    # is refused so hidden or retired cases can never leak dialogue or
+    # verdicts. Mirrors MLAI Backend's HEALTH_HACK_OPEN_CASE_IDS default.
+    SIM_OPEN_CASE_IDS: str = "1,2,3"
 
     @property
     def sim_open_case_ids(self) -> frozenset[int]:

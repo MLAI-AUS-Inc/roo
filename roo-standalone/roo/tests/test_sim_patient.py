@@ -1257,9 +1257,10 @@ def test_endpoint_accepts_clerk_role_and_passes_contest_state(monkeypatch):
 
 
 def test_endpoint_honors_open_case_id(monkeypatch):
-    """Two wards run concurrently: the gateway's case_id is honored within
-    SIM_OPEN_CASE_IDS, absent keeps the active pin, and hidden or malformed
-    cases never reach the narrator."""
+    """The gateway's case_id is honored within SIM_OPEN_CASE_IDS, absent
+    keeps the active pin, and hidden or malformed cases never reach the
+    narrator. Pins "1,2" so case 3 doubles as the closed exemplar even though
+    the shipped default now opens it."""
     from fastapi.testclient import TestClient
     from roo import config
     from roo.main import app
@@ -1302,6 +1303,12 @@ def test_endpoint_honors_open_case_id(monkeypatch):
     assert client.post("/api/sim-patient", json={**base, "case_id": 3}).status_code == 404
     assert client.post("/api/sim-patient", json={**base, "case_id": "2"}).status_code == 422
     assert seen == {}  # refused requests never reached handle_question
+
+    # Under the shipped three-ward default, case 3 reaches the narrator.
+    monkeypatch.setattr(real, "SIM_OPEN_CASE_IDS", "1,2,3", raising=False)
+    resp = client.post("/api/sim-patient", json={**base, "case_id": 3})
+    assert resp.status_code == 200
+    assert seen["case_id"] == 3
 
 
 # ---------------------------------------------------------------------------
