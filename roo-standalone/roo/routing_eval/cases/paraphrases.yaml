@@ -299,6 +299,23 @@
   expect: {skill: medhack}
   tags: [paraphrase, channel]
 
+# --- healthhack announcements (exclusive to #healthhack) ---
+- id: para-healthhack-announce-doors
+  text: "announce that doors open at 10:30"
+  channel: healthhack
+  expect: {skill: healthhack, action: announce}
+  tags: [paraphrase, channel]
+- id: para-healthhack-publish-lunch
+  text: "publish an app announcement titled Lunch with body Pizza is upstairs"
+  channel: healthhack
+  expect: {skill: healthhack, action: announce}
+  tags: [paraphrase, channel]
+- id: para-healthhack-post-judging
+  text: "post this to the HealthHack app: judging starts at 5pm"
+  channel: healthhack
+  expect: {skill: healthhack, action: announce}
+  tags: [paraphrase, channel]
+
 # --- watt-the-hack (exclusive to #watt-the-hack) ---
 - id: para-watt-judging
   text: "announce that judging starts at 5pm"
@@ -378,6 +395,11 @@
   tags: [paraphrase, trap, action-trap]
 - id: trap-medhack-meeting
   text: "schedule a meeting with the medhack organisers"
+  channel: general
+  expect: {skill: none}
+  tags: [paraphrase, trap, negative, channel, misroute-guard]
+- id: trap-healthhack-announcement-wrong-channel
+  text: "post a HealthHack app announcement that lunch is ready"
   channel: general
   expect: {skill: none}
   tags: [paraphrase, trap, negative, channel, misroute-guard]
