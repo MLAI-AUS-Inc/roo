@@ -257,6 +257,52 @@ async def test_query_data_uses_canonical_endpoint_and_payload(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_healthhack_announcement_uses_canonical_endpoint_and_provenance(monkeypatch):
+    captured = {}
+
+    async def fake_request(method, endpoint, **kwargs):
+        captured["method"] = method
+        captured["endpoint"] = endpoint
+        captured["json"] = kwargs["json"]
+        request = httpx.Request(method, f"https://backend.test{endpoint}")
+        return httpx.Response(
+            201,
+            request=request,
+            json={"id": "announcement-1", "created": True},
+        )
+
+    client = MLAIBackendClient(
+        base_url="https://backend.test",
+        api_key="roo-api-key",
+        internal_api_key="roo-api-key",
+    )
+    monkeypatch.setattr(client, "_request", fake_request)
+
+    result = await client.healthhack_create_announcement(
+        title="Doors open",
+        body="Registration opens at 10:30am.",
+        requester_slack_id="U0SUPER123",
+        author_slack_id="U0ROO00000",
+        source_channel_id="C0BHZ9NS21L",
+        source_message_ts="1784286514.495879",
+    )
+
+    assert result == {"id": "announcement-1", "created": True}
+    assert captured == {
+        "method": "POST",
+        "endpoint": "/api/v1/hackathons/hospital/announcements/",
+        "json": {
+            "title": "Doors open",
+            "body": "Registration opens at 10:30am.",
+            "requester_slack_id": "U0SUPER123",
+            "author_slack_id": "U0ROO00000",
+            "source_channel_id": "C0BHZ9NS21L",
+            "source_message_ts": "1784286514.495879",
+        },
+    }
+
+
+@pytest.mark.asyncio
 async def test_create_points_purchase_sends_slack_origin(monkeypatch):
     captured = {}
 

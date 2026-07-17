@@ -2606,13 +2606,20 @@ class MLAIBackendClient:
             print(f"⚠️ MedHack get case history error: {e}")
             return []
 
-    async def medhack_create_announcement(self, title: str, body: str, slack_user_id: str) -> Optional[dict]:
+    async def medhack_create_announcement(
+        self,
+        title: str,
+        body: str,
+        requester_slack_id: str,
+        author_slack_id: Optional[str] = None,
+    ) -> Optional[dict]:
         """Create an announcement on the MedHack: Frontiers website.
 
         Args:
             title: Announcement title
             body: Announcement body text
-            slack_user_id: Slack ID of the user creating the announcement
+            requester_slack_id: Slack ID of the human requesting the announcement
+            author_slack_id: Optional Slack ID to display as the author
 
         Returns:
             Response dict on success (201), None on error
@@ -2624,7 +2631,8 @@ class MLAIBackendClient:
                 json={
                     "title": title,
                     "body": body,
-                    "slack_user_id": slack_user_id,
+                    "requester_slack_id": requester_slack_id,
+                    "author_slack_id": author_slack_id,
                 },
                 timeout=10.0,
                 circuit_breaker=True,
@@ -2634,6 +2642,43 @@ class MLAIBackendClient:
             return {"status_code": response.status_code, "detail": response.text}
         except Exception as e:
             print(f"⚠️ MedHack create announcement error: {e}")
+            return None
+
+    async def healthhack_create_announcement(
+        self,
+        *,
+        title: str,
+        body: str,
+        requester_slack_id: str,
+        author_slack_id: Optional[str],
+        source_channel_id: str,
+        source_message_ts: str,
+    ) -> Optional[dict]:
+        """Create one idempotent HealthHack app announcement via mlai-backend."""
+        try:
+            response = await self._request(
+                "POST",
+                "/api/v1/hackathons/hospital/announcements/",
+                json={
+                    "title": title,
+                    "body": body,
+                    "requester_slack_id": requester_slack_id,
+                    "author_slack_id": author_slack_id,
+                    "source_channel_id": source_channel_id,
+                    "source_message_ts": source_message_ts,
+                },
+                timeout=10.0,
+                circuit_breaker=True,
+            )
+            if response.status_code in (200, 201):
+                return response.json()
+            try:
+                detail = response.json().get("detail", response.text)
+            except ValueError:
+                detail = response.text
+            return {"status_code": response.status_code, "detail": detail}
+        except Exception as e:
+            print(f"⚠️ HealthHack create announcement error: {e}")
             return None
 
     async def generic_hackathon_create_announcement(

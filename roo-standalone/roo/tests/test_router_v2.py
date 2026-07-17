@@ -36,23 +36,44 @@ POINTS = _skill(
     ],
 )
 MEDHACK = _skill("medhack", exclusive=["medhack-frontiers"])
+HEALTHHACK = _skill(
+    "healthhack",
+    exclusive=["healthhack"],
+    actions=[
+        {
+            "name": "announce",
+            "description": "Publish an announcement.",
+            "params": {
+                "title": {"type": "string"},
+                "body": {"type": "string"},
+            },
+        }
+    ],
+)
 
 
 def test_build_tools_filters_exclusive_channels_and_always_offers_chat():
-    tools, by_name = router.build_tools([POINTS, MEDHACK], channel_name="general")
+    tools, by_name = router.build_tools([POINTS, MEDHACK, HEALTHHACK], channel_name="general")
     names = [tool["function"]["name"] for tool in tools]
     assert "mlai-points" in names
     assert "medhack" not in names
+    assert "healthhack" not in names
     assert router.RESPOND_IN_CHAT in names
     assert router.ASK_CLARIFICATION in names
     assert "medhack" not in by_name
 
-    tools, by_name = router.build_tools([POINTS, MEDHACK], channel_name="medhack-frontiers")
+    tools, by_name = router.build_tools([POINTS, MEDHACK, HEALTHHACK], channel_name="medhack-frontiers")
     assert "medhack" in [tool["function"]["name"] for tool in tools]
+    assert "healthhack" not in [tool["function"]["name"] for tool in tools]
+
+    tools, by_name = router.build_tools([POINTS, MEDHACK, HEALTHHACK], channel_name="healthhack")
+    assert "healthhack" in [tool["function"]["name"] for tool in tools]
+    assert "medhack" not in [tool["function"]["name"] for tool in tools]
 
     # unknown channel mirrors the executor rule: allowed through
-    tools, _ = router.build_tools([POINTS, MEDHACK], channel_name=None)
+    tools, _ = router.build_tools([POINTS, MEDHACK, HEALTHHACK], channel_name=None)
     assert "medhack" in [tool["function"]["name"] for tool in tools]
+    assert "healthhack" in [tool["function"]["name"] for tool in tools]
 
 
 def test_skill_tool_embeds_routing_block_and_action_enum():
