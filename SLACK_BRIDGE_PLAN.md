@@ -1,6 +1,6 @@
 # Slack Cross-Org Channel Bridge — Implementation Plan
 
-> **Status (updated 2026-07-16):** Running as a **dedicated "Bridge" Slack app installed in both workspaces** — the symmetric two-bot design (a.k.a. Path A). Both channels are polled and `chat:write.customize` preserves author name/avatar. Destination-aware native mentions are supported through explicit ID overrides, exact email matching, and qualified handles such as `@hex:alice`; unresolved identities remain inert. Roo is untouched. Code lives in `roo-standalone/bridge/`.
+> **Status (updated 2026-07-20):** Running as a **dedicated "Bridge" Slack app installed in both workspaces** — the symmetric two-bot design (a.k.a. Path A). Both channels are polled and `chat:write.customize` preserves author name/avatar. Destination-aware native mentions are supported through explicit ID overrides, exact email matching, and Slack-autocomplete-safe qualified handles such as `hex:alice` (with legacy `@hex:alice` support); unresolved identities remain inert. Roo is untouched. Code lives in `roo-standalone/bridge/`.
 
 **Goal:** Bidirectional sync between one channel in the MLAI Slack workspace (where Roo lives) and one channel in the Stone & Chalk (S&C) Slack workspace, relayed by the existing DigitalOcean droplet. Members of each org read and write entirely from their own workspace.
 
@@ -153,7 +153,7 @@ CREATE TABLE seen_events (event_id TEXT PRIMARY KEY, seen_at REAL);
    - Author is Sam (either side) and self-puppet enabled → post with his opposite-side user token, no prefix.
    - Path A or into-MLAI → bot post with `username` + `icon_url`.
    - Path B into-S&C → Sam's user token with `*Name:* ` prefix.
-7. **Translate:** map `<@source-user>` to `<@destination-user>` using manual ID overrides first and exact normalized email second. Resolve qualified destination-only handles such as `@hex:alice`; use labeled inert text when no safe mapping exists. Keep mass mentions inert; map `thread_ts` through `message_map` for replies.
+7. **Translate:** map `<@source-user>` to `<@destination-user>` using manual ID overrides first and exact normalized email second. Resolve qualified destination-only handles such as `hex:alice` without triggering Slack's local autocomplete; retain `@hex:alice` as a legacy input. Use labeled inert text when no safe mapping exists. Keep mass mentions inert; map `thread_ts` through `message_map` for replies.
 8. **Post, then record** mapping + registry. On `429`, honor `Retry-After` (volume makes this rare).
 
 ### Files

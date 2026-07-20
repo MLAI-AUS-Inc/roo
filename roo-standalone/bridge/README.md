@@ -60,10 +60,15 @@ destination user using:
 To notify someone who exists **only** in the other workspace, write a qualified
 plain-text handle:
 
-- In MLAI, `@hex:alice` becomes Alice's native HEX mention.
-- In HEX, `@mlai:sam` becomes Sam's native MLAI mention.
+- In MLAI, `hex:alice` becomes Alice's native HEX mention.
+- In HEX, `mlai:sam` becomes Sam's native MLAI mention.
 - Spaces in a unique display name become hyphens, so `Alice Smith` can be
-  addressed as `@hex:alice-smith`. An exact destination member ID also works.
+  addressed as `hex:alice-smith`. An exact destination member ID also works.
+
+The qualified form intentionally does not start with `@`: Slack's composer
+otherwise tries to replace the workspace alias with a local user before the
+bridge receives the message. The legacy `@hex:alice` / `@mlai:sam` syntax is
+still accepted when it reaches the bridge as plain text.
 
 Ambiguous, unknown, deleted, and bot identities are never guessed. Mentions
 inside code or links stay literal, and `@here`, `@channel`, `@everyone`, and

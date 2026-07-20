@@ -286,7 +286,7 @@ def test_explicit_destination_only_handle_becomes_native_mention():
 
     out = r.translate(
         FakeClient(),
-        "please ask @hex:alice and @hex:alice-smith",
+        "please ask hex:alice and @hex:alice-smith",
         "T_M",
         dst_team="T_R",
         src_alias="mlai",
@@ -311,7 +311,7 @@ def test_ambiguous_or_inactive_explicit_handles_never_ping():
 
     out = r.translate(
         FakeClient(),
-        "@hex:alex-smith @hex:gone @hex:helper",
+        "hex:alex-smith hex:gone @hex:helper",
         "T_M",
         dst_team="T_R",
         src_alias="mlai",
@@ -319,7 +319,7 @@ def test_ambiguous_or_inactive_explicit_handles_never_ping():
         mention_mode="native",
     )
 
-    assert out == "@hex:alex-smith @hex:gone @hex:helper"
+    assert out == "hex:alex-smith hex:gone @hex:helper"
     assert "<@" not in out
 
 
@@ -329,7 +329,9 @@ def test_explicit_mentions_are_not_parsed_inside_code_or_links():
 
     out = r.translate(
         FakeClient(),
-        "`@hex:alice` ```\n@hex:alice\n``` <https://x.test/@hex:alice|@hex:alice> @hex:alice",
+        "`hex:alice` `@hex:alice` ```\nhex:alice @hex:alice\n``` "
+        "<https://x.test/hex:alice|hex:alice> "
+        "<https://x.test/@hex:alice|@hex:alice> hex:alice",
         "T_M",
         dst_team="T_R",
         src_alias="mlai",
@@ -338,8 +340,27 @@ def test_explicit_mentions_are_not_parsed_inside_code_or_links():
     )
 
     assert out.count("<@URALICE>") == 1
+    assert "`hex:alice`" in out
     assert "`@hex:alice`" in out
+    assert "https://x.test/hex:alice" in out
     assert "https://x.test/@hex:alice" in out
+
+
+def test_plain_explicit_mention_requires_a_token_boundary_and_destination_alias():
+    r = IdentityResolver()
+    r.index_workspace("T_R", [_member("URALICE", "alice", display_name="Alice")])
+
+    out = r.translate(
+        FakeClient(),
+        "prefixhex:alice mlai:alice hex:alice",
+        "T_M",
+        dst_team="T_R",
+        src_alias="mlai",
+        dst_alias="hex",
+        mention_mode="native",
+    )
+
+    assert out == "prefixhex:alice mlai:alice <@URALICE>"
 
 
 def test_observe_mode_resolves_without_emitting_native_markup():
@@ -348,7 +369,7 @@ def test_observe_mode_resolves_without_emitting_native_markup():
 
     out = r.translate(
         FakeClient(),
-        "hi @hex:alice",
+        "hi hex:alice",
         "T_M",
         dst_team="T_R",
         src_alias="mlai",
@@ -503,7 +524,7 @@ def test_delivery_wires_native_mentions_in_both_directions():
             {
                 "ts": "230.1",
                 "user": "UMAUTHOR",
-                "text": "hello <@UMALICE> and @hex:alice-hex",
+                "text": "hello <@UMALICE> and hex:alice-hex",
             },
         )
     )
@@ -515,7 +536,7 @@ def test_delivery_wires_native_mentions_in_both_directions():
             {
                 "ts": "230.2",
                 "user": "URAUTHOR",
-                "text": "please ask @mlai:sam",
+                "text": "please ask mlai:sam",
             },
         )
     )

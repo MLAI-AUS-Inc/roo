@@ -6,8 +6,10 @@ small, in-memory workspace directories and map people by explicit configuration
 first, then by exact normalized email. Emails are never persisted or logged.
 
 People who only exist in the other workspace can be addressed with an explicit
-plain-text alias such as ``@hex:alice``. Unknown or ambiguous identities remain
-plain text: the bridge must never guess and notify the wrong person.
+plain-text alias such as ``hex:alice``. The legacy ``@hex:alice`` form remains
+supported, but the form without ``@`` avoids Slack's local mention autocomplete.
+Unknown or ambiguous identities remain plain text: the bridge must never guess
+and notify the wrong person.
 """
 
 from __future__ import annotations
@@ -26,7 +28,7 @@ _SUBTEAM_RE = re.compile(r"<!subteam\^[A-Z0-9]+(?:\|(@?[^>]+))?>")
 _LINK_RE = re.compile(r"<((?:https?://|mailto:)[^>|]+)(?:\|([^>]+))?>")
 _CODE_RE = re.compile(r"(```[\s\S]*?```|`[^`\n]*`)")
 _EXPLICIT_MENTION_RE = re.compile(
-    r"(?<![\w@])@(?P<workspace>[A-Za-z0-9_-]+):(?P<handle>[\w][\w.-]*)",
+    r"(?<![\w@])@?(?P<workspace>[A-Za-z0-9_-]+):(?P<handle>[\w][\w.-]*)",
     re.UNICODE,
 )
 _USER_ID_RE = re.compile(r"^[UW][A-Z0-9]+$")
@@ -169,7 +171,7 @@ class IdentityResolver:
         handle_entries = []
         for profile in profiles:
             # Slack's unique `name` is preferred, but unique normalized display
-            # and real names make @hex:alice-smith ergonomic too.
+            # and real names make hex:alice-smith ergonomic too.
             for value in (profile.name, profile.display_name, profile.real_name):
                 handle_entries.append((_normalized_handle(value), profile))
         directory = WorkspaceDirectory(
@@ -299,7 +301,7 @@ class IdentityResolver:
         user_map: Mapping[str, str],
         mention_mode: str,
     ) -> str:
-        # Protect link markup so an @workspace:handle inside a URL or link label
+        # Protect link markup so a workspace:handle inside a URL or link label
         # can never turn into a notification.
         links = []
 
