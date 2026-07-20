@@ -377,6 +377,54 @@ def test_ambiguous_or_inactive_explicit_handles_never_ping():
     assert "<@" not in out
 
 
+def test_unique_nearby_explicit_handle_typo_becomes_native_mention():
+    r = IdentityResolver()
+    r.index_workspace(
+        "T_R",
+        [
+            _member("URJESS", "jess", display_name="Jess"),
+            _member("URALICE", "alice", display_name="Alice"),
+        ],
+    )
+
+    out = r.translate(
+        FakeClient(),
+        "hex:jese hex:jesss hex:jes hex:jses",
+        "T_M",
+        dst_team="T_R",
+        src_alias="mlai",
+        dst_alias="hex",
+        mention_mode="native",
+    )
+
+    assert out == "<@URJESS> <@URJESS> <@URJESS> <@URJESS>"
+    assert r.health()["mention_counts"]["explicit_fuzzy"] == 4
+
+
+def test_ambiguous_or_low_confidence_handle_typo_never_pings():
+    r = IdentityResolver()
+    r.index_workspace(
+        "T_R",
+        [
+            _member("URJESS", "jess", display_name="Jess"),
+            _member("URBESS", "bess", display_name="Bess"),
+        ],
+    )
+
+    out = r.translate(
+        FakeClient(),
+        "hex:mess hex:jack hex:js",
+        "T_M",
+        dst_team="T_R",
+        src_alias="mlai",
+        dst_alias="hex",
+        mention_mode="native",
+    )
+
+    assert out == "hex:mess hex:jack hex:js"
+    assert "<@" not in out
+
+
 def test_explicit_mentions_are_not_parsed_inside_code_or_links():
     r = IdentityResolver()
     r.index_workspace("T_R", [_member("URALICE", "alice", display_name="Alice")])

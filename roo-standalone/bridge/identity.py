@@ -43,6 +43,39 @@ def _normalized_handle(value: str) -> str:
     return re.sub(r"\s+", "-", value)
 
 
+def _edit_distance(left: str, right: str) -> int:
+    """Damerau-Levenshtein distance with adjacent transpositions."""
+    if left == right:
+        return 0
+    if not left:
+        return len(right)
+    if not right:
+        return len(left)
+
+    rows = [list(range(len(right) + 1))]
+    for left_index, left_char in enumerate(left, start=1):
+        row = [left_index]
+        for right_index, right_char in enumerate(right, start=1):
+            row.append(
+                min(
+                    row[right_index - 1] + 1,
+                    rows[-1][right_index] + 1,
+                    rows[-1][right_index - 1] + (left_char != right_char),
+                )
+            )
+            if (
+                left_index > 1
+                and right_index > 1
+                and left_char == right[right_index - 2]
+                and left[left_index - 2] == right_char
+            ):
+                row[right_index] = min(
+                    row[right_index], rows[-2][right_index - 2] + 1
+                )
+        rows.append(row)
+    return rows[-1][-1]
+
+
 @dataclass(frozen=True)
 class UserProfile:
     id: str
@@ -387,11 +420,15 @@ class IdentityResolver:
                 or match.group("workspace").casefold() != dst_alias.casefold()
             ):
                 return match.group(0)
-            destination = self._destination_alias(dst_team, match.group("handle"))
+            destination, fuzzy = self._destination_alias(
+                dst_team, match.group("handle")
+            )
             if destination is None:
                 self._record("explicit_unresolved")
                 return match.group(0)
             self._record("explicit_resolved")
+            if fuzzy:
+                self._record("explicit_fuzzy")
             if mention_mode == "native":
                 return f"<@{destination.id}>"
             if mention_mode == "observe":
@@ -446,14 +483,59 @@ class IdentityResolver:
                 return match.id, "email"
         return None, ""
 
-    def _destination_alias(self, dst_team: str, handle: str) -> Optional[UserProfile]:
+    def _destination_alias(
+        self, dst_team: str, handle: str
+    ) -> Tuple[Optional[UserProfile], bool]:
         with self._lock:
             destination = self._directories.get(dst_team)
         if destination is None:
-            return None
+            return None, False
         if _USER_ID_RE.match(handle.upper()):
-            return destination.by_id.get(handle.upper())
-        return destination.by_handle.get(_normalized_handle(handle))
+            return destination.by_id.get(handle.upper()), False
+
+        normalized = _normalized_handle(handle)
+        exact = destination.by_handle.get(normalized)
+        if exact is not None:
+            return exact, False
+
+        # A typo may notify someone, so fuzzy matching is intentionally narrow:
+        # one edit for short names, two for names of eight or more characters,
+        # at least 75% similarity, and exactly one closest person. Aliases for
+        # the same person are collapsed before checking for a tie.
+        if len(normalized) < 3:
+            return None, False
+        candidates: Dict[str, Tuple[int, UserProfile]] = {}
+        for profile in destination.by_id.values():
+            aliases = {
+                _normalized_handle(value)
+                for value in (profile.name, profile.display_name, profile.real_name)
+                if value
+            }
+            for alias in aliases:
+                longest = max(len(normalized), len(alias))
+                if longest < 4:
+                    continue
+                allowed = 2 if longest >= 8 else 1
+                if abs(len(normalized) - len(alias)) > allowed:
+                    continue
+                distance = _edit_distance(normalized, alias)
+                if distance > allowed or 1 - (distance / longest) < 0.75:
+                    continue
+                current = candidates.get(profile.id)
+                if current is None or distance < current[0]:
+                    candidates[profile.id] = (distance, profile)
+
+        if not candidates:
+            return None, False
+        best_distance = min(distance for distance, _ in candidates.values())
+        best = [
+            profile
+            for distance, profile in candidates.values()
+            if distance == best_distance
+        ]
+        if len(best) != 1:
+            return None, False
+        return best[0], True
 
     @staticmethod
     def _fallback(label: str, workspace_alias: str) -> str:

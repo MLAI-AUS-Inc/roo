@@ -66,6 +66,9 @@ plain-text handle:
 - In HEX, `mlai:sam` becomes Sam's native MLAI mention.
 - Spaces in a unique display name become hyphens, so `Alice Smith` can be
   addressed as `hex:alice-smith`. An exact destination member ID also works.
+- Small typos are tolerated when exactly one person is the clear nearby match
+  (one edit for short handles, up to two for longer handles). Ambiguous or
+  low-confidence guesses stay plain text and do not notify anyone.
 
 The qualified form intentionally does not start with `@`: Slack's composer
 otherwise tries to replace the workspace alias with a local user before the
