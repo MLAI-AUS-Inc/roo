@@ -197,6 +197,60 @@ def test_workspace_refresh_uses_all_cursor_pages():
     assert set(directory.by_id) == {"UONE", "UTWO"}
 
 
+def test_workspace_refresh_adds_slack_connect_channel_members():
+    jess = _member("UJESS", "jess", display_name="Jess")
+
+    class SlackConnectClient:
+        def __init__(self):
+            self.channel_calls = []
+            self.info_calls = []
+
+        def users_list(self, limit=200, cursor=None):
+            return {
+                "ok": True,
+                "members": [_member("USAM", "sam", "sam@example.com")],
+                "response_metadata": {"next_cursor": ""},
+            }
+
+        def conversations_members(self, channel, limit=200, cursor=None):
+            self.channel_calls.append((channel, cursor))
+            if cursor is None:
+                return {
+                    "ok": True,
+                    "members": ["USAM"],
+                    "response_metadata": {"next_cursor": "page-2"},
+                }
+            return {
+                "ok": True,
+                "members": ["UJESS"],
+                "response_metadata": {"next_cursor": ""},
+            }
+
+        def users_info(self, user):
+            self.info_calls.append(user)
+            return {"ok": True, "user": jess}
+
+    client = SlackConnectClient()
+    resolver = IdentityResolver()
+    directory = resolver.refresh_workspace(
+        client, "T_HEX", channel_ids=["C_SHARED", "C_SHARED"]
+    )
+    out = resolver.translate(
+        FakeClient(),
+        "please ask hex:jess",
+        "T_MLAI",
+        dst_team="T_HEX",
+        src_alias="mlai",
+        dst_alias="hex",
+        mention_mode="native",
+    )
+
+    assert client.channel_calls == [("C_SHARED", None), ("C_SHARED", "page-2")]
+    assert client.info_calls == ["UJESS"]
+    assert set(directory.by_id) == {"USAM", "UJESS"}
+    assert out == "please ask <@UJESS>"
+
+
 def test_native_structured_mention_maps_by_exact_email():
     r = IdentityResolver()
     r.index_workspace(

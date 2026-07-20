@@ -12,7 +12,7 @@ A minimal FastAPI app exposes GET /healthz for nginx/monitoring.
 
 import asyncio
 from contextlib import asynccontextmanager, suppress
-from typing import List
+from typing import Dict, List, Set
 
 from fastapi import FastAPI
 
@@ -24,15 +24,20 @@ from .slack import make_bot_client, resolve_channel_id, resolve_identity
 from .store import get_store
 
 
-async def _refresh_identity_directories(identity, workspace_clients) -> None:
+async def _refresh_identity_directories(
+    identity, workspace_clients, workspace_channels
+) -> None:
     """Refresh each unique workspace without blocking message delivery."""
     for team, client in workspace_clients.items():
         try:
             directory = await asyncio.to_thread(
-                identity.refresh_workspace, client, team
+                identity.refresh_workspace,
+                client,
+                team,
+                workspace_channels.get(team, ()),
             )
             print(
-                f"👥 identity directory {team}: {len(directory.by_id)} active users, "
+                f"👥 identity directory {team}: {len(directory.by_id)} addressable users, "
                 f"{directory.email_count} with email"
             )
         except Exception as e:
@@ -43,12 +48,14 @@ async def _refresh_identity_directories(identity, workspace_clients) -> None:
 
 
 async def _identity_refresh_loop(
-    identity, workspace_clients, refresh_seconds: float
+    identity, workspace_clients, workspace_channels, refresh_seconds: float
 ) -> None:
     interval = max(60.0, float(refresh_seconds))
     while True:
         await asyncio.sleep(interval)
-        await _refresh_identity_directories(identity, workspace_clients)
+        await _refresh_identity_directories(
+            identity, workspace_clients, workspace_channels
+        )
 
 
 @asynccontextmanager
@@ -135,7 +142,7 @@ async def lifespan(app: FastAPI):
         )
         print(
             f"   pair {pair.label!r}: MLAI {mlai_ch} <-> {remote_team}/{remote_ch} "
-            f"(mentions @{mention_alias}:handle)"
+            f"(mentions {mention_alias}:handle)"
         )
 
     if not resolved:
@@ -147,8 +154,16 @@ async def lifespan(app: FastAPI):
     workspace_clients.update(
         {pair.remote_team: pair.remote_client for pair in resolved}
     )
+    workspace_channels: Dict[str, Set[str]] = {
+        team: set() for team in workspace_clients
+    }
+    for pair in resolved:
+        workspace_channels[settings.MLAI_TEAM_ID or ""].add(pair.mlai_channel_id)
+        workspace_channels[pair.remote_team].add(pair.remote_channel_id)
     if settings.BRIDGE_MENTION_MODE != "plain":
-        await _refresh_identity_directories(identity, workspace_clients)
+        await _refresh_identity_directories(
+            identity, workspace_clients, workspace_channels
+        )
 
     relay = Relay(
         settings=settings,
@@ -199,6 +214,7 @@ async def lifespan(app: FastAPI):
                 _identity_refresh_loop(
                     identity,
                     workspace_clients,
+                    workspace_channels,
                     settings.BRIDGE_IDENTITY_REFRESH_SECONDS,
                 )
             )

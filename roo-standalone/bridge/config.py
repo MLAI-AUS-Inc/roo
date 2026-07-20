@@ -24,7 +24,7 @@ class BridgePair(BaseModel):
     remote_token: str  # the Bridge bot token for the partner workspace
     remote_channel: str  # name or ID in the partner workspace
     # Plain-text cross-workspace mention prefix. With label="hex", people in
-    # MLAI can write @hex:alice to ping Alice in the partner workspace.
+    # MLAI can write hex:alice to ping Alice in the partner workspace.
     mention_alias: Optional[str] = None
     # Explicit MLAI user id -> partner user id mappings. These take precedence
     # over automatic email matching (useful when the two accounts use different

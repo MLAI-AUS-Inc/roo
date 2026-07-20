@@ -124,8 +124,15 @@ class IdentityResolver:
     # Workspace directories
     # ------------------------------------------------------------------
 
-    def refresh_workspace(self, client, team: str) -> WorkspaceDirectory:
-        """Fetch and atomically replace one workspace's active-human directory."""
+    def refresh_workspace(
+        self, client, team: str, channel_ids: Iterable[str] = ()
+    ) -> WorkspaceDirectory:
+        """Fetch and atomically replace one workspace's addressable directory.
+
+        ``users.list`` can omit people who participate through Slack Connect.
+        Merge members of the configured bridged channels via ``users.info`` so
+        qualified handles can resolve every person the bridge can address.
+        """
         members = []
         cursor = None
         try:
@@ -139,6 +146,37 @@ class IdentityResolver:
                 cursor = (response.get("response_metadata") or {}).get("next_cursor")
                 if not cursor:
                     break
+
+            known_ids = {member.get("id") for member in members if member.get("id")}
+            for channel_id in dict.fromkeys(channel_ids):
+                if not channel_id:
+                    continue
+                cursor = None
+                while True:
+                    response = client.conversations_members(
+                        channel=channel_id, limit=200, cursor=cursor
+                    )
+                    if not response.get("ok"):
+                        raise RuntimeError(
+                            response.get("error")
+                            or f"conversations.members returned not ok for {channel_id}"
+                        )
+                    for user_id in response.get("members", []):
+                        if not user_id or user_id in known_ids:
+                            continue
+                        info = client.users_info(user=user_id)
+                        if not info.get("ok") or not info.get("user"):
+                            raise RuntimeError(
+                                info.get("error")
+                                or f"users.info returned not ok for {user_id}"
+                            )
+                        members.append(info["user"])
+                        known_ids.add(user_id)
+                    cursor = (response.get("response_metadata") or {}).get(
+                        "next_cursor"
+                    )
+                    if not cursor:
+                        break
             directory = self.index_workspace(team, members)
         except Exception as exc:
             with self._lock:

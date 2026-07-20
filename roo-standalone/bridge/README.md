@@ -50,8 +50,10 @@ or an ID. Add a partner workspace by appending another object to the JSON list.
 ### 3. Cross-workspace mentions
 
 Slack user IDs are workspace-specific, so the bridge maintains an in-memory
-directory for every connected workspace. It maps a native source mention to a
-destination user using:
+directory for every connected workspace. It combines the workspace user list
+with members of every configured bridged channel; this includes Slack Connect
+participants who may be absent from `users.list`. It maps a native source
+mention to a destination user using:
 
 1. `user_map` (MLAI user ID -> partner user ID), when configured;
 2. an exact case-insensitive email match;
