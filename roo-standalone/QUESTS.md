@@ -6,7 +6,7 @@ Welcome to MLAI Quests! Complete these activities to earn points and level up in
 
 | Quest Name | Description | Points | How to Complete |
 |------------|-------------|--------|-----------------|
-| **First Contact** | Post your introduction in `#_start-here` | 2 | Post a new message (not a reply) in the channel. |
+| **First Contact** | Introduce yourself and your startup in `#_start-here` | 4 | Make one top-level post covering both you and what your startup does. If Roo asks for more detail, edit that original post. |
 | **Warm Welcome** | Welcome a new member | 1 | React to someone else's post in `#_start-here`. |
 | **Connector** | React to 5 messages with an emoji | 2 | Add reactions to other people's posts. |
 | **Helper** | Reply to 3 threads | 2 | Join the conversation by replying to threads. |

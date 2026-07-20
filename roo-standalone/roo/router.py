@@ -205,7 +205,12 @@ def build_tools(
     channel_name: Optional[str] = None,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Skill]]:
     """Build the tool list (channel-filtered) and a name->Skill map."""
-    available = [skill for skill in skills if skill_available_in_channel(skill, channel_name)]
+    available = [
+        skill
+        for skill in skills
+        if skill_available_in_channel(skill, channel_name)
+        and not bool((skill.routing or {}).get("event_only"))
+    ]
     tools = [_skill_tool(skill) for skill in available]
     tools.append(_chat_tool())
     tools.append(_clarification_tool())

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Start Here Introductions"
+  short_description: "Validate intros and award four Roo points"
+  default_prompt: "Use $start-here-introductions to validate a new member introduction and award points safely."

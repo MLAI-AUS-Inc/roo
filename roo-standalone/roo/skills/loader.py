@@ -12,6 +12,7 @@ import sys
 
 import re
 import frontmatter
+import yaml
 
 
 @dataclass
@@ -141,7 +142,18 @@ def load_skill_from_directory(skill_dir: Path) -> Optional[Skill]:
     parameters = post.metadata.get("parameters", [])
     if not parameters and post.content:
         parameters = _extract_parameters_from_markdown(post.content)
-    
+
+    routing = post.metadata.get("routing")
+    routing_file = skill_dir / "routing.yaml"
+    if routing_file.exists():
+        with routing_file.open("r", encoding="utf-8") as handle:
+            file_routing = yaml.safe_load(handle) or {}
+        if routing:
+            raise ValueError(
+                f"{name}: define routing in either SKILL.md or routing.yaml, not both"
+            )
+        routing = file_routing
+
     skill = Skill(
         name=name,
         description=post.metadata.get("description", ""),
@@ -151,7 +163,7 @@ def load_skill_from_directory(skill_dir: Path) -> Optional[Skill]:
         parameters=parameters,
         priority_channels=post.metadata.get("priority_channels", []),
         exclusive_channels=post.metadata.get("exclusive_channels", []),
-        routing=_validate_routing(name, post.metadata.get("routing")),
+        routing=_validate_routing(name, routing),
         actions=_validate_actions(name, post.metadata.get("actions")),
     )
 

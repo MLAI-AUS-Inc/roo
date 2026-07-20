@@ -66,6 +66,12 @@ class Settings(BaseSettings):
     BOOST_LINK_LOVE_RETRY_POLL_SECONDS: float = 15.0
     BOOST_LINK_LOVE_MAX_RETRY_ATTEMPTS: int = 5
     BOOST_LINK_LOVE_MAX_ROOT_AGE_DAYS: int = 7
+    START_HERE_INTRO_ENABLED: bool = True
+    START_HERE_INTRO_CHANNEL_NAME: str = "_start-here"
+    START_HERE_INTRO_DB_PATH: str = "data/start_here_introductions.db"
+    START_HERE_INTRO_MIN_CONFIDENCE: float = 0.8
+    START_HERE_INTRO_RETRY_POLL_SECONDS: float = 15.0
+    START_HERE_INTRO_MAX_RETRY_ATTEMPTS: int = 5
     JOBS_SCHEDULER_ENABLED: bool = False
     JOBS_API_URL: Optional[str] = None
     JOBS_TRIGGER_TOKEN: Optional[str] = None

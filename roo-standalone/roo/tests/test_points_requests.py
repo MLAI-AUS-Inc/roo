@@ -1390,20 +1390,6 @@ class RecordingAsyncClient:
         return self._response("GET", url, params=params, headers=headers, timeout=timeout)
 
 
-class FakeStartHereAwardClient:
-    last_instance = None
-    response = {"awarded": True, "new_balance": 4, "points_awarded": 4}
-
-    def __init__(self, *args, **kwargs):
-        self.init_kwargs = kwargs
-        self.award_args = None
-        FakeStartHereAwardClient.last_instance = self
-
-    async def award_first_channel_post(self, slack_user_id, channel_id):
-        self.award_args = (slack_user_id, channel_id)
-        return dict(self.response)
-
-
 @pytest.mark.asyncio
 async def test_reaction_approval_posts_confirmation(monkeypatch):
     posted_messages = []
@@ -1810,6 +1796,50 @@ async def test_slack_events_message_subtype_does_not_trigger_intro_handler(monke
 
 
 @pytest.mark.asyncio
+async def test_slack_events_start_here_message_edit_rechecks_intro(monkeypatch):
+    handled_events = []
+    scheduled_tasks = []
+    real_create_task = asyncio.create_task
+
+    async def fake_handle_start_here_intro(event):
+        handled_events.append(event)
+
+    def fake_create_task(coro):
+        task = real_create_task(coro)
+        scheduled_tasks.append(task)
+        return task
+
+    monkeypatch.setattr(slack_client_module, "get_channel_id", lambda name: "CSTART")
+    monkeypatch.setattr(main_module, "_handle_start_here_intro", fake_handle_start_here_intro)
+    monkeypatch.setattr(main_module.asyncio, "create_task", fake_create_task)
+
+    payload = {
+        "event": {
+            "type": "message",
+            "subtype": "message_changed",
+            "channel": "CSTART",
+            "message": {
+                "type": "message",
+                "user": "UINTRO",
+                "channel": "CSTART",
+                "ts": "111.222",
+                "text": "Hi, I'm Sam and my startup helps founders test ideas.",
+            },
+        }
+    }
+
+    class FakeRequest:
+        async def json(self):
+            return payload
+
+    response = await main_module.slack_events(FakeRequest())
+
+    assert response.status_code == 200
+    await asyncio.gather(*scheduled_tasks)
+    assert handled_events == [payload["event"]]
+
+
+@pytest.mark.asyncio
 async def test_slack_events_dedupes_retried_app_mention(monkeypatch):
     handled_events = []
     scheduled_tasks = []
@@ -1915,110 +1945,26 @@ def test_app_mention_dedupe_logs_ttl_expiry(capsys):
 
 
 @pytest.mark.asyncio
-async def test_handle_start_here_intro_awards_and_posts_thread_reply(monkeypatch):
-    posted_messages = []
-    FakeStartHereAwardClient.response = {"awarded": True, "new_balance": 4, "points_awarded": 4}
+async def test_handle_start_here_intro_delegates_to_skill(monkeypatch):
+    handled = []
 
-    monkeypatch.setattr(
-        main_module,
-        "get_settings",
-        lambda: SimpleNamespace(
-            MLAI_BACKEND_URL="https://backend.test",
-            MLAI_API_KEY="api-key",
-            ROO_API_KEY="roo-api-key",
-            INTERNAL_API_KEY="internal-key",
-        ),
-    )
-    monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeStartHereAwardClient)
-    monkeypatch.setattr(
-        main_module,
-        "post_message",
-        lambda **kwargs: posted_messages.append(kwargs),
-    )
+    async def fake_handle(event):
+        handled.append(event)
+        return {"status": "awarded"}
 
-    await main_module._handle_start_here_intro(
-        {
-            "user": "UINTRO",
-            "channel": "CSTART",
-            "ts": "111.222",
-        }
-    )
+    monkeypatch.setattr(main_module, "handle_start_here_intro", fake_handle)
+    event = {
+        "type": "message",
+        "user": "UINTRO",
+        "channel": "CSTART",
+        "ts": "111.222",
+        "text": "Hi, I'm Sam and my startup helps founders test ideas.",
+    }
 
-    assert FakeStartHereAwardClient.last_instance.award_args == ("UINTRO", "CSTART")
-    assert posted_messages == [
-        {
-            "channel": "CSTART",
-            "thread_ts": "111.222",
-            "text": "Welcome <@UINTRO>! You've earned 4 Roo points for introducing yourself here.",
-        }
-    ]
+    result = await main_module._handle_start_here_intro(event)
 
-
-@pytest.mark.asyncio
-async def test_handle_start_here_intro_defaults_to_four_points_for_legacy_backend_response(monkeypatch):
-    posted_messages = []
-    FakeStartHereAwardClient.response = {"awarded": True, "new_balance": 4}
-
-    monkeypatch.setattr(
-        main_module,
-        "get_settings",
-        lambda: SimpleNamespace(
-            MLAI_BACKEND_URL="https://backend.test",
-            MLAI_API_KEY="api-key",
-            ROO_API_KEY="roo-api-key",
-            INTERNAL_API_KEY="internal-key",
-        ),
-    )
-    monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeStartHereAwardClient)
-    monkeypatch.setattr(
-        main_module,
-        "post_message",
-        lambda **kwargs: posted_messages.append(kwargs),
-    )
-
-    await main_module._handle_start_here_intro(
-        {
-            "user": "UINTRO",
-            "channel": "CSTART",
-            "ts": "111.222",
-        }
-    )
-
-    assert posted_messages[0]["text"] == "Welcome <@UINTRO>! You've earned 4 Roo points for introducing yourself here."
-
-
-@pytest.mark.asyncio
-async def test_handle_start_here_intro_noops_when_award_already_exists(monkeypatch):
-    posted_messages = []
-    FakeStartHereAwardClient.response = {"awarded": False}
-
-    monkeypatch.setattr(
-        main_module,
-        "get_settings",
-        lambda: SimpleNamespace(
-            MLAI_BACKEND_URL="https://backend.test",
-            MLAI_API_KEY="api-key",
-            ROO_API_KEY="roo-api-key",
-            INTERNAL_API_KEY="internal-key",
-        ),
-    )
-    monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeStartHereAwardClient)
-    monkeypatch.setattr(
-        main_module,
-        "post_message",
-        lambda **kwargs: posted_messages.append(kwargs),
-    )
-
-    await main_module._handle_start_here_intro(
-        {
-            "user": "UINTRO",
-            "channel": "CSTART",
-            "ts": "111.222",
-        }
-    )
-
-    assert FakeStartHereAwardClient.last_instance.award_args == ("UINTRO", "CSTART")
-    assert posted_messages == []
+    assert result == {"status": "awarded"}
+    assert handled == [event]
 
 
 @pytest.mark.asyncio

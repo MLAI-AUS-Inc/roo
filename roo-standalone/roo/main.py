@@ -48,6 +48,11 @@ from .points_request_approval import (
 from .slack_client import get_message, post_message, send_dm
 from .coworking_booking_intents import coworking_booking_retry_loop
 from .link_love import handle_link_love_reply, link_love_retry_loop
+from .start_here_introductions import (
+    handle_start_here_intro,
+    normalize_intro_event,
+    start_here_intro_retry_loop,
+)
 
 # Pending intents for auto-continue after prerequisite steps complete.
 # Key: "{slack_user_id}:{domain}" → {"action": "write", "topic": "...", "channel_id": "...", "thread_ts": "..."}
@@ -1508,6 +1513,7 @@ async def lifespan(app: FastAPI):
     app.state.startup_complete = False
     coworking_retry_task: Optional[asyncio.Task] = None
     link_love_task: Optional[asyncio.Task] = None
+    start_here_intro_task: Optional[asyncio.Task] = None
     jobs_scheduler_task: Optional[asyncio.Task] = None
     print(f"🦘 Roo Standalone starting...")
     print(f"   LLM Provider: {settings.default_llm_provider}")
@@ -1521,6 +1527,9 @@ async def lifespan(app: FastAPI):
     if settings.BOOST_LINK_LOVE_ENABLED:
         link_love_task = asyncio.create_task(link_love_retry_loop())
         app.state.link_love_task = link_love_task
+    if getattr(settings, "START_HERE_INTRO_ENABLED", True):
+        start_here_intro_task = asyncio.create_task(start_here_intro_retry_loop())
+        app.state.start_here_intro_task = start_here_intro_task
     if settings.JOBS_SCHEDULER_ENABLED:
         _validate_jobs_scheduler_settings(settings)
         jobs_scheduler_task = asyncio.create_task(_jobs_daily_run_loop())
@@ -1552,6 +1561,10 @@ async def lifespan(app: FastAPI):
             link_love_task.cancel()
             with suppress(asyncio.CancelledError):
                 await link_love_task
+        if start_here_intro_task:
+            start_here_intro_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await start_here_intro_task
 
     # Cancel the background task on shutdown (disabled)
     # medhack_task.cancel()
@@ -1726,6 +1739,24 @@ async def slack_events(
     if event_type == "reaction_added":
         asyncio.create_task(_handle_reaction_added(event))
         return JSONResponse(status_code=200, content={})
+
+    if event_type == "message" and event.get("subtype") == "message_changed":
+        from .slack_client import get_channel_id
+
+        try:
+            settings = get_settings()
+            intro_enabled = bool(getattr(settings, "START_HERE_INTRO_ENABLED", True))
+            intro_channel_name = str(
+                getattr(settings, "START_HERE_INTRO_CHANNEL_NAME", "_start-here")
+            )
+        except Exception:
+            intro_enabled = True
+            intro_channel_name = "_start-here"
+        start_here_id = get_channel_id(intro_channel_name) if intro_enabled else None
+        if start_here_id and event.get("channel") == start_here_id:
+            if normalize_intro_event(event) is not None:
+                asyncio.create_task(_handle_start_here_intro(event))
+            return JSONResponse(status_code=200, content={})
     
     if (
         event_type == "message"
@@ -1734,7 +1765,16 @@ async def slack_events(
     ):
         from .slack_client import get_channel_id
 
-        start_here_id = get_channel_id("_start-here")
+        try:
+            settings = get_settings()
+            intro_enabled = bool(getattr(settings, "START_HERE_INTRO_ENABLED", True))
+            intro_channel_name = str(
+                getattr(settings, "START_HERE_INTRO_CHANNEL_NAME", "_start-here")
+            )
+        except Exception:
+            intro_enabled = True
+            intro_channel_name = "_start-here"
+        start_here_id = get_channel_id(intro_channel_name) if intro_enabled else None
         if start_here_id and event.get("channel") == start_here_id and not event.get("subtype"):
             if event.get("thread_ts"):
                 print(f"🧵 Ignoring thread reply in #_start-here from {event.get('user')}")
@@ -1777,41 +1817,8 @@ async def slack_events(
 
 
 async def _handle_start_here_intro(event: dict):
-    """Award the intro bonus for a qualifying top-level #_start-here post."""
-    user_id = event.get("user")
-    channel_id = event.get("channel")
-    message_ts = event.get("ts")
-
-    if not user_id or not channel_id or not message_ts:
-        return
-
-    try:
-        from .clients.mlai_backend import MLAIBackendClient
-
-        settings = get_settings()
-        client = MLAIBackendClient(
-            base_url=settings.MLAI_BACKEND_URL,
-            api_key=settings.ROO_API_KEY or settings.MLAI_API_KEY,
-            internal_api_key=settings.INTERNAL_API_KEY or settings.ROO_API_KEY or settings.MLAI_API_KEY,
-        )
-        result = await client.award_first_channel_post(user_id, channel_id)
-    except Exception as exc:
-        print(f"⚠️ Failed to process #_start-here intro award for {user_id} in {channel_id}: {exc}")
-        return
-
-    if not result.get("awarded"):
-        return
-
-    try:
-        points_awarded = int(result.get("points_awarded") or 4)
-    except (TypeError, ValueError):
-        points_awarded = 4
-
-    post_message(
-        channel=channel_id,
-        thread_ts=message_ts,
-        text=f"Welcome <@{user_id}>! You've earned {points_awarded} Roo points for introducing yourself here.",
-    )
+    """Delegate a #_start-here message event to the introduction skill."""
+    return await handle_start_here_intro(event)
 
 
 async def _handle_mention(event: dict):

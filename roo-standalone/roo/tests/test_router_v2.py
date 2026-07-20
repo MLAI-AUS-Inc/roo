@@ -50,6 +50,19 @@ HEALTHHACK = _skill(
         }
     ],
 )
+START_HERE = _skill(
+    "start-here-introductions",
+    routing={
+        "event_only": True,
+        "use_when": "process ambient start-here message events",
+        "examples": [
+            {"text": "intro one"},
+            {"text": "intro two"},
+            {"text": "intro three"},
+        ],
+        "negative_examples": [{"text": "give points", "instead": "mlai-points"}],
+    },
+)
 
 
 def test_build_tools_filters_exclusive_channels_and_always_offers_chat():
@@ -68,12 +81,20 @@ def test_build_tools_filters_exclusive_channels_and_always_offers_chat():
 
     tools, by_name = router.build_tools([POINTS, MEDHACK, HEALTHHACK], channel_name="healthhack")
     assert "healthhack" in [tool["function"]["name"] for tool in tools]
-    assert "medhack" not in [tool["function"]["name"] for tool in tools]
 
     # unknown channel mirrors the executor rule: allowed through
     tools, _ = router.build_tools([POINTS, MEDHACK, HEALTHHACK], channel_name=None)
     assert "medhack" in [tool["function"]["name"] for tool in tools]
     assert "healthhack" in [tool["function"]["name"] for tool in tools]
+
+
+def test_build_tools_excludes_event_only_skills():
+    tools, by_name = router.build_tools([POINTS, START_HERE], channel_name="_start-here")
+    names = [tool["function"]["name"] for tool in tools]
+
+    assert "mlai-points" in names
+    assert "start-here-introductions" not in names
+    assert "start-here-introductions" not in by_name
 
 
 def test_skill_tool_embeds_routing_block_and_action_enum():

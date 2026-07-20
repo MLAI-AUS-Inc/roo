@@ -156,9 +156,7 @@ async def handle_quests(event: dict):
         if is_thread and event.get("thread_ts") != ts:
              await _update_progress(user_id, "helper")
 
-        # 6. First Contact (#_start-here post, no thread)
-        if not is_thread:
-             await _check_start_here_quest(event)
+        # 6. First Contact is handled by the durable start-here-introductions skill.
 
         # 7. Pattern Match Quests (Paper Trail, Git Pusher, etc)
         for q_id, q_data in QUESTS.items():
@@ -211,42 +209,6 @@ async def _update_progress(user_id: str, quest_id: str):
     if current >= target:
         _completed_quests[user_id].add(quest_id)
         await _complete_quest(user_id, quest_id)
-
-async def _check_start_here_quest(event: dict):
-    """Special handling for the First Contact quest."""
-    channel_id = event.get("channel")
-    user_id = event.get("user")
-
-    # Resolve channel name
-    target_channel_id = get_channel_id("_start-here")
-
-    # Fallback for testing/mocking if get_channel_id returns None but we want to simulate match
-    # (In real run, get_channel_id should work or return None)
-
-    if channel_id != target_channel_id:
-        return
-
-    # Use MLAIBackendClient to check if they've posted before
-    settings = get_settings()
-    points_client = MLAIBackendClient(
-        base_url=settings.MLAI_BACKEND_URL,
-        api_key=settings.MLAI_API_KEY,
-        internal_api_key=settings.INTERNAL_API_KEY or settings.MLAI_API_KEY
-    )
-
-    try:
-        has_posted = await points_client.has_posted_in_channel(user_id, channel_id)
-        if has_posted:
-            return
-
-        # Record it
-        await points_client.record_channel_post(user_id, channel_id)
-
-        # Complete the quest directly
-        await _complete_quest(user_id, "first_contact")
-    except Exception as e:
-        print(f"❌ Failed First Contact check: {e}")
-
 
 async def _complete_quest(user_id: str, quest_id: str):
     """Award points and notify user of quest completion."""
