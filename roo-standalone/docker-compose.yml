@@ -6,9 +6,9 @@ services:
     env_file:
       - .env
     environment:
-      # Start the first contextual-response pilot in observation-only mode.
+      # Enforce contextual responses in the first allowlisted pilot channel.
       ROO_CONTEXTUAL_RESPONSES_ENABLED: "true"
-      ROO_CONTEXTUAL_SHADOW_MODE: "true"
+      ROO_CONTEXTUAL_SHADOW_MODE: "false"
       ROO_CONTEXTUAL_CHANNEL_IDS: C09L4DMMU5N
     restart: unless-stopped
     healthcheck:
