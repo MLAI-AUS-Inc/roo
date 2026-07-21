@@ -241,6 +241,14 @@
   files: true
   expect: {skill: linear-meeting-actions}
   tags: [paraphrase, files]
+- id: para-linear-contextual-self-task
+  text: "add this as a task for me in Linear"
+  expect: {skill: linear-meeting-actions, action: create}
+  tags: [paraphrase, contextual, thread]
+- id: para-linear-request-above
+  text: "make the request above a Linear issue"
+  expect: {skill: linear-meeting-actions, action: create}
+  tags: [paraphrase, contextual, thread]
 - id: para-linear-raise-issue
   text: "raise a linear issue to fix the signup bug"
   expect: {skill: linear-meeting-actions}

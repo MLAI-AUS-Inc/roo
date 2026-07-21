@@ -169,8 +169,9 @@ def _build_thread_text_source(
         message_text = str(message.get("text") or "").strip()
         if not message_text:
             continue
-        speaker = str(message.get("user") or "user").strip()
-        parts.append(f"{speaker}: {message_text}")
+        speaker = _slack_speaker_label(message)
+        source_prefix = _slack_message_source_prefix(message)
+        parts.append(f"{source_prefix}{speaker}: {message_text}")
 
     clean_text = str(text or "").strip()
     if not exclude_current_message and clean_text and all(clean_text not in part for part in parts):
@@ -179,6 +180,31 @@ def _build_thread_text_source(
     if not parts:
         return None
     return SlackSource(kind="text", label="Slack thread", text="\n".join(dict.fromkeys(parts)))
+
+
+def _slack_speaker_label(message: dict[str, Any]) -> str:
+    user_id = str(message.get("user") or "").strip()
+    display_name = str(message.get("display_name") or "").strip()
+    email = str(message.get("email") or "").strip()
+    identity_parts: list[str] = []
+    if user_id:
+        identity_parts.append(f"<@{user_id}>")
+    if email:
+        identity_parts.append(email)
+    if display_name and identity_parts:
+        return f"{display_name} ({', '.join(identity_parts)})"
+    return display_name or (f"<@{user_id}>" if user_id else "user")
+
+
+def _slack_message_source_prefix(message: dict[str, Any]) -> str:
+    metadata: list[str] = []
+    ts = str(message.get("ts") or "").strip()
+    local_datetime = str(message.get("local_datetime") or "").strip()
+    if ts:
+        metadata.append(f"ts={ts}")
+    if local_datetime:
+        metadata.append(f"local={local_datetime}")
+    return f"[Slack message {' '.join(metadata)}] " if metadata else ""
 
 
 def _collect_slack_files(

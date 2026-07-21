@@ -103,6 +103,7 @@ class LinearMeetingActionsClient:
         priority: Optional[int] = None,
         due_date: Optional[str] = None,
         label_ids: Optional[list[str]] = None,
+        idempotency_key: Optional[str] = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "title": title,
@@ -120,6 +121,8 @@ class LinearMeetingActionsClient:
             payload["due_date"] = due_date
         if label_ids:
             payload["label_ids"] = label_ids
+        if idempotency_key:
+            payload["idempotency_key"] = idempotency_key
 
         return await self._request_json(
             "POST",

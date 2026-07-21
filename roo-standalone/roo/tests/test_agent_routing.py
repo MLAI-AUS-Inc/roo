@@ -36,6 +36,12 @@ def _make_agent() -> RooAgent:
     return agent
 
 
+def _add_linear_skill(agent: RooAgent) -> None:
+    agent.skills.append(
+        Skill(name="linear-meeting-actions", description="linear", content="", path=Path("."))
+    )
+
+
 class _CaptureExecutor:
     def __init__(self, captured: dict):
         self._captured = captured
@@ -137,6 +143,48 @@ def test_handle_mention_rejects_unauthorized_delegation(monkeypatch):
         "skill_used": "content-factory",
         "data": None,
     }
+
+
+def test_linear_skill_receives_bounded_slack_context_after_routing(monkeypatch):
+    agent = _make_agent()
+    _add_linear_skill(agent)
+    captured = {}
+    agent.skill_executor = _CaptureExecutor(captured)
+    _patch_route(
+        monkeypatch,
+        RouteDecision(skill="linear-meeting-actions", action="create", params={}),
+        captured,
+    )
+    monkeypatch.setattr("roo.agent.get_thread_messages", lambda channel, thread_ts: [])
+
+    context = {
+        "messages": [
+            {"user": "UJESS", "text": "Sam can you send the run sheet?", "ts": "1.1"},
+            {"user": "USAM", "text": "add this as a task for me in Linear", "ts": "1.2"},
+        ],
+        "request": {"user_id": "USAM", "message_ts": "1.2"},
+        "selection": {"mode": "recent_channel"},
+    }
+    monkeypatch.setattr(
+        "roo.linear_context.build_linear_slack_context",
+        lambda **kwargs: context,
+    )
+
+    result = asyncio.run(
+        agent.handle_mention(
+            text="add this as a task for me in Linear",
+            user_id="USAM",
+            channel_id="C1",
+            thread_ts="1.2",
+            current_message_ts="1.2",
+            slack_team_id="T1",
+            event_id="Ev1",
+        )
+    )
+
+    assert result["skill_used"] == "linear-meeting-actions"
+    assert captured["thread_history"] == context["messages"]
+    assert captured["slack_context"] == context
 
 
 def test_handle_mention_keeps_delegated_target_sticky_within_thread(monkeypatch):

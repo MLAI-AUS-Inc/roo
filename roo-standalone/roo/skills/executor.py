@@ -7,6 +7,7 @@ Executes skill actions based on the skill definition.
 Follows Anthropic's Agent Skills pattern for execution.
 """
 import base64
+import hashlib
 import json
 import re
 import asyncio
@@ -170,6 +171,7 @@ class SkillExecutor:
                     thread_history,
                     kwargs.get("event_files"),
                     kwargs.get("current_message_ts"),
+                    kwargs.get("slack_context"),
                 )
             elif skill.name == "tone-of-voice":
                 result = await self._execute_tone_of_voice(skill, text, params, user_id)
@@ -1783,13 +1785,26 @@ Keep the response concise but informative."""
         thread_history: Optional[List[dict]] = None,
         event_files: Optional[List[dict]] = None,
         current_message_ts: Optional[str] = None,
+        slack_context: Optional[dict[str, Any]] = None,
     ) -> dict:
         settings = get_settings()
         params = self._apply_linear_meeting_project_hint_prepass(text, params)
         params = self._apply_linear_meeting_owner_hint_prepass(text, params)
         params = self._apply_linear_meeting_default_assignee_prepass(text, params)
-        direct_issue_request = self._is_linear_direct_issue_request(text, params)
+        request_context = (slack_context or {}).get("request") or {}
+        if request_context:
+            params = {
+                **params,
+                "source_local_datetime": request_context.get("local_datetime"),
+                "source_timezone": request_context.get("timezone"),
+                "requester_slack_id": request_context.get("user_id") or user_id,
+                "requester_display_name": request_context.get("display_name"),
+                "requester_email": request_context.get("email"),
+            }
         thread_reference_request = self._is_linear_thread_reference_request(text, params)
+        if thread_reference_request and self._linear_request_assigns_to_requester(text):
+            params["owner_hint"] = f"<@{user_id}>"
+        direct_issue_request = self._is_linear_direct_issue_request(text, params)
         source_result = await self._build_linear_meeting_source_result(
             text=text,
             params=params,
@@ -1806,9 +1821,25 @@ Keep the response concise but informative."""
         # "add these to linear as tasks" hijacks the command path and the attached file
         # is parsed but never used.
         has_document_sources = source_result.files_parsed > 0
-        use_direct_issue_path = direct_issue_request and not has_document_sources
+        use_direct_issue_path = (
+            direct_issue_request
+            and not thread_reference_request
+            and not has_document_sources
+        )
         if len(transcript.split()) < 8 and not use_direct_issue_path:
             warning_suffix = self._format_linear_meeting_source_warnings(source_result.warnings)
+            selection_mode = str(
+                ((slack_context or {}).get("selection") or {}).get("mode") or ""
+            )
+            if thread_reference_request and selection_mode == "recent_channel":
+                return {
+                    "message": (
+                        "I couldn't find enough preceding Slack context to identify the task. "
+                        "Reply to the source message in a thread and mention me there, or check "
+                        "that Roo has channel-history access."
+                        + warning_suffix
+                    )
+                }
             return {
                 "message": (
                     "Paste the meeting transcript or summary in this thread, then ask me to turn it into Linear tasks."
@@ -1875,6 +1906,9 @@ Keep the response concise but informative."""
         uncertain_threshold = float(
             getattr(settings, "LINEAR_MEETING_UNCERTAIN_MIN_CONFIDENCE", 0.65) or 0.65
         )
+        contextual_auto_create_enabled = bool(
+            getattr(settings, "LINEAR_CONTEXTUAL_AUTO_CREATE_ENABLED", True)
+        )
         meeting_action_label_ids = [
             str(label.get("id"))
             for label in labels
@@ -1896,10 +1930,14 @@ Keep the response concise but informative."""
         skipped: list[dict[str, Any]] = []
         project_update: Optional[dict[str, Any]] = None
         project_update_error: Optional[str] = None
-        source = {
+        base_source = {
+            "workspace_id": str((slack_context or {}).get("workspace_id") or ""),
             "channel_id": channel_id,
+            "channel_name": str(((slack_context or {}).get("channel") or {}).get("name") or ""),
             "thread_ts": thread_ts,
             "requester_slack_id": user_id,
+            "request_message_ts": current_message_ts,
+            "event_id": str(((slack_context or {}).get("request") or {}).get("event_id") or ""),
         }
 
         if project_update_requested:
@@ -1935,6 +1973,22 @@ Keep the response concise but informative."""
             if not candidate.get("title"):
                 continue
 
+            if params.get("owner_hint") and (use_direct_issue_path or thread_reference_request):
+                candidate["owner_hint"] = str(params["owner_hint"])
+            candidate = self._normalize_linear_meeting_due_date(candidate, slack_context)
+            evidence_message = self._resolve_linear_evidence_message(candidate, slack_context)
+            source = {
+                **base_source,
+                "source_message_ts": str((evidence_message or {}).get("ts") or ""),
+                "source_local_datetime": str(
+                    (evidence_message or {}).get("local_datetime") or ""
+                ),
+                "source_permalink": self._linear_source_permalink(
+                    channel_id,
+                    str((evidence_message or {}).get("ts") or ""),
+                ),
+            }
+
             owner_match = self._match_linear_meeting_owner(candidate.get("owner_hint"), users)
             if (
                 float(owner_match.get("confidence") or 0.0) < uncertain_threshold
@@ -1951,6 +2005,8 @@ Keep the response concise but informative."""
                 projects,
                 owner_match.get("user"),
                 params.get("project_hint"),
+                channel_id=channel_id,
+                channel_context=(slack_context or {}).get("channel"),
             )
             team_match = self._match_linear_meeting_team(
                 project_match.get("project"),
@@ -1974,12 +2030,20 @@ Keep the response concise but informative."""
             )
             if candidate.get("contextual_review_only") and decision == "create":
                 decision = "review"
-            # Extraction path is "review first": never auto-create. Surface every
-            # creatable candidate for Slack Approve/Reject; only drop duplicates and
-            # items we couldn't resolve enough to create on approval (no team, or no
-            # assignee even after the fallback).
+            # Contextual commands may auto-create only when the source contains an
+            # explicit commitment. Discussion-derived and bulk extraction remain
+            # review-first.
             if not use_direct_issue_path and decision != "duplicate":
-                if owner_match.get("user") and team_match.get("team"):
+                contextual_explicit_create = bool(
+                    contextual_auto_create_enabled
+                    and thread_reference_request
+                    and candidate.get("explicit_commitment")
+                    and not candidate.get("contextual_review_only")
+                    and decision == "create"
+                )
+                if contextual_explicit_create:
+                    decision = "create"
+                elif owner_match.get("user") and team_match.get("team"):
                     decision = "review"
                 else:
                     decision = "skip"
@@ -2282,15 +2346,27 @@ Keep the response concise but informative."""
         return has_creation_intent and has_issue_noun
 
     def _is_linear_thread_reference_request(self, text: str, params: dict[str, Any]) -> bool:
+        from ..linear_context import is_contextual_linear_reference
+
         normalized = str(text or "").lower()
         if "linear" not in normalized:
             return False
         if self._normalize_match_text(params.get("action")) in {"threadreference", "addthread", "addthis"}:
             return True
-        reference = r'(?:this|that|above|thread|conversation|message|discussion)'
+        if is_contextual_linear_reference(text):
+            return True
+        return False
+
+    @staticmethod
+    def _linear_request_assigns_to_requester(text: str) -> bool:
+        value = str(text or "")
         return bool(
-            re.search(rf'\b(?:add|put|send|sync|create)\b.*\b{reference}\b.*\blinear\b', normalized)
-            or re.search(rf'\blinear\b.*\b(?:add|put|send|sync|create)\b.*\b{reference}\b', normalized)
+            re.search(r"\bfor\s+me\b", value, flags=re.IGNORECASE)
+            or re.search(
+                r"\bassign(?:ed)?(?:\s+(?:it|this|task|issue))?\s+to\s+me\b",
+                value,
+                flags=re.IGNORECASE,
+            )
         )
 
     async def _extract_linear_thread_context_candidate(
@@ -2405,6 +2481,8 @@ Return JSON only with this shape:
             "project_hint": project_hint,
             "evidence": text[:700],
             "source_label": "Slack command",
+            "evidence_message_ts": "",
+            "explicit_commitment": True,
             "confidence": 0.96,
         }
 
@@ -2444,6 +2522,7 @@ Return JSON only:
       "due_date": null,
       "priority": 3,
       "evidence": "short phrase from the command",
+      "explicit_commitment": true,
       "source_label": "Slack command",
       "confidence": 0.96
     }}
@@ -2620,13 +2699,18 @@ Return JSON only:
             for user in users[:80]
             if user.get("displayName") or user.get("name") or user.get("email")
         )
-        prompt = f"""Extract concrete action items from the meeting notes.
+        source_local_datetime = str(params.get("source_local_datetime") or "").strip()
+        source_date = source_local_datetime[:10] if source_local_datetime else get_current_date().isoformat()
+        prompt = f"""Extract concrete action items from the Slack conversation or meeting notes.
 
-Current date: {get_current_date().isoformat()}
+Source-local date: {source_date}
+Source-local datetime: {source_local_datetime or "unknown"}
+Source timezone: {params.get("source_timezone") or "unknown"}
 Source label: {source_label or "Slack thread"}
 Project hint: {params.get("project_hint") or "none"}
 Team hint: {params.get("team_hint") or "none"}
 Default assignee if the owner is unclear: {params.get("default_assignee_hint") or "none"}
+Requester: {params.get("requester_display_name") or "unknown"} (<@{params.get("requester_slack_id") or "unknown"}>, {params.get("requester_email") or "email unavailable"})
 
 Known Linear projects: {project_names or "none loaded"}
 Known Linear users: {user_names or "none loaded"}
@@ -2643,16 +2727,20 @@ Return JSON only with this shape:
       "owner_hint": "person, Slack mention, or email",
       "project_hint": "project name if clear",
       "team_hint": "team if clear",
+      "due_expression": "the exact relative or absolute due phrase, or null",
       "due_date": "YYYY-MM-DD or null",
       "priority": 3,
       "evidence": "short source phrase from notes",
+      "evidence_message_ts": "Slack ts from the matching [Slack message ts=...] marker, or null",
+      "explicit_commitment": true,
       "source_label": "{source_label or "Slack thread"}",
       "confidence": 0.0
     }}
   ]
 }}
 
-Only include actionable work someone agreed to do. Do not include decisions, FYIs, vague follow-ups, or the user's instruction to create Linear tasks/project updates.
+Only include actionable work someone explicitly agreed, promised, or was asked to do. Set explicit_commitment=false when you had to reframe a discussion into possible work. Do not include decisions, FYIs, vague follow-ups, or the user's instruction to create Linear tasks/project updates.
+Resolve relative dates such as EOW from the source-local date above. In this Australian workspace, numeric dates are day/month unless the source makes another format explicit.
 If an action item has no clear owner and a default assignee is given above, set its owner_hint to that default assignee."""
         settings = get_settings()
         response = await chat(
@@ -3116,6 +3204,7 @@ Chunk {index} source: {label}
         owner_hint = str(candidate.get("owner_hint") or candidate.get("owner") or "").strip()
         project_hint = str(candidate.get("project_hint") or candidate.get("project") or "").strip()
         team_hint = str(candidate.get("team_hint") or candidate.get("team") or "").strip()
+        due_expression = str(candidate.get("due_expression") or candidate.get("due") or "").strip()
         due_date = candidate.get("due_date") or candidate.get("dueDate")
         due_date = str(due_date).strip() if due_date else None
         if due_date and not re.match(r"^\d{4}-\d{2}-\d{2}$", due_date):
@@ -3131,6 +3220,18 @@ Chunk {index} source: {label}
             confidence = 0.0
         confidence = min(max(confidence, 0.0), 1.0)
         evidence = str(candidate.get("evidence") or candidate.get("quote") or "").strip()
+        evidence_message_ts = str(
+            candidate.get("evidence_message_ts") or candidate.get("evidenceMessageTs") or ""
+        ).strip()
+        explicit_commitment_value = candidate.get("explicit_commitment", False)
+        if isinstance(explicit_commitment_value, str):
+            explicit_commitment = explicit_commitment_value.strip().lower() in {
+                "1",
+                "true",
+                "yes",
+            }
+        else:
+            explicit_commitment = bool(explicit_commitment_value)
         source_label = str(candidate.get("source_label") or candidate.get("source") or "").strip()
         return {
             "title": title[:180],
@@ -3138,12 +3239,118 @@ Chunk {index} source: {label}
             "owner_hint": owner_hint,
             "project_hint": project_hint,
             "team_hint": team_hint,
+            "due_expression": due_expression[:120],
             "due_date": due_date,
             "priority": priority,
             "evidence": evidence[:700],
+            "evidence_message_ts": evidence_message_ts[:40],
+            "explicit_commitment": explicit_commitment,
             "source_label": source_label[:300],
             "confidence": confidence,
         }
+
+    def _normalize_linear_meeting_due_date(
+        self,
+        candidate: dict[str, Any],
+        slack_context: Optional[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Resolve common relative due expressions from the evidence timestamp."""
+        expression = str(candidate.get("due_expression") or "").strip()
+        evidence = str(candidate.get("evidence") or "")
+        if not expression:
+            relative_match = re.search(
+                r"\b(EOW|end of (?:the )?week|today|tomorrow)\b",
+                evidence,
+                flags=re.IGNORECASE,
+            )
+            expression = relative_match.group(1) if relative_match else ""
+        if not expression:
+            return candidate
+
+        normalized_expression = expression.lower().strip()
+        supported_relative_expressions = {
+            "eow",
+            "end of week",
+            "end of the week",
+            "today",
+            "tomorrow",
+        }
+        if normalized_expression not in supported_relative_expressions:
+            return candidate
+
+        evidence_message = self._resolve_linear_evidence_message(candidate, slack_context)
+        local_value = str((evidence_message or {}).get("local_datetime") or "")
+        if not local_value:
+            local_value = str(((slack_context or {}).get("request") or {}).get("local_datetime") or "")
+        try:
+            base_date = datetime.fromisoformat(local_value).date()
+        except (TypeError, ValueError):
+            return candidate
+
+        due: Optional[date] = None
+        if normalized_expression in {"eow", "end of week", "end of the week"}:
+            days_until_friday = 4 - base_date.weekday()
+            if days_until_friday < 0:
+                days_until_friday += 7
+            due = base_date + timedelta(days=days_until_friday)
+        elif normalized_expression == "today":
+            due = base_date
+        elif normalized_expression == "tomorrow":
+            due = base_date + timedelta(days=1)
+
+        if due:
+            return {**candidate, "due_expression": expression, "due_date": due.isoformat()}
+        return candidate
+
+    def _resolve_linear_evidence_message(
+        self,
+        candidate: dict[str, Any],
+        slack_context: Optional[dict[str, Any]],
+    ) -> Optional[dict[str, Any]]:
+        messages = [
+            message
+            for message in ((slack_context or {}).get("messages") or [])
+            if isinstance(message, dict) and not message.get("is_bot")
+        ]
+        if not messages:
+            return None
+
+        evidence_ts = str(candidate.get("evidence_message_ts") or "").strip()
+        if evidence_ts:
+            for message in messages:
+                if str(message.get("ts") or "") == evidence_ts:
+                    return message
+
+        evidence = self._normalize_linear_evidence_text(candidate.get("evidence"))
+        if evidence:
+            for message in reversed(messages):
+                message_text = self._normalize_linear_evidence_text(message.get("text"))
+                if evidence in message_text or message_text in evidence:
+                    return message
+
+        request_ts = str(((slack_context or {}).get("request") or {}).get("message_ts") or "")
+        prior_messages = [
+            message for message in messages if str(message.get("ts") or "") != request_ts
+        ]
+        return prior_messages[-1] if prior_messages else messages[-1]
+
+    @staticmethod
+    def _normalize_linear_evidence_text(value: Any) -> str:
+        return re.sub(r"\s+", " ", str(value or "").lower()).strip(" .,:;!?\"'“”")
+
+    @staticmethod
+    def _linear_source_permalink(
+        channel_id: Optional[str],
+        message_ts: str,
+    ) -> Optional[str]:
+        if not channel_id or not message_ts:
+            return None
+        try:
+            from ..slack_client import get_message_permalink
+
+            return get_message_permalink(channel_id, message_ts)
+        except Exception:
+            return None
 
     def _match_linear_meeting_owner(
         self,
@@ -3263,63 +3470,82 @@ Chunk {index} source: {label}
         projects: list[dict[str, Any]],
         owner_user: Optional[dict[str, Any]],
         explicit_project_hint: Optional[str] = None,
+        *,
+        channel_id: Optional[str] = None,
+        channel_context: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
         hint = str(explicit_project_hint or candidate.get("project_hint") or "").strip()
+        scored_by_project: dict[str, tuple[float, dict[str, Any], str]] = {}
+
+        def record(project: dict[str, Any], score: float, reason: str) -> None:
+            key = str(project.get("id") or project.get("name") or project.get("slugId") or "")
+            if not key:
+                return
+            existing = scored_by_project.get(key)
+            if existing is None or score > existing[0]:
+                scored_by_project[key] = (score, project, reason)
+
         if hint:
             normalized_hint = self._normalize_match_text(hint)
-            exact_name_matches: list[dict[str, Any]] = []
-            exact_value_matches: list[dict[str, Any]] = []
-            scored_matches: list[tuple[float, dict[str, Any]]] = []
             for project in projects:
                 project_name = project.get("name")
                 project_slug = project.get("slugId")
                 normalized_project_name = self._normalize_match_text(project_name)
                 if normalized_project_name and normalized_hint == normalized_project_name:
-                    exact_name_matches.append(project)
-                    continue
-                for value in (project_slug, project_name):
+                    record(project, 0.98, "Matched project by exact name")
+                normalized_slug = self._normalize_match_text(project_slug)
+                if normalized_slug and normalized_hint == normalized_slug:
+                    record(project, 0.96, "Matched project by exact slug")
+                for value in (project_name, project_slug):
                     normalized_value = self._normalize_match_text(value)
                     if not normalized_value:
                         continue
-                    if normalized_hint == normalized_value:
-                        exact_value_matches.append(project)
-                        continue
                     if normalized_value in normalized_hint or normalized_hint in normalized_value:
-                        score = 0.88
+                        record(project, 0.88, "Matched project by name similarity")
                     else:
-                        score = SequenceMatcher(None, normalized_hint, normalized_value).ratio()
-                    scored_matches.append((score, project))
+                        similarity = SequenceMatcher(None, normalized_hint, normalized_value).ratio()
+                        if similarity >= 0.78:
+                            record(
+                                project,
+                                min(similarity, 0.86),
+                                "Matched project by name similarity",
+                            )
 
-            exact_name_matches = self._dedupe_linear_projects_by_id(exact_name_matches)
-            if len(exact_name_matches) == 1:
-                return {
-                    "project": exact_name_matches[0],
-                    "confidence": 0.96,
-                    "reason": "Matched project by exact hint",
-                }
-            if len(exact_name_matches) > 1:
+                semantic_score = self._linear_project_semantic_score(hint, project)
+                if semantic_score >= 0.78:
+                    record(project, semantic_score, "Matched project by Linear context")
+
+        if channel_id:
+            for project in projects:
+                if str(project.get("slackChannelId") or "").strip() == str(channel_id):
+                    record(project, 0.97, "Matched project's linked Slack channel")
+
+        if not hint and channel_context:
+            channel_hint = " ".join(
+                str(channel_context.get(key) or "")
+                for key in ("name", "topic", "purpose")
+            ).strip()
+            if channel_hint:
+                for project in projects:
+                    channel_score = self._linear_project_semantic_score(channel_hint, project)
+                    if channel_score >= 0.82:
+                        record(
+                            project,
+                            min(channel_score, 0.86),
+                            "Matched project from Slack channel context",
+                        )
+
+        ranked = sorted(scored_by_project.values(), key=lambda item: item[0], reverse=True)
+        if ranked:
+            best_score, best_project, best_reason = ranked[0]
+            second_score = ranked[1][0] if len(ranked) > 1 else 0.0
+            if second_score >= 0.78 and best_score - second_score < 0.05:
                 return {"project": None, "confidence": 0.0, "reason": "Ambiguous project hint"}
-
-            exact_value_matches = self._dedupe_linear_projects_by_id(exact_value_matches)
-            if len(exact_value_matches) == 1:
-                return {
-                    "project": exact_value_matches[0],
-                    "confidence": 0.94,
-                    "reason": "Matched project by exact slug",
-                }
-            if len(exact_value_matches) > 1:
-                return {"project": None, "confidence": 0.0, "reason": "Ambiguous project hint"}
-
-            scored_matches.sort(key=lambda item: item[0], reverse=True)
-            if scored_matches and scored_matches[0][0] >= 0.78:
-                best_score, best_project = scored_matches[0]
-                second_score = scored_matches[1][0] if len(scored_matches) > 1 else 0.0
-                if second_score >= 0.78 and best_score - second_score < 0.03:
-                    return {"project": None, "confidence": 0.0, "reason": "Ambiguous project hint"}
+            if best_score >= 0.78:
                 return {
                     "project": best_project,
-                    "confidence": min(best_score, 0.86),
-                    "reason": "Matched project by name similarity",
+                    "confidence": best_score,
+                    "reason": best_reason,
                 }
 
         owner_id = str((owner_user or {}).get("id") or "")
@@ -3327,6 +3553,8 @@ Chunk {index} source: {label}
         member_projects = []
         if owner_id or owner_email:
             for project in projects:
+                if project.get("membersSource") == "team_fallback":
+                    continue
                 members = self._linear_connection_nodes(project.get("members"))
                 lead = project.get("lead")
                 participants = members + ([lead] if isinstance(lead, dict) else [])
@@ -3344,6 +3572,55 @@ Chunk {index} source: {label}
                 "reason": "Only active project found for owner",
             }
         return {"project": None, "confidence": 0.0, "reason": "No project match"}
+
+    def _linear_project_semantic_score(
+        self,
+        hint: str,
+        project: dict[str, Any],
+    ) -> float:
+        hint_tokens = self._linear_project_match_tokens(hint)
+        if not hint_tokens:
+            return 0.0
+        recent_issue_titles = " ".join(
+            str(issue.get("title") or "")
+            for issue in (project.get("recentIssues") or [])[:20]
+            if isinstance(issue, dict)
+        )
+        context = " ".join(
+            [
+                str(project.get("name") or ""),
+                str(project.get("slugId") or ""),
+                str(project.get("description") or ""),
+                str(project.get("content") or ""),
+                str((project.get("lastUpdate") or {}).get("body") or ""),
+                recent_issue_titles,
+            ]
+        )
+        context_tokens = self._linear_project_match_tokens(context)
+        if not context_tokens:
+            return 0.0
+        coverage = len(hint_tokens & context_tokens) / len(hint_tokens)
+        normalized_hint = self._normalize_match_text(hint)
+        normalized_context = self._normalize_match_text(context)
+        if len(normalized_hint) >= 6 and normalized_hint in normalized_context:
+            return 0.92
+        if coverage == 1.0 and len(hint_tokens) >= 2:
+            return 0.9
+        if coverage >= 0.75:
+            return 0.84
+        return 0.0
+
+    @staticmethod
+    def _linear_project_match_tokens(value: Any) -> set[str]:
+        stop_words = {
+            "about", "active", "from", "into", "linear", "project", "slack",
+            "task", "team", "that", "the", "this", "with",
+        }
+        return {
+            token
+            for token in re.findall(r"[a-z0-9]+", str(value or "").lower())
+            if len(token) >= 3 and token not in stop_words
+        }
 
     @staticmethod
     def _dedupe_linear_projects_by_id(projects: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -3501,7 +3778,7 @@ Chunk {index} source: {label}
         team = team_match.get("team") or {}
         owner = owner_match.get("user") or {}
         project = project_match.get("project") or {}
-        return {
+        issue_input = {
             "title": candidate["title"],
             "team_id": str(team.get("id") or ""),
             "description": self._build_linear_meeting_issue_description(candidate, source),
@@ -3511,6 +3788,39 @@ Chunk {index} source: {label}
             "due_date": candidate.get("due_date"),
             "label_ids": label_ids,
         }
+        issue_input["idempotency_key"] = self._linear_meeting_idempotency_key(
+            candidate=candidate,
+            source=source,
+            assignee_id=issue_input.get("assignee_id"),
+            project_id=issue_input.get("project_id"),
+        )
+        return issue_input
+
+    def _linear_meeting_idempotency_key(
+        self,
+        *,
+        candidate: dict[str, Any],
+        source: dict[str, Any],
+        assignee_id: Optional[str],
+        project_id: Optional[str],
+    ) -> str:
+        source_message_ts = (
+            source.get("source_message_ts")
+            or source.get("thread_ts")
+            or source.get("request_message_ts")
+            or ""
+        )
+        raw = "|".join(
+            [
+                str(source.get("workspace_id") or ""),
+                str(source.get("channel_id") or ""),
+                str(source_message_ts),
+                self._normalize_match_text(candidate.get("title")),
+                str(assignee_id or ""),
+                str(project_id or ""),
+            ]
+        )
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
     def _build_linear_meeting_issue_description(
         self,
@@ -3532,14 +3842,19 @@ Chunk {index} source: {label}
         if candidate.get("source_label"):
             source_lines.append(f"- Source document: `{candidate['source_label']}`")
         if source.get("channel_id"):
-            source_lines.append(f"- Slack channel: `{source['channel_id']}`")
+            channel_label = source.get("channel_name") or source["channel_id"]
+            source_lines.append(f"- Slack channel: `{channel_label}` (`{source['channel_id']}`)")
         if source.get("thread_ts"):
             source_lines.append(f"- Slack thread: `{source['thread_ts']}`")
+        if source.get("source_message_ts"):
+            source_lines.append(f"- Evidence message: `{source['source_message_ts']}`")
+        if source.get("source_permalink"):
+            source_lines.append(f"- [Open source message in Slack]({source['source_permalink']})")
         if source.get("requester_slack_id"):
             source_lines.append(f"- Requested by: `<@{source['requester_slack_id']}>`")
         if source_lines:
             lines.extend(["### Source", *source_lines, ""])
-        lines.append("_Generated by Roo from meeting notes._")
+        lines.append("_Generated by Roo from Slack context._")
         return "\n".join(line for line in lines if line is not None).strip()
 
     def _build_linear_meeting_candidate_display(
@@ -3560,6 +3875,7 @@ Chunk {index} source: {label}
             "team": team.get("key") or team.get("name") or "Unresolved",
             "source": candidate.get("source_label") or "Slack thread",
             "evidence": candidate.get("evidence") or "",
+            "due_date": candidate.get("due_date"),
             "confidence": confidence,
             "owner_reason": owner_match.get("reason"),
             "project_reason": project_match.get("reason"),
@@ -3621,7 +3937,14 @@ Chunk {index} source: {label}
                 issue = item.get("issue") or {}
                 issue_label = issue.get("identifier") or issue.get("title") or item["title"]
                 if issue.get("url"):
-                    lines.append(f"- <{issue['url']}|{issue_label}> - {item['title']}")
+                    detail = f"{item['assignee']} · {item['project']}"
+                    if item.get("due_date"):
+                        detail += f" · due {item['due_date']}"
+                    replay = " · already existed" if issue.get("idempotentReplay") else ""
+                    lines.append(
+                        f"- <{issue['url']}|{issue_label}> - {item['title']} "
+                        f"({detail}{replay})"
+                    )
                 else:
                     lines.append(f"- {issue_label} - {item['title']}")
         if review_needed:

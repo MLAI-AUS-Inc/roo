@@ -52,7 +52,7 @@ Copy `roo-standalone/.env.example` to `roo-standalone/.env` and configure:
 - `MLAI_BACKEND_URL` - Backend API URL for points, admin lookup, and Luma attendee reports
 - `ROO_API_KEY`/`MLAI_API_KEY`/`INTERNAL_API_KEY` - Backend auth key for Roo-to-mlai-backend calls
 
-For Slack file parsing, the Roo Slack app must include the `files:read` bot scope and be reinstalled after the scope is added. If Slack rotates the bot token during reinstall, update `SLACK_BOT_TOKEN` in production and restart Roo.
+For Slack file parsing, the Roo Slack app must include the `files:read` bot scope. Contextual Linear commands additionally require `channels:history`/`channels:read` for public channels, `groups:history`/`groups:read` for private channels, and `users:read` plus `users:read.email` for reliable Slack-to-Linear identity matching. Reinstall the app after adding scopes. If Slack rotates the bot token during reinstall, update `SLACK_BOT_TOKEN` in production and restart Roo.
 
 For daily jobs, the recommended production setup is:
 - `mlai-backend` owns the 7am Melbourne scheduler and Slack posting

@@ -155,6 +155,8 @@ def get_thread_messages(channel: str, thread_ts: str) -> list[dict]:
                     "user": msg.get("user", ""),
                     "text": msg.get("text", ""),
                     "ts": msg.get("ts", ""),
+                    "thread_ts": msg.get("thread_ts"),
+                    "subtype": msg.get("subtype"),
                     "bot_id": msg.get("bot_id"),
                     "is_bot": bool(msg.get("bot_id")),
                     "files": msg.get("files", []),
@@ -167,6 +169,82 @@ def get_thread_messages(channel: str, thread_ts: str) -> list[dict]:
     except Exception as e:
         print(f"❌ Thread history error: {e}")
         return []
+
+
+def get_recent_channel_messages(
+    channel: str,
+    *,
+    before_ts: Optional[str] = None,
+    limit: int = 50,
+    lookback_hours: int = 24,
+) -> list[dict]:
+    """Retrieve a bounded slice of channel history before an anchor message.
+
+    Slack returns history newest-first; callers receive chronological order.
+    This helper performs one on-demand read and never crawls other channels.
+    """
+    client = get_slack_client()
+    bounded_limit = min(max(int(limit or 50), 1), 100)
+    oldest = None
+    try:
+        if before_ts and lookback_hours > 0:
+            oldest = str(max(float(before_ts) - (lookback_hours * 60 * 60), 0.0))
+    except (TypeError, ValueError):
+        oldest = None
+
+    kwargs: Dict[str, Any] = {
+        "channel": channel,
+        "limit": bounded_limit,
+        "inclusive": False,
+        "include_all_metadata": True,
+    }
+    if before_ts:
+        kwargs["latest"] = before_ts
+    if oldest:
+        kwargs["oldest"] = oldest
+
+    try:
+        response = client.conversations_history(**kwargs)
+        if not response.get("ok"):
+            return []
+        messages = [_normalize_slack_message(message) for message in response.get("messages", [])]
+        messages.reverse()
+        print(f"📚 Retrieved {len(messages)} recent messages from {channel}")
+        return messages
+    except Exception as exc:
+        retry_after = _slack_retry_after(exc)
+        if retry_after:
+            print(
+                f"⚠️ Slack channel history rate limited for {channel}; "
+                f"retry after {retry_after}s"
+            )
+        else:
+            print(f"❌ Channel history error for {channel}: {exc}")
+        return []
+
+
+def _normalize_slack_message(message: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "user": message.get("user", ""),
+        "text": message.get("text", ""),
+        "ts": message.get("ts", ""),
+        "thread_ts": message.get("thread_ts"),
+        "subtype": message.get("subtype"),
+        "bot_id": message.get("bot_id"),
+        "is_bot": bool(message.get("bot_id")),
+        "files": message.get("files", []),
+        "reply_count": int(message.get("reply_count") or 0),
+    }
+
+
+def _slack_retry_after(exc: Exception) -> Optional[str]:
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", None)
+    if headers:
+        value = headers.get("Retry-After") or headers.get("retry-after")
+        if value:
+            return str(value)
+    return None
 
 
 def get_message(channel: str, message_ts: str) -> Optional[Dict[str, Any]]:
@@ -353,6 +431,49 @@ def send_dm(user_id: str, text: str, **kwargs) -> Optional[Dict[str, Any]]:
 
 
 _channel_name_cache: Dict[str, str] = {}
+_channel_context_cache: Dict[str, Dict[str, Any]] = {}
+
+
+def get_channel_context(channel_id: str) -> Dict[str, Any]:
+    """Return cached channel name/topic/purpose metadata."""
+    cached = _channel_context_cache.get(channel_id)
+    if cached is not None:
+        return dict(cached)
+
+    client = get_slack_client()
+    try:
+        response = client.conversations_info(channel=channel_id)
+        if not response.get("ok"):
+            return {}
+        channel = response.get("channel") or {}
+        context = {
+            "id": channel_id,
+            "name": channel.get("name") or "",
+            "topic": (channel.get("topic") or {}).get("value") or "",
+            "purpose": (channel.get("purpose") or {}).get("value") or "",
+            "is_private": bool(channel.get("is_private")),
+        }
+        _channel_context_cache[channel_id] = context
+        if context["name"]:
+            _channel_name_cache[channel_id] = str(context["name"])
+        return dict(context)
+    except Exception as exc:
+        print(f"❌ Channel context lookup error for {channel_id}: {exc}")
+        return {}
+
+
+def get_message_permalink(channel_id: str, message_ts: str) -> Optional[str]:
+    """Resolve a stable Slack link for source provenance."""
+    if not channel_id or not message_ts:
+        return None
+    client = get_slack_client()
+    try:
+        response = client.chat_getPermalink(channel=channel_id, message_ts=message_ts)
+        if response.get("ok"):
+            return str(response.get("permalink") or "") or None
+    except Exception as exc:
+        print(f"⚠️ Slack permalink lookup failed for {channel_id}:{message_ts}: {exc}")
+    return None
 
 
 def get_channel_name(channel_id: str) -> Optional[str]:
@@ -365,19 +486,7 @@ def get_channel_name(channel_id: str) -> Optional[str]:
     if cached:
         return cached
 
-    client = get_slack_client()
-
-    try:
-        response = client.conversations_info(channel=channel_id)
-        if response.get("ok"):
-            name = response["channel"].get("name")
-            if name:
-                _channel_name_cache[channel_id] = name
-            return name
-        return None
-    except Exception as e:
-        print(f"❌ Channel info lookup error for {channel_id}: {e}")
-        return None
+    return str(get_channel_context(channel_id).get("name") or "") or None
 
 
 @lru_cache(maxsize=10)

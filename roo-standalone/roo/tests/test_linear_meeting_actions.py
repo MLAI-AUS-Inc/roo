@@ -111,6 +111,27 @@ def test_linear_meeting_project_matches_explicit_hint():
     assert match["confidence"] >= 0.9
 
 
+def test_linear_meeting_project_matches_semantic_context_and_linked_channel():
+    executor = SkillExecutor()
+    project = {
+        "id": "proj-founder-program",
+        "name": "Founder Program 2026",
+        "description": "Applications, operations, and support for Founder Games.",
+        "content": "Run sheets and participant experience for the Founder Games event.",
+        "slackChannelId": "CFOUNDERS",
+    }
+
+    match = executor._match_linear_meeting_project(
+        {"project_hint": "Founder Games"},
+        [project, {"id": "proj-other", "name": "Website Refresh"}],
+        owner_user=None,
+        channel_id="CFOUNDERS",
+    )
+
+    assert match["project"]["id"] == "proj-founder-program"
+    assert match["confidence"] >= 0.9
+
+
 @pytest.mark.parametrize(
     ("text", "expected"),
     [
@@ -1700,6 +1721,175 @@ async def test_linear_meeting_command_with_file_uses_extraction_not_direct_path(
 
 
 @pytest.mark.asyncio
+async def test_contextual_founder_games_assignment_creates_one_step(monkeypatch):
+    executor = SkillExecutor()
+    created_inputs = []
+    team = {"id": "team-1", "key": "MLA", "name": "MLAI"}
+    sam = {
+        "id": "linear-sam",
+        "name": "Sam Donegan",
+        "displayName": "Sam",
+        "email": "sam@example.com",
+    }
+    project = {
+        "id": "project-founder-program",
+        "name": "Founder Program 2026",
+        "description": "Applications and operations for Founder Games.",
+        "content": "Founder Games run sheets, setup, and participant experience.",
+        "slackChannelId": "CFOUNDERS",
+        "teams": {"nodes": [team]},
+        "members": {"nodes": [sam]},
+        "membersSource": "project",
+    }
+    slack_context = {
+        "workspace_id": "TMLAI",
+        "channel": {
+            "id": "CFOUNDERS",
+            "name": "founder-programs",
+            "topic": "Founder Games planning",
+            "purpose": "",
+        },
+        "request": {
+            "user_id": "USAM",
+            "display_name": "Dr Sam",
+            "email": "sam@example.com",
+            "message_ts": "1784595900.000002",
+            "local_datetime": "2026-07-21T10:05:00+10:00",
+            "timezone": "Australia/Sydney",
+            "event_id": "Ev-founder-task",
+        },
+        "messages": [
+            {
+                "user": "UJESS",
+                "display_name": "Jess",
+                "email": "jess@example.com",
+                "text": (
+                    "Sam can you send me through the run sheet for the founder games by EOW "
+                    "and we can allocate support to setting up for that"
+                ),
+                "ts": "1784592300.000001",
+                "local_datetime": "2026-07-21T09:05:00+10:00",
+                "is_bot": False,
+                "files": [],
+            },
+            {
+                "user": "USAM",
+                "display_name": "Dr Sam",
+                "email": "sam@example.com",
+                "text": "@Roo add this as a task for me in Linear",
+                "ts": "1784595900.000002",
+                "local_datetime": "2026-07-21T10:05:00+10:00",
+                "is_bot": False,
+                "files": [],
+            },
+        ],
+        "selection": {"mode": "recent_channel", "contextual_reference": True},
+    }
+
+    async def extracted_candidates(**kwargs):
+        combined = "\n".join(source.text for source in kwargs["sources"])
+        assert "Jess (<@UJESS>, jess@example.com)" in combined
+        assert "@Roo add this" not in combined
+        return [
+            {
+                "title": "Send Founder Games run sheet to Jess",
+                "description": "Send Jess the run sheet so HEX can allocate setup support.",
+                "owner_hint": "Sam",
+                "project_hint": "Founder Games",
+                "due_expression": "EOW",
+                # The evidence timestamp is authoritative for relative dates,
+                # even if extraction supplied a stale normalization.
+                "due_date": "2026-07-31",
+                "evidence": (
+                    "Sam can you send me through the run sheet for the founder games by EOW"
+                ),
+                "evidence_message_ts": "1784592300.000001",
+                "explicit_commitment": True,
+                "source_label": "Slack thread",
+                "confidence": 0.95,
+            }
+        ]
+
+    class FakeClient:
+        async def list_teams(self):
+            return [team]
+
+        async def list_users(self):
+            return [sam]
+
+        async def list_active_projects(self):
+            return [project]
+
+        async def list_issue_labels(self):
+            return []
+
+        async def list_recent_open_issues(self):
+            return []
+
+        async def create_issue(self, **kwargs):
+            created_inputs.append(kwargs)
+            return {
+                "identifier": "MLA-42",
+                "title": kwargs["title"],
+                "url": "https://linear.test/MLA-42",
+            }
+
+    class FakeSkill:
+        def get_client_class(self, name):
+            assert name == "LinearMeetingActionsClient"
+            return FakeClient
+
+    monkeypatch.setattr(
+        executor_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            OPENAI_API_KEY=None,
+            LINEAR_DEFAULT_TEAM=None,
+            LINEAR_MEETING_AUTO_CREATE_MIN_CONFIDENCE=0.85,
+            LINEAR_MEETING_UNCERTAIN_MIN_CONFIDENCE=0.65,
+            LINEAR_CONTEXTUAL_AUTO_CREATE_ENABLED=True,
+        ),
+    )
+    monkeypatch.setattr(
+        "roo.slack_client.get_user_info",
+        lambda user_id: {"email": "sam@example.com"} if user_id == "USAM" else {},
+    )
+    monkeypatch.setattr(
+        "roo.slack_client.get_message_permalink",
+        lambda channel_id, message_ts: "https://slack.test/source-message",
+    )
+    monkeypatch.setattr(
+        executor,
+        "_extract_linear_meeting_candidates_from_sources",
+        extracted_candidates,
+    )
+
+    result = await executor._execute_linear_meeting_actions(
+        skill=FakeSkill(),
+        text="@Roo add this as a task for me in Linear",
+        params={},
+        user_id="USAM",
+        channel_id="CFOUNDERS",
+        thread_ts="1784595900.000002",
+        thread_history=slack_context["messages"],
+        current_message_ts="1784595900.000002",
+        slack_context=slack_context,
+    )
+
+    assert result["data"]["created_count"] == 1
+    assert result["data"]["review_count"] == 0
+    assert len(created_inputs) == 1
+    issue = created_inputs[0]
+    assert issue["title"] == "Send Founder Games run sheet to Jess"
+    assert issue["assignee_id"] == "linear-sam"
+    assert issue["project_id"] == "project-founder-program"
+    assert issue["team_id"] == "team-1"
+    assert issue["due_date"] == "2026-07-24"
+    assert len(issue["idempotency_key"]) == 64
+    assert "https://slack.test/source-message" in issue["description"]
+
+
+@pytest.mark.asyncio
 async def test_linear_meeting_unmatched_owner_skipped_without_fallback(monkeypatch):
     """Without a fallback assignee, a task whose owner can't be resolved is skipped
     (not reviewed). The fallback is what rescues it (see the test above)."""
@@ -1771,3 +1961,48 @@ async def test_linear_meeting_unmatched_owner_skipped_without_fallback(monkeypat
     assert result["data"]["review_count"] == 0
     assert result["data"]["skipped_count"] == 1
     assert created_inputs == []
+
+
+def test_normalize_candidate_string_false_is_not_an_explicit_commitment():
+    candidate = SkillExecutor()._normalize_linear_meeting_candidate(
+        {
+            "title": "Consider changing the format",
+            "explicit_commitment": "false",
+        }
+    )
+
+    assert candidate["explicit_commitment"] is False
+
+
+@pytest.mark.asyncio
+async def test_contextual_command_without_readable_history_explains_recovery(monkeypatch):
+    monkeypatch.setattr(
+        executor_module,
+        "get_settings",
+        lambda: SimpleNamespace(OPENAI_API_KEY=None),
+    )
+    current_message = {
+        "user": "USAM",
+        "text": "@Roo add this as a task for me in Linear",
+        "ts": "1784595900.000002",
+        "is_bot": False,
+        "files": [],
+    }
+
+    result = await SkillExecutor()._execute_linear_meeting_actions(
+        skill=SimpleNamespace(),
+        text=current_message["text"],
+        params={},
+        user_id="USAM",
+        channel_id="CFOUNDERS",
+        thread_ts=current_message["ts"],
+        thread_history=[current_message],
+        current_message_ts=current_message["ts"],
+        slack_context={
+            "messages": [current_message],
+            "selection": {"mode": "recent_channel", "contextual_reference": True},
+        },
+    )
+
+    assert "couldn't find enough preceding Slack context" in result["message"]
+    assert "channel-history access" in result["message"]
