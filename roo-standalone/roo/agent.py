@@ -81,6 +81,7 @@ class RooAgent:
         """
         # Clean the message
         routing_started_at = time.monotonic()
+        implicit_addressing = bool(kwargs.get("implicit_addressing"))
         clean_text = self._clean_mention(text)
         thread_context = self._get_thread_context(channel_id, thread_ts)
         stripped_text, delegation = extract_content_factory_delegation(clean_text)
@@ -134,6 +135,13 @@ class RooAgent:
                 print(f"⚠️ Failed to fetch thread history: {e}")
 
         # 1. Try Fast Path (Direct Command Execution)
+        fast_action = self._match_fast_path(clean_text)
+        if (
+            implicit_addressing
+            and fast_action
+            and not self._is_implicit_action_allowed("mlai-points", fast_action)
+        ):
+            return self._implicit_action_blocked("mlai-points", fast_action)
         fast_result = await self._try_fast_path(clean_text, user_id, channel_id, thread_ts)
         if fast_result:
             print(f"⚡ Fast Path matched!")
@@ -186,6 +194,11 @@ class RooAgent:
 
         if skill:
             print(f"🎯 Selected skill: {skill.name}")
+            if implicit_addressing and not self._is_implicit_action_allowed(
+                skill.name,
+                v2_decision.action,
+            ):
+                return self._implicit_action_blocked(skill.name, v2_decision.action)
             self._remember_selected_skill(
                 skill.name,
                 channel_id,
@@ -269,6 +282,11 @@ class RooAgent:
             }
         else:
             print("💬 No skill matched, generating general response")
+            if implicit_addressing and not self._is_implicit_action_allowed(
+                "respond_in_chat",
+                None,
+            ):
+                return self._implicit_action_blocked("respond_in_chat", None)
             response = await self._general_response(clean_text, thread_history)
             return {
                 "message": response,
@@ -375,6 +393,38 @@ class RooAgent:
 
     def _get_skill_by_name(self, skill_name: str) -> Optional[Skill]:
         return next((skill for skill in self.skills if skill.name == skill_name), None)
+
+    def _is_implicit_action_allowed(
+        self,
+        skill_name: str,
+        action: Optional[str],
+    ) -> bool:
+        """Keep untagged execution on an explicit, narrow action allowlist."""
+
+        allowed = get_settings().implicit_action_allowlist
+        candidates = {skill_name, f"{skill_name}:*"}
+        if action:
+            candidates.add(f"{skill_name}:{action}")
+        return bool(candidates & allowed)
+
+    def _implicit_action_blocked(
+        self,
+        skill_name: str,
+        action: Optional[str],
+    ) -> Dict[str, Any]:
+        print(
+            "🔒 Implicit Slack action blocked; explicit Roo mention required "
+            f"skill={skill_name} action={action or 'none'}"
+        )
+        return {
+            "message": None,
+            "skill_used": skill_name if skill_name != "respond_in_chat" else None,
+            "data": {
+                "implicit_action_blocked": True,
+                "action": action,
+            },
+            "suppress_post": True,
+        }
 
     def _extract_domain(self, text: str) -> Optional[str]:
         return extract_domain(text)

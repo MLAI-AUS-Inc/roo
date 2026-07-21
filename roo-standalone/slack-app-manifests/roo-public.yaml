@@ -1,0 +1,46 @@
+display_information:
+  name: Roo
+  description: MLAI community assistant
+  background_color: "#B45309"
+features:
+  bot_user:
+    display_name: Roo
+    always_online: false
+  slash_commands:
+    - command: /roo
+      url: http://209.38.22.179/slack/commands
+      description: Ask Roo to perform an MLAI community action
+      should_escape: false
+oauth_config:
+  scopes:
+    bot:
+      - app_mentions:read
+      - channels:history
+      - channels:read
+      - chat:write
+      - commands
+      - files:read
+      - files:write
+      - groups:history
+      - groups:read
+      - im:history
+      - im:read
+      - im:write
+      - reactions:read
+      - users:read
+      - users:read.email
+settings:
+  event_subscriptions:
+    request_url: http://209.38.22.179/slack/events
+    bot_events:
+      - app_mention
+      - message.channels
+      - message.groups
+      - message.im
+      - reaction_added
+  interactivity:
+    is_enabled: true
+    request_url: http://209.38.22.179/slack/actions
+  org_deploy_enabled: false
+  socket_mode_enabled: false
+  token_rotation_enabled: true

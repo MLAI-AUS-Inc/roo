@@ -1,0 +1,61 @@
+- id: direct-topup
+  text: "<@UROO> topup 20 points"
+  explicit_mention: true
+  candidate_reason: explicit_mention
+  history: []
+  expect: respond
+
+- id: indirect-teaching-command
+  text: "lol sorry sam you'll need to say <@UROO> topup 20 points"
+  explicit_mention: true
+  candidate_reason: explicit_mention
+  history: []
+  expect: ignore
+
+- id: same-user-pack-followup
+  text: "Then top up 20 points please"
+  explicit_mention: false
+  candidate_reason: same_user_thread_continuation
+  history:
+    - {user: USAM, text: "<@UROO> top up 25 points"}
+    - {user: UROO, text: "I can only help with 10, 20, or 50 Top-up Roo Points.", is_bot: true}
+  expect: respond
+
+- id: short-answer-to-roo
+  text: "20 please"
+  explicit_mention: false
+  candidate_reason: same_user_thread_continuation
+  history:
+    - {user: UROO, text: "Would you like 10, 20, or 50?", is_bot: true}
+  expect: respond
+
+- id: human-thank-you
+  text: "Thank you <@UDRSAM>"
+  explicit_mention: false
+  candidate_reason: same_user_thread_continuation
+  history:
+    - {user: UROO, text: "Your checkout is ready.", is_bot: true}
+  expect: ignore
+
+- id: talking-about-roo
+  text: "Roo said the available packs are 10, 20, and 50"
+  explicit_mention: false
+  candidate_reason: plain_roo_name
+  history: []
+  expect: ignore
+
+- id: plain-name-address
+  text: "Roo, can you check my points balance?"
+  explicit_mention: false
+  candidate_reason: plain_roo_name
+  history: []
+  expect: respond
+
+- id: another-user-takes-over
+  text: "I think Sam was asking about the 20 point pack"
+  explicit_mention: false
+  candidate_reason: same_user_thread_continuation
+  history:
+    - {user: UROO, text: "Which pack would you like?", is_bot: true}
+    - {user: USAM, text: "Not sure yet"}
+  expect: ignore
