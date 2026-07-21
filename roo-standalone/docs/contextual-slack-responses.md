@@ -16,19 +16,20 @@ The relevant subscriptions are `message.channels` and `message.groups`. Keep
 `app_mention` and `message.im`; the application deduplicates overlapping logical
 message deliveries by workspace, channel, and Slack message timestamp.
 
-## Shadow rollout
+## Enforced pilot
 
-Start with:
+The first production pilot uses:
 
 ```dotenv
 ROO_CONTEXTUAL_RESPONSES_ENABLED=true
-ROO_CONTEXTUAL_SHADOW_MODE=true
+ROO_CONTEXTUAL_SHADOW_MODE=false
 ROO_CONTEXTUAL_CHANNEL_IDS=C09L4DMMU5N
 ```
 
-Shadow mode preserves existing mention behaviour and never sends an untagged
-reply. Review structured `ADDRESSING_DECISION` log lines; they contain message
-metadata and decision reasons, but not Slack message text.
+Roo can send an untagged reply only after the allowlist, candidate prefilter,
+same-user session checks, and high-confidence addressedness gate pass. Review
+structured `ADDRESSING_DECISION` log lines; they contain message metadata and
+decision reasons, but not Slack message text.
 
 Run the labelled live evaluation before enabling replies:
 
@@ -36,10 +37,9 @@ Run the labelled live evaluation before enabling replies:
 python scripts/run_addressing_eval.py
 ```
 
-When the shadow decisions are satisfactory, set
-`ROO_CONTEXTUAL_SHADOW_MODE=false` in one pilot channel. Roll back immediately
-by setting `ROO_CONTEXTUAL_RESPONSES_ENABLED=false`; removing Slack event
-subscriptions is not required for the kill switch to take effect.
+Roll back immediately by setting `ROO_CONTEXTUAL_RESPONSES_ENABLED=false`;
+removing Slack event subscriptions is not required for the kill switch to take
+effect.
 
 ## Safety policy
 
