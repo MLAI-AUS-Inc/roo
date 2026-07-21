@@ -4,7 +4,9 @@ Roo Standalone Configuration
 Pydantic Settings for environment-based configuration.
 """
 import hmac
+import re
 from typing import Optional
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -20,6 +22,23 @@ class Settings(BaseSettings):
     # Slack
     SLACK_BOT_TOKEN: str
     SLACK_SIGNING_SECRET: str
+    SLACK_CONTEXTUAL_STATE_DB_PATH: str = "data/slack_contextual_responses.db"
+
+    # Context-aware channel replies. Disabled by default and restricted to an
+    # explicit channel allowlist before any untagged message can be considered.
+    ROO_CONTEXTUAL_RESPONSES_ENABLED: bool = False
+    ROO_CONTEXTUAL_SHADOW_MODE: bool = True
+    ROO_CONTEXTUAL_CHANNEL_IDS: str = ""
+    ROO_CONTEXTUAL_MIN_CONFIDENCE: float = 0.90
+    ROO_CONTEXTUAL_INDIRECT_MENTION_CONFIDENCE: float = 0.90
+    ROO_CONTEXTUAL_ADJACENCY_SECONDS: int = 3 * 60
+    ROO_CONTEXTUAL_THREAD_TTL_SECONDS: int = 30 * 60
+    ROO_CONTEXTUAL_MESSAGE_RECEIPT_TTL_SECONDS: int = 10 * 60
+    ROO_CONTEXTUAL_CLASSIFIER_TIMEOUT_SECONDS: float = 5.0
+    ROO_CONTEXTUAL_MODEL: Optional[str] = None
+    ROO_IMPLICIT_ACTION_ALLOWLIST: str = (
+        "respond_in_chat,mlai-points:balance,mlai-points:topup_points"
+    )
     
     # LLM Providers (at least one required)
     OPENAI_API_KEY: Optional[str] = None
@@ -110,6 +129,53 @@ class Settings(BaseSettings):
     # retired cases can never leak dialogue or verdicts. Mirrors MLAI
     # Backend's HEALTH_HACK_OPEN_CASE_IDS default.
     SIM_OPEN_CASE_IDS: str = "1,2"
+
+    @staticmethod
+    def _split_configured_values(raw: str) -> frozenset[str]:
+        return frozenset(
+            value.strip()
+            for value in str(raw or "").replace(",", " ").split()
+            if value.strip()
+        )
+
+    @property
+    def contextual_channel_ids(self) -> frozenset[str]:
+        return self._split_configured_values(self.ROO_CONTEXTUAL_CHANNEL_IDS)
+
+    @property
+    def implicit_action_allowlist(self) -> frozenset[str]:
+        return self._split_configured_values(self.ROO_IMPLICIT_ACTION_ALLOWLIST)
+
+    @model_validator(mode="after")
+    def validate_contextual_responses(self):
+        if not str(self.SLACK_CONTEXTUAL_STATE_DB_PATH or "").strip():
+            raise ValueError("SLACK_CONTEXTUAL_STATE_DB_PATH is required")
+        if not 0.5 <= self.ROO_CONTEXTUAL_MIN_CONFIDENCE <= 1.0:
+            raise ValueError("ROO_CONTEXTUAL_MIN_CONFIDENCE must be between 0.5 and 1.0")
+        if not 0.5 <= self.ROO_CONTEXTUAL_INDIRECT_MENTION_CONFIDENCE <= 1.0:
+            raise ValueError(
+                "ROO_CONTEXTUAL_INDIRECT_MENTION_CONFIDENCE must be between 0.5 and 1.0"
+            )
+        if self.ROO_CONTEXTUAL_ADJACENCY_SECONDS <= 0:
+            raise ValueError("ROO_CONTEXTUAL_ADJACENCY_SECONDS must be positive")
+        if self.ROO_CONTEXTUAL_THREAD_TTL_SECONDS <= 0:
+            raise ValueError("ROO_CONTEXTUAL_THREAD_TTL_SECONDS must be positive")
+        if self.ROO_CONTEXTUAL_MESSAGE_RECEIPT_TTL_SECONDS <= 0:
+            raise ValueError("ROO_CONTEXTUAL_MESSAGE_RECEIPT_TTL_SECONDS must be positive")
+        if not 0 < self.ROO_CONTEXTUAL_CLASSIFIER_TIMEOUT_SECONDS <= 30:
+            raise ValueError(
+                "ROO_CONTEXTUAL_CLASSIFIER_TIMEOUT_SECONDS must be between 0 and 30"
+            )
+        if any(
+            not re.fullmatch(r"[CG][A-Z0-9]+", channel_id)
+            for channel_id in self.contextual_channel_ids
+        ):
+            raise ValueError("ROO_CONTEXTUAL_CHANNEL_IDS contains invalid channel IDs")
+        if self.ROO_CONTEXTUAL_RESPONSES_ENABLED and not self.contextual_channel_ids:
+            raise ValueError(
+                "Contextual Roo responses require ROO_CONTEXTUAL_CHANNEL_IDS"
+            )
+        return self
 
     @property
     def sim_open_case_ids(self) -> frozenset[int]:

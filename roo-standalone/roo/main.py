@@ -24,6 +24,12 @@ from fastapi.responses import JSONResponse
 
 from .config import get_settings, Settings, validate_runtime_security
 from .agent import RooAgent, get_agent
+from .addressing import (
+    candidate_reason_for_message,
+    contains_bot_mention,
+    decide_addressing,
+)
+from .conversation_sessions import get_contextual_conversation_store
 from .content_factory_progress import (
     CONTENT_FACTORY_REQUEST_SOURCE,
     build_live_status_blocks,
@@ -45,7 +51,14 @@ from .points_request_approval import (
     get_remembered_points_request_summary,
     remember_points_request_summary,
 )
-from .slack_client import get_message, post_message, send_dm
+from .slack_client import (
+    get_bot_user_id,
+    get_message,
+    get_recent_channel_messages,
+    get_thread_messages,
+    post_message,
+    send_dm,
+)
 from .coworking_booking_intents import coworking_booking_retry_loop
 from .link_love import handle_link_love_reply, link_love_retry_loop
 from .start_here_introductions import (
@@ -76,6 +89,224 @@ CONTENT_FACTORY_WATCHDOG_STOP_STATUSES = {
     "denied",
     "cancelled",
 }
+
+
+def _is_contextual_channel_enabled(settings: Settings, channel_id: Optional[str]) -> bool:
+    """Return true only for explicitly allowlisted Roo pilot channels."""
+
+    if not bool(getattr(settings, "ROO_CONTEXTUAL_RESPONSES_ENABLED", False)):
+        return False
+    configured = getattr(settings, "contextual_channel_ids", frozenset())
+    return bool(channel_id and channel_id in configured)
+
+
+def _log_addressing_decision(
+    *,
+    event: dict[str, Any],
+    decision: str,
+    candidate_reason: Optional[str],
+    source: str,
+    confidence: Optional[float] = None,
+    reason: Optional[str] = None,
+    shadow_mode: bool = False,
+) -> None:
+    """Emit metadata-only addressing telemetry; never log channel message text."""
+
+    payload = {
+        "event": "addressing_decision",
+        "decision": decision,
+        "candidate_reason": candidate_reason,
+        "source": source,
+        "confidence": confidence,
+        "reason": reason,
+        "shadow_mode": shadow_mode,
+        "channel_id": event.get("channel"),
+        "thread_ts": event.get("thread_ts"),
+        "message_ts": event.get("ts"),
+        "user_id": event.get("user"),
+    }
+    print("ADDRESSING_DECISION " + json.dumps(payload, ensure_ascii=True, default=str))
+
+
+async def _get_addressing_history(event: dict[str, Any]) -> list[dict]:
+    channel_id = str(event.get("channel") or "")
+    thread_ts = str(event.get("thread_ts") or "")
+    message_ts = str(event.get("ts") or "")
+    if not channel_id:
+        return []
+    if thread_ts:
+        return await asyncio.to_thread(get_thread_messages, channel_id, thread_ts)
+    return await asyncio.to_thread(
+        get_recent_channel_messages,
+        channel_id,
+        before_ts=message_ts or None,
+        limit=8,
+        lookback_hours=1,
+    )
+
+
+async def _handle_contextual_slack_message(
+    event: dict[str, Any],
+    *,
+    slack_team_id: str,
+    trigger_source: str,
+) -> Optional[dict[str, Any]]:
+    """Gate one pilot-channel message before handing it to the existing agent."""
+
+    settings = get_settings()
+    team_id = str(slack_team_id or event.get("team") or "").strip()
+    channel_id = str(event.get("channel") or "").strip()
+    message_ts = str(event.get("ts") or "").strip()
+    user_id = str(event.get("user") or "").strip()
+    thread_ts = str(event.get("thread_ts") or "").strip() or None
+    if not team_id or not channel_id or not message_ts or not user_id:
+        return None
+
+    # Resolve the cached bot identity before claiming the logical receipt. If
+    # this Slack call fails, an app_mention delivery can still use its fallback.
+    bot_user_id = await asyncio.to_thread(get_bot_user_id)
+    store = get_contextual_conversation_store(settings.SLACK_CONTEXTUAL_STATE_DB_PATH)
+    claimed = await asyncio.to_thread(
+        store.claim_message,
+        team_id=team_id,
+        channel_id=channel_id,
+        message_ts=message_ts,
+        ttl_seconds=settings.ROO_CONTEXTUAL_MESSAGE_RECEIPT_TTL_SECONDS,
+    )
+    if not claimed:
+        _log_addressing_decision(
+            event=event,
+            decision="ignore",
+            candidate_reason=None,
+            source="logical_dedupe",
+            reason="duplicate_logical_message",
+            shadow_mode=settings.ROO_CONTEXTUAL_SHADOW_MODE,
+        )
+        return None
+
+    explicit_mention = trigger_source == "app_mention" or contains_bot_mention(
+        str(event.get("text") or ""),
+        bot_user_id,
+    )
+    session = await asyncio.to_thread(
+        store.find_session,
+        team_id=team_id,
+        channel_id=channel_id,
+        requester_user_id=user_id,
+        thread_ts=thread_ts,
+    )
+    candidate_reason = candidate_reason_for_message(
+        text=str(event.get("text") or ""),
+        explicit_mention=explicit_mention,
+        thread_ts=thread_ts,
+        session=session,
+    )
+    if not candidate_reason:
+        _log_addressing_decision(
+            event=event,
+            decision="ignore",
+            candidate_reason=None,
+            source="prefilter",
+            reason="not_addressing_candidate",
+            shadow_mode=settings.ROO_CONTEXTUAL_SHADOW_MODE,
+        )
+        if not thread_ts:
+            await asyncio.to_thread(
+                store.break_channel_adjacency,
+                team_id=team_id,
+                channel_id=channel_id,
+            )
+        return None
+
+    history = await _get_addressing_history(event)
+    address_decision = await decide_addressing(
+        text=str(event.get("text") or ""),
+        user_id=user_id,
+        bot_user_id=bot_user_id,
+        history=history,
+        current_message_ts=message_ts,
+        candidate_reason=candidate_reason,
+        explicit_mention=explicit_mention,
+        min_implicit_confidence=settings.ROO_CONTEXTUAL_MIN_CONFIDENCE,
+        indirect_mention_confidence=settings.ROO_CONTEXTUAL_INDIRECT_MENTION_CONFIDENCE,
+        model=(settings.ROO_CONTEXTUAL_MODEL or None),
+        classifier_timeout_seconds=settings.ROO_CONTEXTUAL_CLASSIFIER_TIMEOUT_SECONDS,
+    )
+    shadow_mode = settings.ROO_CONTEXTUAL_SHADOW_MODE
+    _log_addressing_decision(
+        event=event,
+        decision="respond" if address_decision.should_respond else "ignore",
+        candidate_reason=candidate_reason,
+        source=address_decision.source,
+        confidence=address_decision.confidence,
+        reason=address_decision.reason,
+        shadow_mode=shadow_mode,
+    )
+
+    # Shadow mode observes implicit decisions but preserves direct-mention
+    # behaviour and never sends an untagged reply.
+    should_process = explicit_mention if shadow_mode else address_decision.should_respond
+    if not should_process:
+        if not thread_ts:
+            await asyncio.to_thread(
+                store.break_channel_adjacency,
+                team_id=team_id,
+                channel_id=channel_id,
+            )
+        return None
+
+    routed_event = dict(event)
+    routed_event["implicit_addressing"] = not explicit_mention
+    routed_event["contextual_candidate_reason"] = candidate_reason
+    outcome = await _handle_mention(routed_event)
+    post_response = (outcome or {}).get("post_response") or {}
+    bot_message_ts = str(post_response.get("ts") or "").strip()
+    if bot_message_ts:
+        await asyncio.to_thread(
+            store.record_roo_response,
+            team_id=team_id,
+            channel_id=channel_id,
+            requester_user_id=user_id,
+            thread_ts=str((outcome or {}).get("thread_ts") or thread_ts or message_ts),
+            bot_message_ts=bot_message_ts,
+            adjacency_seconds=settings.ROO_CONTEXTUAL_ADJACENCY_SECONDS,
+            thread_ttl_seconds=settings.ROO_CONTEXTUAL_THREAD_TTL_SECONDS,
+        )
+    elif not thread_ts:
+        await asyncio.to_thread(
+            store.break_channel_adjacency,
+            team_id=team_id,
+            channel_id=channel_id,
+        )
+    return outcome
+
+
+async def _handle_contextual_slack_message_safely(
+    event: dict[str, Any],
+    *,
+    slack_team_id: str,
+    trigger_source: str,
+) -> Optional[dict[str, Any]]:
+    """Protect direct mentions from failures in the optional context layer."""
+
+    try:
+        return await _handle_contextual_slack_message(
+            event,
+            slack_team_id=slack_team_id,
+            trigger_source=trigger_source,
+        )
+    except Exception as exc:
+        _log_addressing_decision(
+            event=event,
+            decision="respond" if trigger_source == "app_mention" else "ignore",
+            candidate_reason="explicit_mention" if trigger_source == "app_mention" else None,
+            source="pipeline_error",
+            reason=exc.__class__.__name__,
+            shadow_mode=getattr(get_settings(), "ROO_CONTEXTUAL_SHADOW_MODE", True),
+        )
+        if trigger_source == "app_mention":
+            return await _handle_mention(event)
+        return None
 
 
 def _looks_like_linear_meeting_file_request(text: str, has_files: bool = False) -> bool:
@@ -1718,6 +1949,7 @@ async def slack_events(
     # Handle events
     event = payload.get("event", {})
     event_type = event.get("type")
+    settings = get_settings()
     
     print(f"📨 Received Slack event: {event_type}")
 
@@ -1732,8 +1964,16 @@ async def slack_events(
     if event_type == "app_mention":
         if not _mark_app_mention_event_seen(payload, event):
             return JSONResponse(status_code=200, content={})
-        # Process mention asynchronously
-        asyncio.create_task(_handle_mention(event))
+        if _is_contextual_channel_enabled(settings, event.get("channel")):
+            asyncio.create_task(
+                _handle_contextual_slack_message_safely(
+                    event,
+                    slack_team_id=str(payload.get("team_id") or ""),
+                    trigger_source="app_mention",
+                )
+            )
+        else:
+            asyncio.create_task(_handle_mention(event))
         return JSONResponse(status_code=200, content={})
 
     if event_type == "reaction_added":
@@ -1812,6 +2052,19 @@ async def slack_events(
             print(f"📨 Received DM from {event.get('user')}")
             asyncio.create_task(_handle_mention(event))
             return JSONResponse(status_code=200, content={})
+
+        if (
+            not event.get("subtype")
+            and _is_contextual_channel_enabled(settings, event.get("channel"))
+        ):
+            asyncio.create_task(
+                _handle_contextual_slack_message_safely(
+                    event,
+                    slack_team_id=str(payload.get("team_id") or ""),
+                    trigger_source="channel_message",
+                )
+            )
+            return JSONResponse(status_code=200, content={})
     
     return JSONResponse(status_code=200, content={})
 
@@ -1822,7 +2075,7 @@ async def _handle_start_here_intro(event: dict):
 
 
 async def _handle_mention(event: dict):
-    """Handle an @Roo mention asynchronously."""
+    """Handle one Slack message that has passed the addressing gate."""
     try:
         user_id = event.get("user")
         text = event.get("text", "")
@@ -1834,7 +2087,7 @@ async def _handle_mention(event: dict):
         print(f"\n🦘 ROO MENTION: from {user_id} in {channel_id}")
         print(f"   Text: {text[:100]}...")
 
-        if await _maybe_handle_manual_jobs_trigger(event):
+        if not event.get("implicit_addressing") and await _maybe_handle_manual_jobs_trigger(event):
             return
         
         agent = get_agent()
@@ -1846,8 +2099,11 @@ async def _handle_mention(event: dict):
             param_overrides=param_overrides if isinstance(param_overrides, dict) else None,
             current_message_ts=event.get("ts"),
             event_files=event_files,
+            implicit_addressing=bool(event.get("implicit_addressing")),
+            contextual_candidate_reason=event.get("contextual_candidate_reason"),
         )
-        
+
+        response = None
         if result.get("message") and not result.get("suppress_post"):
             post_kwargs = {
                 "channel": channel_id,
@@ -1865,6 +2121,11 @@ async def _handle_mention(event: dict):
             )
 
         print(f"✅ Mention handled successfully (skill: {result.get('skill_used')})")
+        return {
+            "result": result,
+            "post_response": response,
+            "thread_ts": thread_ts,
+        }
         
     except Exception as e:
         print(f"❌ Error handling mention: {e}")
@@ -1879,6 +2140,7 @@ async def _handle_mention(event: dict):
             )
         except Exception:
             pass
+        return {"error": str(e), "thread_ts": event.get("thread_ts") or event.get("ts")}
 
 
 async def _resume_intent(user_id: str, intent: dict):

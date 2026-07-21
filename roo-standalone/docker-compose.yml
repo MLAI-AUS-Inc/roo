@@ -5,6 +5,11 @@ services:
       - "8000"
     env_file:
       - .env
+    environment:
+      # Start the first contextual-response pilot in observation-only mode.
+      ROO_CONTEXTUAL_RESPONSES_ENABLED: "true"
+      ROO_CONTEXTUAL_SHADOW_MODE: "true"
+      ROO_CONTEXTUAL_CHANNEL_IDS: C09L4DMMU5N
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz/ready', timeout=5).read()"]
