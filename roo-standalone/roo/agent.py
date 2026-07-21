@@ -4,6 +4,7 @@ Roo Agent - Core Orchestration Layer
 The agent receives user messages, selects appropriate skills,
 and executes them to generate responses.
 """
+import asyncio
 import json
 import re
 import time
@@ -220,15 +221,44 @@ class RooAgent:
                         "effective_slack_user_id": effective_slack_user_id,
                         **effective_param_overrides,
                     }
+            execution_kwargs = dict(kwargs)
+            execution_thread_history = thread_history
+            if skill.name == "linear-meeting-actions":
+                from .linear_context import build_linear_slack_context
+
+                settings = get_settings()
+                slack_context = await asyncio.to_thread(
+                    build_linear_slack_context,
+                    text=clean_text,
+                    requester_user_id=user_id,
+                    channel_id=channel_id,
+                    thread_ts=thread_ts,
+                    current_message_ts=kwargs.get("current_message_ts"),
+                    thread_history=thread_history,
+                    workspace_id=kwargs.get("slack_team_id"),
+                    event_id=kwargs.get("event_id"),
+                    timezone_name=getattr(settings, "TIMEZONE", "Australia/Sydney"),
+                    max_messages=int(
+                        getattr(settings, "LINEAR_CONTEXT_MAX_MESSAGES", 50) or 50
+                    ),
+                    lookback_hours=int(
+                        getattr(settings, "LINEAR_CONTEXT_LOOKBACK_HOURS", 24) or 24
+                    ),
+                    max_chars=int(
+                        getattr(settings, "LINEAR_CONTEXT_MAX_CHARS", 16000) or 16000
+                    ),
+                )
+                execution_thread_history = slack_context.get("messages") or thread_history
+                execution_kwargs["slack_context"] = slack_context
             result = await self.skill_executor.execute(
                 skill=skill,
                 text=clean_text,
                 user_id=user_id,
                 channel_id=channel_id,
                 thread_ts=thread_ts,
-                thread_history=thread_history,
+                thread_history=execution_thread_history,
                 param_overrides=effective_param_overrides or None,
-                **kwargs
+                **execution_kwargs
             )
             return {
                 "message": result.message,
