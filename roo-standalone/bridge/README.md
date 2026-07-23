@@ -64,6 +64,8 @@ plain-text handle:
 
 - In MLAI, `hex:alice` becomes Alice's native HEX mention.
 - In HEX, `mlai:sam` becomes Sam's native MLAI mention.
+- In HEX, `mlai:roo` becomes Roo's native MLAI bot mention when Roo's exact
+  Slack handle is `roo`.
 - Spaces in a unique display name become hyphens, so `Alice Smith` can be
   addressed as `hex:alice-smith`. An exact destination member ID also works.
 - Small typos are tolerated when exactly one person is the clear nearby match
@@ -75,9 +77,11 @@ otherwise tries to replace the workspace alias with a local user before the
 bridge receives the message. The legacy `@hex:alice` / `@mlai:sam` syntax is
 still accepted when it reaches the bridge as plain text.
 
-Ambiguous, unknown, deleted, and bot identities are never guessed. Mentions
-inside code or links stay literal, and `@here`, `@channel`, `@everyone`, and
-user groups never fan out across organizations.
+Ambiguous, unknown, and deleted identities are never guessed. Active bots can
+only be addressed by an exact qualified handle or exact destination user ID;
+they are never mapped by email or fuzzy spelling. Mentions inside code or links
+stay literal, and `@here`, `@channel`, `@everyone`, and user groups never fan
+out across organizations.
 
 Roll out with `BRIDGE_MENTION_MODE=observe`: candidates are counted and logged
 by workspace/user ID, but messages remain inert. Once verified, switch to

@@ -351,7 +351,51 @@ def test_explicit_destination_only_handle_becomes_native_mention():
     assert out == "please ask <@URALICE> and <@URALICE>"
 
 
-def test_ambiguous_or_inactive_explicit_handles_never_ping():
+def test_exact_destination_bot_handle_becomes_native_mention_without_fuzzy_guessing():
+    r = IdentityResolver()
+    r.index_workspace(
+        "T_M",
+        [_member("UMROO", "roo", display_name="Roo", is_bot=True)],
+    )
+
+    out = r.translate(
+        FakeClient(),
+        "please ask mlai:roo but leave mlai:ro alone",
+        "T_R",
+        dst_team="T_M",
+        src_alias="hex",
+        dst_alias="mlai",
+        mention_mode="native",
+    )
+
+    assert out == "please ask <@UMROO> but leave mlai:ro alone"
+    assert r.health()["teams"]["T_M"]["qualified_bots"] == 1
+
+
+def test_human_and_bot_with_same_qualified_handle_are_ambiguous():
+    r = IdentityResolver()
+    r.index_workspace(
+        "T_M",
+        [
+            _member("UMHUMAN", "roo", display_name="Roo"),
+            _member("UMROOBOT", "roo-bot", display_name="Roo", is_bot=True),
+        ],
+    )
+
+    out = r.translate(
+        FakeClient(),
+        "mlai:roo",
+        "T_R",
+        dst_team="T_M",
+        src_alias="hex",
+        dst_alias="mlai",
+        mention_mode="native",
+    )
+
+    assert out == "mlai:roo"
+
+
+def test_ambiguous_or_inactive_explicit_human_handles_never_ping():
     r = IdentityResolver()
     r.index_workspace(
         "T_R",
@@ -359,13 +403,12 @@ def test_ambiguous_or_inactive_explicit_handles_never_ping():
             _member("URONE", "alex-one", display_name="Alex Smith"),
             _member("URTWO", "alex-two", display_name="Alex Smith"),
             _member("URGONE", "gone", deleted=True),
-            _member("URBOT", "helper", is_bot=True),
         ],
     )
 
     out = r.translate(
         FakeClient(),
-        "hex:alex-smith hex:gone @hex:helper",
+        "hex:alex-smith hex:gone",
         "T_M",
         dst_team="T_R",
         src_alias="mlai",
@@ -373,7 +416,7 @@ def test_ambiguous_or_inactive_explicit_handles_never_ping():
         mention_mode="native",
     )
 
-    assert out == "hex:alex-smith hex:gone @hex:helper"
+    assert out == "hex:alex-smith hex:gone"
     assert "<@" not in out
 
 
@@ -609,6 +652,7 @@ def test_delivery_wires_native_mentions_in_both_directions():
             _member("UMAUTHOR", "mlai-author", "author@mlai.example", "MLAI Author"),
             _member("UMSAM", "sam", "sam@mlai.example", "Sam"),
             _member("UMALICE", "alice", "alice@example.com", "Alice"),
+            _member("UMROO", "roo", display_name="Roo", is_bot=True),
         ],
     )
     relay.identity.index_workspace(
@@ -638,14 +682,14 @@ def test_delivery_wires_native_mentions_in_both_directions():
             {
                 "ts": "230.2",
                 "user": "URAUTHOR",
-                "text": "please ask mlai:sam",
+                "text": "please ask mlai:sam and mlai:roo",
             },
         )
     )
     asyncio.run(relay.deliver(s.claim_due_inbound(10, time.time())[0]))
 
     assert remote.posted[0]["text"] == "hello <@URALICE> and <@URALICE>"
-    assert mlai.posted[0]["text"] == "please ask <@UMSAM>"
+    assert mlai.posted[0]["text"] == "please ask <@UMSAM> and <@UMROO>"
 
 
 def test_deliver_retries_on_failure_instead_of_dropping():

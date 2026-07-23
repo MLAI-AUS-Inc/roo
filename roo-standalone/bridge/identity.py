@@ -6,10 +6,12 @@ small, in-memory workspace directories and map people by explicit configuration
 first, then by exact normalized email. Emails are never persisted or logged.
 
 People who only exist in the other workspace can be addressed with an explicit
-plain-text alias such as ``hex:alice``. The legacy ``@hex:alice`` form remains
-supported, but the form without ``@`` avoids Slack's local mention autocomplete.
-Unknown or ambiguous identities remain plain text: the bridge must never guess
-and notify the wrong person.
+plain-text alias such as ``hex:alice``. Active bots can be addressed the same
+way when the handle is an exact match, for example ``mlai:roo``. Bot handles
+are never email-matched or fuzzily guessed. The legacy ``@hex:alice`` form
+remains supported, but the form without ``@`` avoids Slack's local mention
+autocomplete. Unknown or ambiguous identities remain plain text: the bridge
+must never guess and notify the wrong identity.
 """
 
 from __future__ import annotations
@@ -120,11 +122,17 @@ class WorkspaceDirectory:
     by_id: Dict[str, UserProfile] = field(default_factory=dict)
     by_email: Dict[str, UserProfile] = field(default_factory=dict)
     by_handle: Dict[str, UserProfile] = field(default_factory=dict)
+    qualified_by_id: Dict[str, UserProfile] = field(default_factory=dict)
+    qualified_by_handle: Dict[str, UserProfile] = field(default_factory=dict)
     refreshed_at: float = 0.0
 
     @property
     def email_count(self) -> int:
         return sum(1 for profile in self.by_id.values() if profile.email)
+
+    @property
+    def bot_count(self) -> int:
+        return max(0, len(self.qualified_by_id) - len(self.by_id))
 
 
 def _unique_index(entries: Iterable[Tuple[str, UserProfile]]) -> Dict[str, UserProfile]:
@@ -226,16 +234,19 @@ class IdentityResolver:
     ) -> WorkspaceDirectory:
         """Build a directory from Slack user objects (also useful for tests)."""
         profiles = []
+        qualified_profiles = []
         for user in members:
             if (
                 not user.get("id")
                 or user.get("deleted")
-                or user.get("is_bot")
-                or user.get("is_app_user")
                 or user.get("id") == "USLACKBOT"
             ):
                 continue
-            profiles.append(UserProfile.from_slack_user(user))
+            profile = UserProfile.from_slack_user(user)
+            qualified_profiles.append(profile)
+            if user.get("is_bot") or user.get("is_app_user"):
+                continue
+            profiles.append(profile)
 
         by_id = {profile.id: profile for profile in profiles}
         by_email = _unique_index((profile.email, profile) for profile in profiles)
@@ -245,10 +256,16 @@ class IdentityResolver:
             # and real names make hex:alice-smith ergonomic too.
             for value in (profile.name, profile.display_name, profile.real_name):
                 handle_entries.append((_normalized_handle(value), profile))
+        qualified_handle_entries = []
+        for profile in qualified_profiles:
+            for value in (profile.name, profile.display_name, profile.real_name):
+                qualified_handle_entries.append((_normalized_handle(value), profile))
         directory = WorkspaceDirectory(
             by_id=by_id,
             by_email=by_email,
             by_handle=_unique_index(handle_entries),
+            qualified_by_id={profile.id: profile for profile in qualified_profiles},
+            qualified_by_handle=_unique_index(qualified_handle_entries),
             refreshed_at=time.time(),
         )
         with self._lock:
@@ -261,6 +278,7 @@ class IdentityResolver:
             teams = {
                 team: {
                     "users": len(directory.by_id),
+                    "qualified_bots": directory.bot_count,
                     "users_with_email": directory.email_count,
                     "refreshed_at": directory.refreshed_at,
                     "last_error": self._refresh_errors.get(team),
@@ -272,6 +290,7 @@ class IdentityResolver:
                     team,
                     {
                         "users": 0,
+                        "qualified_bots": 0,
                         "users_with_email": 0,
                         "refreshed_at": 0.0,
                         "last_error": error,
@@ -491,10 +510,10 @@ class IdentityResolver:
         if destination is None:
             return None, False
         if _USER_ID_RE.match(handle.upper()):
-            return destination.by_id.get(handle.upper()), False
+            return destination.qualified_by_id.get(handle.upper()), False
 
         normalized = _normalized_handle(handle)
-        exact = destination.by_handle.get(normalized)
+        exact = destination.qualified_by_handle.get(normalized)
         if exact is not None:
             return exact, False
 

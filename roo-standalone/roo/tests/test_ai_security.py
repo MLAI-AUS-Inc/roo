@@ -412,7 +412,10 @@ def test_deploy_workflow_requires_and_secretly_upserts_security_values():
     assert "needs: security-checks" in workflow
     assert "roo/tests/test_ai_security.py" in workflow
     assert "roo/tests/test_victor_ai_applications.py" in workflow
+    assert "bridge/tests" in workflow
+    assert "python -m compileall -q roo bridge" in workflow
     assert "docker compose config --quiet" in workflow
+    assert "docker compose -f docker-compose.bridge.yml config --quiet" in workflow
     assert "nginx:1.28.3-alpine nginx -t" in workflow
     assert "secrets.SIM_PATIENT_API_KEY" in workflow
     assert "secrets.SIM_PATIENT_SAFETY_SALT" in workflow
@@ -439,6 +442,9 @@ def test_deploy_workflow_requires_and_secretly_upserts_security_values():
     assert workflow.index('upsert_env "VICTOR_AI_SKILL_ENABLED"') < workflow.index(
         "docker compose up"
     )
+    assert "systemctl restart slack-bridge.service" in workflow
+    assert "docker compose -f docker-compose.bridge.yml up -d --build" in workflow
+    assert "Slack bridge readiness check timed out" in workflow
     assert workflow.index("upsert_env \"SIM_PATIENT_API_KEY\"") < workflow.index("docker compose up")
     assert 'echo "$SIM_PATIENT_API_KEY"' not in workflow
     assert 'echo "$SIM_PATIENT_SAFETY_SALT"' not in workflow
