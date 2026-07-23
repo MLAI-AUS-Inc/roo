@@ -408,6 +408,7 @@ def test_ward_agent_has_one_total_deadline(monkeypatch):
 
 def test_deploy_workflow_requires_and_secretly_upserts_security_values():
     workflow = (REPO_ROOT / ".github/workflows/deploy.yml").read_text()
+    assert "workflow_dispatch:" in workflow
     assert "security-checks:" in workflow
     assert "needs: security-checks" in workflow
     assert "roo/tests/test_ai_security.py" in workflow
