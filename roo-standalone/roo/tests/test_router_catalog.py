@@ -21,15 +21,24 @@ def test_catalog_lints_clean():
 
 
 def test_catalog_stays_within_token_budget():
-    """The whole tool catalog rides on every routed message — keep it bounded."""
-    tools, _ = router.build_tools(_skills(), channel_name=None)
+    """Each real channel context sends only its bounded tool catalog."""
     import json
 
-    approx_tokens = len(json.dumps(tools)) / 4
-    assert approx_tokens < 6000, (
-        f"tool catalog ≈{approx_tokens:.0f} tokens (budget 6000) — trim SKILL.md "
-        "routing descriptions/examples"
-    )
+    skills = _skills()
+    catalogs = {
+        "general": (
+            [skill for skill in skills if skill.name != "victor-ai-applications"],
+            "general",
+        ),
+        "victor-channel": (skills, "exp-victor-ai"),
+    }
+    for context, (context_skills, channel_name) in catalogs.items():
+        tools, _ = router.build_tools(context_skills, channel_name=channel_name)
+        approx_tokens = len(json.dumps(tools)) / 4
+        assert approx_tokens < 6000, (
+            f"{context} tool catalog ≈{approx_tokens:.0f} tokens (budget 6000) — "
+            "trim SKILL.md routing descriptions/examples"
+        )
 
 
 def test_eval_case_actions_exist_in_skill_manifests():

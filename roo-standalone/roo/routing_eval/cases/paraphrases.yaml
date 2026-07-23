@@ -346,6 +346,38 @@
   expect: {skill: watt-the-hack, action: announce}
   tags: [paraphrase, channel]
 
+# --- Victor AI applications (exclusive to #exp-victor-ai) ---
+- id: para-victor-summary
+  text: "give me a high level report on how many Victor applicants we have"
+  channel: exp-victor-ai
+  expect: {skill: victor-ai-applications, action: summary}
+  tags: [paraphrase, channel]
+- id: para-victor-list
+  text: "show me the latest Victor applications"
+  channel: exp-victor-ai
+  expect: {skill: victor-ai-applications, action: list}
+  tags: [paraphrase, channel]
+- id: para-victor-detail
+  text: "open the full details for Victor application 42"
+  channel: exp-victor-ai
+  expect: {skill: victor-ai-applications, action: detail}
+  tags: [paraphrase, channel]
+- id: para-victor-csv
+  text: "download the complete Victor applications as a CSV"
+  channel: exp-victor-ai
+  expect: {skill: victor-ai-applications, action: export_csv}
+  tags: [paraphrase, channel]
+- id: para-victor-help
+  text: "what can I ask Roo about Victor applications?"
+  channel: exp-victor-ai
+  expect: {skill: victor-ai-applications, action: help}
+  tags: [paraphrase, channel]
+- id: trap-victor-wrong-channel
+  text: "show me the latest Victor applications"
+  channel: general
+  expect: {skill: none}
+  tags: [paraphrase, trap, negative, channel, misroute-guard]
+
 # --- general conversation (expected: no skill) ---
 - id: para-none-summarise-thread
   text: "can you summarise this thread for me?"

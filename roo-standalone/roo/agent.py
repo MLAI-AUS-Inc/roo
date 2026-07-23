@@ -178,7 +178,19 @@ class RooAgent:
                 "data": {"router": "v2", "clarification": True},
             }
 
-        skill = self._get_skill_by_name(v2_decision.skill) if v2_decision.skill else None
+        available_skills = self._skills_for_slack_context(channel_id=channel_id)
+        skill = (
+            next(
+                (
+                    candidate
+                    for candidate in available_skills
+                    if candidate.name == v2_decision.skill
+                ),
+                None,
+            )
+            if v2_decision.skill
+            else None
+        )
         selection_layer = "v2" if v2_decision.source == "router" else "v2-error"
 
         self._log_routing_decision(
@@ -287,7 +299,14 @@ class RooAgent:
                 None,
             ):
                 return self._implicit_action_blocked("respond_in_chat", None)
-            response = await self._general_response(clean_text, thread_history)
+            if any(skill.name == "victor-ai-applications" for skill in self.skills):
+                response = await self._general_response(
+                    clean_text,
+                    thread_history,
+                    channel_id=channel_id,
+                )
+            else:
+                response = await self._general_response(clean_text, thread_history)
             return {
                 "message": response,
                 "skill_used": None,
@@ -394,6 +413,36 @@ class RooAgent:
     def _get_skill_by_name(self, skill_name: str) -> Optional[Skill]:
         return next((skill for skill in self.skills if skill.name == skill_name), None)
 
+    def _skills_for_slack_context(
+        self,
+        *,
+        channel_id: Optional[str],
+        channel_name: Optional[str] = None,
+    ) -> List[Skill]:
+        """Expose Victor application data only in its configured named channel."""
+
+        if not any(skill.name == "victor-ai-applications" for skill in self.skills):
+            return list(self.skills)
+        settings = get_settings()
+        resolved_channel_name = channel_name or self._safe_channel_name(channel_id)
+        victor_allowed = settings.is_victor_ai_context_allowed(
+            channel_name=resolved_channel_name,
+        )
+        if not victor_allowed and not resolved_channel_name and channel_id:
+            try:
+                from .slack_client import get_channel_id
+
+                victor_allowed = (
+                    get_channel_id(settings.victor_ai_slack_channel_name) == channel_id
+                )
+            except Exception as exc:
+                print(f"⚠️ Victor AI channel lookup failed for {channel_id}: {exc}")
+        return [
+            skill
+            for skill in self.skills
+            if skill.name != "victor-ai-applications" or victor_allowed
+        ]
+
     def _is_implicit_action_allowed(
         self,
         skill_name: str,
@@ -495,6 +544,16 @@ class RooAgent:
         """Run the v2 tool-calling router over the live skill catalog."""
         from . import router as router_v2
 
+        channel_name = self._safe_channel_name(channel_id)
+        available_skills = self._skills_for_slack_context(
+            channel_id=channel_id,
+            channel_name=channel_name,
+        )
+        thread_hint = self._get_thread_context(channel_id, thread_ts)
+        available_names = {skill.name for skill in available_skills}
+        if thread_hint and thread_hint.get("skill_name") not in available_names:
+            thread_hint = None
+
         file_names = [
             file.get("name") or file.get("title")
             for file in (event_files or [])
@@ -502,10 +561,10 @@ class RooAgent:
         ]
         return await router_v2.route(
             text,
-            skills=self.skills,
-            channel_name=self._safe_channel_name(channel_id),
+            skills=available_skills,
+            channel_name=channel_name,
             thread_history=thread_history,
-            thread_hint=self._get_thread_context(channel_id, thread_ts),
+            thread_hint=thread_hint,
             file_names=[name for name in file_names if name] or None,
         )
 
@@ -735,7 +794,13 @@ class RooAgent:
 
 
     
-    async def _general_response(self, text: str, history: List[dict] = None) -> str:
+    async def _general_response(
+        self,
+        text: str,
+        history: List[dict] = None,
+        *,
+        channel_id: Optional[str] = None,
+    ) -> str:
         """Generate a general conversational response."""
         # Format history
         history_context = ""
@@ -744,7 +809,7 @@ class RooAgent:
             history_context = f"\nRecent Context:\n{history_str}\n"
 
         skill_lines = []
-        for s in self.skills:
+        for s in self._skills_for_slack_context(channel_id=channel_id):
             line = f"- {s.name}: {s.description}"
             if s.exclusive_channels:
                 channels = ", ".join(f"#{channel}" for channel in s.exclusive_channels)

@@ -55,6 +55,13 @@ class Settings(BaseSettings):
     INTERNAL_API_KEY: Optional[str] = None
     LINEAR_DEFAULT_TEAM: Optional[str] = None
 
+    # Read-only Victor AI application reports. Access is based on the resolved
+    # Slack channel name, so channel or user ID allowlists are not required.
+    VICTOR_AI_SKILL_ENABLED: bool = False
+    VICTOR_AI_ROO_SIGNING_SECRET: Optional[str] = None
+    VICTOR_AI_SLACK_CHANNEL_NAME: str = "exp-victor-ai"
+    VICTOR_AI_BACKEND_TIMEOUT_SECONDS: float = 20.0
+
     # GitHub OAuth
     GITHUB_CLIENT_ID: Optional[str] = None
     GITHUB_CLIENT_SECRET: Optional[str] = None
@@ -146,6 +153,18 @@ class Settings(BaseSettings):
     def implicit_action_allowlist(self) -> frozenset[str]:
         return self._split_configured_values(self.ROO_IMPLICIT_ACTION_ALLOWLIST)
 
+    @property
+    def victor_ai_slack_channel_name(self) -> str:
+        return str(self.VICTOR_AI_SLACK_CHANNEL_NAME or "").strip().lstrip("#").lower()
+
+    def is_victor_ai_context_allowed(self, *, channel_name: Optional[str]) -> bool:
+        resolved_name = str(channel_name or "").strip().lstrip("#").lower()
+        return bool(
+            self.VICTOR_AI_SKILL_ENABLED
+            and resolved_name
+            and resolved_name == self.victor_ai_slack_channel_name
+        )
+
     @model_validator(mode="after")
     def validate_contextual_responses(self):
         if not str(self.SLACK_CONTEXTUAL_STATE_DB_PATH or "").strip():
@@ -175,6 +194,24 @@ class Settings(BaseSettings):
             raise ValueError(
                 "Contextual Roo responses require ROO_CONTEXTUAL_CHANNEL_IDS"
             )
+        if self.VICTOR_AI_SKILL_ENABLED:
+            if not str(self.MLAI_BACKEND_URL or "").strip():
+                raise ValueError(
+                    "MLAI_BACKEND_URL is required when VICTOR_AI_SKILL_ENABLED is true"
+                )
+            if len(str(self.VICTOR_AI_ROO_SIGNING_SECRET or "")) < 32:
+                raise ValueError(
+                    "VICTOR_AI_ROO_SIGNING_SECRET must contain at least 32 characters"
+                )
+            if not re.fullmatch(
+                r"[a-z0-9][a-z0-9_-]{0,79}",
+                self.victor_ai_slack_channel_name,
+            ):
+                raise ValueError("VICTOR_AI_SLACK_CHANNEL_NAME is invalid")
+            if not 1 <= self.VICTOR_AI_BACKEND_TIMEOUT_SECONDS <= 60:
+                raise ValueError(
+                    "VICTOR_AI_BACKEND_TIMEOUT_SECONDS must be between 1 and 60"
+                )
         return self
 
     @property

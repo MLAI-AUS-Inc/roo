@@ -4,8 +4,14 @@ MLAI Backend Client
 HTTP client for communicating with the mlai-backend service.
 """
 import asyncio
+import hashlib
+import hmac
+import json
+import re
+import secrets
 import time
 from typing import Optional, Dict, Any, List, Union
+from urllib.parse import urlparse
 from uuid import uuid4
 
 import httpx
@@ -28,9 +34,20 @@ class MLAIBackendClient:
     _transport_failure_threshold = 3
     _slack_user_registration_ttl_seconds = 3600
     
-    def __init__(self, base_url: Optional[str] = None, api_key: Optional[str] = None, internal_api_key: Optional[str] = None):
+    def __init__(
+        self,
+        base_url: Optional[str] = None,
+        api_key: Optional[str] = None,
+        internal_api_key: Optional[str] = None,
+        victor_ai_signing_secret: Optional[str] = None,
+        victor_ai_actor_context: Optional[dict] = None,
+    ):
         settings = None
-        if base_url is None or api_key is None or internal_api_key is None:
+        if base_url is None or (
+            api_key is None
+            and internal_api_key is None
+            and victor_ai_signing_secret is None
+        ):
             settings = get_settings()
 
         self.base_url = base_url or (settings.MLAI_BACKEND_URL if settings else None)
@@ -45,6 +62,10 @@ class MLAIBackendClient:
             or (settings.ROO_API_KEY if settings else None)
             or (settings.MLAI_API_KEY if settings else None)
         )
+        self.victor_ai_signing_secret = victor_ai_signing_secret or (
+            getattr(settings, "VICTOR_AI_ROO_SIGNING_SECRET", None) if settings else None
+        )
+        self.victor_ai_actor_context = dict(victor_ai_actor_context or {})
         self.base_url = self.base_url.rstrip('/') if self.base_url else ""
         self._points_base = "/api/v1/points"
         self._data_base = "/api/v1/data"
@@ -228,6 +249,7 @@ class MLAIBackendClient:
         retry_backoff_seconds: float = 0.25,
         circuit_breaker: bool = False,
         use_admin_headers: bool = False,
+        use_victor_ai_identity: bool = False,
     ) -> httpx.Response:
         if not self.base_url:
             raise ValueError("MLAI_BACKEND_URL not configured")
@@ -237,7 +259,10 @@ class MLAIBackendClient:
             await self._guard_circuit_breaker(normalized_endpoint)
 
         request_id = request_id or self._new_request_id()
-        resolved_headers = dict(self.admin_headers if use_admin_headers else self.headers)
+        if use_victor_ai_identity:
+            resolved_headers = self.victor_ai_headers(request_id)
+        else:
+            resolved_headers = dict(self.admin_headers if use_admin_headers else self.headers)
         if headers:
             resolved_headers.update(headers)
         resolved_headers["X-Request-ID"] = request_id
@@ -341,6 +366,170 @@ class MLAIBackendClient:
         elif self.api_key:
             headers["X-API-Key"] = self.api_key
         return headers
+
+    def victor_ai_headers(self, request_id: str) -> dict:
+        """Build a fresh signed Slack actor assertion for one Victor read."""
+
+        secret = str(self.victor_ai_signing_secret or "")
+        if len(secret) < 32:
+            raise ValueError("VICTOR_AI_ROO_SIGNING_SECRET is not configured")
+
+        context = self.victor_ai_actor_context
+        values = {
+            "surface": "public_roo",
+            "slack_team_id": str(context.get("slack_team_id") or "").strip(),
+            "acting_slack_user_id": str(
+                context.get("acting_slack_user_id") or ""
+            ).strip(),
+            "slack_channel_id": str(context.get("slack_channel_id") or "").strip(),
+            "slack_thread_ts": str(context.get("slack_thread_ts") or "").strip(),
+            "event_id": str(context.get("event_id") or "").strip(),
+            "request_id": request_id,
+            "timestamp": int(time.time()),
+            "nonce": secrets.token_urlsafe(24),
+        }
+        required = (
+            "slack_team_id",
+            "acting_slack_user_id",
+            "slack_channel_id",
+            "event_id",
+        )
+        if any(not values[name] for name in required):
+            raise ValueError("Verified Slack context is unavailable for this Victor request")
+
+        canonical = json.dumps(
+            {**values, "v": 1},
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode("ascii")
+        signature = "v1=" + hmac.new(
+            secret.encode("utf-8"),
+            canonical,
+            hashlib.sha256,
+        ).hexdigest()
+        return {
+            "Content-Type": "application/json",
+            "X-Victor-Roo-Signature": signature,
+            "X-Victor-Roo-Timestamp": str(values["timestamp"]),
+            "X-Victor-Roo-Nonce": values["nonce"],
+            "X-Roo-Surface": values["surface"],
+            "X-Slack-Team-ID": values["slack_team_id"],
+            "X-Acting-Slack-User-ID": values["acting_slack_user_id"],
+            "X-Slack-Channel-ID": values["slack_channel_id"],
+            "X-Slack-Thread-TS": values["slack_thread_ts"],
+            "X-Slack-Event-ID": values["event_id"],
+        }
+
+    def _victor_ai_endpoint(self, suffix: str) -> str:
+        """Support backend base URLs with or without an /api/v1 suffix."""
+
+        raw_suffix = str(suffix or "")
+        suffix = raw_suffix.strip("/")
+        base_path = urlparse(self.base_url).path.rstrip("/")
+        prefix = "" if base_path.endswith("/api/v1") else "/api/v1"
+        root = f"{prefix}/victor-ai/roo/applications/"
+        if not suffix:
+            return root
+        trailing_slash = "/" if raw_suffix.endswith("/") else ""
+        return f"{root}{suffix}{trailing_slash}"
+
+    @staticmethod
+    def _victor_ai_params(filters: Optional[dict] = None, **pagination: Any) -> dict:
+        allowed = {
+            "stage",
+            "role",
+            "startup_stage",
+            "industry_sector",
+            "created_after",
+            "created_before",
+            "q",
+        }
+        params = {
+            key: value
+            for key, value in (filters or {}).items()
+            if key in allowed and value not in (None, "")
+        }
+        params.update(
+            {
+                key: value
+                for key, value in pagination.items()
+                if value not in (None, "")
+            }
+        )
+        return params
+
+    async def get_victor_application_summary(
+        self,
+        *,
+        filters: Optional[dict] = None,
+        timeout: float = 20.0,
+    ) -> dict:
+        response = await self._request(
+            "GET",
+            self._victor_ai_endpoint("summary/"),
+            params=self._victor_ai_params(filters),
+            timeout=timeout,
+            circuit_breaker=True,
+            use_victor_ai_identity=True,
+        )
+        self._raise_for_status_or_backend_unavailable(response)
+        return response.json()
+
+    async def list_victor_applications(
+        self,
+        *,
+        filters: Optional[dict] = None,
+        limit: int = 10,
+        offset: int = 0,
+        timeout: float = 20.0,
+    ) -> dict:
+        response = await self._request(
+            "GET",
+            self._victor_ai_endpoint(""),
+            params=self._victor_ai_params(filters, limit=limit, offset=offset),
+            timeout=timeout,
+            circuit_breaker=True,
+            use_victor_ai_identity=True,
+        )
+        self._raise_for_status_or_backend_unavailable(response)
+        return response.json()
+
+    async def get_victor_application(
+        self,
+        application_id: int,
+        *,
+        timeout: float = 20.0,
+    ) -> dict:
+        response = await self._request(
+            "GET",
+            self._victor_ai_endpoint(f"{int(application_id)}/"),
+            timeout=timeout,
+            circuit_breaker=True,
+            use_victor_ai_identity=True,
+        )
+        self._raise_for_status_or_backend_unavailable(response)
+        return response.json()
+
+    async def export_victor_applications_csv(
+        self,
+        *,
+        filters: Optional[dict] = None,
+        timeout: float = 20.0,
+    ) -> tuple[str, str]:
+        response = await self._request(
+            "GET",
+            self._victor_ai_endpoint("export.csv"),
+            params=self._victor_ai_params(filters),
+            timeout=timeout,
+            circuit_breaker=True,
+            use_victor_ai_identity=True,
+        )
+        self._raise_for_status_or_backend_unavailable(response)
+        disposition = str(response.headers.get("Content-Disposition") or "")
+        match = re.search(r'filename="?([^";]+)', disposition, flags=re.IGNORECASE)
+        filename = match.group(1).strip() if match else "victor-ai-applications.csv"
+        return response.text, filename
 
     def _extract_response_body(self, response: httpx.Response) -> str:
         """Return a compact, log-friendly response body."""

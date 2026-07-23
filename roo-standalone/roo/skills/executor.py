@@ -46,8 +46,9 @@ from ..points_request_approval import (
     build_points_request_record,
     remember_points_request_summary,
 )
-from ..slack_client import post_message
+from ..slack_client import get_channel_id, get_channel_name, post_message, upload_file
 from ..config import get_settings
+from ..clients.mlai_backend import MLAIBackendClient, MLAIBackendUnavailableError
 from ..coworking_booking_intents import (
     get_coworking_intent_store,
     is_retryable_coworking_exception,
@@ -57,6 +58,9 @@ from ..coworking_booking_intents import (
 POINTS_SUPER_ADMIN_SLACK_ID = "U05QPB483K9"
 FULL_POINTS_ADMIN_ROLES = {"admin", "committee", "portfolio_lead"}
 COWORKING_REPORT_ROLES = {*FULL_POINTS_ADMIN_ROLES, "partner"}
+VICTOR_AI_ACCESS_UNAVAILABLE_MESSAGE = (
+    "Victor application data is not available in this conversation."
+)
 LINEAR_MEETING_PENDING_ACTIONS: dict[str, dict[str, Any]] = {}
 # Pack ids are opaque and kept stable; the id number no longer matches the
 # points it grants (points were doubled for the same price). Must stay in sync
@@ -175,6 +179,17 @@ class SkillExecutor:
                 )
             elif skill.name == "tone-of-voice":
                 result = await self._execute_tone_of_voice(skill, text, params, user_id)
+            elif skill.name == "victor-ai-applications":
+                result = await self._execute_victor_ai_applications(
+                    text=text,
+                    params=params,
+                    user_id=user_id,
+                    channel_id=channel_id,
+                    thread_ts=thread_ts,
+                    slack_team_id=kwargs.get("slack_team_id"),
+                    event_id=kwargs.get("event_id"),
+                    current_message_ts=kwargs.get("current_message_ts"),
+                )
             elif skill.name == "medhack":
                 result = await self._execute_medhack(skill, text, params, user_id, channel_id, thread_ts, thread_history)
             elif skill.name == "healthhack":
@@ -225,7 +240,430 @@ class SkillExecutor:
                 message="Sorry, I ran into a problem executing that skill. Can you try again?",
                 error=str(e)
             )
-    
+
+    async def _execute_victor_ai_applications(
+        self,
+        *,
+        text: str,
+        params: dict,
+        user_id: str,
+        channel_id: Optional[str],
+        thread_ts: Optional[str],
+        slack_team_id: Optional[str],
+        event_id: Optional[str],
+        current_message_ts: Optional[str],
+    ) -> dict:
+        """Run deterministic, read-only Victor application actions."""
+
+        settings = get_settings()
+        channel_name = get_channel_name(channel_id) if channel_id else None
+        channel_allowed = settings.is_victor_ai_context_allowed(
+            channel_name=channel_name,
+        )
+        if not channel_allowed and not channel_name and channel_id:
+            channel_allowed = (
+                get_channel_id(settings.victor_ai_slack_channel_name) == channel_id
+            )
+        if not channel_allowed:
+            print(
+                "VICTOR_AI_ACCESS_BLOCKED "
+                f"user_id={user_id} channel_id={channel_id} channel_name={channel_name}"
+            )
+            return {
+                "message": VICTOR_AI_ACCESS_UNAVAILABLE_MESSAGE,
+                "data": {"victor_ai": True, "allowed": False},
+            }
+
+        action = self._resolve_victor_ai_action(text, params)
+        if action == "help":
+            return {
+                "message": self._victor_ai_help_message(),
+                "data": {"victor_ai": True, "action": "help"},
+            }
+
+        actor_context = {
+            "slack_team_id": str(slack_team_id or "").strip(),
+            "acting_slack_user_id": str(user_id or "").strip(),
+            "slack_channel_id": str(channel_id or "").strip(),
+            "slack_thread_ts": str(thread_ts or current_message_ts or "").strip(),
+            "event_id": str(
+                event_id or current_message_ts or thread_ts or ""
+            ).strip(),
+        }
+        filters = self._victor_ai_filters(text, params)
+        timeout = float(settings.VICTOR_AI_BACKEND_TIMEOUT_SECONDS)
+        client = MLAIBackendClient(
+            base_url=settings.MLAI_BACKEND_URL,
+            victor_ai_signing_secret=settings.VICTOR_AI_ROO_SIGNING_SECRET,
+            victor_ai_actor_context=actor_context,
+        )
+        try:
+            if action == "summary":
+                payload = await client.get_victor_application_summary(
+                    filters=filters,
+                    timeout=timeout,
+                )
+                return {
+                    "message": self._format_victor_ai_summary(payload),
+                    "data": {
+                        "victor_ai": True,
+                        "action": action,
+                        "complete_count": payload.get("complete_count"),
+                        "lead_count": payload.get("lead_count"),
+                    },
+                }
+
+            if action == "list":
+                limit = self._bounded_int(
+                    params.get("limit"),
+                    default=10,
+                    minimum=1,
+                    maximum=10,
+                )
+                offset = self._bounded_int(
+                    params.get("offset"),
+                    default=0,
+                    minimum=0,
+                    maximum=100000,
+                )
+                payload = await client.list_victor_applications(
+                    filters=filters,
+                    limit=limit,
+                    offset=offset,
+                    timeout=timeout,
+                )
+                return {
+                    "message": self._format_victor_ai_list(payload),
+                    "data": {
+                        "victor_ai": True,
+                        "action": action,
+                        "total_count": payload.get("total_count"),
+                        "returned_count": payload.get("returned_count"),
+                        "offset": payload.get("offset"),
+                        "has_more": payload.get("has_more"),
+                    },
+                }
+
+            if action == "detail":
+                application_id = self._victor_ai_application_id(text, params)
+                if application_id is None:
+                    return {
+                        "message": (
+                            "Which application should I open? Give me its numeric ID, "
+                            "for example: `@Roo show Victor application 123`."
+                        ),
+                        "data": {"victor_ai": True, "action": action},
+                    }
+                payload = await client.get_victor_application(
+                    application_id,
+                    timeout=timeout,
+                )
+                return {
+                    "message": self._format_victor_ai_detail(payload),
+                    "data": {
+                        "victor_ai": True,
+                        "action": action,
+                        "application_id": application_id,
+                    },
+                }
+
+            csv_content, filename = await client.export_victor_applications_csv(
+                filters=filters,
+                timeout=timeout,
+            )
+            response = await asyncio.to_thread(
+                upload_file,
+                channel=channel_id,
+                content=csv_content,
+                filename=filename,
+                title="Victor AI applications export",
+                thread_ts=thread_ts,
+            )
+            if not response or not response.get("ok"):
+                raise RuntimeError("Slack rejected the Victor AI CSV upload")
+            return {
+                "message": f"Done — I uploaded `{self._slack_safe(filename)}` to this thread.",
+                "data": {
+                    "victor_ai": True,
+                    "action": "export_csv",
+                    "filename": filename,
+                },
+            }
+        except httpx.HTTPStatusError as exc:
+            status_code = exc.response.status_code
+            print(
+                "VICTOR_AI_REQUEST_FAILED "
+                f"status={status_code} action={action} user_id={user_id} channel_id={channel_id}"
+            )
+            if status_code in {401, 403}:
+                message = VICTOR_AI_ACCESS_UNAVAILABLE_MESSAGE
+            elif status_code == 404 and action == "detail":
+                message = "I couldn't find a Victor AI application with that ID."
+            elif status_code in {400, 413}:
+                message = self._victor_ai_error_detail(exc) or (
+                    "That request needs narrower or valid filters."
+                )
+            else:
+                message = "I couldn't retrieve Victor applications just now. Try again in a tick."
+            return {
+                "message": message,
+                "data": {"victor_ai": True, "action": action},
+            }
+        except (MLAIBackendUnavailableError, ValueError) as exc:
+            print(
+                "VICTOR_AI_UNAVAILABLE "
+                f"error={exc.__class__.__name__} action={action} channel_id={channel_id}"
+            )
+            return {
+                "message": "I couldn't retrieve Victor applications just now. Try again in a tick.",
+                "data": {"victor_ai": True, "action": action},
+            }
+        except Exception as exc:
+            print(
+                "VICTOR_AI_FAILED "
+                f"error={exc.__class__.__name__} action={action} channel_id={channel_id}"
+            )
+            return {
+                "message": "I retrieved the data but couldn't finish that Slack response. Try again in a tick.",
+                "data": {"victor_ai": True, "action": action},
+            }
+
+    @staticmethod
+    def _resolve_victor_ai_action(text: str, params: dict) -> str:
+        declared = str(params.get("action") or "").strip().lower()
+        if declared in {"help", "summary", "list", "detail", "export_csv"}:
+            return declared
+        lowered = str(text or "").lower()
+        if re.search(r"\b(csv|download|export)\b", lowered):
+            return "export_csv"
+        if re.search(r"\b(help|options|commands|what can i ask|how do i ask)\b", lowered):
+            return "help"
+        if re.search(r"\b(detail|full details?|in[- ]depth|open application)\b", lowered):
+            return "detail"
+        if re.search(r"\b(how many|count|summary|report|breakdown)\b", lowered):
+            return "summary"
+        if re.search(r"\b(list|show|latest|recent|find|search)\b", lowered):
+            return "list"
+        return "help"
+
+    @staticmethod
+    def _victor_ai_filters(text: str, params: dict) -> dict:
+        filters = {}
+        for key in (
+            "stage",
+            "role",
+            "startup_stage",
+            "industry_sector",
+            "created_after",
+            "created_before",
+        ):
+            value = params.get(key)
+            if value not in (None, ""):
+                filters[key] = str(value).strip()
+        query = params.get("query") or params.get("q")
+        if query not in (None, ""):
+            filters["q"] = str(query).strip()
+        lowered = str(text or "").lower()
+        if "stage" not in filters:
+            if re.search(r"\b(partial|lead|incomplete) applications?\b", lowered):
+                filters["stage"] = "lead"
+            elif re.search(r"\b(complete|completed) applications?\b", lowered):
+                filters["stage"] = "complete"
+        return filters
+
+    @staticmethod
+    def _victor_ai_application_id(text: str, params: dict) -> Optional[int]:
+        raw = params.get("application_id")
+        if raw in (None, ""):
+            match = re.search(
+                r"\b(?:application|app)\s*#?\s*(\d+)\b",
+                str(text or ""),
+                re.I,
+            )
+            raw = match.group(1) if match else None
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            return None
+        return value if value > 0 else None
+
+    @staticmethod
+    def _bounded_int(value: Any, *, default: int, minimum: int, maximum: int) -> int:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            parsed = default
+        return max(minimum, min(parsed, maximum))
+
+    @staticmethod
+    def _slack_safe(value: Any, *, empty: str = "—", maximum: int = 500) -> str:
+        rendered = " ".join(str(value if value is not None else "").split())
+        if not rendered:
+            return empty
+        rendered = rendered[:maximum]
+        return rendered.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+    @classmethod
+    def _victor_ai_help_message(cls) -> str:
+        return (
+            "*Victor AI application reports I can provide*\n"
+            "• Summary: `@Roo how many Victor AI applications do we have?`\n"
+            "• List: `@Roo list the latest Victor AI applications`\n"
+            "• Full record: `@Roo show Victor application 123`\n"
+            "• CSV: `@Roo export complete Victor applications to CSV`\n"
+            "• Filters: stage (`complete` or `lead`), role, startup stage, industry, "
+            "created-date range, or applicant/team search.\n"
+            "I can only read and present the data; I can't edit application records."
+        )
+
+    @classmethod
+    def _format_victor_ai_summary(cls, payload: dict) -> str:
+        complete = int(payload.get("complete_count") or 0)
+        leads = int(payload.get("lead_count") or 0)
+        today = int(payload.get("complete_created_today") or 0)
+        last_week = int(payload.get("complete_created_last_7_days") or 0)
+        lines = [
+            f"*Victor AI applications: {complete} complete*",
+            f"{leads} partial lead{'s' if leads != 1 else ''} · {today} completed today · {last_week} in the last 7 days",
+        ]
+        breakdowns = payload.get("breakdowns") or {}
+        for key, label in (
+            ("startup_stage", "Startup stages"),
+            ("industry_sector", "Industries"),
+        ):
+            rows = breakdowns.get(key) or []
+            if rows:
+                rendered = ", ".join(
+                    f"{cls._slack_safe(row.get('value'), maximum=80)} ({int(row.get('count') or 0)})"
+                    for row in rows[:5]
+                )
+                lines.append(f"*{label}:* {rendered}")
+        if payload.get("filters"):
+            lines.append("_This summary reflects the filters in your request._")
+        return "\n".join(lines)
+
+    @classmethod
+    def _format_victor_ai_list(cls, payload: dict) -> str:
+        applications = payload.get("applications") or []
+        total = int(payload.get("total_count") or 0)
+        offset = int(payload.get("offset") or 0)
+        if not applications:
+            return "I couldn't find any Victor AI applications matching those filters."
+        start = offset + 1
+        end = offset + len(applications)
+        lines = [f"*Victor AI applications {start}–{end} of {total}*"]
+        for application in applications:
+            app_id = int(application.get("id") or 0)
+            name = " ".join(
+                value
+                for value in (
+                    cls._slack_safe(
+                        application.get("first_name"),
+                        empty="",
+                        maximum=80,
+                    ),
+                    cls._slack_safe(
+                        application.get("last_name"),
+                        empty="",
+                        maximum=80,
+                    ),
+                )
+                if value
+            ) or "Unnamed applicant"
+            lines.extend(
+                [
+                    f"\n*#{app_id} — {name}* · {cls._slack_safe(application.get('team_name'), maximum=120)}",
+                    f"{cls._slack_safe(application.get('email'), maximum=160)} · {cls._slack_safe(application.get('stage'), maximum=40)} · {cls._slack_safe(application.get('role'), maximum=100)}",
+                    f"{cls._slack_safe(application.get('startup_stage'), maximum=100)} · {cls._slack_safe(application.get('industry_sector'), maximum=120)} · team {cls._slack_safe(application.get('team_size'), maximum=20)} · {cls._slack_safe(application.get('created_at'), maximum=60)}",
+                ]
+            )
+        if payload.get("has_more"):
+            lines.append(
+                f"\n_More are available. Ask `@Roo list Victor applications from offset {end}`._"
+            )
+        lines.append("_For one full record, ask `@Roo show Victor application <ID>`._")
+        return "\n".join(lines)
+
+    @classmethod
+    def _format_victor_ai_detail(cls, application: dict) -> str:
+        app_id = int(application.get("id") or 0)
+        name = " ".join(
+            value
+            for value in (
+                cls._slack_safe(
+                    application.get("first_name"),
+                    empty="",
+                    maximum=80,
+                ),
+                cls._slack_safe(
+                    application.get("last_name"),
+                    empty="",
+                    maximum=80,
+                ),
+            )
+            if value
+        ) or "Unnamed applicant"
+        lines = [
+            f"*Victor AI application #{app_id} — {name}*",
+            f"*Status:* {cls._slack_safe(application.get('stage'))}",
+            f"*Contact:* {cls._slack_safe(application.get('email'))} · {cls._slack_safe(application.get('linkedin'))}",
+            f"*Team:* {cls._slack_safe(application.get('team_name'))} · {cls._slack_safe(application.get('role'))} · size {cls._slack_safe(application.get('team_size'))}",
+            f"*Startup:* {cls._slack_safe(application.get('startup_stage'))} · {cls._slack_safe(application.get('industry_sector'))} · {cls._slack_safe(application.get('location'))}",
+            f"*Idea:* {cls._slack_safe(application.get('idea'), maximum=1000)}",
+            f"*Support requested:* {cls._slack_safe(application.get('support'), maximum=1000)}",
+        ]
+        members = application.get("team_members") or []
+        if members:
+            lines.append("*Other team members:*")
+            for member in members[:49]:
+                member_name = " ".join(
+                    value
+                    for value in (
+                        cls._slack_safe(
+                            member.get("first_name"),
+                            empty="",
+                            maximum=80,
+                        ),
+                        cls._slack_safe(
+                            member.get("last_name"),
+                            empty="",
+                            maximum=80,
+                        ),
+                    )
+                    if value
+                ) or "Unnamed"
+                lines.append(
+                    f"• {member_name} · {cls._slack_safe(member.get('role'), maximum=80)} · {cls._slack_safe(member.get('email'), maximum=160)}"
+                )
+        revenue = application.get("revenue_last_3_months") or {}
+        if revenue:
+            rendered_revenue = ", ".join(
+                f"{cls._slack_safe(month, maximum=20)}: {cls._slack_safe(amount, maximum=40)}"
+                for month, amount in sorted(revenue.items())
+            )
+            lines.append(f"*Revenue (last 3 months):* {rendered_revenue}")
+        consent = "Yes" if application.get("consent") else "No"
+        lines.append(
+            f"*Consent:* {consent} · *Created:* {cls._slack_safe(application.get('created_at'), maximum=60)} · *Updated:* {cls._slack_safe(application.get('updated_at'), maximum=60)}"
+        )
+        return "\n".join(lines)
+
+    @staticmethod
+    def _victor_ai_error_detail(exc: httpx.HTTPStatusError) -> Optional[str]:
+        try:
+            payload = exc.response.json()
+        except ValueError:
+            return None
+        detail = payload.get("detail") if isinstance(payload, dict) else None
+        if isinstance(detail, str):
+            return detail[:500]
+        if isinstance(payload, dict):
+            return "; ".join(
+                f"{key}: {value}"
+                for key, value in payload.items()
+            )[:500]
+        return None
+
 
     def _should_prompt_for_article_direction(self, text: str, params: dict) -> bool:
         """Prompt for topic-vs-research only on generic article requests."""

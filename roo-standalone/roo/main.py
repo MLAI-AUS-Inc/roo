@@ -376,6 +376,22 @@ def _mark_app_mention_event_seen(
     return True
 
 
+def _with_slack_delivery_context(event: dict, payload: dict) -> dict:
+    """Attach envelope IDs only when Slack supplied both verified values."""
+
+    team_id = str(
+        payload.get("team_id") or payload.get("team") or event.get("team") or ""
+    ).strip()
+    event_id = str(payload.get("event_id") or "").strip()
+    if not team_id or not event_id:
+        return event
+    return {
+        **event,
+        "_slack_team_id": team_id,
+        "_slack_event_id": event_id,
+    }
+
+
 def _pending_intent_key(slack_user_id: Optional[str], domain: Optional[str]) -> Optional[str]:
     return _pending_intent_identity_key(slack_user_id, None, domain)
 
@@ -1947,7 +1963,7 @@ async def slack_events(
         return {"challenge": payload.get("challenge")}
     
     # Handle events
-    event = payload.get("event", {})
+    event = payload.get("event", {}) or {}
     event_type = event.get("type")
     settings = get_settings()
     
@@ -1964,16 +1980,17 @@ async def slack_events(
     if event_type == "app_mention":
         if not _mark_app_mention_event_seen(payload, event):
             return JSONResponse(status_code=200, content={})
+        routed_event = _with_slack_delivery_context(event, payload)
         if _is_contextual_channel_enabled(settings, event.get("channel")):
             asyncio.create_task(
                 _handle_contextual_slack_message_safely(
-                    event,
+                    routed_event,
                     slack_team_id=str(payload.get("team_id") or ""),
                     trigger_source="app_mention",
                 )
             )
         else:
-            asyncio.create_task(_handle_mention(event))
+            asyncio.create_task(_handle_mention(routed_event))
         return JSONResponse(status_code=200, content={})
 
     if event_type == "reaction_added":
@@ -2050,7 +2067,9 @@ async def slack_events(
             ):
                 return JSONResponse(status_code=200, content={})
             print(f"📨 Received DM from {event.get('user')}")
-            asyncio.create_task(_handle_mention(event))
+            asyncio.create_task(
+                _handle_mention(_with_slack_delivery_context(event, payload))
+            )
             return JSONResponse(status_code=200, content={})
 
         if (
@@ -2059,7 +2078,7 @@ async def slack_events(
         ):
             asyncio.create_task(
                 _handle_contextual_slack_message_safely(
-                    event,
+                    _with_slack_delivery_context(event, payload),
                     slack_team_id=str(payload.get("team_id") or ""),
                     trigger_source="channel_message",
                 )
@@ -2101,6 +2120,8 @@ async def _handle_mention(event: dict):
             event_files=event_files,
             implicit_addressing=bool(event.get("implicit_addressing")),
             contextual_candidate_reason=event.get("contextual_candidate_reason"),
+            slack_team_id=event.get("_slack_team_id"),
+            event_id=event.get("_slack_event_id"),
         )
 
         response = None

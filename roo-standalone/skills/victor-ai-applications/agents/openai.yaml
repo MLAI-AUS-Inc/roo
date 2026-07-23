@@ -1,0 +1,4 @@
+interface:
+  display_name: "Victor AI Applications"
+  short_description: "Review and export Victor AI applications"
+  default_prompt: "Use $victor-ai-applications to summarise the latest Victor AI applications."
