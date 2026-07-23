@@ -57,6 +57,7 @@ jobs:
           SIM_PATIENT_API_KEY: ${{ secrets.SIM_PATIENT_API_KEY }}
           SIM_PATIENT_SAFETY_SALT: ${{ secrets.SIM_PATIENT_SAFETY_SALT }}
           ROO_API_KEY: ${{ secrets.ROO_API_KEY }}
+          VICTOR_AI_ROO_SIGNING_SECRET: ${{ secrets.VICTOR_AI_ROO_SIGNING_SECRET }}
         run: |
           set -eu
           if [ "${#SIM_PATIENT_API_KEY}" -lt 32 ]; then
@@ -71,7 +72,11 @@ jobs:
             echo "ROO_API_KEY is missing or shorter than 32 characters" >&2
             exit 1
           fi
-          if [ "$SIM_PATIENT_API_KEY" = "$SIM_PATIENT_SAFETY_SALT" ] || [ "$SIM_PATIENT_API_KEY" = "$ROO_API_KEY" ] || [ "$SIM_PATIENT_SAFETY_SALT" = "$ROO_API_KEY" ]; then
+          if [ "${#VICTOR_AI_ROO_SIGNING_SECRET}" -lt 32 ]; then
+            echo "VICTOR_AI_ROO_SIGNING_SECRET is missing or shorter than 32 characters" >&2
+            exit 1
+          fi
+          if [ "$SIM_PATIENT_API_KEY" = "$SIM_PATIENT_SAFETY_SALT" ] || [ "$SIM_PATIENT_API_KEY" = "$ROO_API_KEY" ] || [ "$SIM_PATIENT_API_KEY" = "$VICTOR_AI_ROO_SIGNING_SECRET" ] || [ "$SIM_PATIENT_SAFETY_SALT" = "$ROO_API_KEY" ] || [ "$SIM_PATIENT_SAFETY_SALT" = "$VICTOR_AI_ROO_SIGNING_SECRET" ] || [ "$ROO_API_KEY" = "$VICTOR_AI_ROO_SIGNING_SECRET" ]; then
             echo "Roo service credentials must be distinct" >&2
             exit 1
           fi
@@ -82,23 +87,24 @@ jobs:
           SIM_PATIENT_API_KEY: ${{ secrets.SIM_PATIENT_API_KEY }}
           SIM_PATIENT_SAFETY_SALT: ${{ secrets.SIM_PATIENT_SAFETY_SALT }}
           ROO_API_KEY: ${{ secrets.ROO_API_KEY }}
+          VICTOR_AI_ROO_SIGNING_SECRET: ${{ secrets.VICTOR_AI_ROO_SIGNING_SECRET }}
           ROO_PRIVATE_BASE_URL: ${{ vars.ROO_PRIVATE_BASE_URL }}
         with:
           host: ${{ secrets.DO_HOST }}
           username: ${{ secrets.DO_USERNAME }}
           key: ${{ secrets.DO_SSH_KEY }}
-          envs: SIM_PATIENT_API_KEY,SIM_PATIENT_SAFETY_SALT,ROO_API_KEY,ROO_PRIVATE_BASE_URL
+          envs: SIM_PATIENT_API_KEY,SIM_PATIENT_SAFETY_SALT,ROO_API_KEY,VICTOR_AI_ROO_SIGNING_SECRET,ROO_PRIVATE_BASE_URL
           script: |
             # Stop if any command fails
             set -eu
 
             # Fail before touching the existing environment if forwarding was
             # misconfigured. Values are intentionally never printed.
-            if [ "${#SIM_PATIENT_API_KEY}" -lt 32 ] || [ "${#SIM_PATIENT_SAFETY_SALT}" -lt 32 ] || [ "${#ROO_API_KEY}" -lt 32 ]; then
+            if [ "${#SIM_PATIENT_API_KEY}" -lt 32 ] || [ "${#SIM_PATIENT_SAFETY_SALT}" -lt 32 ] || [ "${#ROO_API_KEY}" -lt 32 ] || [ "${#VICTOR_AI_ROO_SIGNING_SECRET}" -lt 32 ]; then
               echo "Required Roo security secrets were not forwarded" >&2
               exit 1
             fi
-            if [ "$SIM_PATIENT_API_KEY" = "$SIM_PATIENT_SAFETY_SALT" ] || [ "$SIM_PATIENT_API_KEY" = "$ROO_API_KEY" ] || [ "$SIM_PATIENT_SAFETY_SALT" = "$ROO_API_KEY" ]; then
+            if [ "$SIM_PATIENT_API_KEY" = "$SIM_PATIENT_SAFETY_SALT" ] || [ "$SIM_PATIENT_API_KEY" = "$ROO_API_KEY" ] || [ "$SIM_PATIENT_API_KEY" = "$VICTOR_AI_ROO_SIGNING_SECRET" ] || [ "$SIM_PATIENT_SAFETY_SALT" = "$ROO_API_KEY" ] || [ "$SIM_PATIENT_SAFETY_SALT" = "$VICTOR_AI_ROO_SIGNING_SECRET" ] || [ "$ROO_API_KEY" = "$VICTOR_AI_ROO_SIGNING_SECRET" ]; then
               echo "Roo service credentials must be distinct" >&2
               exit 1
             fi
@@ -136,6 +142,9 @@ jobs:
             upsert_env "SIM_PATIENT_API_KEY" "$SIM_PATIENT_API_KEY"
             upsert_env "SIM_PATIENT_SAFETY_SALT" "$SIM_PATIENT_SAFETY_SALT"
             upsert_env "ROO_API_KEY" "$ROO_API_KEY"
+            upsert_env "VICTOR_AI_ROO_SIGNING_SECRET" "$VICTOR_AI_ROO_SIGNING_SECRET"
+            upsert_env "VICTOR_AI_SKILL_ENABLED" "true"
+            upsert_env "VICTOR_AI_SLACK_CHANNEL_NAME" "exp-victor-ai"
             
             # Restart the app
             docker compose up -d --build --remove-orphans
