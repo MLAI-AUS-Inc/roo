@@ -34,6 +34,7 @@ jobs:
             roo/tests/test_sim_patient.py \
             roo/tests/test_diagnosis_check.py \
             roo/tests/test_llm_agent_tools.py \
+            roo/tests/test_victor_ai_applications.py \
             -q
           python -m compileall -q roo
 
