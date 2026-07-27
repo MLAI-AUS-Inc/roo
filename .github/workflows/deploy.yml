@@ -2,12 +2,19 @@ name: Deploy to Digital Ocean
 
 on:
   workflow_dispatch:
+    inputs:
+      diagnostics_only:
+        description: Inspect the live Roo rollout without redeploying
+        required: false
+        type: boolean
+        default: false
   push:
     branches:
       - main
 
 jobs:
   security-checks:
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.diagnostics_only != true }}
     runs-on: ubuntu-latest
     steps:
       - name: Check out release candidate
@@ -53,6 +60,7 @@ jobs:
             nginx:1.28.3-alpine nginx -t
 
   deploy:
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.diagnostics_only != true }}
     needs: security-checks
     runs-on: ubuntu-latest
     steps:
@@ -243,3 +251,33 @@ jobs:
           expect_status 404 POST /api/mention
           expect_status 403 POST /api/sim-patient
           expect_status 403 POST /api/diagnosis-check
+
+  rollout-diagnostics:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.diagnostics_only == true }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Inspect live Roo rollout
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DO_HOST }}
+          username: ${{ secrets.DO_USERNAME }}
+          key: ${{ secrets.DO_SSH_KEY }}
+          script: |
+            set -eu
+            cd /root/roo/roo-standalone
+
+            docker compose ps
+            docker compose exec -T roo python -c '
+            from roo.config import get_settings
+            settings = get_settings()
+            print({
+                "topup_enabled": settings.ROO_POINTS_TOPUP_ENABLED,
+                "buttons_enabled": settings.ROO_POINTS_TOPUP_BUTTONS_ENABLED,
+                "checkout_hosts": sorted(settings.roo_points_stripe_checkout_hosts),
+            })
+            '
+
+            docker compose logs --since=45m --tail=2000 2>&1 \
+              | grep -E 'Received Slack event|Slack private|Private message|ROUTING_DECISION|topup|checkout-options|Traceback|ERROR|Error|Exception|error_type|1785144941' \
+              | sed -E 's#https://checkout\.stripe\.com/[^ ]+#https://checkout.stripe.com/[redacted]#g' \
+              || true
