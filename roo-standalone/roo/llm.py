@@ -7,7 +7,7 @@ import json
 import inspect
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Optional, List, Dict, Any, Callable
+from typing import Optional, List, Dict, Any, Callable, Type, TypeVar
 from enum import Enum
 import base64
 
@@ -49,6 +49,9 @@ class AgentResponse:
 
 class ToolCallParseError(ValueError):
     """The model produced no tool call or unparsable arguments."""
+
+
+StructuredResponseT = TypeVar("StructuredResponseT")
 
 
 class BaseLLMClient(ABC):
@@ -279,6 +282,42 @@ class OpenAIClient(BaseLLMClient):
                 })
 
         raise RuntimeError("ward NPC did not produce a final response")
+
+    async def responses_parse(
+        self,
+        messages: List[Dict[str, str]],
+        response_format: Type[StructuredResponseT],
+        **kwargs,
+    ) -> StructuredResponseT:
+        """Parse a Responses API result into a Pydantic model."""
+        model = kwargs.get("model", self.model)
+        instructions = "\n\n".join(
+            message["content"]
+            for message in messages
+            if message.get("role") == "system"
+        )
+        input_items = [
+            {"role": message["role"], "content": message["content"]}
+            for message in messages
+            if message.get("role") != "system"
+        ]
+        create_kwargs: Dict[str, Any] = {
+            "model": model,
+            "instructions": instructions,
+            "input": input_items,
+            "text_format": response_format,
+            "store": bool(kwargs.get("store", False)),
+        }
+        reasoning_effort = kwargs.get("reasoning_effort")
+        if reasoning_effort:
+            create_kwargs["reasoning"] = {"effort": reasoning_effort}
+        if kwargs.get("safety_identifier"):
+            create_kwargs["safety_identifier"] = kwargs["safety_identifier"]
+        response = await self._request_client(kwargs).responses.parse(**create_kwargs)
+        parsed = getattr(response, "output_parsed", None)
+        if parsed is None:
+            raise ToolCallParseError("structured_response_missing")
+        return parsed
 
     async def embed(self, text: str) -> List[float]:
         """Generate embeddings using OpenAI."""
