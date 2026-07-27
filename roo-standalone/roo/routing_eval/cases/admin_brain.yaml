@@ -1,0 +1,93 @@
+# Admin Roo organisational-memory routing and public-workflow boundaries.
+# The runtime surface allowlist decides whether admin-brain is loadable; these
+# cases exercise catalog semantics when all skills are compared together.
+
+- id: admin-brain-latest-project
+  text: "what is the latest evidence-backed status of the transcript pilot?"
+  expect: {skill: admin-brain, action: answer}
+  tags: [admin-brain, private-surface]
+
+- id: admin-brain-decision
+  text: "what did we decide about the venue and why?"
+  expect: {skill: admin-brain, action: answer}
+  tags: [admin-brain, private-surface]
+
+- id: admin-brain-owner
+  text: "who owns the sponsor follow-up according to our internal sources?"
+  expect: {skill: admin-brain, action: answer}
+  tags: [admin-brain, private-surface]
+
+- id: admin-brain-change
+  text: "what changed in the partner plan since last week?"
+  expect: {skill: admin-brain, action: answer}
+  tags: [admin-brain, private-surface]
+
+- id: admin-brain-history
+  text: "show me the history of our launch-date decision"
+  expect: {skill: admin-brain, action: answer}
+  tags: [admin-brain, private-surface]
+
+- id: admin-brain-open-loops
+  text: "what unresolved commitments does the committee currently have?"
+  expect: {skill: admin-brain, action: answer}
+  tags: [admin-brain, private-surface]
+
+- id: admin-brain-evidence
+  text: "which internal evidence supports the claim that the launch is blocked?"
+  expect: {skill: admin-brain, action: answer}
+  tags: [admin-brain, private-surface]
+
+- id: admin-brain-as-of
+  text: "as of 2026-07-01, what did we believe about Acme?"
+  expect: {skill: admin-brain, action: answer}
+  tags: [admin-brain, private-surface]
+
+- id: admin-boundary-points
+  text: "give Sam 10 Roo points for helping with the pilot"
+  expect: {skill: mlai-points, action: award_points}
+  tags: [admin-brain, public-regression, misroute-guard]
+
+- id: admin-boundary-points-balance
+  text: "what is my Roo points balance?"
+  expect: {skill: mlai-points, action: balance}
+  tags: [admin-brain, public-regression, misroute-guard]
+
+- id: admin-boundary-luma
+  text: "how many people registered for Thursday's Luma event?"
+  expect: {skill: luma-events}
+  tags: [admin-brain, public-regression, misroute-guard]
+
+- id: admin-boundary-luma-export
+  text: "export the Luma attendee list as a CSV"
+  expect: {skill: luma-events}
+  tags: [admin-brain, public-regression, misroute-guard]
+
+- id: admin-boundary-content
+  text: "write and publish an article about the transcript pilot"
+  expect: {skill: content-factory, action: write}
+  tags: [admin-brain, public-regression, misroute-guard]
+
+- id: admin-boundary-content-research
+  text: "research topics for the next mlai.au article"
+  expect: {skill: content-factory}
+  tags: [admin-brain, public-regression, misroute-guard]
+
+- id: admin-boundary-linear
+  text: "create a Linear issue for the sponsor follow-up"
+  expect: {skill: linear-meeting-actions}
+  tags: [admin-brain, public-regression, misroute-guard]
+
+- id: admin-boundary-linear-update
+  text: "post a Linear project update saying the pilot is green"
+  expect: {skill: linear-meeting-actions}
+  tags: [admin-brain, public-regression, misroute-guard]
+
+- id: admin-boundary-write-memory
+  text: "remember that the venue has changed to South Eveleigh"
+  expect: {skill: none}
+  tags: [admin-brain, read-only-boundary, misroute-guard]
+
+- id: admin-boundary-chitchat
+  text: "thanks, that was useful"
+  expect: {skill: none}
+  tags: [admin-brain, read-only-boundary, misroute-guard]

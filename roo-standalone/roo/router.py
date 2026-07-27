@@ -111,6 +111,13 @@ def _action_param_properties(skill: Skill) -> Dict[str, Dict[str, Any]]:
                 continue
             spec = dict(spec or {})
             prop: Dict[str, Any] = {"type": spec.get("type", "string")}
+            if prop["type"] == "array":
+                items = spec.get("items")
+                prop["items"] = (
+                    dict(items)
+                    if isinstance(items, dict)
+                    else {"type": "string"}
+                )
             if spec.get("enum"):
                 prop["enum"] = spec["enum"]
             if spec.get("description"):

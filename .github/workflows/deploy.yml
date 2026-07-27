@@ -11,6 +11,9 @@ on:
   push:
     branches:
       - main
+  pull_request:
+    branches:
+      - main
 
 jobs:
   security-checks:
@@ -38,6 +41,16 @@ jobs:
           OPENAI_API_KEY: test
         run: |
           python -m pytest \
+            roo/tests/test_surface_security.py \
+            roo/tests/test_slack_security.py \
+            roo/tests/test_backend_identity.py \
+            roo/tests/test_mlai_backend_client.py \
+            roo/tests/test_admin_brain.py \
+            roo/tests/test_admin_brain_interactions.py \
+            roo/tests/test_admin_pilot_config.py \
+            roo/tests/test_admin_pilot_smoke.py \
+            roo/tests/test_admin_actions.py \
+            roo/tests/test_router_catalog.py \
             roo/tests/test_ai_security.py \
             roo/tests/test_sim_patient.py \
             roo/tests/test_diagnosis_check.py \
@@ -60,12 +73,17 @@ jobs:
             nginx:1.28.3-alpine nginx -t
 
   deploy:
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.diagnostics_only != true }}
+    if: >-
+      ${{
+        (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+        (github.event_name == 'workflow_dispatch' && inputs.diagnostics_only != true)
+      }}
     needs: security-checks
     runs-on: ubuntu-latest
     steps:
       - name: Validate required Roo security secrets
         env:
+          RELEASE_SHA: ${{ github.sha }}
           SIM_PATIENT_API_KEY: ${{ secrets.SIM_PATIENT_API_KEY }}
           SIM_PATIENT_SAFETY_SALT: ${{ secrets.SIM_PATIENT_SAFETY_SALT }}
           ROO_API_KEY: ${{ secrets.ROO_API_KEY }}
@@ -105,7 +123,7 @@ jobs:
           host: ${{ secrets.DO_HOST }}
           username: ${{ secrets.DO_USERNAME }}
           key: ${{ secrets.DO_SSH_KEY }}
-          envs: SIM_PATIENT_API_KEY,SIM_PATIENT_SAFETY_SALT,ROO_API_KEY,VICTOR_AI_ROO_SIGNING_SECRET,ROO_PRIVATE_BASE_URL
+          envs: SIM_PATIENT_API_KEY,SIM_PATIENT_SAFETY_SALT,ROO_API_KEY,VICTOR_AI_ROO_SIGNING_SECRET,ROO_PRIVATE_BASE_URL,RELEASE_SHA
           script: |
             # Stop if any command fails
             set -eu
@@ -120,19 +138,25 @@ jobs:
               echo "Roo service credentials must be distinct" >&2
               exit 1
             fi
+            if ! printf '%s' "$RELEASE_SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+              echo "RELEASE_SHA must be a full 40-character Git commit SHA" >&2
+              exit 1
+            fi
             
             # Define deployment directory
             DEPLOY_DIR="/root/roo"
             
-            # Clone repo if it doesn't exist, otherwise pull
+            # Clone the repository once, then deploy the exact workflow SHA.
             if [ ! -d "$DEPLOY_DIR" ]; then
               echo "Cloning repository..."
               git clone https://github.com/MLAI-AUS-Inc/roo.git "$DEPLOY_DIR"
-            else
-              echo "Updating repository..."
-              cd "$DEPLOY_DIR"
-              git pull origin main
             fi
+            cd "$DEPLOY_DIR"
+            git fetch origin main
+            git cat-file -e "${RELEASE_SHA}^{commit}"
+            git merge-base --is-ancestor "$RELEASE_SHA" origin/main
+            git checkout --detach "$RELEASE_SHA"
+            test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
             
             # Go to the sub-project directory
             cd "$DEPLOY_DIR/roo-standalone"
@@ -151,6 +175,7 @@ jobs:
               mv "$tmp_file" .env
             }
             upsert_env "ROO_ENVIRONMENT" "production"
+            upsert_env "ROO_RELEASE_SHA" "$RELEASE_SHA"
             upsert_env "SIM_PATIENT_API_KEY" "$SIM_PATIENT_API_KEY"
             upsert_env "SIM_PATIENT_SAFETY_SALT" "$SIM_PATIENT_SAFETY_SALT"
             upsert_env "ROO_API_KEY" "$ROO_API_KEY"

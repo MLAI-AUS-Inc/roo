@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, List
 from pathlib import Path
 
+from .admin_brain import ADMIN_BRAIN_UNAVAILABLE_MESSAGE
 from .config import get_settings
 from .content_intent import (
     extract_content_factory_delegation,
@@ -47,9 +48,22 @@ class RooAgent:
     def __init__(self):
         """Initialize the Roo agent with loaded skills."""
         settings = get_settings()
+        self._surface = settings.ROO_SURFACE
         skills_dir = Path(settings.SKILLS_DIR)
 
-        self.skills = load_skills(skills_dir)
+        allowed_skill_names = settings.enabled_skill_names
+        self.skills = load_skills(
+            skills_dir,
+            allowed_names=allowed_skill_names,
+        )
+        if settings.has_explicit_skill_allowlist:
+            loaded_names = {skill.name for skill in self.skills}
+            missing_names = allowed_skill_names - loaded_names
+            if missing_names:
+                raise ValueError(
+                    "ROO_ENABLED_SKILLS references missing or invalid skills: "
+                    + ", ".join(sorted(missing_names))
+                )
         self.skill_executor = SkillExecutor()
         self._thread_skill_context: Dict[str, Dict[str, Any]] = {}
 
@@ -293,6 +307,19 @@ class RooAgent:
                 "suppress_post": result.suppress_post,
             }
         else:
+            if getattr(self, "_surface", "public") == "admin":
+                print(
+                    "🔒 Admin Roo declined generic chat because no authorised "
+                    "Admin Brain route was selected"
+                )
+                return {
+                    "message": ADMIN_BRAIN_UNAVAILABLE_MESSAGE,
+                    "skill_used": None,
+                    "data": {
+                        "admin_brain": True,
+                        "reason": "no_authorised_memory_route",
+                    },
+                }
             print("💬 No skill matched, generating general response")
             if implicit_addressing and not self._is_implicit_action_allowed(
                 "respond_in_chat",
