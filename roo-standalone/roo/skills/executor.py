@@ -12,6 +12,7 @@ import json
 import re
 import asyncio
 import calendar
+from urllib.parse import urlsplit
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Any, Optional, List
@@ -52,7 +53,13 @@ from ..points_request_approval import (
     build_points_request_record,
     remember_points_request_summary,
 )
-from ..slack_client import get_channel_id, get_channel_name, post_message, upload_file
+from ..slack_client import (
+    get_channel_id,
+    get_channel_name,
+    post_ephemeral,
+    post_message,
+    upload_file,
+)
 from ..config import get_settings
 from ..clients.mlai_backend import MLAIBackendClient, MLAIBackendUnavailableError
 from ..coworking_booking_intents import (
@@ -165,7 +172,18 @@ class SkillExecutor:
             elif skill.name == "connect-users":
                 result = await self._execute_connect_users(skill, text, params, user_id)
             elif skill.name == "mlai-points":
-                result = await self._execute_mlai_points(skill, text, params, user_id, channel_id, thread_ts)
+                result = await self._execute_mlai_points(
+                    skill,
+                    text,
+                    params,
+                    user_id,
+                    channel_id,
+                    thread_ts,
+                    request_id=(
+                        kwargs.get("event_id")
+                        or kwargs.get("current_message_ts")
+                    ),
+                )
             elif skill.name == "mlai-data-query":
                 result = await self._execute_mlai_data_query(skill, text, params, user_id)
             elif skill.name == "github-integration":
@@ -8139,7 +8157,8 @@ Chunk {index} source: {label}
         params: dict,
         user_id: str,
         channel_id: Optional[str],
-        thread_ts: Optional[str]
+        thread_ts: Optional[str],
+        request_id: Optional[str] = None,
     ) -> Any:
         """Execute the MLAI Points skill."""
         import httpx
@@ -8175,15 +8194,20 @@ Chunk {index} source: {label}
                 )
 
             # Execute the appropriate action
+            handle_kwargs = {
+                "client": client,
+                "action": action,
+                "params": params,
+                "text": text,
+                "user_id": user_id,
+                "channel_id": channel_id,
+                "thread_ts": thread_ts,
+                "skill": skill,
+            }
+            if request_id:
+                handle_kwargs["request_id"] = request_id
             return await self._handle_points_action(
-                client=client,
-                action=action,
-                params=params,
-                text=text,
-                user_id=user_id,
-                channel_id=channel_id,
-                thread_ts=thread_ts,
-                skill=skill
+                **handle_kwargs
             )
             
         except MLAIBackendUnavailableError:
@@ -8294,6 +8318,161 @@ Chunk {index} source: {label}
             "Top-up Roo Points are optional and do not count toward lifetime earned contribution."
         )
         return "\n".join(lines)
+
+    def _trusted_topup_checkout_options(
+        self,
+        raw_options: Any,
+        *,
+        settings: Any,
+    ) -> list[dict[str, Any]]:
+        """Return sanitized Stripe Checkout options safe to embed in Slack."""
+        allowed_hosts = set(
+            getattr(settings, "roo_points_stripe_checkout_hosts", set()) or set()
+        )
+        trusted = []
+        for raw_option in raw_options if isinstance(raw_options, list) else []:
+            if not isinstance(raw_option, dict):
+                continue
+            checkout_url = str(raw_option.get("checkout_session_url") or "").strip()
+            parsed = urlsplit(checkout_url)
+            try:
+                checkout_port = parsed.port
+            except ValueError:
+                checkout_port = -1
+            if (
+                parsed.scheme != "https"
+                or not parsed.hostname
+                or parsed.hostname.lower() not in allowed_hosts
+                or parsed.username
+                or parsed.password
+                or checkout_port not in {None, 443}
+            ):
+                print(
+                    "ROO_TOPUP_UNTRUSTED_CHECKOUT_URL "
+                    f"pack_id={raw_option.get('pack_id')}"
+                )
+                continue
+            try:
+                points = int(raw_option.get("points_amount"))
+                amount_cents = int(raw_option.get("amount_cents"))
+            except (TypeError, ValueError):
+                continue
+            if points <= 0 or amount_cents <= 0:
+                continue
+            currency = str(raw_option.get("currency") or "aud").strip().lower()
+            pack_id = str(raw_option.get("pack_id") or "").strip()
+            if not pack_id:
+                continue
+            trusted.append(
+                {
+                    "pack_id": pack_id,
+                    "points": points,
+                    "amount_cents": amount_cents,
+                    "currency": currency,
+                    "checkout_url": checkout_url,
+                    "expires_at": str(raw_option.get("expires_at") or "").strip(),
+                }
+            )
+        return trusted
+
+    @staticmethod
+    def _topup_price_label(amount_cents: int, currency: str) -> str:
+        amount = amount_cents / 100
+        if currency.lower() == "aud":
+            return f"A${amount:.2f}"
+        return f"{currency.upper()} {amount:.2f}"
+
+    def _topup_checkout_button_response(
+        self,
+        *,
+        options: list[dict[str, Any]],
+        user_id: str,
+        channel_id: Optional[str],
+        thread_ts: Optional[str],
+        had_partial_errors: bool,
+    ) -> dict:
+        singular = len(options) == 1
+        message = (
+            "Your Top-up Roo Points checkout is ready. Use the private Stripe "
+            "Checkout button below."
+            if singular
+            else "Choose a Top-up Roo Points pack using one of the private Stripe Checkout buttons."
+        )
+        if had_partial_errors:
+            message += " Some checkout options are temporarily unavailable."
+        message += (
+            "\n\nTop-up Roo Points are optional MLAI community reward points. "
+            "They are not money, have no cash value, cannot be converted to cash, "
+            "and do not count toward lifetime earned contribution."
+        )
+
+        buttons = []
+        for option in options:
+            price = self._topup_price_label(
+                option["amount_cents"],
+                option["currency"],
+            )
+            button = {
+                "type": "button",
+                "text": {
+                    "type": "plain_text",
+                    "text": f"{option['points']} points · {price}",
+                    "emoji": True,
+                },
+                "url": option["checkout_url"],
+                "action_id": f"roo_topup_checkout_{option['pack_id']}",
+            }
+            if option["pack_id"] == "topup_10":
+                button["style"] = "primary"
+            buttons.append(button)
+
+        blocks = [
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": message},
+            },
+            {"type": "actions", "elements": buttons},
+            {
+                "type": "context",
+                "elements": [
+                    {
+                        "type": "mrkdwn",
+                        "text": (
+                            "Stripe will ask you to accept the Roo Points terms "
+                            "before payment. Checkout links expire within 24 hours."
+                        ),
+                    }
+                ],
+            },
+        ]
+        response_data = {
+            "action": "topup_points",
+            "delivery": (
+                "direct_message"
+                if channel_id and channel_id.startswith("D")
+                else "ephemeral"
+            ),
+            "pack_ids": [option["pack_id"] for option in options],
+            "partial": had_partial_errors,
+        }
+        if channel_id and not channel_id.startswith("D"):
+            post_ephemeral(
+                channel=channel_id,
+                user=user_id,
+                text=message,
+                thread_ts=thread_ts,
+                blocks=blocks,
+            )
+            return {
+                "message": "",
+                "data": response_data,
+                "suppress_post": True,
+            }
+        return {
+            "message": message,
+            "blocks": blocks,
+            "data": response_data,
+        }
 
     def _normalize_points_routing_text(self, text: str) -> str:
         """Normalize common Slack typo variants before deterministic routing."""
@@ -9862,7 +10041,8 @@ Chunk {index} source: {label}
         user_id: str,
         channel_id: Optional[str],
         thread_ts: Optional[str],
-        skill
+        skill,
+        request_id: Optional[str] = None,
     ) -> Any:
         """Handle individual points actions."""
         
@@ -9876,6 +10056,45 @@ Chunk {index} source: {label}
                 return "Top-up checkout is not enabled yet. Ask the MLAI team to finish enabling Stripe top-ups first."
 
             pack_id, unsupported_amount = self._resolve_topup_pack_id(text, params)
+            if getattr(settings, "ROO_POINTS_TOPUP_BUTTONS_ENABLED", False):
+                purchase_from = {"source": "slack"}
+                if channel_id:
+                    purchase_from["slack_channel_id"] = channel_id
+                if thread_ts:
+                    purchase_from["slack_thread_ts"] = thread_ts
+                checkout_request_id = str(
+                    request_id or f"roo-topup-{uuid4().hex}"
+                ).strip()
+                requested_pack_ids = [pack_id] if pack_id else None
+                try:
+                    checkout_payload = await client.create_points_checkout_options(
+                        slack_user_id=user_id,
+                        checkout_request_id=checkout_request_id,
+                        pack_ids=requested_pack_ids,
+                        purchase_from=purchase_from,
+                    )
+                except httpx.HTTPStatusError as exc:
+                    error_detail = self._extract_http_error_detail(exc)
+                    detail = f" {error_detail}" if error_detail else ""
+                    return f"I couldn't create the Stripe top-up buttons yet.{detail}"
+
+                options = self._trusted_topup_checkout_options(
+                    checkout_payload.get("options"),
+                    settings=settings,
+                )
+                if not options:
+                    return (
+                        "I couldn't create trusted Stripe Checkout links for those "
+                        "top-up packs. Please try again shortly."
+                    )
+                return self._topup_checkout_button_response(
+                    options=options,
+                    user_id=user_id,
+                    channel_id=channel_id,
+                    thread_ts=thread_ts,
+                    had_partial_errors=bool(checkout_payload.get("errors")),
+                )
+
             if not pack_id:
                 if unsupported_amount is None:
                     return self._topup_pack_list_message()

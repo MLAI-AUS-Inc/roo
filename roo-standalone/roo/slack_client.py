@@ -90,6 +90,37 @@ def post_message(
         raise
 
 
+def post_ephemeral(
+    channel: str,
+    user: str,
+    text: str,
+    thread_ts: Optional[str] = None,
+    **kwargs,
+) -> Dict[str, Any]:
+    """Post a private message visible only to one member in a Slack channel."""
+    client = get_slack_client()
+
+    try:
+        response = client.chat_postEphemeral(
+            channel=channel,
+            user=user,
+            text=text,
+            thread_ts=thread_ts,
+            **kwargs,
+        )
+        if response.get("ok"):
+            print(f"✅ Private message posted in {channel} for {user}")
+        else:
+            print(
+                "❌ Failed to post private message: "
+                f"error={response.get('error', 'unknown')}"
+            )
+        return response
+    except Exception as exc:
+        print(f"❌ Slack private post error: error_type={exc.__class__.__name__}")
+        raise
+
+
 def upload_file(
     channel: str,
     content: str,

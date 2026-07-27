@@ -149,6 +149,9 @@ jobs:
             upsert_env "VICTOR_AI_ROO_SIGNING_SECRET" "$VICTOR_AI_ROO_SIGNING_SECRET"
             upsert_env "VICTOR_AI_SKILL_ENABLED" "true"
             upsert_env "VICTOR_AI_SLACK_CHANNEL_NAME" "exp-victor-ai"
+            upsert_env "ROO_POINTS_TOPUP_ENABLED" "true"
+            upsert_env "ROO_POINTS_TOPUP_BUTTONS_ENABLED" "true"
+            upsert_env "ROO_POINTS_STRIPE_CHECKOUT_HOSTS" "checkout.stripe.com"
             
             # Restart the app
             docker compose up -d --build --remove-orphans

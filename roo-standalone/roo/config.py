@@ -96,6 +96,8 @@ class Settings(BaseSettings):
     COWORKING_INTENTS_DB_PATH: str = "data/coworking_booking_intents.db"
     COWORKING_RETRY_POLL_SECONDS: float = 30.0
     ROO_POINTS_TOPUP_ENABLED: bool = False
+    ROO_POINTS_TOPUP_BUTTONS_ENABLED: bool = False
+    ROO_POINTS_STRIPE_CHECKOUT_HOSTS: str = "checkout.stripe.com"
     BOOST_LINK_LOVE_ENABLED: bool = True
     BOOST_LINK_LOVE_CHANNEL_NAME: str = "boost-my-startup"
     BOOST_LINK_LOVE_DB_PATH: str = "data/link_love_awards.db"
@@ -161,6 +163,15 @@ class Settings(BaseSettings):
         return self._split_configured_values(self.ROO_IMPLICIT_ACTION_ALLOWLIST)
 
     @property
+    def roo_points_stripe_checkout_hosts(self) -> frozenset[str]:
+        return frozenset(
+            value.lower()
+            for value in self._split_configured_values(
+                self.ROO_POINTS_STRIPE_CHECKOUT_HOSTS
+            )
+        )
+
+    @property
     def victor_ai_slack_channel_name(self) -> str:
         return str(self.VICTOR_AI_SLACK_CHANNEL_NAME or "").strip().lstrip("#").lower()
 
@@ -200,6 +211,13 @@ class Settings(BaseSettings):
         if self.ROO_CONTEXTUAL_RESPONSES_ENABLED and not self.contextual_channel_ids:
             raise ValueError(
                 "Contextual Roo responses require ROO_CONTEXTUAL_CHANNEL_IDS"
+            )
+        if (
+            self.ROO_POINTS_TOPUP_BUTTONS_ENABLED
+            and not self.roo_points_stripe_checkout_hosts
+        ):
+            raise ValueError(
+                "ROO_POINTS_STRIPE_CHECKOUT_HOSTS is required when top-up buttons are enabled"
             )
         if self.VICTOR_AI_SKILL_ENABLED:
             if not str(self.MLAI_BACKEND_URL or "").strip():
