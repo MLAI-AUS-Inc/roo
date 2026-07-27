@@ -6,6 +6,8 @@ services:
     env_file:
       - .env
     environment:
+      # The existing deployment is permanently the Public Roo surface.
+      ROO_SURFACE: public
       # Enforce contextual responses in the first allowlisted pilot channel.
       ROO_CONTEXTUAL_RESPONSES_ENABLED: "true"
       ROO_CONTEXTUAL_SHADOW_MODE: "false"

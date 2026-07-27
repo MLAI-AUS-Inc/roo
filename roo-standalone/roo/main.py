@@ -8,7 +8,6 @@ Main entrypoint for the Roo AI agent service.
 import asyncio
 import json
 import hmac
-import hashlib
 import re
 import time
 from contextlib import asynccontextmanager, suppress
@@ -66,6 +65,29 @@ from .start_here_introductions import (
     normalize_intro_event,
     start_here_intro_retry_loop,
 )
+from .slack_security import (
+    SlackRequestVerificationError,
+    verify_and_claim_slack_request,
+)
+from .backend_identity import (
+    BackendActorContext,
+    get_backend_actor_context,
+    use_backend_actor_context,
+)
+from .admin_brain import (
+    ADMIN_ACTION_APPROVE,
+    ADMIN_ACTION_REJECT,
+    ADMIN_BRAIN_FEEDBACK_ACTIONS,
+    ADMIN_BRAIN_INCORRECT_ACTION,
+    ADMIN_BRAIN_INCORRECT_CALLBACK,
+    build_admin_action_reject_modal,
+    build_admin_action_response,
+    build_incorrect_feedback_modal,
+    parse_admin_action_reject_submission,
+    parse_admin_action_value,
+    parse_feedback_value,
+    parse_incorrect_feedback_submission,
+)
 
 # Pending intents for auto-continue after prerequisite steps complete.
 # Key: "{slack_user_id}:{domain}" → {"action": "write", "topic": "...", "channel_id": "...", "thread_ts": "..."}
@@ -91,9 +113,42 @@ CONTENT_FACTORY_WATCHDOG_STOP_STATUSES = {
 }
 
 
-def _is_contextual_channel_enabled(settings: Settings, channel_id: Optional[str]) -> bool:
-    """Return true only for explicitly allowlisted Roo pilot channels."""
+def _is_duplicate_slack_request(request: Request) -> bool:
+    state = getattr(request, "state", None)
+    return bool(getattr(state, "slack_duplicate", False))
 
+
+def _request_settings(request: Request) -> Settings:
+    state = getattr(request, "state", None)
+    return getattr(state, "roo_settings", None) or get_settings()
+
+
+def _is_slack_context_allowed(
+    settings: Settings,
+    *,
+    channel_id: Optional[str],
+    user_id: Optional[str],
+    channel_type: Optional[str] = None,
+) -> bool:
+    if getattr(settings, "ROO_SURFACE", "public") == "public":
+        return True
+    checker = getattr(settings, "is_slack_context_allowed", None)
+    if not callable(checker):
+        return False
+    return bool(
+        checker(
+            channel_id=channel_id,
+            user_id=user_id,
+            channel_type=channel_type,
+        )
+    )
+
+
+def _is_contextual_channel_enabled(settings: Settings, channel_id: Optional[str]) -> bool:
+    """Return true only for explicitly allowlisted Public Roo pilot channels."""
+
+    if getattr(settings, "ROO_SURFACE", "public") != "public":
+        return False
     if not bool(getattr(settings, "ROO_CONTEXTUAL_RESPONSES_ENABLED", False)):
         return False
     configured = getattr(settings, "contextual_channel_ids", frozenset())
@@ -1763,29 +1818,33 @@ async def lifespan(app: FastAPI):
     start_here_intro_task: Optional[asyncio.Task] = None
     jobs_scheduler_task: Optional[asyncio.Task] = None
     print(f"🦘 Roo Standalone starting...")
+    print(f"   Surface: {settings.ROO_SURFACE}")
     print(f"   LLM Provider: {settings.default_llm_provider}")
     print(f"   Skills Dir: {settings.SKILLS_DIR}")
 
     # Initialize agent on startup
     agent = get_agent()
     print(f"   Loaded {len(agent.skills)} skills")
-    coworking_retry_task = asyncio.create_task(coworking_booking_retry_loop())
-    app.state.coworking_retry_task = coworking_retry_task
-    if settings.BOOST_LINK_LOVE_ENABLED:
-        link_love_task = asyncio.create_task(link_love_retry_loop())
-        app.state.link_love_task = link_love_task
-    if getattr(settings, "START_HERE_INTRO_ENABLED", True):
-        start_here_intro_task = asyncio.create_task(start_here_intro_retry_loop())
-        app.state.start_here_intro_task = start_here_intro_task
-    if settings.JOBS_SCHEDULER_ENABLED:
-        _validate_jobs_scheduler_settings(settings)
-        jobs_scheduler_task = asyncio.create_task(_jobs_daily_run_loop())
-        app.state.jobs_scheduler_task = jobs_scheduler_task
-        print(
-            "   Started jobs daily scheduler "
-            f"for {settings.JOBS_SCHEDULE_HOUR:02d}:{settings.JOBS_SCHEDULE_MINUTE:02d} "
-            f"{settings.TIMEZONE}"
-        )
+    if settings.ROO_SURFACE == "public":
+        coworking_retry_task = asyncio.create_task(coworking_booking_retry_loop())
+        app.state.coworking_retry_task = coworking_retry_task
+        if settings.BOOST_LINK_LOVE_ENABLED:
+            link_love_task = asyncio.create_task(link_love_retry_loop())
+            app.state.link_love_task = link_love_task
+        if getattr(settings, "START_HERE_INTRO_ENABLED", True):
+            start_here_intro_task = asyncio.create_task(start_here_intro_retry_loop())
+            app.state.start_here_intro_task = start_here_intro_task
+        if settings.JOBS_SCHEDULER_ENABLED:
+            _validate_jobs_scheduler_settings(settings)
+            jobs_scheduler_task = asyncio.create_task(_jobs_daily_run_loop())
+            app.state.jobs_scheduler_task = jobs_scheduler_task
+            print(
+                "   Started jobs daily scheduler "
+                f"for {settings.JOBS_SCHEDULE_HOUR:02d}:{settings.JOBS_SCHEDULE_MINUTE:02d} "
+                f"{settings.TIMEZONE}"
+            )
+    else:
+        print("   Public Roo background workflows disabled on Admin surface")
     app.state.startup_complete = True
 
     # MedHack daily case scheduler (currently disabled)
@@ -1834,28 +1893,31 @@ app = FastAPI(
 async def verify_slack_signature(
     request: Request,
     settings: Settings = Depends(get_settings)
-) -> None:
+) -> bool:
     """Verify every internet-facing Slack webhook before parsing its body."""
-    timestamp = request.headers.get("X-Slack-Request-Timestamp", "")
-    signature = request.headers.get("X-Slack-Signature", "")
-
-    # Check timestamp is recent (within 5 minutes)
     try:
-        ts = int(timestamp)
-        if abs(time.time() - ts) > 300:
-            raise ValueError("stale")
-    except (TypeError, ValueError):
+        is_duplicate = verify_and_claim_slack_request(
+            signing_secret=settings.SLACK_SIGNING_SECRET,
+            raw_body=await request.body(),
+            headers=request.headers,
+            receipt_db_path=settings.SLACK_RECEIPTS_DB_PATH,
+            max_age_seconds=settings.SLACK_REQUEST_MAX_AGE_SECONDS,
+            receipt_ttl_seconds=settings.SLACK_RECEIPT_TTL_SECONDS,
+        )
+    except SlackRequestVerificationError:
         raise HTTPException(status_code=403, detail="unauthorized")
+    request.state.slack_duplicate = is_duplicate
+    request.state.roo_settings = settings
+    return True
 
-    body = await request.body()
-    signed = b"v0:" + timestamp.encode("utf-8") + b":" + body
-    expected = "v0=" + hmac.new(
-        settings.SLACK_SIGNING_SECRET.encode("utf-8"),
-        signed,
-        hashlib.sha256,
-    ).hexdigest()
-    if not hmac.compare_digest(signature, expected):
-        raise HTTPException(status_code=403, detail="unauthorized")
+
+def require_public_surface(
+    settings: Settings = Depends(get_settings),
+) -> Settings:
+    """Hide Public Roo-only HTTP capabilities from the Admin deployment."""
+    if settings.ROO_SURFACE != "public":
+        raise HTTPException(status_code=404, detail="not found")
+    return settings
 
 
 @app.get("/health")
@@ -1864,6 +1926,7 @@ async def health_check():
     return {
         "status": "ok",
         "service": "roo",
+        "surface": get_settings().ROO_SURFACE,
         "message": "G'day! Roo is awake and ready 🦘"
     }
 
@@ -1881,6 +1944,7 @@ async def readiness_check():
     return {
         "status": "ok",
         "service": "roo",
+        "surface": get_settings().ROO_SURFACE,
         "message": "Roo startup complete",
     }
 
@@ -1941,7 +2005,7 @@ async def dependency_health_check():
 @app.post("/slack/events")
 async def slack_events(
     request: Request,
-    _: None = Depends(verify_slack_signature),
+    _verified: bool = Depends(verify_slack_signature),
 ):
     """
     Slack Events API webhook.
@@ -1961,11 +2025,33 @@ async def slack_events(
     if payload.get("type") == "url_verification":
         print("✅ Slack URL verification challenge")
         return {"challenge": payload.get("challenge")}
+
+    if _is_duplicate_slack_request(request):
+        print("↩️ Ignoring duplicate signed Slack event request")
+        return JSONResponse(status_code=200, content={})
     
     # Handle events
     event = payload.get("event", {}) or {}
     event_type = event.get("type")
-    settings = get_settings()
+    settings = _request_settings(request)
+
+    if not _is_slack_context_allowed(
+        settings,
+        channel_id=event.get("channel"),
+        user_id=event.get("user"),
+        channel_type=event.get("channel_type"),
+    ):
+        print("🔒 Ignoring Slack event outside the deployment context allowlist")
+        return JSONResponse(status_code=200, content={})
+
+    if getattr(settings, "ROO_SURFACE", "public") == "admin":
+        is_admin_dm = (
+            event_type == "message"
+            and event.get("channel_type") == "im"
+        )
+        if event_type != "app_mention" and not is_admin_dm:
+            print(f"🔒 Admin Roo ignored unsupported Slack event type: {event_type}")
+            return JSONResponse(status_code=200, content={})
     
     print(f"📨 Received Slack event: {event_type}")
 
@@ -2093,7 +2179,45 @@ async def _handle_start_here_intro(event: dict):
     return await handle_start_here_intro(event)
 
 
+async def _handle_slack_mention(
+    event: dict,
+    *,
+    slack_team_id: str,
+    event_id: str,
+):
+    """Bind trusted Slack envelope identity to this task and its backend calls."""
+    context = BackendActorContext(
+        slack_team_id=slack_team_id,
+        acting_slack_user_id=str(event.get("user") or ""),
+        slack_channel_id=str(event.get("channel") or ""),
+        slack_thread_ts=str(event.get("thread_ts") or event.get("ts") or ""),
+        event_id=event_id,
+    )
+    with use_backend_actor_context(context):
+        return await _handle_mention(event)
+
+
 async def _handle_mention(event: dict):
+    """Bind trusted Slack envelope identity to one routed task."""
+    context = BackendActorContext(
+        slack_team_id=str(event.get("_slack_team_id") or ""),
+        acting_slack_user_id=str(event.get("user") or ""),
+        slack_channel_id=str(event.get("channel") or ""),
+        slack_thread_ts=str(
+            event.get("thread_ts") or event.get("ts") or ""
+        ),
+        event_id=str(
+            event.get("_slack_event_id")
+            or event.get("client_msg_id")
+            or event.get("ts")
+            or ""
+        ),
+    )
+    with use_backend_actor_context(context):
+        return await _handle_mention_with_context(event)
+
+
+async def _handle_mention_with_context(event: dict):
     """Handle one Slack message that has passed the addressing gate."""
     try:
         user_id = event.get("user")
@@ -2106,7 +2230,12 @@ async def _handle_mention(event: dict):
         print(f"\n🦘 ROO MENTION: from {user_id} in {channel_id}")
         print(f"   Text: {text[:100]}...")
 
-        if not event.get("implicit_addressing") and await _maybe_handle_manual_jobs_trigger(event):
+        settings = get_settings()
+        if (
+            settings.ROO_SURFACE == "public"
+            and not event.get("implicit_addressing")
+            and await _maybe_handle_manual_jobs_trigger(event)
+        ):
             return
         
         agent = get_agent()
@@ -2120,8 +2249,8 @@ async def _handle_mention(event: dict):
             event_files=event_files,
             implicit_addressing=bool(event.get("implicit_addressing")),
             contextual_candidate_reason=event.get("contextual_candidate_reason"),
-            slack_team_id=event.get("_slack_team_id"),
-            event_id=event.get("_slack_event_id"),
+            slack_team_id=get_backend_actor_context().slack_team_id,
+            event_id=get_backend_actor_context().event_id,
         )
 
         response = None
@@ -2349,13 +2478,35 @@ async def _handle_reaction_added(event: dict):
 @app.post("/slack/commands")
 async def slack_commands(
     request: Request,
-    _: None = Depends(verify_slack_signature),
+    _verified: bool = Depends(verify_slack_signature),
 ):
     """Slack Slash Commands webhook."""
     form = await request.form()
+    if _is_duplicate_slack_request(request):
+        print("↩️ Ignoring duplicate signed Slack command request")
+        return {}
     command = form.get("command", "")
     text = form.get("text", "")
     user_id = form.get("user_id", "")
+    settings = _request_settings(request)
+    if not _is_slack_context_allowed(
+        settings,
+        channel_id=form.get("channel_id"),
+        user_id=user_id,
+        channel_type=None,
+    ):
+        return {
+            "response_type": "ephemeral",
+            "text": "This Roo deployment is not available in this context.",
+        }
+    if settings.ROO_SURFACE == "admin":
+        return {
+            "response_type": "ephemeral",
+            "text": (
+                "Admin Roo slash commands are not enabled in this "
+                "read-only pilot."
+            ),
+        }
     
     print(f"📨 Slash command: {command} {text} from {user_id}")
     
@@ -2550,14 +2701,37 @@ def _validated_case_id(value: Any, settings: Settings) -> int:
     return value
 
 
-# The legacy /api/mention endpoint was intentionally removed. Repository-wide
-# caller inventory found no consumer, and accepting a JSON user_id let an
-# unauthenticated caller exercise Roo's broader, privileged agent. Verified
-# Slack traffic continues to enter through /slack/events.
+@app.post("/api/mention")
+async def api_mention(
+    request: Request,
+    settings: Settings = Depends(get_settings),
+):
+    """Authenticated Public Roo entry point for trusted internal services."""
+    if settings.ROO_SURFACE != "public" or not settings.INTERNAL_MENTION_API_KEY:
+        raise HTTPException(status_code=404, detail="Not found")
+    authorization = request.headers.get("Authorization", "")
+    expected = f"Bearer {settings.INTERNAL_MENTION_API_KEY}"
+    if not hmac.compare_digest(authorization, expected):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid internal mention credentials",
+        )
+
+    payload = await request.json()
+    agent = get_agent()
+    return await agent.handle_mention(
+        text=payload.get("text", ""),
+        user_id=payload.get("user_id", ""),
+        channel_id=payload.get("channel_id"),
+        thread_ts=payload.get("thread_ts"),
+    )
 
 
 @app.post("/api/sim-patient")
-async def api_sim_patient(request: Request, settings: Settings = Depends(get_settings)):
+async def api_sim_patient(
+    request: Request,
+    settings: Settings = Depends(require_public_surface),
+):
     """Simulated-patient roleplay for the health-hack 3D ward.
 
     Runs the medhack "Guess the Diagnosis" case as an in-character narrator.
@@ -2615,7 +2789,10 @@ async def api_sim_patient(request: Request, settings: Settings = Depends(get_set
 
 
 @app.post("/api/diagnosis-check")
-async def api_diagnosis_check(request: Request, settings: Settings = Depends(get_settings)):
+async def api_diagnosis_check(
+    request: Request,
+    settings: Settings = Depends(require_public_surface),
+):
     """Ward-clerk diagnosis contest: adjudicate ONE guess and record it.
 
     Fully scripted — no LLM anywhere in this path. The playable cases are
@@ -2709,7 +2886,10 @@ def _format_tier_display(tier: str) -> str:
 
 
 @app.post("/api/callbacks/content-factory")
-async def content_factory_callback(request: Request):
+async def content_factory_callback(
+    request: Request,
+    _settings: Settings = Depends(require_public_surface),
+):
     """
     Handle callbacks from mlai-backend Content Factory.
 
@@ -3772,11 +3952,325 @@ async def content_factory_callback(request: Request):
 from .slack_client import open_dm as from_slack_client_open_dm
 
 
+async def _record_admin_brain_feedback(
+    *,
+    settings: Settings,
+    user_id: str,
+    team_id: str,
+    channel_id: str,
+    thread_ts: str,
+    feedback: dict[str, str],
+    feedback_type: str,
+    correction_text: Optional[str] = None,
+) -> None:
+    """Record signed Slack feedback with a fresh actor assertion."""
+
+    query_id = str(feedback.get("query_id") or "").strip()
+    claim_id = str(feedback.get("claim_id") or "").strip() or None
+    requester_user_id = str(
+        feedback.get("requester_user_id") or ""
+    ).strip()
+    if not query_id or requester_user_id != user_id:
+        if channel_id:
+            post_message(
+                channel=channel_id,
+                thread_ts=thread_ts or None,
+                text=(
+                    "Only the person who requested this Admin Roo answer "
+                    "can submit its feedback."
+                ),
+            )
+        return
+    if feedback_type == "incorrect" and (
+        not claim_id or not correction_text
+    ):
+        if channel_id:
+            post_message(
+                channel=channel_id,
+                thread_ts=thread_ts or None,
+                text=(
+                    "I need the specific correction before I can send "
+                    "this answer for review."
+                ),
+            )
+        return
+
+    context = BackendActorContext(
+        slack_team_id=team_id,
+        acting_slack_user_id=user_id,
+        slack_channel_id=channel_id,
+        slack_thread_ts=thread_ts,
+        event_id=f"Ia{uuid4().hex}",
+    )
+    try:
+        from .clients.mlai_backend import MLAIBackendClient
+
+        with use_backend_actor_context(context):
+            client = MLAIBackendClient(
+                base_url=settings.MLAI_BACKEND_URL,
+                service_principal_key=settings.ORG_BRAIN_API_KEY,
+                surface=settings.ROO_SURFACE,
+            )
+            await client.submit_org_memory_feedback(
+                query_id=query_id,
+                feedback_type=feedback_type,
+                claim_id=claim_id,
+                correction_text=correction_text,
+                timeout=float(
+                    settings.ORG_BRAIN_BACKEND_TIMEOUT_SECONDS
+                ),
+            )
+    except Exception as exc:
+        print(
+            "ADMIN_BRAIN_FEEDBACK_FAILED "
+            f"error={exc.__class__.__name__} query_id={query_id}"
+        )
+        if channel_id:
+            post_message(
+                channel=channel_id,
+                thread_ts=thread_ts or None,
+                text=(
+                    "I couldn't record that Admin Roo feedback just now. "
+                    "The answer itself was not changed."
+                ),
+            )
+        return
+
+    acknowledgement = {
+        "relevant": "Thanks — I recorded this answer as helpful.",
+        "stale": "Thanks — I flagged this answer as potentially stale.",
+        "missing": (
+            "Thanks — I recorded that this answer is missing context."
+        ),
+        "incorrect": (
+            "Thanks — I sent your correction to the organisational-memory "
+            "review queue."
+        ),
+    }.get(feedback_type, "Thanks — I recorded your feedback.")
+    if channel_id:
+        post_message(
+            channel=channel_id,
+            thread_ts=thread_ts or None,
+            text=acknowledgement,
+        )
+
+
+def _open_admin_brain_correction_modal(
+    *,
+    payload: dict,
+    action: dict,
+    user_id: str,
+    team_id: str,
+    channel_id: str,
+    thread_ts: str,
+) -> None:
+    feedback = parse_feedback_value(action.get("value"))
+    if feedback.get("requester_user_id") != user_id:
+        if channel_id:
+            post_message(
+                channel=channel_id,
+                thread_ts=thread_ts or None,
+                text=(
+                    "Only the person who requested this Admin Roo answer "
+                    "can correct it."
+                ),
+            )
+        return
+    if not feedback.get("query_id") or not feedback.get("claim_id"):
+        if channel_id:
+            post_message(
+                channel=channel_id,
+                thread_ts=thread_ts or None,
+                text=(
+                    "This answer doesn't contain a reviewable claim. "
+                    "Use Missing context instead."
+                ),
+            )
+        return
+    trigger_id = str(payload.get("trigger_id") or "").strip()
+    if not trigger_id:
+        return
+    from .slack_client import get_slack_client
+
+    get_slack_client().views_open(
+        trigger_id=trigger_id,
+        view=build_incorrect_feedback_modal(
+            feedback,
+            team_id=team_id,
+            channel_id=channel_id,
+            thread_ts=thread_ts,
+        ),
+    )
+
+
+def _open_admin_action_rejection_modal(
+    *,
+    payload: dict,
+    action: dict,
+    team_id: str,
+    channel_id: str,
+    thread_ts: str,
+) -> None:
+    proposal = parse_admin_action_value(action.get("value"))
+    trigger_id = str(payload.get("trigger_id") or "").strip()
+    if not proposal or not trigger_id:
+        if channel_id:
+            post_message(
+                channel=channel_id,
+                thread_ts=thread_ts or None,
+                text=(
+                    "This controlled-action card could not be verified. "
+                    "Ask Admin Roo to open the proposal again."
+                ),
+            )
+        return
+    from .slack_client import get_slack_client
+
+    get_slack_client().views_open(
+        trigger_id=trigger_id,
+        view=build_admin_action_reject_modal(
+            proposal,
+            team_id=team_id,
+            channel_id=channel_id,
+            thread_ts=thread_ts,
+        ),
+    )
+
+
+async def _review_admin_action(
+    *,
+    settings: Settings,
+    decision: str,
+    proposal_id: str,
+    user_id: str,
+    team_id: str,
+    channel_id: str,
+    thread_ts: str,
+    rejection_reason: Optional[str] = None,
+) -> None:
+    """Re-authenticate a reviewer and defer every transition to the backend."""
+
+    if (
+        settings.ROO_SURFACE != "admin"
+        or not settings.ORG_BRAIN_ACTIONS_ENABLED
+        or decision not in {"approve", "reject"}
+    ):
+        return
+    context = BackendActorContext(
+        slack_team_id=team_id,
+        acting_slack_user_id=user_id,
+        slack_channel_id=channel_id,
+        slack_thread_ts=thread_ts,
+        event_id=f"Ia{uuid4().hex}",
+    )
+    result = None
+    failure_message = ""
+    try:
+        from .clients.mlai_backend import MLAIBackendClient
+
+        with use_backend_actor_context(context):
+            client = MLAIBackendClient(
+                base_url=settings.MLAI_BACKEND_URL,
+                service_principal_key=settings.ORG_BRAIN_API_KEY,
+                surface=settings.ROO_SURFACE,
+            )
+            timeout = float(settings.ORG_BRAIN_BACKEND_TIMEOUT_SECONDS)
+            current = await client.get_org_memory_action(
+                proposal_id,
+                timeout=timeout,
+            )
+            status = str(current.get("status") or "")
+            if decision == "reject":
+                if status == "rejected":
+                    result = current
+                else:
+                    result = await client.reject_org_memory_action(
+                        proposal_id,
+                        reason=str(rejection_reason or "").strip(),
+                        idempotency_key=(
+                            f"slack-reject-{proposal_id}-{user_id}"
+                        ),
+                        timeout=timeout,
+                    )
+            elif status in {"completed", "rejected", "failed", "reversed"}:
+                result = current
+            else:
+                approved = current
+                if status in {"awaiting_approval", "stale"}:
+                    approved = await client.approve_org_memory_action(
+                        proposal_id,
+                        idempotency_key=(
+                            f"slack-approve-{proposal_id}-{user_id}"
+                        ),
+                        timeout=timeout,
+                    )
+                if str(approved.get("status") or "") == "approved":
+                    result = await client.execute_org_memory_action(
+                        proposal_id,
+                        idempotency_key=f"slack-execute-{proposal_id}",
+                        timeout=timeout,
+                    )
+                else:
+                    result = approved
+    except httpx.HTTPStatusError as exc:
+        status_code = exc.response.status_code
+        try:
+            detail = str(
+                exc.response.json().get("detail") or ""
+            ).strip()
+        except (ValueError, AttributeError):
+            detail = ""
+        print(
+            "ADMIN_ACTION_REVIEW_DENIED "
+            f"status={status_code} decision={decision} "
+            f"proposal_id={proposal_id}"
+        )
+        if status_code in {401, 403, 404}:
+            failure_message = (
+                "You are not authorised to review that controlled action, "
+                "or it is no longer visible to you."
+            )
+        elif detail:
+            failure_message = f"Nothing was changed. {detail}"
+        else:
+            failure_message = (
+                "The action was not changed because the backend rejected "
+                "the review."
+            )
+    except Exception as exc:
+        print(
+            "ADMIN_ACTION_REVIEW_FAILED "
+            f"error={exc.__class__.__name__} decision={decision} "
+            f"proposal_id={proposal_id}"
+        )
+        failure_message = (
+            "The controlled-action gateway is unavailable. "
+            "I did not retry or claim that anything changed."
+        )
+
+    if not channel_id:
+        return
+    if result is not None:
+        rendered = build_admin_action_response(result)
+        post_message(
+            channel=channel_id,
+            thread_ts=thread_ts or None,
+            text=rendered["message"],
+            blocks=rendered["blocks"],
+        )
+    else:
+        post_message(
+            channel=channel_id,
+            thread_ts=thread_ts or None,
+            text=failure_message,
+        )
+
+
 
 @app.post("/slack/actions")
 async def slack_actions(
     request: Request,
-    _: None = Depends(verify_slack_signature),
+    _verified: bool = Depends(verify_slack_signature),
 ):
     """Handle interactive actions (e.g. button clicks)."""
     form = await request.form()
@@ -3788,14 +4282,204 @@ async def slack_actions(
         payload = json.loads(payload_json)
     except json.JSONDecodeError:
         return JSONResponse(status_code=400, content={"error": "Invalid JSON"})
-        
+
+    if _is_duplicate_slack_request(request):
+        print("↩️ Ignoring duplicate signed Slack action request")
+        return JSONResponse(status_code=200, content={})
+
+    settings = _request_settings(request)
+    payload_type = str(payload.get("type") or "")
+    user_id = payload.get("user", {}).get("id")
+    correction_submission = (
+        parse_incorrect_feedback_submission(payload)
+        if payload_type == "view_submission"
+        else {}
+    )
+    action_rejection_submission = (
+        parse_admin_action_reject_submission(payload)
+        if payload_type == "view_submission"
+        else {}
+    )
+    submission = correction_submission or action_rejection_submission
+    channel_id = (
+        payload.get("channel", {}).get("id")
+        or submission.get("channel_id")
+    )
+    channel_type = (
+        "im" if str(channel_id or "").startswith("D") else None
+    )
+    if not _is_slack_context_allowed(
+        settings,
+        channel_id=channel_id,
+        user_id=user_id,
+        channel_type=channel_type,
+    ):
+        print("🔒 Ignoring Slack action outside the deployment context allowlist")
+        return JSONResponse(status_code=200, content={})
+
+    if settings.ROO_SURFACE == "admin":
+        if payload_type == "view_submission":
+            if not submission:
+                print("🔒 Admin Roo ignored an unsupported view submission")
+                return JSONResponse(status_code=200, content={})
+            team_id = str(payload.get("team", {}).get("id") or "")
+            if correction_submission:
+                if (
+                    submission.get("requester_user_id") != user_id
+                    or submission.get("team_id") != team_id
+                    or not submission.get("query_id")
+                    or not submission.get("claim_id")
+                    or not submission.get("correction_text")
+                ):
+                    return JSONResponse(
+                        status_code=200,
+                        content={
+                            "response_action": "errors",
+                            "errors": {
+                                "admin_brain_correction": (
+                                    "This correction could not be verified. "
+                                    "Reopen it from the original answer."
+                                )
+                            },
+                        },
+                    )
+                asyncio.create_task(
+                    _record_admin_brain_feedback(
+                        settings=settings,
+                        user_id=str(user_id or ""),
+                        team_id=team_id,
+                        channel_id=str(channel_id or ""),
+                        thread_ts=submission.get("thread_ts") or "",
+                        feedback=submission,
+                        feedback_type="incorrect",
+                        correction_text=submission.get("correction_text"),
+                    )
+                )
+                return JSONResponse(
+                    status_code=200,
+                    content={"response_action": "clear"},
+                )
+
+            if (
+                not settings.ORG_BRAIN_ACTIONS_ENABLED
+                or submission.get("team_id") != team_id
+                or not submission.get("proposal_id")
+                or not submission.get("reason")
+            ):
+                return JSONResponse(
+                    status_code=200,
+                    content={
+                        "response_action": "errors",
+                        "errors": {
+                            "admin_action_rejection": (
+                                "This rejection could not be verified. "
+                                "Reopen it from the original action card."
+                            )
+                        },
+                    },
+                )
+            asyncio.create_task(
+                _review_admin_action(
+                    settings=settings,
+                    decision="reject",
+                    proposal_id=submission["proposal_id"],
+                    user_id=str(user_id or ""),
+                    team_id=team_id,
+                    channel_id=str(channel_id or ""),
+                    thread_ts=submission.get("thread_ts") or "",
+                    rejection_reason=submission["reason"],
+                )
+            )
+            return JSONResponse(
+                status_code=200,
+                content={"response_action": "clear"},
+            )
+
+        actions = payload.get("actions", [])
+        if not actions:
+            return JSONResponse(status_code=200, content={})
+        action = actions[0]
+        action_id = str(action.get("action_id") or "")
+        message = payload.get("message", {})
+        thread_ts = str(
+            message.get("thread_ts") or message.get("ts") or ""
+        )
+        team_id = str(payload.get("team", {}).get("id") or "")
+        if action_id in {ADMIN_ACTION_APPROVE, ADMIN_ACTION_REJECT}:
+            if not settings.ORG_BRAIN_ACTIONS_ENABLED:
+                print(
+                    "🔒 Admin Roo ignored a controlled action while "
+                    "actions are disabled"
+                )
+                return JSONResponse(status_code=200, content={})
+            proposal = parse_admin_action_value(action.get("value"))
+            if not proposal:
+                if channel_id:
+                    post_message(
+                        channel=channel_id,
+                        thread_ts=thread_ts or None,
+                        text=(
+                            "This controlled-action card could not be "
+                            "verified. Ask Admin Roo to open the proposal "
+                            "again."
+                        ),
+                    )
+                return JSONResponse(status_code=200, content={})
+            if action_id == ADMIN_ACTION_REJECT:
+                _open_admin_action_rejection_modal(
+                    payload=payload,
+                    action=action,
+                    team_id=team_id,
+                    channel_id=str(channel_id or ""),
+                    thread_ts=thread_ts,
+                )
+                return JSONResponse(status_code=200, content={})
+            asyncio.create_task(
+                _review_admin_action(
+                    settings=settings,
+                    decision="approve",
+                    proposal_id=proposal["proposal_id"],
+                    user_id=str(user_id or ""),
+                    team_id=team_id,
+                    channel_id=str(channel_id or ""),
+                    thread_ts=thread_ts,
+                )
+            )
+            return JSONResponse(status_code=200, content={})
+        if action_id == ADMIN_BRAIN_INCORRECT_ACTION:
+            _open_admin_brain_correction_modal(
+                payload=payload,
+                action=action,
+                user_id=str(user_id or ""),
+                team_id=team_id,
+                channel_id=str(channel_id or ""),
+                thread_ts=thread_ts,
+            )
+            return JSONResponse(status_code=200, content={})
+        feedback_type = ADMIN_BRAIN_FEEDBACK_ACTIONS.get(action_id)
+        if feedback_type:
+            asyncio.create_task(
+                _record_admin_brain_feedback(
+                    settings=settings,
+                    user_id=str(user_id or ""),
+                    team_id=team_id,
+                    channel_id=str(channel_id or ""),
+                    thread_ts=thread_ts,
+                    feedback=parse_feedback_value(action.get("value")),
+                    feedback_type=feedback_type,
+                )
+            )
+            return JSONResponse(status_code=200, content={})
+        print(
+            f"🔒 Admin Roo ignored unsupported interactive action: {action_id}"
+        )
+        return JSONResponse(status_code=200, content={})
+
     actions = payload.get("actions", [])
     if not actions:
         return JSONResponse(status_code=200, content={})
         
     action_id = actions[0].get("action_id")
-    user_id = payload.get("user", {}).get("id")
-    channel_id = payload.get("channel", {}).get("id")
     # Interactive messages structure is slightly different for TS
     message = payload.get("message", {})
     thread_ts = message.get("thread_ts") or message.get("ts")

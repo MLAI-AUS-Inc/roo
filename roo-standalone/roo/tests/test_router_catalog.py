@@ -21,22 +21,50 @@ def test_catalog_lints_clean():
 
 
 def test_catalog_stays_within_token_budget():
-    """Each real channel context sends only its bounded tool catalog."""
+    """Each real routing context sends only its bounded tool catalog."""
     import json
 
     skills = _skills()
-    catalogs = {
-        "general": (
-            [skill for skill in skills if skill.name != "victor-ai-applications"],
+    surface_catalogs = {
+        "public": (
+            [
+                skill
+                for skill in skills
+                if skill.name
+                not in {
+                    "admin-actions",
+                    "admin-brain",
+                    "victor-ai-applications",
+                }
+            ],
             "general",
         ),
-        "victor-channel": (skills, "exp-victor-ai"),
+        "victor-channel": (
+            [
+                skill
+                for skill in skills
+                if skill.name not in {"admin-actions", "admin-brain"}
+            ],
+            "exp-victor-ai",
+        ),
+        "admin": (
+            [
+                skill
+                for skill in skills
+                if skill.name in {"admin-actions", "admin-brain"}
+            ],
+            None,
+        ),
     }
-    for context, (context_skills, channel_name) in catalogs.items():
-        tools, _ = router.build_tools(context_skills, channel_name=channel_name)
+    for surface, (surface_skills, channel_name) in surface_catalogs.items():
+        tools, _ = router.build_tools(
+            surface_skills,
+            channel_name=channel_name,
+        )
         approx_tokens = len(json.dumps(tools)) / 4
         assert approx_tokens < 6000, (
-            f"{context} tool catalog ≈{approx_tokens:.0f} tokens (budget 6000) — "
+            f"{surface} tool catalog ≈{approx_tokens:.0f} tokens "
+            "(budget 6000) — "
             "trim SKILL.md routing descriptions/examples"
         )
 

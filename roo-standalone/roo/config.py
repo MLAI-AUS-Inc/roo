@@ -5,13 +5,34 @@ Pydantic Settings for environment-based configuration.
 """
 import hmac
 import re
-from typing import Optional
+from typing import ClassVar, Literal, Optional
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
+
+    PUBLIC_DEFAULT_SKILLS: ClassVar[frozenset[str]] = frozenset(
+        {
+            "connect-users",
+            "content-factory",
+            "github-integration",
+            "healthhack",
+            "linear-meeting-actions",
+            "luma-events",
+            "medhack",
+            "mlai-data-query",
+            "mlai-points",
+            "reconciliation-report",
+            "start-here-introductions",
+            "tone-of-voice",
+            "watt-the-hack",
+        }
+    )
+    PRIVATE_SKILLS: ClassVar[frozenset[str]] = frozenset(
+        {"admin-actions", "admin-brain", "org-memory"}
+    )
     
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -22,6 +43,9 @@ class Settings(BaseSettings):
     # Slack
     SLACK_BOT_TOKEN: str
     SLACK_SIGNING_SECRET: str
+    SLACK_REQUEST_MAX_AGE_SECONDS: int = 300
+    SLACK_RECEIPT_TTL_SECONDS: int = 10 * 60
+    SLACK_RECEIPTS_DB_PATH: str = "data/slack_request_receipts.db"
     SLACK_CONTEXTUAL_STATE_DB_PATH: str = "data/slack_contextual_responses.db"
 
     # Context-aware channel replies. Disabled by default and restricted to an
@@ -53,7 +77,20 @@ class Settings(BaseSettings):
     MLAI_API_KEY: Optional[str] = None
     ROO_API_KEY: Optional[str] = None
     INTERNAL_API_KEY: Optional[str] = None
+    INTERNAL_MENTION_API_KEY: Optional[str] = None
     LINEAR_DEFAULT_TEAM: Optional[str] = None
+
+    # Public/Admin trust boundary. Admin starts with no skills and no private
+    # memory access until an explicit allowlist and scoped credential exist.
+    ROO_SURFACE: Literal["public", "admin"] = "public"
+    ROO_ENABLED_SKILLS: str = ""
+    ROO_ALLOWED_CHANNEL_IDS: str = ""
+    ROO_ALLOWED_DM_USER_IDS: str = ""
+    ORG_BRAIN_ENABLED: bool = False
+    ORG_BRAIN_ACTIONS_ENABLED: bool = False
+    ORG_BRAIN_API_KEY: Optional[str] = None
+    ORG_BRAIN_BACKEND_TIMEOUT_SECONDS: float = 20.0
+    ORG_BRAIN_MAX_CONTEXT_TOKENS: int = 6000
 
     # Read-only Victor AI application reports. Access is based on the resolved
     # Slack channel name, so channel or user ID allowlists are not required.
@@ -150,6 +187,29 @@ class Settings(BaseSettings):
         )
 
     @property
+    def has_explicit_skill_allowlist(self) -> bool:
+        return bool(self._split_configured_values(self.ROO_ENABLED_SKILLS))
+
+    @property
+    def enabled_skill_names(self) -> frozenset[str]:
+        configured = self._split_configured_values(self.ROO_ENABLED_SKILLS)
+        if configured:
+            return configured
+        if self.ROO_SURFACE == "public":
+            if self.VICTOR_AI_SKILL_ENABLED:
+                return self.PUBLIC_DEFAULT_SKILLS | {"victor-ai-applications"}
+            return self.PUBLIC_DEFAULT_SKILLS
+        return frozenset()
+
+    @property
+    def allowed_channel_ids(self) -> frozenset[str]:
+        return self._split_configured_values(self.ROO_ALLOWED_CHANNEL_IDS)
+
+    @property
+    def allowed_dm_user_ids(self) -> frozenset[str]:
+        return self._split_configured_values(self.ROO_ALLOWED_DM_USER_IDS)
+
+    @property
     def contextual_channel_ids(self) -> frozenset[str]:
         return self._split_configured_values(self.ROO_CONTEXTUAL_CHANNEL_IDS)
 
@@ -178,8 +238,29 @@ class Settings(BaseSettings):
             and resolved_name == self.victor_ai_slack_channel_name
         )
 
+    def is_slack_context_allowed(
+        self,
+        *,
+        channel_id: Optional[str],
+        user_id: Optional[str],
+        channel_type: Optional[str] = None,
+    ) -> bool:
+        if self.ROO_SURFACE == "public":
+            return True
+        if channel_type == "im":
+            return bool(user_id and user_id in self.allowed_dm_user_ids)
+        return bool(channel_id and channel_id in self.allowed_channel_ids)
+
     @model_validator(mode="after")
     def validate_contextual_responses(self):
+        if not 1 <= self.SLACK_REQUEST_MAX_AGE_SECONDS <= 300:
+            raise ValueError("SLACK_REQUEST_MAX_AGE_SECONDS must be between 1 and 300")
+        if self.SLACK_RECEIPT_TTL_SECONDS < self.SLACK_REQUEST_MAX_AGE_SECONDS:
+            raise ValueError(
+                "SLACK_RECEIPT_TTL_SECONDS must be at least SLACK_REQUEST_MAX_AGE_SECONDS"
+            )
+        if not str(self.SLACK_RECEIPTS_DB_PATH or "").strip():
+            raise ValueError("SLACK_RECEIPTS_DB_PATH is required")
         if not str(self.SLACK_CONTEXTUAL_STATE_DB_PATH or "").strip():
             raise ValueError("SLACK_CONTEXTUAL_STATE_DB_PATH is required")
         if not 0.5 <= self.ROO_CONTEXTUAL_MIN_CONFIDENCE <= 1.0:
@@ -207,6 +288,8 @@ class Settings(BaseSettings):
             raise ValueError(
                 "Contextual Roo responses require ROO_CONTEXTUAL_CHANNEL_IDS"
             )
+        if self.ROO_SURFACE == "admin" and self.ROO_CONTEXTUAL_RESPONSES_ENABLED:
+            raise ValueError("Admin Roo cannot enable contextual channel responses")
         if (
             self.ROO_POINTS_TOPUP_BUTTONS_ENABLED
             and not self.roo_points_stripe_checkout_hosts
@@ -215,6 +298,10 @@ class Settings(BaseSettings):
                 "ROO_POINTS_STRIPE_CHECKOUT_HOSTS is required when top-up buttons are enabled"
             )
         if self.VICTOR_AI_SKILL_ENABLED:
+            if self.ROO_SURFACE != "public":
+                raise ValueError(
+                    "Victor AI application access is available only on Public Roo"
+                )
             if not str(self.MLAI_BACKEND_URL or "").strip():
                 raise ValueError(
                     "MLAI_BACKEND_URL is required when VICTOR_AI_SKILL_ENABLED is true"
@@ -232,6 +319,102 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "VICTOR_AI_BACKEND_TIMEOUT_SECONDS must be between 1 and 60"
                 )
+
+        enabled_skills = self.enabled_skill_names
+        invalid_skill_names = {
+            name
+            for name in enabled_skills
+            if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", name)
+        }
+        if invalid_skill_names:
+            raise ValueError(
+                "ROO_ENABLED_SKILLS contains invalid names: "
+                + ", ".join(sorted(invalid_skill_names))
+            )
+        if (
+            "victor-ai-applications" in enabled_skills
+            and not self.VICTOR_AI_SKILL_ENABLED
+        ):
+            raise ValueError(
+                "victor-ai-applications cannot be enabled unless "
+                "VICTOR_AI_SKILL_ENABLED is true"
+            )
+
+        if self.ROO_SURFACE == "public":
+            if (
+                self.ORG_BRAIN_ENABLED
+                or self.ORG_BRAIN_ACTIONS_ENABLED
+                or self.ORG_BRAIN_API_KEY
+            ):
+                raise ValueError(
+                    "Public Roo cannot receive organisational-brain access"
+                )
+            private_skills = enabled_skills & self.PRIVATE_SKILLS
+            if private_skills:
+                raise ValueError(
+                    "Public Roo cannot enable private skills: "
+                    + ", ".join(sorted(private_skills))
+                )
+            return self
+
+        if not 1 <= self.ORG_BRAIN_BACKEND_TIMEOUT_SECONDS <= 60:
+            raise ValueError(
+                "ORG_BRAIN_BACKEND_TIMEOUT_SECONDS must be between 1 and 60"
+            )
+        if not 1000 <= self.ORG_BRAIN_MAX_CONTEXT_TOKENS <= 12000:
+            raise ValueError(
+                "ORG_BRAIN_MAX_CONTEXT_TOKENS must be between 1000 and 12000"
+            )
+        if not self.allowed_channel_ids and not self.allowed_dm_user_ids:
+            raise ValueError(
+                "Admin Roo requires ROO_ALLOWED_CHANNEL_IDS or ROO_ALLOWED_DM_USER_IDS"
+            )
+        if any(
+            not re.fullmatch(r"G[A-Z0-9]+", value)
+            for value in self.allowed_channel_ids
+        ):
+            raise ValueError(
+                "Admin Roo allowlists contain invalid public or direct-message "
+                "channel IDs; channels must use private G-prefixed Slack IDs"
+            )
+        if any(
+            not re.fullmatch(r"[UW][A-Z0-9]+", value)
+            for value in self.allowed_dm_user_ids
+        ):
+            raise ValueError("Admin Roo contains an invalid Slack user ID")
+        if self.ORG_BRAIN_ENABLED:
+            if not self.ORG_BRAIN_API_KEY:
+                raise ValueError(
+                    "Admin Roo brain access requires ORG_BRAIN_API_KEY"
+                )
+            if not re.fullmatch(
+                r"mlai_sp_[0-9a-f]{32}\.[A-Za-z0-9_-]{32,128}",
+                self.ORG_BRAIN_API_KEY,
+            ):
+                raise ValueError(
+                    "ORG_BRAIN_API_KEY must be a scoped service-principal credential"
+                )
+            if "admin-brain" not in enabled_skills:
+                raise ValueError(
+                    "ORG_BRAIN_ENABLED requires admin-brain in ROO_ENABLED_SKILLS"
+                )
+        elif self.ORG_BRAIN_API_KEY:
+            raise ValueError(
+                "ORG_BRAIN_API_KEY cannot be present while ORG_BRAIN_ENABLED is false"
+            )
+        if self.ORG_BRAIN_ACTIONS_ENABLED:
+            if not self.ORG_BRAIN_ENABLED:
+                raise ValueError(
+                    "Admin Roo controlled actions require ORG_BRAIN_ENABLED"
+                )
+            if "admin-actions" not in enabled_skills:
+                raise ValueError(
+                    "ORG_BRAIN_ACTIONS_ENABLED requires admin-actions in ROO_ENABLED_SKILLS"
+                )
+        elif "admin-actions" in enabled_skills:
+            raise ValueError(
+                "admin-actions cannot be enabled while ORG_BRAIN_ACTIONS_ENABLED is false"
+            )
         return self
 
     @property

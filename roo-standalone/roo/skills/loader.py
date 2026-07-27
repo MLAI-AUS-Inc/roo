@@ -6,7 +6,7 @@ Follows Anthropic's Agent Skills pattern with progressive disclosure.
 """
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Set
 import importlib.util
 import sys
 
@@ -73,7 +73,10 @@ class Skill:
         return None
 
 
-def load_skills(skills_dir: Path) -> List[Skill]:
+def load_skills(
+    skills_dir: Path,
+    allowed_names: Optional[Set[str]] = None,
+) -> List[Skill]:
     """
     Load all skill definitions from skill directories.
     
@@ -99,7 +102,10 @@ def load_skills(skills_dir: Path) -> List[Skill]:
             skill_file = item / "SKILL.md"
             if skill_file.exists():
                 try:
-                    skill = load_skill_from_directory(item)
+                    skill = load_skill_from_directory(
+                        item,
+                        allowed_names=allowed_names,
+                    )
                     if skill:
                         skills.append(skill)
                         print(f"   ✅ Loaded skill: {skill.name} (from {item.name}/)")
@@ -114,7 +120,7 @@ def load_skills(skills_dir: Path) -> List[Skill]:
             continue
         
         try:
-            skill = load_skill_file(md_file)
+            skill = load_skill_file(md_file, allowed_names=allowed_names)
             if skill:
                 skills.append(skill)
                 print(f"   ✅ Loaded skill: {skill.name} (legacy: {md_file.name})")
@@ -124,7 +130,10 @@ def load_skills(skills_dir: Path) -> List[Skill]:
     return skills
 
 
-def load_skill_from_directory(skill_dir: Path) -> Optional[Skill]:
+def load_skill_from_directory(
+    skill_dir: Path,
+    allowed_names: Optional[Set[str]] = None,
+) -> Optional[Skill]:
     """
     Load a skill from a directory containing SKILL.md.
     
@@ -136,6 +145,9 @@ def load_skill_from_directory(skill_dir: Path) -> Optional[Skill]:
     name = post.metadata.get("name")
     if not name:
         print(f"   ⚠️  Skipping {skill_dir.name}: missing 'name' in frontmatter")
+        return None
+    if allowed_names is not None and name not in allowed_names:
+        print(f"   🔒 Skipped skill outside deployment allowlist: {name}")
         return None
     
     # Extract parameters from markdown if not in frontmatter
@@ -179,13 +191,19 @@ def load_skill_from_directory(skill_dir: Path) -> Optional[Skill]:
     return skill
 
 
-def load_skill_file(file_path: Path) -> Optional[Skill]:
+def load_skill_file(
+    file_path: Path,
+    allowed_names: Optional[Set[str]] = None,
+) -> Optional[Skill]:
     """Load a single skill from a legacy flat markdown file."""
     post = frontmatter.load(file_path)
     
     name = post.metadata.get("name")
     if not name:
         print(f"   ⚠️  Skipping {file_path.name}: missing 'name' in frontmatter")
+        return None
+    if allowed_names is not None and name not in allowed_names:
+        print(f"   🔒 Skipped skill outside deployment allowlist: {name}")
         return None
     
     # Try to extract parameters from markdown if not in frontmatter

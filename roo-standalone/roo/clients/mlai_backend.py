@@ -12,10 +12,17 @@ import secrets
 import time
 from typing import Optional, Dict, Any, List, Union
 from urllib.parse import urlparse
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import httpx
 
+from ..backend_identity import (
+    BackendActorContext,
+    BackendIdentityError,
+    build_org_memory_identity_headers,
+    build_victor_ai_identity_headers,
+    get_backend_actor_context,
+)
 from ..config import get_settings
 
 CONTENT_FACTORY_REQUEST_SOURCE = "roo_slackbot"
@@ -39,13 +46,17 @@ class MLAIBackendClient:
         base_url: Optional[str] = None,
         api_key: Optional[str] = None,
         internal_api_key: Optional[str] = None,
+        service_principal_key: Optional[str] = None,
         victor_ai_signing_secret: Optional[str] = None,
         victor_ai_actor_context: Optional[dict] = None,
+        surface: Optional[str] = None,
+        actor_context: Optional[BackendActorContext] = None,
     ):
         settings = None
         if base_url is None or (
             api_key is None
             and internal_api_key is None
+            and service_principal_key is None
             and victor_ai_signing_secret is None
         ):
             settings = get_settings()
@@ -62,10 +73,17 @@ class MLAIBackendClient:
             or (settings.ROO_API_KEY if settings else None)
             or (settings.MLAI_API_KEY if settings else None)
         )
+        self.service_principal_key = service_principal_key or (
+            getattr(settings, "ORG_BRAIN_API_KEY", None) if settings else None
+        )
         self.victor_ai_signing_secret = victor_ai_signing_secret or (
             getattr(settings, "VICTOR_AI_ROO_SIGNING_SECRET", None) if settings else None
         )
         self.victor_ai_actor_context = dict(victor_ai_actor_context or {})
+        self.surface = surface or (
+            getattr(settings, "ROO_SURFACE", "public") if settings else "public"
+        )
+        self.actor_context = actor_context or get_backend_actor_context()
         self.base_url = self.base_url.rstrip('/') if self.base_url else ""
         self._points_base = "/api/v1/points"
         self._data_base = "/api/v1/data"
@@ -249,6 +267,7 @@ class MLAIBackendClient:
         retry_backoff_seconds: float = 0.25,
         circuit_breaker: bool = False,
         use_admin_headers: bool = False,
+        use_org_memory_identity: bool = False,
         use_victor_ai_identity: bool = False,
     ) -> httpx.Response:
         if not self.base_url:
@@ -259,7 +278,13 @@ class MLAIBackendClient:
             await self._guard_circuit_breaker(normalized_endpoint)
 
         request_id = request_id or self._new_request_id()
-        if use_victor_ai_identity:
+        if use_org_memory_identity and use_victor_ai_identity:
+            raise BackendIdentityError(
+                "A backend request cannot use two actor assertion types"
+            )
+        if use_org_memory_identity:
+            resolved_headers = self.org_memory_headers(request_id)
+        elif use_victor_ai_identity:
             resolved_headers = self.victor_ai_headers(request_id)
         else:
             resolved_headers = dict(self.admin_headers if use_admin_headers else self.headers)
@@ -367,6 +392,24 @@ class MLAIBackendClient:
             headers["X-API-Key"] = self.api_key
         return headers
 
+    def org_memory_headers(self, request_id: str) -> dict:
+        """Build a one-request Admin Roo identity assertion for private memory."""
+        if self.surface != "admin":
+            raise BackendIdentityError(
+                "Only Admin Roo can call organisational-memory endpoints"
+            )
+        if not self.service_principal_key:
+            raise BackendIdentityError("ORG_BRAIN_API_KEY is not configured")
+        if not self.actor_context:
+            raise BackendIdentityError(
+                "No verified Slack actor context is active"
+            )
+        return build_org_memory_identity_headers(
+            self.service_principal_key,
+            context=self.actor_context,
+            request_id=request_id,
+        )
+
     def victor_ai_headers(self, request_id: str) -> dict:
         """Build a fresh signed Slack actor assertion for one Victor read."""
 
@@ -374,52 +417,35 @@ class MLAIBackendClient:
         if len(secret) < 32:
             raise ValueError("VICTOR_AI_ROO_SIGNING_SECRET is not configured")
 
-        context = self.victor_ai_actor_context
-        values = {
-            "surface": "public_roo",
-            "slack_team_id": str(context.get("slack_team_id") or "").strip(),
-            "acting_slack_user_id": str(
-                context.get("acting_slack_user_id") or ""
-            ).strip(),
-            "slack_channel_id": str(context.get("slack_channel_id") or "").strip(),
-            "slack_thread_ts": str(context.get("slack_thread_ts") or "").strip(),
-            "event_id": str(context.get("event_id") or "").strip(),
-            "request_id": request_id,
-            "timestamp": int(time.time()),
-            "nonce": secrets.token_urlsafe(24),
-        }
-        required = (
-            "slack_team_id",
-            "acting_slack_user_id",
-            "slack_channel_id",
-            "event_id",
-        )
-        if any(not values[name] for name in required):
+        context = self.actor_context
+        if context is None and self.victor_ai_actor_context:
+            context = BackendActorContext(
+                slack_team_id=str(
+                    self.victor_ai_actor_context.get("slack_team_id") or ""
+                ).strip(),
+                acting_slack_user_id=str(
+                    self.victor_ai_actor_context.get(
+                        "acting_slack_user_id"
+                    )
+                    or ""
+                ).strip(),
+                slack_channel_id=str(
+                    self.victor_ai_actor_context.get("slack_channel_id") or ""
+                ).strip(),
+                slack_thread_ts=str(
+                    self.victor_ai_actor_context.get("slack_thread_ts") or ""
+                ).strip(),
+                event_id=str(
+                    self.victor_ai_actor_context.get("event_id") or ""
+                ).strip(),
+            )
+        if context is None:
             raise ValueError("Verified Slack context is unavailable for this Victor request")
-
-        canonical = json.dumps(
-            {**values, "v": 1},
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=True,
-        ).encode("ascii")
-        signature = "v1=" + hmac.new(
-            secret.encode("utf-8"),
-            canonical,
-            hashlib.sha256,
-        ).hexdigest()
-        return {
-            "Content-Type": "application/json",
-            "X-Victor-Roo-Signature": signature,
-            "X-Victor-Roo-Timestamp": str(values["timestamp"]),
-            "X-Victor-Roo-Nonce": values["nonce"],
-            "X-Roo-Surface": values["surface"],
-            "X-Slack-Team-ID": values["slack_team_id"],
-            "X-Acting-Slack-User-ID": values["acting_slack_user_id"],
-            "X-Slack-Channel-ID": values["slack_channel_id"],
-            "X-Slack-Thread-TS": values["slack_thread_ts"],
-            "X-Slack-Event-ID": values["event_id"],
-        }
+        return build_victor_ai_identity_headers(
+            secret,
+            context=context,
+            request_id=request_id,
+        )
 
     def _victor_ai_endpoint(self, suffix: str) -> str:
         """Support backend base URLs with or without an /api/v1 suffix."""
@@ -433,6 +459,14 @@ class MLAIBackendClient:
             return root
         trailing_slash = "/" if raw_suffix.endswith("/") else ""
         return f"{root}{suffix}{trailing_slash}"
+
+    def _org_memory_endpoint(self, suffix: str) -> str:
+        """Support backend base URLs with or without an /api/v1 suffix."""
+
+        suffix = str(suffix or "").strip("/")
+        base_path = urlparse(self.base_url).path.rstrip("/")
+        prefix = "" if base_path.endswith("/api/v1") else "/api/v1"
+        return f"{prefix}/org-memory/{suffix}"
 
     @staticmethod
     def _victor_ai_params(filters: Optional[dict] = None, **pagination: Any) -> dict:
@@ -531,6 +565,299 @@ class MLAIBackendClient:
         filename = match.group(1).strip() if match else "victor-ai-applications.csv"
         return response.text, filename
 
+    async def get_org_memory_actor_context(self) -> dict:
+        """Validate the scoped service identity without retrieving memory data."""
+        response = await self._request(
+            "GET",
+            self._org_memory_endpoint("auth/context"),
+            timeout=10.0,
+            circuit_breaker=True,
+            use_org_memory_identity=True,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def get_org_memory_pilot_access_probe(self) -> dict:
+        """Prove the live pilot boundary without retrieving memory data."""
+        response = await self._request(
+            "GET",
+            self._org_memory_endpoint("pilot/access-check"),
+            timeout=10.0,
+            circuit_breaker=True,
+            use_org_memory_identity=True,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def answer_org_memory(
+        self,
+        query: str,
+        *,
+        channel_id: Optional[str] = None,
+        thread_ts: Optional[str] = None,
+        answer_mode: str = "auto",
+        as_of: Optional[str] = None,
+        time_start: Optional[str] = None,
+        time_end: Optional[str] = None,
+        max_context_tokens: int = 6000,
+        timeout: float = 20.0,
+    ) -> dict:
+        payload: dict[str, Any] = {
+            "query": str(query or "").strip(),
+            "answer_mode": str(answer_mode or "auto").strip().lower(),
+            "max_context_tokens": int(max_context_tokens),
+        }
+        if channel_id:
+            payload["channel_id"] = str(channel_id)
+        if thread_ts:
+            payload["thread_ts"] = str(thread_ts)
+        if as_of:
+            payload["as_of"] = str(as_of)
+        if time_start or time_end:
+            payload["time_range"] = {
+                "start": str(time_start) if time_start else None,
+                "end": str(time_end) if time_end else None,
+            }
+        response = await self._request(
+            "POST",
+            self._org_memory_endpoint("answer"),
+            json=payload,
+            timeout=float(timeout),
+            circuit_breaker=True,
+            use_org_memory_identity=True,
+        )
+        self._raise_for_status_or_backend_unavailable(response)
+        return response.json()
+
+    async def get_org_memory_query_trace(
+        self,
+        query_id: str,
+        *,
+        timeout: float = 20.0,
+    ) -> dict:
+        response = await self._request(
+            "GET",
+            self._org_memory_endpoint(
+                f"queries/{str(query_id).strip()}/trace"
+            ),
+            timeout=float(timeout),
+            circuit_breaker=True,
+            use_org_memory_identity=True,
+        )
+        self._raise_for_status_or_backend_unavailable(response)
+        return response.json()
+
+    async def submit_org_memory_feedback(
+        self,
+        *,
+        query_id: str,
+        feedback_type: str,
+        claim_id: Optional[str] = None,
+        correction_text: Optional[str] = None,
+        timeout: float = 20.0,
+    ) -> dict:
+        payload: dict[str, Any] = {
+            "query_id": str(query_id).strip(),
+            "feedback_type": str(feedback_type).strip().lower(),
+        }
+        if claim_id:
+            payload["claim_id"] = str(claim_id).strip()
+        if correction_text:
+            payload["correction_text"] = str(correction_text).strip()
+        response = await self._request(
+            "POST",
+            self._org_memory_endpoint("feedback"),
+            json=payload,
+            timeout=float(timeout),
+            circuit_breaker=True,
+            use_org_memory_identity=True,
+        )
+        self._raise_for_status_or_backend_unavailable(response)
+        return response.json()
+
+    @staticmethod
+    def _org_memory_action_id(value: Any) -> str:
+        try:
+            return str(UUID(str(value or "").strip()))
+        except (TypeError, ValueError, AttributeError) as exc:
+            raise ValueError(
+                "A valid controlled-action proposal ID is required"
+            ) from exc
+
+    @staticmethod
+    def _org_memory_idempotency_key(value: Any) -> str:
+        key = str(value or "").strip()
+        if not re.fullmatch(r"[A-Za-z0-9._:-]{8,255}", key):
+            raise ValueError(
+                "A controlled-action idempotency key must contain "
+                "8-255 safe characters"
+            )
+        return key
+
+    async def list_org_memory_actions(
+        self,
+        *,
+        status: Optional[str] = None,
+        limit: int = 20,
+        timeout: float = 20.0,
+    ) -> dict:
+        params: dict[str, Any] = {"limit": max(1, min(int(limit), 200))}
+        if status:
+            params["status"] = str(status).strip()
+        response = await self._request(
+            "GET",
+            self._org_memory_endpoint("actions"),
+            params=params,
+            timeout=float(timeout),
+            circuit_breaker=True,
+            use_org_memory_identity=True,
+        )
+        self._raise_for_status_or_backend_unavailable(response)
+        return response.json()
+
+    async def get_org_memory_action(
+        self,
+        proposal_id: str,
+        *,
+        timeout: float = 20.0,
+    ) -> dict:
+        action_id = self._org_memory_action_id(proposal_id)
+        response = await self._request(
+            "GET",
+            self._org_memory_endpoint(f"actions/{action_id}"),
+            timeout=float(timeout),
+            circuit_breaker=True,
+            use_org_memory_identity=True,
+        )
+        self._raise_for_status_or_backend_unavailable(response)
+        return response.json()
+
+    async def create_org_memory_action(
+        self,
+        *,
+        action_type: str,
+        input_payload: dict,
+        idempotency_key: str,
+        configuration_id: Optional[str] = None,
+        evidence_claim_ids: Optional[list[str]] = None,
+        evidence_source_ids: Optional[list[str]] = None,
+        timeout: float = 20.0,
+    ) -> dict:
+        payload: dict[str, Any] = {
+            "action_type": str(action_type or "").strip(),
+            "input_payload": dict(input_payload or {}),
+            "evidence_claim_ids": list(evidence_claim_ids or []),
+            "evidence_source_ids": list(evidence_source_ids or []),
+        }
+        if configuration_id:
+            payload["configuration_id"] = str(configuration_id).strip()
+        response = await self._request(
+            "POST",
+            self._org_memory_endpoint("actions"),
+            json=payload,
+            headers={
+                "Idempotency-Key": self._org_memory_idempotency_key(
+                    idempotency_key
+                )
+            },
+            timeout=float(timeout),
+            circuit_breaker=True,
+            use_org_memory_identity=True,
+        )
+        self._raise_for_status_or_backend_unavailable(response)
+        return response.json()
+
+    async def approve_org_memory_action(
+        self,
+        proposal_id: str,
+        *,
+        idempotency_key: str,
+        timeout: float = 20.0,
+    ) -> dict:
+        return await self._transition_org_memory_action(
+            proposal_id,
+            transition="approve",
+            payload={},
+            idempotency_key=idempotency_key,
+            timeout=timeout,
+        )
+
+    async def reject_org_memory_action(
+        self,
+        proposal_id: str,
+        *,
+        reason: str,
+        idempotency_key: str,
+        timeout: float = 20.0,
+    ) -> dict:
+        return await self._transition_org_memory_action(
+            proposal_id,
+            transition="reject",
+            payload={"reason": str(reason or "").strip()},
+            idempotency_key=idempotency_key,
+            timeout=timeout,
+        )
+
+    async def execute_org_memory_action(
+        self,
+        proposal_id: str,
+        *,
+        idempotency_key: str,
+        timeout: float = 20.0,
+    ) -> dict:
+        return await self._transition_org_memory_action(
+            proposal_id,
+            transition="execute",
+            payload={},
+            idempotency_key=idempotency_key,
+            timeout=timeout,
+        )
+
+    async def reverse_org_memory_action(
+        self,
+        proposal_id: str,
+        *,
+        idempotency_key: str,
+        timeout: float = 20.0,
+    ) -> dict:
+        return await self._transition_org_memory_action(
+            proposal_id,
+            transition="reverse",
+            payload={"confirm": True},
+            idempotency_key=idempotency_key,
+            timeout=timeout,
+        )
+
+    async def _transition_org_memory_action(
+        self,
+        proposal_id: str,
+        *,
+        transition: str,
+        payload: dict,
+        idempotency_key: str,
+        timeout: float,
+    ) -> dict:
+        action_id = self._org_memory_action_id(proposal_id)
+        if transition not in {"approve", "reject", "execute", "reverse"}:
+            raise ValueError("Unsupported controlled-action transition")
+        response = await self._request(
+            "POST",
+            self._org_memory_endpoint(
+                f"actions/{action_id}/{transition}"
+            ),
+            json=dict(payload or {}),
+            headers={
+                "Idempotency-Key": self._org_memory_idempotency_key(
+                    idempotency_key
+                )
+            },
+            timeout=float(timeout),
+            circuit_breaker=True,
+            use_org_memory_identity=True,
+        )
+        self._raise_for_status_or_backend_unavailable(response)
+        return response.json()
+
     def _extract_response_body(self, response: httpx.Response) -> str:
         """Return a compact, log-friendly response body."""
         try:
@@ -556,6 +883,7 @@ class MLAIBackendClient:
             message = str(
                 payload.get("message")
                 or payload.get("error")
+                or payload.get("detail")
                 or "MLAI backend is unavailable right now."
             ).strip()
             raise MLAIBackendUnavailableError(message)

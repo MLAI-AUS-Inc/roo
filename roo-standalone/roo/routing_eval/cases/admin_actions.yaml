@@ -1,0 +1,52 @@
+# Admin Roo controlled-action routing. Execution remains feature-gated and all
+# authorization/precondition decisions remain in mlai-backend.
+
+- id: admin-actions-list-pending
+  text: "show me the Admin Roo actions awaiting approval"
+  expect: {skill: admin-actions, action: list_pending}
+  tags: [admin-actions, private-surface]
+
+- id: admin-actions-show
+  text: "open controlled action 3ec0b82f-b643-4d2d-8ec6-41f6fd701513"
+  expect: {skill: admin-actions, action: show_action}
+  tags: [admin-actions, private-surface]
+
+- id: admin-actions-gmail-draft
+  text: "draft an email to sam@example.com with subject Pilot update and body The pilot is green"
+  expect: {skill: admin-actions, action: draft_gmail}
+  tags: [admin-actions, draft-only]
+
+- id: admin-actions-slack-draft
+  text: "draft a Slack post for this channel saying The venue is confirmed"
+  expect: {skill: admin-actions, action: draft_slack_post}
+  tags: [admin-actions, draft-only]
+
+- id: admin-actions-notion-draft
+  text: "draft a Notion update for page abc123 titled Pilot status with body The pilot is green"
+  expect: {skill: admin-actions, action: draft_notion_update}
+  tags: [admin-actions, draft-only]
+
+- id: admin-actions-linear-create
+  text: "propose a Linear issue in connection 5ed1e325-d10d-41c5-bdce-c0c11f270032, team TEAM-1, project PROJECT-1 titled Confirm the venue"
+  expect: {skill: admin-actions, action: create_linear_issue}
+  tags: [admin-actions, approval-required]
+
+- id: admin-actions-linear-update
+  text: "propose updating Linear issue ISSUE-1 in connection 5ed1e325-d10d-41c5-bdce-c0c11f270032 and project PROJECT-1 to title Venue confirmed"
+  expect: {skill: admin-actions, action: update_linear_issue}
+  tags: [admin-actions, approval-required]
+
+- id: admin-actions-memory-read
+  text: "what did we decide about the venue?"
+  expect: {skill: admin-brain, action: answer}
+  tags: [admin-actions, admin-brain-boundary]
+
+- id: admin-actions-send-email-denied
+  text: "send the sponsor email now"
+  expect: {skill: none}
+  tags: [admin-actions, unsupported-write]
+
+- id: admin-actions-payment-denied
+  text: "pay the venue invoice"
+  expect: {skill: none}
+  tags: [admin-actions, unsupported-write]
