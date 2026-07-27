@@ -78,14 +78,9 @@ class Settings(BaseSettings):
     # Used by router v2 and the legacy LLM fallback. Override via ROUTER_MODEL
     # in .env; re-run `scripts/run_routing_eval.py --mode v2` after any change.
     ROUTER_MODEL: str = "gpt-5.5"
-    LINEAR_MEETING_LLM_MODEL: str = "gpt-5.5"
-    LINEAR_MEETING_LLM_REASONING_EFFORT: str = "low"
     LINEAR_MEETING_AUTO_CREATE_MIN_CONFIDENCE: float = 0.85
     LINEAR_MEETING_UNCERTAIN_MIN_CONFIDENCE: float = 0.65
     LINEAR_STUDIO_SIZING_MODE: str = "required"
-    LINEAR_STUDIO_SIZING_MODEL: str = "gpt-5.6-sol"
-    LINEAR_STUDIO_SIZING_REASONING_EFFORT: str = "max"
-    LINEAR_STUDIO_SIZING_TIMEOUT_SECONDS: float = 120.0
     LINEAR_STUDIO_SIZING_AUTO_CREATE_MIN_CONFIDENCE: float = 0.75
     LINEAR_STUDIO_SIZING_CONTEXT_MAX_CHARS: int = 40000
     LINEAR_STUDIO_SIZING_RUBRIC_VERSION: str = "studio-effort-v1"

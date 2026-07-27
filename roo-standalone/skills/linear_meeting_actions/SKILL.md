@@ -57,6 +57,8 @@ This skill turns pasted Slack meeting transcripts, summaries, supported Slack fi
 - Assign new issues to the best matching Linear user.
 - Attach new issues to the best matching Linear project and team.
 - Avoid likely duplicate open issues and make retries idempotent from Slack source evidence.
+- Use the exact `gpt-5.6-sol` model through the OpenAI Responses API for every Linear inference stage.
+- Select model reasoning effort from source length, source count, ambiguity, partial work, dependencies, artifacts, and conflicting context; never derive model effort from the XS/S/M/L/XL task label.
 - For projects whose current Linear name starts exactly with `[Studio]`, estimate the remaining effort with the dedicated Studio rubric and apply exactly one compatible XS/S/M/L/XL label.
 - Ask for Slack approval when an action item is useful but not confident enough to create automatically.
 
@@ -87,12 +89,14 @@ This skill turns pasted Slack meeting transcripts, summaries, supported Slack fi
 8. Match projects by explicit project hint, exact name/slug, linked Slack channel, project description/content/update/recent issues, and true project membership as a tie-breaker.
 9. Resolve relative dates from the evidence message in the configured workspace timezone.
 10. Suppress candidates that are already completed, cancelled, or duplicates.
-11. For each resolved project whose current title starts exactly with `[Studio]`, read its bounded project updates, active work, terminal references, related issues, label registry, and labelled precedents. Estimate all candidates for the same project in one structured `gpt-5.6-sol` Responses API call at `max` reasoning effort.
+11. For each resolved project whose current title starts exactly with `[Studio]`, read its bounded project updates, active work, terminal references, related issues, label registry, and labelled precedents. Estimate all candidates for the same project in one structured `gpt-5.6-sol` Responses API call.
 12. Estimate remaining work rather than original scope: XS is up to 15 minutes, S is up to 1 hour, M is up to 2 hours, L is up to 3 hours, and XL is up to 5 hours or has substantial uncertainty. Work over 5 hours is XL and should be split.
-13. Add the exact effort label and one-sentence rationale to the issue description and Slack preview. Never create an eligible Studio issue without exactly one valid effort label.
-14. Send an idempotency fingerprint and preserve a Slack permalink in the Linear issue.
-15. Present uncertain candidates in Slack with Approve and Reject buttons.
-16. Report created project updates, created issues, skipped duplicates, and unresolved items clearly.
+13. Start direct cleanup at `low`, ordinary extraction and source summaries at `medium`, and contextual inference, project synthesis, and Studio sizing at `high`. Increase to `xhigh` when deterministic complexity signals warrant it.
+14. Retry a structured parsing or workflow-contract failure at most once with the next reasoning level. Use `max` only when that single escalation follows an `xhigh` attempt.
+15. Add the exact effort label and one-sentence rationale to the issue description and Slack preview. Never create an eligible Studio issue without exactly one valid effort label.
+16. Send an idempotency fingerprint and preserve a Slack permalink in the Linear issue.
+17. Present uncertain candidates in Slack with Approve and Reject buttons.
+18. Report created project updates, created issues, skipped duplicates, and unresolved items clearly.
 
 ## Creation Rules
 

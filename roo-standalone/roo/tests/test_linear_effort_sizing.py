@@ -1,15 +1,15 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from types import SimpleNamespace
-import sys
 
 import pytest
 from pydantic import ValidationError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-import roo.linear_effort_sizing as sizing_module
+import roo.linear_inference as inference_module
 import roo.skills.executor as executor_module
 from roo.linear_effort_sizing import (
     StudioEffortAssessment,
@@ -17,8 +17,8 @@ from roo.linear_effort_sizing import (
     assess_studio_effort_batch,
     is_studio_project,
 )
-from roo.skills.executor import SkillExecutor
 from roo.linear_meeting_sources import ParsedSource, SourceParseResult
+from roo.skills.executor import SkillExecutor
 
 
 def _assessment(candidate_key: str, **overrides):
@@ -71,7 +71,7 @@ async def test_sizing_uses_dedicated_openai_responses_configuration(monkeypatch)
             return StudioEffortAssessmentBatch(assessments=[_assessment("c1")])
 
     monkeypatch.setattr(
-        sizing_module,
+        inference_module,
         "get_llm_client",
         lambda provider: FakeClient() if provider == "openai" else None,
     )
@@ -87,9 +87,6 @@ async def test_sizing_uses_dedicated_openai_responses_configuration(monkeypatch)
         project_context={
             "project": {"id": "project-1", "name": "[Studio] Founder Games"}
         },
-        model="gpt-5.6-sol",
-        reasoning_effort="max",
-        timeout_seconds=120,
         context_max_chars=40000,
         safety_identifier="roo-linear-test",
     )
@@ -98,7 +95,7 @@ async def test_sizing_uses_dedicated_openai_responses_configuration(monkeypatch)
     _, response_format, kwargs = calls[0]
     assert response_format is StudioEffortAssessmentBatch
     assert kwargs["model"] == "gpt-5.6-sol"
-    assert kwargs["reasoning_effort"] == "max"
+    assert kwargs["reasoning_effort"] == "xhigh"
     assert kwargs["store"] is False
     assert "untrusted data" in calls[0][0][-1]["content"]
 
@@ -171,9 +168,6 @@ async def test_executor_batches_one_sizing_call_per_studio_project(monkeypatch):
         labels=[],
         settings=SimpleNamespace(
             LINEAR_STUDIO_SIZING_MODE="required",
-            LINEAR_STUDIO_SIZING_MODEL="gpt-5.6-sol",
-            LINEAR_STUDIO_SIZING_REASONING_EFFORT="max",
-            LINEAR_STUDIO_SIZING_TIMEOUT_SECONDS=120,
             LINEAR_STUDIO_SIZING_CONTEXT_MAX_CHARS=40000,
             LINEAR_STUDIO_SIZING_RUBRIC_VERSION="studio-effort-v1",
         ),
@@ -386,9 +380,6 @@ async def test_required_mode_creates_studio_issue_with_exact_effort_label(monkey
             LINEAR_MEETING_UNCERTAIN_MIN_CONFIDENCE=0.65,
             LINEAR_CONTEXTUAL_AUTO_CREATE_ENABLED=True,
             LINEAR_STUDIO_SIZING_MODE="required",
-            LINEAR_STUDIO_SIZING_MODEL="gpt-5.6-sol",
-            LINEAR_STUDIO_SIZING_REASONING_EFFORT="max",
-            LINEAR_STUDIO_SIZING_TIMEOUT_SECONDS=120,
             LINEAR_STUDIO_SIZING_AUTO_CREATE_MIN_CONFIDENCE=0.75,
             LINEAR_STUDIO_SIZING_CONTEXT_MAX_CHARS=40000,
             LINEAR_STUDIO_SIZING_RUBRIC_VERSION="studio-effort-v1",

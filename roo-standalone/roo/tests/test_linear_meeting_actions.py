@@ -11,9 +11,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 sys.modules.setdefault("frontmatter", SimpleNamespace(load=lambda *args, **kwargs: None))
 sys.modules.pop("roo.skills.executor", None)
 
-from roo.skills.executor import SkillExecutor
 import roo.skills.executor as executor_module
+from roo.linear_inference import (
+    LinearCandidate,
+    LinearDirectIssueBatch,
+    LinearProjectSourceSummary,
+    LinearProjectUpdateResult,
+)
 from roo.linear_meeting_sources import ParsedSource, SourceParseResult
+from roo.skills.executor import SkillExecutor
 
 
 def test_linear_meeting_transcript_uses_thread_history_and_message():
@@ -707,8 +713,17 @@ async def test_linear_meeting_candidate_extraction_chunks_sources(monkeypatch):
     executor = SkillExecutor()
     calls = []
 
-    async def fake_extract(*, transcript, params, users, projects, source_label=None):
+    async def fake_extract(
+        *,
+        transcript,
+        params,
+        users,
+        projects,
+        source_label=None,
+        source_count=1,
+    ):
         calls.append(transcript)
+        assert source_count >= 1
         return [
             {
                 "title": "Update onboarding docs",
@@ -859,24 +874,23 @@ async def test_linear_direct_issue_command_creates_immediately(monkeypatch):
     executor = SkillExecutor()
     created_inputs = []
 
-    async def fake_chat(messages, **kwargs):
+    async def fake_inference(*, messages, response_format, **kwargs):
         prompt = messages[-1]["content"]
         assert "directly asking Roo to create Linear issue" in prompt
+        assert response_format is LinearDirectIssueBatch
         return SimpleNamespace(
-            content=json.dumps(
-                {
-                    "issues": [
-                        {
-                            "title": "Rebrand and rename the Venture Studio project",
-                            "description": "Rebrand and rename the project because Venture Studio is confusing and does not describe the offering.",
-                            "owner_hint": "Sonia",
-                            "project_hint": "venture studio",
-                            "evidence": "rebrand and change the name",
-                            "source_label": "Slack command",
-                            "confidence": 0.96,
-                        }
-                    ]
-                }
+            value=LinearDirectIssueBatch(
+                issues=[
+                    LinearCandidate(
+                        title="Rebrand and rename the Venture Studio project",
+                        description="Rebrand and rename the project because Venture Studio is confusing and does not describe the offering.",
+                        owner_hint="Sonia",
+                        project_hint="venture studio",
+                        evidence="rebrand and change the name",
+                        source_label="Slack command",
+                        confidence=0.96,
+                    )
+                ]
             )
         )
 
@@ -918,7 +932,11 @@ async def test_linear_direct_issue_command_creates_immediately(monkeypatch):
             assert name == "LinearMeetingActionsClient"
             return FakeClient
 
-    monkeypatch.setattr(executor_module, "chat", fake_chat)
+    monkeypatch.setattr(
+        executor_module,
+        "run_linear_structured_inference",
+        fake_inference,
+    )
     monkeypatch.setattr(executor, "_extract_linear_meeting_candidates_from_sources", fail_meeting_extraction)
     monkeypatch.setattr(
         executor_module,
@@ -928,8 +946,6 @@ async def test_linear_direct_issue_command_creates_immediately(monkeypatch):
             LINEAR_DEFAULT_TEAM=None,
             LINEAR_MEETING_AUTO_CREATE_MIN_CONFIDENCE=0.85,
             LINEAR_MEETING_UNCERTAIN_MIN_CONFIDENCE=0.65,
-            LINEAR_MEETING_LLM_MODEL="gpt-5.5",
-            LINEAR_MEETING_LLM_REASONING_EFFORT="low",
         ),
     )
 
@@ -1017,8 +1033,6 @@ async def test_linear_direct_issue_command_reports_ambiguous_project(monkeypatch
             LINEAR_DEFAULT_TEAM=None,
             LINEAR_MEETING_AUTO_CREATE_MIN_CONFIDENCE=0.85,
             LINEAR_MEETING_UNCERTAIN_MIN_CONFIDENCE=0.65,
-            LINEAR_MEETING_LLM_MODEL="gpt-5.5",
-            LINEAR_MEETING_LLM_REASONING_EFFORT="low",
         ),
     )
 
@@ -1099,8 +1113,6 @@ async def test_linear_direct_issue_command_reports_ambiguous_assignee(monkeypatc
             LINEAR_DEFAULT_TEAM=None,
             LINEAR_MEETING_AUTO_CREATE_MIN_CONFIDENCE=0.85,
             LINEAR_MEETING_UNCERTAIN_MIN_CONFIDENCE=0.65,
-            LINEAR_MEETING_LLM_MODEL="gpt-5.5",
-            LINEAR_MEETING_LLM_REASONING_EFFORT="low",
         ),
     )
 
@@ -1204,8 +1216,6 @@ async def test_linear_meeting_executor_creates_project_update_when_requested(mon
             LINEAR_DEFAULT_TEAM=None,
             LINEAR_MEETING_AUTO_CREATE_MIN_CONFIDENCE=0.85,
             LINEAR_MEETING_UNCERTAIN_MIN_CONFIDENCE=0.65,
-            LINEAR_MEETING_LLM_MODEL="gpt-5.5",
-            LINEAR_MEETING_LLM_REASONING_EFFORT="low",
         ),
     )
     monkeypatch.setattr(executor, "_build_linear_meeting_source_result", fake_source_result)
@@ -1247,21 +1257,32 @@ async def test_linear_project_update_writer_uses_chunk_summaries_last_update_and
     executor = SkillExecutor()
     prompts = []
 
-    async def fake_chat(messages, **kwargs):
+    async def fake_inference(*, messages, response_format, **kwargs):
         prompt = messages[-1]["content"]
         prompts.append(prompt)
-        if prompt.startswith("Summarize this meeting-notes chunk"):
-            return SimpleNamespace(content="- Work done\n- Finished partner outreach.\n- Decisions\n- Keep launch scope tight.")
+        if response_format is LinearProjectSourceSummary:
+            if "page 1" in prompt:
+                value = LinearProjectSourceSummary(
+                    work_done=["Finished partner outreach."]
+                )
+            else:
+                value = LinearProjectSourceSummary(
+                    decisions=["Keep launch scope tight."]
+                )
+            return SimpleNamespace(value=value)
+        assert response_format is LinearProjectUpdateResult
         return SimpleNamespace(
-            content=json.dumps(
-                {
-                    "body": "## Summary\nPartner outreach moved forward.\n\n## Work done since last update\nFinished outreach.\n\n## Decisions made\nKeep launch scope tight.\n\n## Risks / open questions\nNone noted.\n\n## Next steps\nConfirm launch comms.",
-                    "health": "atRisk",
-                }
+            value=LinearProjectUpdateResult(
+                body="## Summary\nPartner outreach moved forward.\n\n## Work done since last update\nFinished outreach.\n\n## Decisions made\nKeep launch scope tight.\n\n## Risks / open questions\nNone noted.\n\n## Next steps\nConfirm launch comms.",
+                health="atRisk",
             )
         )
 
-    monkeypatch.setattr(executor_module, "chat", fake_chat)
+    monkeypatch.setattr(
+        executor_module,
+        "run_linear_structured_inference",
+        fake_inference,
+    )
 
     project = {
         "id": "project-1",
@@ -1291,7 +1312,7 @@ async def test_linear_project_update_writer_uses_chunk_summaries_last_update_and
                 "assignee": {"displayName": "Yana"},
             }
         ],
-        settings=SimpleNamespace(LINEAR_MEETING_LLM_MODEL="gpt-5.5", LINEAR_MEETING_LLM_REASONING_EFFORT="low"),
+        settings=SimpleNamespace(),
     )
 
     assert result["project_id"] == "project-1"
@@ -1579,6 +1600,7 @@ async def test_linear_thread_reference_fallback_skips_when_assignee_unresolved(m
 @pytest.mark.asyncio
 async def test_linear_meeting_slack_approval_creates_contextual_issue(monkeypatch):
     import importlib
+
     import roo.main as main_module
 
     live_executor_module = importlib.import_module("roo.skills.executor")
@@ -1656,6 +1678,7 @@ async def test_linear_meeting_slack_approval_creates_contextual_issue(monkeypatc
 @pytest.mark.asyncio
 async def test_linear_meeting_slack_reject_clears_contextual_issue(monkeypatch):
     import importlib
+
     import roo.main as main_module
 
     live_executor_module = importlib.import_module("roo.skills.executor")

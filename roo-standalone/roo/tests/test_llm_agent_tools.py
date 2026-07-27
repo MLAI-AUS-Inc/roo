@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from pydantic import BaseModel
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
@@ -96,6 +97,44 @@ def test_openai_request_client_applies_bounded_timeout_and_zero_retries():
 
     assert selected == "bounded-client"
     assert root.calls == [{"timeout": 20.0, "max_retries": 0}]
+
+
+def test_responses_parse_forwards_reasoning_and_output_bounds():
+    class ParsedResult(BaseModel):
+        value: str
+
+    class FakeParsedResponses:
+        def __init__(self):
+            self.calls = []
+
+        async def parse(self, **kwargs):
+            self.calls.append(kwargs)
+            return SimpleNamespace(output_parsed=ParsedResult(value="ok"))
+
+    client = OpenAIClient.__new__(OpenAIClient)
+    client.model = "gpt-5.6-sol"
+    responses = FakeParsedResponses()
+    client.client = SimpleNamespace(responses=responses)
+
+    result = _run(
+        client.responses_parse(
+            [
+                {"role": "system", "content": "Return structured output."},
+                {"role": "user", "content": "Create the task."},
+            ],
+            ParsedResult,
+            model="gpt-5.6-sol",
+            reasoning_effort="high",
+            max_output_tokens=3_000,
+            store=False,
+        )
+    )
+
+    assert result.value == "ok"
+    assert responses.calls[0]["model"] == "gpt-5.6-sol"
+    assert responses.calls[0]["reasoning"] == {"effort": "high"}
+    assert responses.calls[0]["max_output_tokens"] == 3_000
+    assert responses.calls[0]["store"] is False
 
 
 def test_reasoning_chat_uses_completion_bound_and_safety_identifier():
