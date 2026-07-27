@@ -15,6 +15,10 @@ on:
     branches:
       - main
 
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('roo-pr-{0}', github.event.pull_request.number) || 'roo-production-deploy' }}
+  cancel-in-progress: false
+
 jobs:
   security-checks:
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.diagnostics_only != true }}
@@ -66,10 +70,15 @@ jobs:
           cp .env.example .env
           trap 'rm -f .env' EXIT
           docker compose config --quiet
+          ADMIN_ROO_ENV_FILE=.env.admin.example \
+            docker compose -f docker-compose.admin.yml config --quiet
           docker compose -f docker-compose.bridge.yml config --quiet
-          docker run --rm --add-host roo:127.0.0.1 \
+          docker run --rm \
+            --add-host roo:127.0.0.1 \
+            --add-host roo-admin:127.0.0.1 \
             -v "$PWD/nginx/roo.conf:/etc/nginx/conf.d/default.conf:ro" \
             -v "$PWD/nginx/roo-proxy.conf:/etc/nginx/roo-proxy.conf:ro" \
+            -v "$PWD/nginx/roo-admin-proxy.conf:/etc/nginx/roo-admin-proxy.conf:ro" \
             nginx:1.28.3-alpine nginx -t
 
   deploy:
@@ -161,6 +170,9 @@ jobs:
             
             # Go to the sub-project directory
             cd "$DEPLOY_DIR/roo-standalone"
+
+            docker network inspect roo-admin-gateway >/dev/null 2>&1 \
+              || docker network create roo-admin-gateway
 
             # Update security settings without printing secret values. Rebuild
             # the file atomically so duplicate/stale keys cannot win.

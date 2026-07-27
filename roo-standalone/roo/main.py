@@ -1941,12 +1941,23 @@ async def readiness_check():
             },
             status_code=503,
         )
-    return {
+    settings = get_settings()
+    payload = {
         "status": "ok",
         "service": "roo",
-        "surface": get_settings().ROO_SURFACE,
+        "surface": settings.ROO_SURFACE,
         "message": "Roo startup complete",
     }
+    if settings.ROO_SURFACE == "admin":
+        payload.update(
+            {
+                "enabled_skills": sorted(settings.enabled_skill_names),
+                "org_brain_enabled": settings.ORG_BRAIN_ENABLED,
+                "org_brain_actions_enabled": settings.ORG_BRAIN_ACTIONS_ENABLED,
+                "contextual_shadow_mode": settings.ROO_CONTEXTUAL_SHADOW_MODE,
+            }
+        )
+    return payload
 
 
 @app.get("/healthz/dependencies")

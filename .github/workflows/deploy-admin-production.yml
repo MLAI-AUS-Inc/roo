@@ -1,0 +1,287 @@
+name: Deploy Admin Roo production
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      release_sha:
+        description: Full reviewed commit SHA already merged into main
+        required: true
+        type: string
+
+concurrency:
+  group: roo-production-deploy
+  cancel-in-progress: false
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.release_sha || github.sha }}
+    defaults:
+      run:
+        working-directory: roo-standalone
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_SHA }}
+          fetch-depth: 0
+
+      - name: Verify the exact release is on main
+        working-directory: .
+        run: |
+          git fetch origin main
+          git cat-file -e "${RELEASE_SHA}^{commit}"
+          git merge-base --is-ancestor "$RELEASE_SHA" origin/main
+          test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Roo dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Admin Roo trust-boundary tests
+        run: >-
+          pytest -q
+          roo/tests/test_surface_security.py
+          roo/tests/test_slack_security.py
+          roo/tests/test_backend_identity.py
+          roo/tests/test_mlai_backend_client.py
+          roo/tests/test_admin_brain.py
+          roo/tests/test_admin_brain_interactions.py
+          roo/tests/test_admin_pilot_config.py
+          roo/tests/test_admin_pilot_smoke.py
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: checks
+    env:
+      RELEASE_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.release_sha || github.sha }}
+    steps:
+      - name: Validate Admin Roo production secrets
+        env:
+          ADMIN_ROO_SLACK_BOT_TOKEN: ${{ secrets.ADMIN_ROO_SLACK_BOT_TOKEN }}
+          ADMIN_ROO_SLACK_SIGNING_SECRET: ${{ secrets.ADMIN_ROO_SLACK_SIGNING_SECRET }}
+          ADMIN_ROO_OPENAI_API_KEY: ${{ secrets.ADMIN_ROO_OPENAI_API_KEY }}
+          ADMIN_ROO_ORG_BRAIN_API_KEY: ${{ secrets.ADMIN_ROO_ORG_BRAIN_API_KEY }}
+          ADMIN_ROO_ALLOWED_CHANNEL_IDS: ${{ secrets.ADMIN_ROO_ALLOWED_CHANNEL_IDS }}
+          ADMIN_ROO_ALLOWED_DM_USER_IDS: ${{ secrets.ADMIN_ROO_ALLOWED_DM_USER_IDS }}
+          ADMIN_ROO_SLACK_TEAM_ID: ${{ secrets.ADMIN_ROO_SLACK_TEAM_ID }}
+          ADMIN_ROO_APPROVAL_MANIFEST: ${{ secrets.ADMIN_ROO_APPROVAL_MANIFEST }}
+        run: |
+          set -eu
+          test -n "$ADMIN_ROO_SLACK_BOT_TOKEN"
+          test "${#ADMIN_ROO_SLACK_SIGNING_SECRET}" -ge 16
+          test -n "$ADMIN_ROO_OPENAI_API_KEY"
+          printf '%s' "$ADMIN_ROO_ORG_BRAIN_API_KEY" \
+            | grep -Eq '^mlai_sp_[0-9a-f]{32}\.[A-Za-z0-9_-]{32,128}$'
+          test -n "$ADMIN_ROO_ALLOWED_CHANNEL_IDS$ADMIN_ROO_ALLOWED_DM_USER_IDS"
+          printf '%s' "$ADMIN_ROO_SLACK_TEAM_ID" | grep -Eq '^T[A-Z0-9]+$'
+          python - <<'PY'
+          import json
+          import os
+
+          manifest = json.loads(os.environ["ADMIN_ROO_APPROVAL_MANIFEST"])
+          if not isinstance(manifest, dict):
+              raise SystemExit("ADMIN_ROO_APPROVAL_MANIFEST must be a JSON object")
+          if manifest.get("organization_domain") != "mlai.au":
+              raise SystemExit("Admin Roo production approval must target mlai.au")
+          PY
+
+      - name: Encode approval for single-line SSH transport
+        env:
+          ADMIN_ROO_APPROVAL_MANIFEST: ${{ secrets.ADMIN_ROO_APPROVAL_MANIFEST }}
+        run: |
+          set -eu
+          approval_b64="$(printf '%s' "$ADMIN_ROO_APPROVAL_MANIFEST" | base64 | tr -d '\n')"
+          echo "::add-mask::$approval_b64"
+          printf 'ADMIN_ROO_APPROVAL_MANIFEST_B64=%s\n' "$approval_b64" >> "$GITHUB_ENV"
+
+      - name: Deploy isolated Admin Roo production
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          RELEASE_SHA: ${{ env.RELEASE_SHA }}
+          ADMIN_ROO_SLACK_BOT_TOKEN: ${{ secrets.ADMIN_ROO_SLACK_BOT_TOKEN }}
+          ADMIN_ROO_SLACK_SIGNING_SECRET: ${{ secrets.ADMIN_ROO_SLACK_SIGNING_SECRET }}
+          ADMIN_ROO_OPENAI_API_KEY: ${{ secrets.ADMIN_ROO_OPENAI_API_KEY }}
+          ADMIN_ROO_ORG_BRAIN_API_KEY: ${{ secrets.ADMIN_ROO_ORG_BRAIN_API_KEY }}
+          ADMIN_ROO_ALLOWED_CHANNEL_IDS: ${{ secrets.ADMIN_ROO_ALLOWED_CHANNEL_IDS }}
+          ADMIN_ROO_ALLOWED_DM_USER_IDS: ${{ secrets.ADMIN_ROO_ALLOWED_DM_USER_IDS }}
+          ADMIN_ROO_SLACK_TEAM_ID: ${{ secrets.ADMIN_ROO_SLACK_TEAM_ID }}
+          ADMIN_ROO_APPROVAL_MANIFEST_B64: ${{ env.ADMIN_ROO_APPROVAL_MANIFEST_B64 }}
+        with:
+          host: ${{ secrets.DO_HOST }}
+          username: ${{ secrets.DO_USERNAME }}
+          key: ${{ secrets.DO_SSH_KEY }}
+          envs: RELEASE_SHA,ADMIN_ROO_SLACK_BOT_TOKEN,ADMIN_ROO_SLACK_SIGNING_SECRET,ADMIN_ROO_OPENAI_API_KEY,ADMIN_ROO_ORG_BRAIN_API_KEY,ADMIN_ROO_ALLOWED_CHANNEL_IDS,ADMIN_ROO_ALLOWED_DM_USER_IDS,ADMIN_ROO_SLACK_TEAM_ID,ADMIN_ROO_APPROVAL_MANIFEST_B64
+          script: |
+            set -euo pipefail
+
+            DEPLOY_DIR="/root/roo-admin"
+            PUBLIC_DEPLOY_DIR="/root/roo"
+            OPERATIONS_DIR="/root/roo-admin-operations"
+            ADMIN_ENV="$DEPLOY_DIR/roo-standalone/.env.admin"
+            APPROVAL_MANIFEST="$OPERATIONS_DIR/pilot-approval.json"
+
+            if ! printf '%s' "$RELEASE_SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+              echo "RELEASE_SHA must be a full 40-character Git commit SHA" >&2
+              exit 1
+            fi
+            test -n "$ADMIN_ROO_SLACK_BOT_TOKEN"
+            test "${#ADMIN_ROO_SLACK_SIGNING_SECRET}" -ge 16
+            test -n "$ADMIN_ROO_OPENAI_API_KEY"
+            printf '%s' "$ADMIN_ROO_ORG_BRAIN_API_KEY" \
+              | grep -Eq '^mlai_sp_[0-9a-f]{32}\.[A-Za-z0-9_-]{32,128}$'
+            test -n "$ADMIN_ROO_ALLOWED_CHANNEL_IDS$ADMIN_ROO_ALLOWED_DM_USER_IDS"
+            printf '%s' "$ADMIN_ROO_SLACK_TEAM_ID" | grep -Eq '^T[A-Z0-9]+$'
+
+            checkout_release() {
+              target_dir="$1"
+              if [ ! -d "$target_dir/.git" ]; then
+                git clone https://github.com/MLAI-AUS-Inc/roo.git "$target_dir"
+              fi
+              cd "$target_dir"
+              git fetch origin main
+              git cat-file -e "${RELEASE_SHA}^{commit}"
+              git merge-base --is-ancestor "$RELEASE_SHA" origin/main
+              git checkout --detach "$RELEASE_SHA"
+              test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
+            }
+
+            checkout_release "$DEPLOY_DIR"
+            checkout_release "$PUBLIC_DEPLOY_DIR"
+
+            mkdir -p "$OPERATIONS_DIR"
+            umask 077
+            approval_tmp="$(mktemp "$OPERATIONS_DIR/.pilot-approval.XXXXXX")"
+            printf '%s' "$ADMIN_ROO_APPROVAL_MANIFEST_B64" \
+              | base64 --decode > "$approval_tmp"
+            python3 - "$approval_tmp" <<'PY'
+            import json
+            import pathlib
+            import sys
+
+            manifest = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+            if not isinstance(manifest, dict) or manifest.get("organization_domain") != "mlai.au":
+                raise SystemExit("Invalid Admin Roo production approval")
+            PY
+            chmod 600 "$approval_tmp"
+            mv "$approval_tmp" "$APPROVAL_MANIFEST"
+
+            admin_env_tmp="$(mktemp "$DEPLOY_DIR/roo-standalone/.env.admin.XXXXXX")"
+            {
+              printf 'ROO_ENVIRONMENT=production\n'
+              printf 'ROO_RELEASE_SHA=%s\n' "$RELEASE_SHA"
+              printf 'ROO_SURFACE=admin\n'
+              printf 'SLACK_BOT_TOKEN=%s\n' "$ADMIN_ROO_SLACK_BOT_TOKEN"
+              printf 'SLACK_SIGNING_SECRET=%s\n' "$ADMIN_ROO_SLACK_SIGNING_SECRET"
+              printf 'OPENAI_API_KEY=%s\n' "$ADMIN_ROO_OPENAI_API_KEY"
+              printf 'MLAI_BACKEND_URL=https://api.mlai.au\n'
+              printf 'ORG_BRAIN_API_KEY=%s\n' "$ADMIN_ROO_ORG_BRAIN_API_KEY"
+              printf 'ROO_ENABLED_SKILLS=admin-brain\n'
+              printf 'ROO_ALLOWED_CHANNEL_IDS=%s\n' "$ADMIN_ROO_ALLOWED_CHANNEL_IDS"
+              printf 'ROO_ALLOWED_DM_USER_IDS=%s\n' "$ADMIN_ROO_ALLOWED_DM_USER_IDS"
+              printf 'ORG_BRAIN_ENABLED=true\n'
+              printf 'ORG_BRAIN_ACTIONS_ENABLED=false\n'
+              printf 'ROO_CONTEXTUAL_RESPONSES_ENABLED=false\n'
+              printf 'ROO_CONTEXTUAL_SHADOW_MODE=false\n'
+              printf 'BOOST_LINK_LOVE_ENABLED=false\n'
+              printf 'START_HERE_INTRO_ENABLED=false\n'
+              printf 'JOBS_SCHEDULER_ENABLED=false\n'
+              printf 'DEBUG=false\n'
+              printf 'LOG_LEVEL=INFO\n'
+              printf 'TIMEZONE=Australia/Melbourne\n'
+              printf 'ROUTER_MODEL=gpt-5.5\n'
+            } > "$admin_env_tmp"
+            chmod 600 "$admin_env_tmp"
+            mv "$admin_env_tmp" "$ADMIN_ENV"
+
+            docker network inspect roo-admin-gateway >/dev/null 2>&1 \
+              || docker network create roo-admin-gateway
+
+            cd "$DEPLOY_DIR/roo-standalone"
+            docker compose -f docker-compose.admin.yml build roo-admin
+            docker compose -f docker-compose.admin.yml run \
+              -T --rm --no-deps \
+              -v "$APPROVAL_MANIFEST:/run/pilot-approval.json:ro" \
+              roo-admin \
+              python scripts/check_admin_pilot_config.py \
+              --env-file /dev/null \
+              --approval-manifest /run/pilot-approval.json \
+              --organization-domain mlai.au
+
+            # Prove the exact actor/context matrix through the live backend
+            # before any Admin Slack ingress is published.
+            docker compose -f docker-compose.admin.yml run \
+              -T --rm --no-deps \
+              -v "$APPROVAL_MANIFEST:/run/pilot-approval.json:ro" \
+              roo-admin \
+              python scripts/check_admin_pilot_access.py \
+              --env-file /dev/null \
+              --approval-manifest /run/pilot-approval.json \
+              --organization-domain mlai.au \
+              --slack-team-id "$ADMIN_ROO_SLACK_TEAM_ID"
+
+            admin_started=0
+            stop_admin_on_error() {
+              if [ "$admin_started" = "1" ]; then
+                echo "Admin Roo production verification failed; stopping Admin Roo" >&2
+                cd "$DEPLOY_DIR/roo-standalone"
+                docker compose -f docker-compose.admin.yml stop roo-admin || true
+              fi
+            }
+            trap stop_admin_on_error ERR
+            docker compose -f docker-compose.admin.yml up \
+              -d --force-recreate --remove-orphans roo-admin
+            admin_started=1
+
+            # Publish only the three Admin routes through the existing
+            # production edge. Public Roo remains a separate service and key.
+            cd "$PUBLIC_DEPLOY_DIR/roo-standalone"
+            docker compose up -d --no-deps --force-recreate nginx
+
+            ready=0
+            for attempt in $(seq 1 18); do
+              if curl --silent --show-error --fail --max-time 5 \
+                http://127.0.0.1/admin/healthz/ready \
+                | python3 -c "
+            import json
+            import sys
+            payload = json.load(sys.stdin)
+            assert payload['status'] == 'ok'
+            assert payload['surface'] == 'admin'
+            assert payload['enabled_skills'] == ['admin-brain']
+            assert payload['org_brain_enabled'] is True
+            assert payload['org_brain_actions_enabled'] is False
+            assert payload['contextual_shadow_mode'] is False
+            " >/dev/null; then
+                ready=1
+                break
+              fi
+              sleep 5
+            done
+            test "$ready" = "1"
+
+            expect_status() {
+              expected="$1"
+              method="$2"
+              path="$3"
+              actual="$(curl --silent --show-error --max-time 8 \
+                --output /dev/null --write-out '%{http_code}' \
+                --request "$method" "http://127.0.0.1${path}")"
+              test "$actual" = "$expected"
+            }
+            expect_status 200 GET /healthz/ready
+            expect_status 404 GET /admin/docs
+            expect_status 404 POST /admin/api/mention
+            expect_status 403 POST /admin/slack/events
+            expect_status 403 POST /admin/slack/actions
+
+            trap - ERR
+            docker image prune -f

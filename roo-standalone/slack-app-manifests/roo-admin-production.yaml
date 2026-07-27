@@ -1,5 +1,5 @@
 display_information:
-  name: Roo Admin (Development)
+  name: Roo Admin
   description: Governed administrative assistant for authorised MLAI operators
   background_color: "#1F2937"
 features:
@@ -16,13 +16,13 @@ oauth_config:
       - im:write
 settings:
   event_subscriptions:
-    request_url: https://admin-roo-dev.example.invalid/slack/events
+    request_url: http://209.38.22.179/admin/slack/events
     bot_events:
       - app_mention
       - message.im
   interactivity:
     is_enabled: true
-    request_url: https://admin-roo-dev.example.invalid/slack/actions
+    request_url: http://209.38.22.179/admin/slack/actions
   org_deploy_enabled: false
   socket_mode_enabled: false
   token_rotation_enabled: true

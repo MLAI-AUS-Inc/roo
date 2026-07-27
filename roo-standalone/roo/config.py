@@ -51,7 +51,7 @@ class Settings(BaseSettings):
     # Context-aware channel replies. Disabled by default and restricted to an
     # explicit channel allowlist before any untagged message can be considered.
     ROO_CONTEXTUAL_RESPONSES_ENABLED: bool = False
-    ROO_CONTEXTUAL_SHADOW_MODE: bool = True
+    ROO_CONTEXTUAL_SHADOW_MODE: bool = False
     ROO_CONTEXTUAL_CHANNEL_IDS: str = ""
     ROO_CONTEXTUAL_MIN_CONFIDENCE: float = 0.90
     ROO_CONTEXTUAL_INDIRECT_MENTION_CONFIDENCE: float = 0.90
@@ -290,6 +290,8 @@ class Settings(BaseSettings):
             )
         if self.ROO_SURFACE == "admin" and self.ROO_CONTEXTUAL_RESPONSES_ENABLED:
             raise ValueError("Admin Roo cannot enable contextual channel responses")
+        if self.ROO_SURFACE == "admin" and self.ROO_CONTEXTUAL_SHADOW_MODE:
+            raise ValueError("Admin Roo cannot enable contextual shadow mode")
         if (
             self.ROO_POINTS_TOPUP_BUTTONS_ENABLED
             and not self.roo_points_stripe_checkout_hosts

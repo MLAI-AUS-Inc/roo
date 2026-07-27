@@ -3,10 +3,10 @@ name: roo-admin
 services:
   roo-admin:
     build: .
-    ports:
-      - "8081:8000"
+    expose:
+      - "8000"
     env_file:
-      - .env.admin
+      - ${ADMIN_ROO_ENV_FILE:-.env.admin}
     environment:
       ROO_SURFACE: admin
     restart: unless-stopped
@@ -19,6 +19,16 @@ services:
     volumes:
       - ./skills:/app/skills:ro
       - roo-admin-data:/app/data
+    networks:
+      default:
+      roo-admin-gateway:
+        aliases:
+          - roo-admin
 
 volumes:
   roo-admin-data:
+
+networks:
+  roo-admin-gateway:
+    external: true
+    name: roo-admin-gateway

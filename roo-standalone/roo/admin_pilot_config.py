@@ -61,6 +61,8 @@ def admin_pilot_config_report(
         blockers.append("admin_brain_not_enabled")
     if bool(getattr(settings, "ORG_BRAIN_ACTIONS_ENABLED", False)):
         blockers.append("admin_actions_must_remain_disabled")
+    if bool(getattr(settings, "ROO_CONTEXTUAL_SHADOW_MODE", False)):
+        blockers.append("admin_shadow_mode_must_remain_disabled")
     if set(getattr(settings, "enabled_skill_names", ())) != {"admin-brain"}:
         blockers.append("admin_skill_allowlist_not_exact")
 

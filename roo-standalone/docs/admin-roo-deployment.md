@@ -1,36 +1,56 @@
-# Roo Admin development deployment
+# Roo Admin production deployment
 
-The existing Slack app and `docker-compose.yml` remain Public Roo. Admin Roo is a second Slack app, hostname, deployment, bot token, signing secret, receipt database, data volume, and scoped backend service principal.
+The existing Slack app and `docker-compose.yml` remain Public Roo. Admin Roo is
+a second production Slack app, Compose project, bot token, signing secret,
+receipt database, data volume, and scoped backend service principal on the same
+production host. There is no separate staging environment.
 
-## Create the development Slack app
+## Create the production Slack app
 
-1. In the MLAI Slack app console, create an app from `slack-app-manifests/roo-admin-development.yaml`.
-2. Replace `admin-roo-dev.example.invalid` with the dedicated development hostname before enabling events or interactivity.
-3. Install it only in the MLAI workspace and copy its bot token and signing secret into `.env.admin`.
-4. Do not add channel-history, file, search, admin, user-token, or source-ingestion scopes. This app is the conversational Admin surface, not the Slack ingestion connector.
-5. Invite it only to a private development channel whose Slack ID begins with
+1. In the MLAI Slack app console, create an app from
+   `slack-app-manifests/roo-admin-production.yaml`.
+2. Install it only in the MLAI workspace and store its bot token and signing
+   secret in the repository secrets used by the production workflow.
+3. Do not add channel-history, file, search, admin, user-token, or source-ingestion scopes. This app is the conversational Admin surface, not the Slack ingestion connector.
+4. Invite it only to an approved private channel whose Slack ID begins with
    `G`. Record that channel ID in `ROO_ALLOWED_CHANNEL_IDS`, or record
    individual pilot Slack user IDs in `ROO_ALLOWED_DM_USER_IDS`. Public
    `C...` channels and raw `D...` conversation IDs are rejected at startup.
 
-## Start the isolated deployment
+## Production shape
 
 ```bash
+docker network create roo-admin-gateway
 cp .env.admin.example .env.admin
-# Fill Slack credentials, one LLM key, and an explicit Admin channel/DM allowlist.
+# Fill the dedicated Slack credentials, scoped backend principal, one LLM key,
+# and the exact approved private-channel/DM allowlists.
 docker compose -f docker-compose.admin.yml up -d --build
-curl http://127.0.0.1:8081/healthz/ready
+curl http://127.0.0.1/admin/healthz/ready
 ```
 
 `docker-compose.admin.yml` uses the dedicated `roo-admin` Compose project.
 Public Roo keeps its existing project and data volume, so either deployment's
-orphan cleanup cannot remove the other surface.
+orphan cleanup cannot remove the other surface. The Admin container publishes
+no host port. The existing production nginx joins `roo-admin-gateway` and
+exposes only `/admin/slack/events`, `/admin/slack/actions`, and
+`/admin/healthz/ready`; all other Admin paths return 404.
 
-For a Slack-envelope smoke test, leave `ORG_BRAIN_ENABLED=false` and
-`ROO_ENABLED_SKILLS` empty. The service will accept only signed, allowlisted
-mentions/DMs but cannot retrieve memory.
+The production workflow writes `.env.admin` atomically and enforces:
 
-## Enable the read-only pilot
+```text
+ROO_ENVIRONMENT=production
+ROO_SURFACE=admin
+ROO_ENABLED_SKILLS=admin-brain
+ORG_BRAIN_ENABLED=true
+ORG_BRAIN_ACTIONS_ENABLED=false
+ROO_CONTEXTUAL_RESPONSES_ENABLED=false
+ROO_CONTEXTUAL_SHADOW_MODE=false
+```
+
+Any mismatch between the effective allowlists and the exact current approval
+blocks deployment before the service is restarted.
+
+## Provision read-only access
 
 Provision the service principal in `mlai-backend` after the pilot Slack
 workspace, users, memberships, roles, and capabilities have been mapped:
@@ -43,7 +63,10 @@ python manage.py create_service_principal \
   --surface admin_roo
 ```
 
-Store the one-time credential only in `.env.admin`, then set:
+Store the one-time credential only in
+`ADMIN_ROO_ORG_BRAIN_API_KEY`, then set the exact approved channel and user
+IDs in the corresponding Admin Roo repository secrets. Never copy this
+credential into Public Roo.
 
 ```text
 ROO_ENABLED_SKILLS=admin-brain
@@ -53,8 +76,8 @@ ORG_BRAIN_BACKEND_TIMEOUT_SECONDS=20
 ORG_BRAIN_MAX_CONTEXT_TOKENS=6000
 ```
 
-Before starting a live read-only container, compare the effective Roo
-allowlists with the exact restricted approval manifest:
+The production workflow compares the effective Roo allowlists with the exact
+restricted approval manifest before starting the live container:
 
 ```bash
 python scripts/check_admin_pilot_config.py \
@@ -113,29 +136,29 @@ mlai-backend `docs/org-memory-service-identity.md` runbook. Its one-time
 `mlai_sp_...` credential is valid only as `ORG_BRAIN_API_KEY`; never place it in
 the Public Roo environment or reuse a legacy shared API key.
 
-## Manual staging deployment
+## Automatic production deployment
 
-The `Deploy Admin Roo staging` GitHub Actions workflow is manual-only and uses
-the protected `admin-roo-staging` environment. Configure these repository or
-environment secrets before running it:
+`Deploy Admin Roo production` runs for every reviewed commit pushed to `main`.
+It can also redeploy a full commit SHA already contained in `main`. Configure
+these repository secrets before merging:
 
-- `ADMIN_ROO_DO_HOST`;
-- `ADMIN_ROO_DO_USERNAME`;
-- `ADMIN_ROO_DO_SSH_KEY`;
+- `DO_HOST`, `DO_USERNAME`, and `DO_SSH_KEY` (the existing Public Roo host);
+- `ADMIN_ROO_SLACK_BOT_TOKEN`;
+- `ADMIN_ROO_SLACK_SIGNING_SECRET`;
+- `ADMIN_ROO_OPENAI_API_KEY`;
+- `ADMIN_ROO_ORG_BRAIN_API_KEY`;
+- `ADMIN_ROO_ALLOWED_CHANNEL_IDS` and/or `ADMIN_ROO_ALLOWED_DM_USER_IDS`;
 - `ADMIN_ROO_SLACK_TEAM_ID`.
+- `ADMIN_ROO_APPROVAL_MANIFEST`.
 
-The target host must already contain a separate Roo checkout at
-`/root/roo-admin`, a mode-0600
-`/root/roo-admin/roo-standalone/.env.admin`, and the restricted approval at
-`/root/roo-admin-operations/pilot-approval.json`. Start the workflow with the
-full reviewed commit SHA after that commit has been merged into `main`. The
-workflow rejects unmerged commits, checks out that exact SHA in detached mode,
-runs all Admin trust-boundary tests against it, validates exact approval/config
-alignment inside a one-off container, deploys only the isolated `roo-admin`
-project, and verifies that readiness exposes only the read-only `admin-brain`
-skill. It then runs the aggregate-only signed-request gate against the deployed
-backend. It never queries memory, creates an approval, issues a backend
-credential, enables the backend query flag, or deploys Public Roo.
+The workflow rejects unmerged commits, checks out the exact SHA in detached
+mode, runs all Admin trust-boundary tests, validates exact approval/config
+alignment, and atomically installs mode-0600 runtime files. It then deploys the
+isolated `roo-admin` project, refreshes only the shared production nginx edge,
+and verifies Public Roo containment plus enforced Admin readiness. Before
+publishing Admin ingress it runs the aggregate-only signed-request gate against
+the active backend. It never queries memory, creates an approval, issues a
+backend credential, or enables controlled actions.
 
 ## Enable controlled actions after the read-only pilot
 
@@ -182,8 +205,9 @@ and must reconcile provider state before using it.
 - Public Roo must fail startup if an organisational-brain key or private skill is present.
 - Admin Roo must fail startup without a Slack context allowlist.
 - Enabling Admin Brain requires `admin-brain` in `ROO_ENABLED_SKILLS` and a separate scoped `ORG_BRAIN_API_KEY`.
+- Admin contextual responses and contextual shadow mode must remain disabled.
 - Enabling controlled actions additionally requires `admin-actions`, `ORG_BRAIN_ACTIONS_ENABLED=true`, the `org_memory.actions` service scope, and named `approve_actions` reviewers.
-- Never reuse Public Roo's bot token, signing secret, hostname, data volume, receipt database, or backend key.
+- Never reuse Public Roo's bot token, signing secret, data volume, receipt database, or backend key.
 - Keep `/api/mention` disabled on Admin Roo. On Public Roo it is disabled unless `INTERNAL_MENTION_API_KEY` is configured, then requires an exact bearer token.
 
 ## Rollback

@@ -95,6 +95,22 @@ def test_allowlist_mismatch_and_actions_fail_closed():
     assert "roo_channel_allowlist_mismatch" in report["blockers"]
 
 
+def test_shadow_mode_fails_the_production_config_gate():
+    now = datetime.now(timezone.utc)
+    configured = configured_settings()
+    object.__setattr__(configured, "ROO_CONTEXTUAL_SHADOW_MODE", True)
+
+    report = admin_pilot_config_report(
+        configured,
+        approval_manifest(now),
+        organization_domain="mlai.au",
+        now=now,
+    )
+
+    assert not report["ready"]
+    assert "admin_shadow_mode_must_remain_disabled" in report["blockers"]
+
+
 def test_public_channel_approval_and_expiry_fail_closed():
     now = datetime.now(timezone.utc)
     manifest = approval_manifest(now)

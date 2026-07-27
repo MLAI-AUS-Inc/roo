@@ -481,3 +481,39 @@ def test_nginx_exposes_only_slack_health_and_vpc_service_routes():
         assert "allow 10.126.0.0/16" in block
         assert "deny all" in block
     assert "location / { return 404; }" in nginx
+
+
+def test_admin_production_deploy_is_enforced_without_staging_or_shadow():
+    workflow = (
+        REPO_ROOT / ".github/workflows/deploy-admin-production.yml"
+    ).read_text()
+    public_compose = (
+        REPO_ROOT / "roo-standalone/docker-compose.yml"
+    ).read_text()
+    admin_compose = (
+        REPO_ROOT / "roo-standalone/docker-compose.admin.yml"
+    ).read_text()
+    nginx = (REPO_ROOT / "roo-standalone/nginx/roo.conf").read_text()
+
+    assert "push:" in workflow
+    assert "branches:" in workflow
+    assert "- main" in workflow
+    assert "environment: admin-roo-staging" not in workflow
+    assert "ADMIN_ROO_DO_HOST" not in workflow
+    assert "secrets.DO_HOST" in workflow
+    assert "git merge-base --is-ancestor" in workflow
+    assert "ROO_ENVIRONMENT=production" in workflow
+    assert "ROO_ENABLED_SKILLS=admin-brain" in workflow
+    assert "ORG_BRAIN_ENABLED=true" in workflow
+    assert "ORG_BRAIN_ACTIONS_ENABLED=false" in workflow
+    assert "ROO_CONTEXTUAL_RESPONSES_ENABLED=false" in workflow
+    assert "ROO_CONTEXTUAL_SHADOW_MODE=false" in workflow
+    assert "check_admin_pilot_config.py" in workflow
+    assert "check_admin_pilot_access.py" in workflow
+    assert "contextual_shadow_mode" in workflow
+    assert "roo-admin-gateway" in public_compose
+    assert "roo-admin-gateway" in admin_compose
+    assert "ports:" not in admin_compose
+    assert "location = /admin/slack/events" in nginx
+    assert "location = /admin/slack/actions" in nginx
+    assert "location = /admin/healthz/ready" in nginx

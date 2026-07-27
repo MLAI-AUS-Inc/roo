@@ -2,6 +2,7 @@
 
 # Database
 .env
+.env.admin
 *.db
 data/
 
