@@ -40,6 +40,12 @@ from ..linear_meeting_sources import (
     parse_linear_meeting_sources,
     source_text_chunks,
 )
+from ..linear_effort_sizing import (
+    assessment_metadata,
+    assess_studio_effort_batch,
+    is_studio_project,
+    is_terminal_candidate,
+)
 from ..llm import chat, embed, extract_text_from_image, get_llm_client
 from ..points_request_approval import (
     build_points_request_metadata,
@@ -2347,12 +2353,6 @@ Keep the response concise but informative."""
         contextual_auto_create_enabled = bool(
             getattr(settings, "LINEAR_CONTEXTUAL_AUTO_CREATE_ENABLED", True)
         )
-        meeting_action_label_ids = [
-            str(label.get("id"))
-            for label in labels
-            if self._normalize_match_text(label.get("name")) == "meetingaction"
-        ]
-
         # Resolve the optional fallback assignee once ("if unsure, assign to X").
         # Used to rescue candidates whose own owner can't be confidently matched so
         # they remain assignable instead of being dropped.
@@ -2404,11 +2404,27 @@ Keep the response concise but informative."""
                     except Exception as exc:
                         project_update_error = f"Could not create project update: {exc.__class__.__name__}: {exc}"
 
-        for raw_candidate in candidates[:20]:
+        prepared_candidates: list[dict[str, Any]] = []
+        for candidate_index, raw_candidate in enumerate(candidates[:20]):
             candidate = self._normalize_linear_meeting_candidate(raw_candidate)
             if raw_candidate.get("contextual_review_only"):
                 candidate["contextual_review_only"] = True
             if not candidate.get("title"):
+                continue
+            if is_terminal_candidate(candidate):
+                skipped.append(
+                    {
+                        "title": candidate["title"],
+                        "assignee": "Not applicable",
+                        "project": candidate.get("project_hint") or "Unresolved",
+                        "team": "Not applicable",
+                        "source": candidate.get("source_label") or "Slack thread",
+                        "evidence": candidate.get("evidence") or "",
+                        "due_date": candidate.get("due_date"),
+                        "confidence": candidate.get("confidence") or 0.0,
+                        "reason": f"Work is already {candidate.get('work_status') or 'terminal'}",
+                    }
+                )
                 continue
 
             if params.get("owner_hint") and (use_direct_issue_path or thread_reference_request):
@@ -2486,14 +2502,6 @@ Keep the response concise but informative."""
                 else:
                     decision = "skip"
 
-            issue_input = self._build_linear_meeting_issue_input(
-                candidate=candidate,
-                owner_match=owner_match,
-                project_match=project_match,
-                team_match=team_match,
-                label_ids=meeting_action_label_ids,
-                source=source,
-            )
             display = self._build_linear_meeting_candidate_display(
                 candidate,
                 owner_match,
@@ -2510,6 +2518,128 @@ Keep the response concise but informative."""
                 })
                 continue
 
+            if decision == "skip":
+                skip_reason = self._linear_meeting_skip_reason(
+                    candidate,
+                    owner_match,
+                    project_match,
+                    team_match,
+                    uncertain_threshold,
+                )
+                if candidate.get("contextual_review_only"):
+                    if float(owner_match.get("confidence") or 0.0) < uncertain_threshold:
+                        skip_reason = "Assignee unclear; mention who should own this and I can add it to Linear."
+                    elif float(project_match.get("confidence") or 0.0) < uncertain_threshold:
+                        skip_reason = "Project unclear; mention the Linear project and I can add it."
+                    elif float(team_match.get("confidence") or 0.0) < uncertain_threshold:
+                        skip_reason = "Linear team unclear; mention the team and I can add it."
+                skipped.append({**display, "reason": skip_reason})
+                continue
+
+            candidate_key = (
+                f"c{candidate_index}-"
+                f"{hashlib.sha256(candidate['title'].encode('utf-8')).hexdigest()[:12]}"
+            )
+            idempotency_key = self._linear_meeting_idempotency_key(
+                candidate=candidate,
+                source=source,
+                assignee_id=str((owner_match.get("user") or {}).get("id") or ""),
+                project_id=str((project_match.get("project") or {}).get("id") or ""),
+            )
+            prepared_candidates.append(
+                {
+                    "candidate_key": candidate_key,
+                    "idempotency_key": idempotency_key,
+                    "candidate": candidate,
+                    "owner_match": owner_match,
+                    "project_match": project_match,
+                    "team_match": team_match,
+                    "source": source,
+                    "decision": decision,
+                    "overall_confidence": overall_confidence,
+                    "display": display,
+                }
+            )
+
+        sizing_shadow = await self._size_linear_studio_prepared_candidates(
+            prepared_candidates=prepared_candidates,
+            client=client,
+            labels=labels,
+            settings=settings,
+            requester_slack_id=user_id,
+        )
+        sizing_mode = str(
+            getattr(settings, "LINEAR_STUDIO_SIZING_MODE", "off") or "off"
+        ).strip().lower()
+        if sizing_mode not in {"off", "shadow", "review", "required"}:
+            sizing_mode = "off"
+        sizing_auto_threshold = float(
+            getattr(
+                settings,
+                "LINEAR_STUDIO_SIZING_AUTO_CREATE_MIN_CONFIDENCE",
+                0.75,
+            )
+            or 0.75
+        )
+
+        for prepared in prepared_candidates:
+            candidate = prepared["candidate"]
+            project = (prepared["project_match"].get("project") or {})
+            team = prepared["team_match"].get("team") or {}
+            display = prepared["display"]
+            decision = prepared["decision"]
+            studio_candidate = is_studio_project(project)
+            replay_issue = prepared.get("receipt_replay_issue")
+            if isinstance(replay_issue, dict):
+                created.append(
+                    {
+                        **display,
+                        "issue": {**replay_issue, "idempotentReplay": True},
+                    }
+                )
+                continue
+            sizing_error = str(prepared.get("studio_sizing_error") or "")
+            if studio_candidate and sizing_mode in {"review", "required"}:
+                if sizing_error or not prepared.get("effort_assessment"):
+                    skipped.append(
+                        {
+                            **display,
+                            "reason": (
+                                "Studio effort sizing could not be completed; no unlabeled issue was created. "
+                                + (sizing_error or "Rerun the request after the sizing context is available.")
+                            )[:700],
+                        }
+                    )
+                    continue
+                if sizing_mode == "review":
+                    decision = "review"
+                else:
+                    assessment = prepared["effort_assessment"]
+                    if (
+                        float(assessment.get("confidence") or 0.0)
+                        < sizing_auto_threshold
+                        or not assessment.get("context_sufficient")
+                    ):
+                        decision = "review"
+
+            meeting_action_ids = self._linear_compatible_label_ids(
+                labels,
+                label_name="meeting-action",
+                team_id=str(team.get("id") or ""),
+            )
+            label_ids = meeting_action_ids[:1]
+            if studio_candidate and sizing_mode in {"review", "required"}:
+                label_ids.append(str(prepared["effort_label_id"]))
+            issue_input = self._build_linear_meeting_issue_input(
+                candidate=candidate,
+                owner_match=prepared["owner_match"],
+                project_match=prepared["project_match"],
+                team_match=prepared["team_match"],
+                label_ids=label_ids,
+                source=prepared["source"],
+                sizing_metadata=prepared.get("effort_assessment"),
+            )
+
             if decision == "create":
                 try:
                     issue = await client.create_issue(**issue_input)
@@ -2524,31 +2654,13 @@ Keep the response concise but informative."""
                     review_needed.append({**display, "pending_id": pending_id})
                 continue
 
-            if decision == "review":
-                pending_id = self._remember_linear_meeting_pending_action(
-                    requested_by=user_id,
-                    issue_input=issue_input,
-                    display=display,
-                    reason="Needs approval",
-                )
-                review_needed.append({**display, "pending_id": pending_id})
-                continue
-
-            skip_reason = self._linear_meeting_skip_reason(
-                candidate,
-                owner_match,
-                project_match,
-                team_match,
-                uncertain_threshold,
+            pending_id = self._remember_linear_meeting_pending_action(
+                requested_by=user_id,
+                issue_input=issue_input,
+                display=display,
+                reason="Needs approval",
             )
-            if candidate.get("contextual_review_only"):
-                if float(owner_match.get("confidence") or 0.0) < uncertain_threshold:
-                    skip_reason = "Assignee unclear; mention who should own this and I can add it to Linear."
-                elif float(project_match.get("confidence") or 0.0) < uncertain_threshold:
-                    skip_reason = "Project unclear; mention the Linear project and I can add it."
-                elif float(team_match.get("confidence") or 0.0) < uncertain_threshold:
-                    skip_reason = "Linear team unclear; mention the team and I can add it."
-            skipped.append({**display, "reason": skip_reason})
+            review_needed.append({**display, "pending_id": pending_id})
 
         message = self._format_linear_meeting_result_message(
             created,
@@ -2571,6 +2683,7 @@ Keep the response concise but informative."""
                 "created_count": len(created),
                 "review_count": len(review_needed),
                 "skipped_count": len(skipped),
+                "studio_sizing_shadow": sizing_shadow,
             },
         }
 
@@ -2856,6 +2969,12 @@ Return JSON only with this shape:
   "issue": {{
     "title": "imperative issue title",
     "description": "one or two sentence issue description",
+    "work_status": "open, completed, cancelled, or duplicate",
+    "completed_work": "work already completed, or empty",
+    "remaining_work": "specific work still required",
+    "available_artifacts": ["existing files, drafts, links, or other reusable outputs"],
+    "dependencies": ["blocking inputs, decisions, or related work"],
+    "acceptance_criteria": ["observable completion conditions"],
     "owner_hint": "person, Slack mention, or email",
     "project_hint": "project name if clear",
     "team_hint": "team if clear",
@@ -2915,6 +3034,12 @@ Return JSON only with this shape:
         fallback = {
             "title": self._linear_direct_issue_title_from_body(task_body),
             "description": task_body,
+            "work_status": "open",
+            "completed_work": "",
+            "remaining_work": task_body,
+            "available_artifacts": [],
+            "dependencies": [],
+            "acceptance_criteria": [],
             "owner_hint": owner_hint,
             "project_hint": project_hint,
             "evidence": text[:700],
@@ -2955,6 +3080,12 @@ Return JSON only:
     {{
       "title": "imperative issue title",
       "description": "one or two sentence issue description",
+      "work_status": "open, completed, cancelled, or duplicate",
+      "completed_work": "work already completed, or empty",
+      "remaining_work": "specific work still required",
+      "available_artifacts": ["existing files, drafts, links, or other reusable outputs"],
+      "dependencies": ["blocking inputs, decisions, or related work"],
+      "acceptance_criteria": ["observable completion conditions"],
       "owner_hint": "{owner_hint}",
       "project_hint": "{project_hint}",
       "due_date": null,
@@ -3162,6 +3293,12 @@ Return JSON only with this shape:
     {{
       "title": "imperative issue title",
       "description": "one or two sentence issue description",
+      "work_status": "open, completed, cancelled, or duplicate",
+      "completed_work": "work already completed, or empty",
+      "remaining_work": "specific work still required",
+      "available_artifacts": ["existing files, drafts, links, or other reusable outputs"],
+      "dependencies": ["blocking inputs, decisions, or related work"],
+      "acceptance_criteria": ["observable completion conditions"],
       "owner_hint": "person, Slack mention, or email",
       "project_hint": "project name if clear",
       "team_hint": "team if clear",
@@ -3177,7 +3314,7 @@ Return JSON only with this shape:
   ]
 }}
 
-Only include actionable work someone explicitly agreed, promised, or was asked to do. Set explicit_commitment=false when you had to reframe a discussion into possible work. Do not include decisions, FYIs, vague follow-ups, or the user's instruction to create Linear tasks/project updates.
+Only include actionable work someone explicitly agreed, promised, or was asked to do. Preserve completed/cancelled/duplicate status when the source says the work is terminal so Roo can suppress creation. Separate completed work from the work remaining. Set explicit_commitment=false when you had to reframe a discussion into possible work. Do not include decisions, FYIs, vague follow-ups, or the user's instruction to create Linear tasks/project updates.
 Resolve relative dates such as EOW from the source-local date above. In this Australian workspace, numeric dates are day/month unless the source makes another format explicit.
 If an action item has no clear owner and a default assignee is given above, set its owner_hint to that default assignee."""
         settings = get_settings()
@@ -3255,7 +3392,21 @@ If an action item has no clear owner and a default assignee is given above, set 
             existing_confidence = candidate_confidence = 0.0
         if candidate_confidence > existing_confidence:
             existing["confidence"] = candidate.get("confidence")
-            for field in ("title", "description", "owner_hint", "project_hint", "team_hint", "due_date", "priority"):
+            for field in (
+                "title",
+                "description",
+                "work_status",
+                "completed_work",
+                "remaining_work",
+                "available_artifacts",
+                "dependencies",
+                "acceptance_criteria",
+                "owner_hint",
+                "project_hint",
+                "team_hint",
+                "due_date",
+                "priority",
+            ):
                 if candidate.get(field):
                     existing[field] = candidate.get(field)
 
@@ -3639,6 +3790,34 @@ Chunk {index} source: {label}
     def _normalize_linear_meeting_candidate(self, candidate: dict[str, Any]) -> dict[str, Any]:
         title = str(candidate.get("title") or candidate.get("task") or "").strip()
         description = str(candidate.get("description") or candidate.get("details") or "").strip()
+        work_status = str(
+            candidate.get("work_status") or candidate.get("status") or "open"
+        ).strip().lower()
+        completed_work = str(candidate.get("completed_work") or "").strip()
+        remaining_work = str(
+            candidate.get("remaining_work") or description or title
+        ).strip()
+
+        def normalized_string_list(value: Any) -> list[str]:
+            if isinstance(value, str):
+                values = re.split(r"[\n,;]+", value)
+            elif isinstance(value, (list, tuple, set)):
+                values = list(value)
+            else:
+                values = []
+            return [
+                str(item).strip()[:500]
+                for item in values
+                if str(item).strip()
+            ][:20]
+
+        available_artifacts = normalized_string_list(
+            candidate.get("available_artifacts") or candidate.get("artifacts")
+        )
+        dependencies = normalized_string_list(candidate.get("dependencies"))
+        acceptance_criteria = normalized_string_list(
+            candidate.get("acceptance_criteria")
+        )
         owner_hint = str(candidate.get("owner_hint") or candidate.get("owner") or "").strip()
         project_hint = str(candidate.get("project_hint") or candidate.get("project") or "").strip()
         team_hint = str(candidate.get("team_hint") or candidate.get("team") or "").strip()
@@ -3674,6 +3853,12 @@ Chunk {index} source: {label}
         return {
             "title": title[:180],
             "description": description,
+            "work_status": work_status[:40],
+            "completed_work": completed_work[:3000],
+            "remaining_work": remaining_work[:3000],
+            "available_artifacts": available_artifacts,
+            "dependencies": dependencies,
+            "acceptance_criteria": acceptance_criteria,
             "owner_hint": owner_hint,
             "project_hint": project_hint,
             "team_hint": team_hint,
@@ -4203,6 +4388,292 @@ Chunk {index} source: {label}
             return "Team unclear"
         return "Low confidence mapping"
 
+    async def _size_linear_studio_prepared_candidates(
+        self,
+        *,
+        prepared_candidates: list[dict[str, Any]],
+        client: Any,
+        labels: list[dict[str, Any]],
+        settings: Any,
+        requester_slack_id: str,
+    ) -> list[dict[str, Any]]:
+        mode = str(
+            getattr(settings, "LINEAR_STUDIO_SIZING_MODE", "off") or "off"
+        ).strip().lower()
+        if mode not in {"off", "shadow", "review", "required"}:
+            mode = "off"
+        if mode == "off":
+            return []
+
+        studio_candidates = [
+            prepared
+            for prepared in prepared_candidates
+            if is_studio_project(prepared["project_match"].get("project") or {})
+        ]
+        receipt_reader = getattr(client, "get_issue_receipt", None)
+        if callable(receipt_reader) and studio_candidates:
+            async def read_receipt(prepared: dict[str, Any]) -> dict[str, Any]:
+                try:
+                    return await receipt_reader(prepared["idempotency_key"])
+                except Exception:
+                    return {}
+
+            receipts = await asyncio.gather(
+                *[read_receipt(prepared) for prepared in studio_candidates]
+            )
+            for prepared, receipt in zip(studio_candidates, receipts):
+                status = str(receipt.get("status") or "")
+                issue = receipt.get("issue")
+                if status == "completed" and isinstance(issue, dict):
+                    prepared["receipt_replay_issue"] = issue
+                    sizing = issue.get("sizingMetadata") or receipt.get("sizingMetadata")
+                    if isinstance(sizing, dict):
+                        prepared["display"]["effort_label"] = (
+                            sizing.get("effort_label")
+                            or sizing.get("effortLabel")
+                            or ""
+                        )
+                        prepared["display"]["effort_rationale"] = sizing.get(
+                            "rationale"
+                        ) or ""
+                elif status == "failed" and isinstance(
+                    receipt.get("sizingMetadata"),
+                    dict,
+                ):
+                    prepared["receipt_sizing_metadata"] = dict(
+                        receipt["sizingMetadata"]
+                    )
+
+        groups: dict[str, list[dict[str, Any]]] = {}
+        for prepared in studio_candidates:
+            project = prepared["project_match"].get("project") or {}
+            project_id = str(project.get("id") or "")
+            if project_id and not prepared.get("receipt_replay_issue"):
+                groups.setdefault(project_id, []).append(prepared)
+
+        shadow_results: list[dict[str, Any]] = []
+        for project_id, group in groups.items():
+            try:
+                project_context = await client.get_project_sizing_context(project_id)
+                live_project = project_context.get("project")
+                if not isinstance(live_project, dict) or str(
+                    live_project.get("id") or ""
+                ) != project_id:
+                    raise RuntimeError("Linear returned mismatched Studio project context.")
+                if not is_studio_project(live_project):
+                    raise RuntimeError(
+                        "The project name changed after matching; rerun the Slack command."
+                    )
+                sizing_candidates: list[dict[str, Any]] = []
+                for prepared in group:
+                    if prepared.get("receipt_sizing_metadata"):
+                        continue
+                    candidate = prepared["candidate"]
+                    source = prepared["source"]
+                    owner = prepared["owner_match"].get("user") or {}
+                    team = prepared["team_match"].get("team") or {}
+                    sizing_candidates.append(
+                        {
+                            "candidate_key": prepared["candidate_key"],
+                            "title": candidate.get("title"),
+                            "description": candidate.get("description"),
+                            "work_status": candidate.get("work_status"),
+                            "completed_work": candidate.get("completed_work"),
+                            "remaining_work": candidate.get("remaining_work"),
+                            "available_artifacts": candidate.get("available_artifacts"),
+                            "dependencies": candidate.get("dependencies"),
+                            "acceptance_criteria": candidate.get("acceptance_criteria"),
+                            "evidence": candidate.get("evidence"),
+                            "source_label": candidate.get("source_label"),
+                            "source_permalink": source.get("source_permalink"),
+                            "due_date": candidate.get("due_date"),
+                            "assignee": {
+                                "id": owner.get("id"),
+                                "name": owner.get("displayName")
+                                or owner.get("name")
+                                or owner.get("email"),
+                            },
+                            "team": {
+                                "id": team.get("id"),
+                                "key": team.get("key"),
+                                "name": team.get("name"),
+                            },
+                        }
+                    )
+                model = str(
+                    getattr(
+                        settings,
+                        "LINEAR_STUDIO_SIZING_MODEL",
+                        "gpt-5.6-sol",
+                    )
+                    or "gpt-5.6-sol"
+                )
+                assessments = (
+                    await assess_studio_effort_batch(
+                        candidates=sizing_candidates,
+                        project_context=project_context,
+                        model=model,
+                        reasoning_effort=str(
+                            getattr(
+                                settings,
+                                "LINEAR_STUDIO_SIZING_REASONING_EFFORT",
+                                "max",
+                            )
+                            or "max"
+                        ),
+                        timeout_seconds=float(
+                            getattr(
+                                settings,
+                                "LINEAR_STUDIO_SIZING_TIMEOUT_SECONDS",
+                                120.0,
+                            )
+                            or 120.0
+                        ),
+                        context_max_chars=int(
+                            getattr(
+                                settings,
+                                "LINEAR_STUDIO_SIZING_CONTEXT_MAX_CHARS",
+                                40000,
+                            )
+                            or 40000
+                        ),
+                        safety_identifier=(
+                            "roo-linear-"
+                            + hashlib.sha256(
+                                str(requester_slack_id or "unknown").encode("utf-8")
+                            ).hexdigest()[:24]
+                        ),
+                    )
+                    if sizing_candidates
+                    else {}
+                )
+                registry = project_context.get("effortLabelRegistry")
+                registry_labels = (
+                    registry.get("nodes")
+                    if isinstance(registry, dict)
+                    and isinstance(registry.get("nodes"), list)
+                    else labels
+                )
+                for prepared in group:
+                    stored_metadata = prepared.get("receipt_sizing_metadata")
+                    if isinstance(stored_metadata, dict):
+                        metadata = stored_metadata
+                        effort_label = str(
+                            metadata.get("effort_label")
+                            or metadata.get("effortLabel")
+                            or ""
+                        )
+                        rationale = str(metadata.get("rationale") or "")
+                        confidence = float(metadata.get("confidence") or 0.0)
+                        context_sufficient = bool(
+                            metadata.get("context_sufficient")
+                            if "context_sufficient" in metadata
+                            else metadata.get("contextSufficient", False)
+                        )
+                    else:
+                        assessment = assessments[prepared["candidate_key"]]
+                        metadata = assessment_metadata(
+                            assessment,
+                            project=live_project,
+                            model=model,
+                            rubric_version=str(
+                                getattr(
+                                    settings,
+                                    "LINEAR_STUDIO_SIZING_RUBRIC_VERSION",
+                                    "studio-effort-v1",
+                                )
+                                or "studio-effort-v1"
+                            ),
+                        )
+                        effort_label = assessment.effort_label
+                        rationale = assessment.rationale
+                        confidence = assessment.confidence
+                        context_sufficient = assessment.context_sufficient
+                    team = prepared["team_match"].get("team") or {}
+                    compatible_label_ids = self._linear_compatible_label_ids(
+                        registry_labels,
+                        label_name=effort_label,
+                        team_id=str(team.get("id") or ""),
+                        exact_name=True,
+                    )
+                    if len(compatible_label_ids) != 1:
+                        raise RuntimeError(
+                            f"Expected exactly one compatible Linear label named "
+                            f"{effort_label!r}; found {len(compatible_label_ids)}."
+                        )
+                    shadow_results.append(
+                        {
+                            "candidate_key": prepared["candidate_key"],
+                            "project": str(live_project.get("name") or ""),
+                            "effort_label": effort_label,
+                            "rationale": rationale,
+                            "confidence": confidence,
+                            "context_sufficient": context_sufficient,
+                            "reused_receipt_assessment": bool(stored_metadata),
+                        }
+                    )
+                    if mode == "shadow":
+                        continue
+                    prepared["effort_assessment"] = metadata
+                    prepared["effort_label_id"] = compatible_label_ids[0]
+                    prepared["display"]["effort_label"] = effort_label
+                    prepared["display"]["effort_rationale"] = rationale
+            except Exception as exc:
+                detail = f"{exc.__class__.__name__}: {exc}"
+                shadow_results.append(
+                    {
+                        "project_id": project_id,
+                        "error": detail,
+                    }
+                )
+                if mode in {"review", "required"}:
+                    for prepared in group:
+                        prepared["studio_sizing_error"] = detail
+        return shadow_results
+
+    def _linear_compatible_label_ids(
+        self,
+        labels: list[dict[str, Any]],
+        *,
+        label_name: str,
+        team_id: str,
+        exact_name: bool = False,
+    ) -> list[str]:
+        selected: list[dict[str, Any]] = []
+        for label in labels:
+            if not isinstance(label, dict) or label.get("archivedAt"):
+                continue
+            name_matches = (
+                str(label.get("name") or "") == label_name
+                if exact_name
+                else self._normalize_match_text(label.get("name"))
+                == self._normalize_match_text(label_name)
+            )
+            if not name_matches:
+                continue
+            label_team = label.get("team")
+            label_team_id = (
+                str(label_team.get("id") or "")
+                if isinstance(label_team, dict)
+                else ""
+            )
+            if label_team_id and label_team_id != str(team_id or ""):
+                continue
+            selected.append(label)
+        team_scoped = [
+            label
+            for label in selected
+            if isinstance(label.get("team"), dict)
+            and str((label.get("team") or {}).get("id") or "") == str(team_id or "")
+        ]
+        preferred = team_scoped or [
+            label
+            for label in selected
+            if not isinstance(label.get("team"), dict)
+            or not str((label.get("team") or {}).get("id") or "")
+        ]
+        return [str(label.get("id") or "") for label in preferred if label.get("id")]
+
     def _build_linear_meeting_issue_input(
         self,
         *,
@@ -4212,6 +4683,7 @@ Chunk {index} source: {label}
         team_match: dict[str, Any],
         label_ids: list[str],
         source: dict[str, Any],
+        sizing_metadata: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
         team = team_match.get("team") or {}
         owner = owner_match.get("user") or {}
@@ -4219,13 +4691,19 @@ Chunk {index} source: {label}
         issue_input = {
             "title": candidate["title"],
             "team_id": str(team.get("id") or ""),
-            "description": self._build_linear_meeting_issue_description(candidate, source),
+            "description": self._build_linear_meeting_issue_description(
+                candidate,
+                source,
+                sizing_metadata=sizing_metadata,
+            ),
             "assignee_id": str(owner.get("id") or "") or None,
             "project_id": str(project.get("id") or "") or None,
             "priority": candidate.get("priority", 3),
             "due_date": candidate.get("due_date"),
             "label_ids": label_ids,
         }
+        if sizing_metadata:
+            issue_input["sizing_metadata"] = sizing_metadata
         issue_input["idempotency_key"] = self._linear_meeting_idempotency_key(
             candidate=candidate,
             source=source,
@@ -4264,12 +4742,63 @@ Chunk {index} source: {label}
         self,
         candidate: dict[str, Any],
         source: dict[str, Any],
+        *,
+        sizing_metadata: Optional[dict[str, Any]] = None,
     ) -> str:
         lines = [
             "### Meeting action",
-            candidate.get("description") or candidate.get("title") or "",
+            candidate.get("remaining_work")
+            or candidate.get("description")
+            or candidate.get("title")
+            or "",
             "",
         ]
+        if candidate.get("completed_work"):
+            lines.extend(
+                [
+                    "### Work already completed",
+                    candidate["completed_work"],
+                    "",
+                ]
+            )
+        if candidate.get("available_artifacts"):
+            lines.extend(
+                [
+                    "### Available artifacts",
+                    *[f"- {item}" for item in candidate["available_artifacts"]],
+                    "",
+                ]
+            )
+        if candidate.get("dependencies"):
+            lines.extend(
+                [
+                    "### Dependencies",
+                    *[f"- {item}" for item in candidate["dependencies"]],
+                    "",
+                ]
+            )
+        if candidate.get("acceptance_criteria"):
+            lines.extend(
+                [
+                    "### Acceptance criteria",
+                    *[f"- {item}" for item in candidate["acceptance_criteria"]],
+                    "",
+                ]
+            )
+        if sizing_metadata:
+            effort_label = (
+                sizing_metadata.get("effort_label")
+                or sizing_metadata.get("effortLabel")
+                or ""
+            )
+            rationale = str(sizing_metadata.get("rationale") or "")
+            lines.extend(
+                [
+                    "### Effort estimate",
+                    f"**{effort_label}** — {rationale}",
+                    "",
+                ]
+            )
         if candidate.get("evidence"):
             lines.extend([
                 "### Evidence",
@@ -4378,11 +4907,15 @@ Chunk {index} source: {label}
                     detail = f"{item['assignee']} · {item['project']}"
                     if item.get("due_date"):
                         detail += f" · due {item['due_date']}"
+                    if item.get("effort_label"):
+                        detail += f" · {item['effort_label']}"
                     replay = " · already existed" if issue.get("idempotentReplay") else ""
                     lines.append(
                         f"- <{issue['url']}|{issue_label}> - {item['title']} "
                         f"({detail}{replay})"
                     )
+                    if item.get("effort_rationale"):
+                        lines.append(f"  Effort: {item['effort_rationale']}")
                 else:
                     lines.append(f"- {issue_label} - {item['title']}")
         if review_needed:
@@ -4390,10 +4923,13 @@ Chunk {index} source: {label}
                 lines.append("")
             lines.append(f"{len(review_needed)} action item{'s' if len(review_needed) != 1 else ''} need approval:")
             for item in review_needed[:20]:
-                lines.append(
+                review_line = (
                     f"- {item['title']} -> {item['project']} / {item['assignee']} "
                     f"({item['confidence']:.0%}, {item.get('source', 'Slack thread')})"
                 )
+                if item.get("effort_label"):
+                    review_line += f" · {item['effort_label']}: {item.get('effort_rationale', '')}"
+                lines.append(review_line)
         if skipped:
             if lines:
                 lines.append("")
@@ -4423,6 +4959,11 @@ Chunk {index} source: {label}
                 f"Project: `{item['project']}` | Assignee: `{item['assignee']}` | "
                 f"Confidence: `{item['confidence']:.0%}` | Source: `{item.get('source', 'Slack thread')}`"
             )
+            if item.get("effort_label"):
+                summary += (
+                    f"\nEffort: `{item['effort_label']}` — "
+                    f"{item.get('effort_rationale', '')}"
+                )
             if item.get("evidence"):
                 summary += f"\nEvidence: “{item['evidence']}”"
             value = json.dumps({"pending_id": pending_id, "requested_by": user_id})

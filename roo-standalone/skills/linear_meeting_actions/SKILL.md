@@ -57,6 +57,7 @@ This skill turns pasted Slack meeting transcripts, summaries, supported Slack fi
 - Assign new issues to the best matching Linear user.
 - Attach new issues to the best matching Linear project and team.
 - Avoid likely duplicate open issues and make retries idempotent from Slack source evidence.
+- For projects whose current Linear name starts exactly with `[Studio]`, estimate the remaining effort with the dedicated Studio rubric and apply exactly one compatible XS/S/M/L/XL label.
 - Ask for Slack approval when an action item is useful but not confident enough to create automatically.
 
 ## Parameters
@@ -85,10 +86,13 @@ This skill turns pasted Slack meeting transcripts, summaries, supported Slack fi
 7. Match owners by explicit requester/self-reference and Slack mention/email first, then unique Linear name/email-prefix match, then display/name similarity.
 8. Match projects by explicit project hint, exact name/slug, linked Slack channel, project description/content/update/recent issues, and true project membership as a tie-breaker.
 9. Resolve relative dates from the evidence message in the configured workspace timezone.
-10. Auto-create only explicit, high-confidence assignments; all discussion-derived, bulk, uncertain, and duplicate candidates remain review/skip paths.
-11. Send an idempotency fingerprint and preserve a Slack permalink in the Linear issue.
-12. Present uncertain candidates in Slack with Approve and Reject buttons.
-13. Report created project updates, created issues, skipped duplicates, and unresolved items clearly.
+10. Suppress candidates that are already completed, cancelled, or duplicates.
+11. For each resolved project whose current title starts exactly with `[Studio]`, read its bounded project updates, active work, terminal references, related issues, label registry, and labelled precedents. Estimate all candidates for the same project in one structured `gpt-5.6-sol` Responses API call at `max` reasoning effort.
+12. Estimate remaining work rather than original scope: XS is up to 15 minutes, S is up to 1 hour, M is up to 2 hours, L is up to 3 hours, and XL is up to 5 hours or has substantial uncertainty. Work over 5 hours is XL and should be split.
+13. Add the exact effort label and one-sentence rationale to the issue description and Slack preview. Never create an eligible Studio issue without exactly one valid effort label.
+14. Send an idempotency fingerprint and preserve a Slack permalink in the Linear issue.
+15. Present uncertain candidates in Slack with Approve and Reject buttons.
+16. Report created project updates, created issues, skipped duplicates, and unresolved items clearly.
 
 ## Creation Rules
 
@@ -97,7 +101,9 @@ This skill turns pasted Slack meeting transcripts, summaries, supported Slack fi
 - A contextual command can auto-create only when its source contains an explicit assignment/commitment and the assignee, project, team, and due date are unambiguous.
 - Do not auto-create contextual discussion-thread issues; always request Slack approval first.
 - Project updates are created immediately when explicitly requested and the project match is confident.
-- Apply the `meeting-action` label if it already exists. If it does not exist, create the issue without labels.
+- Apply the compatible `meeting-action` label if it already exists.
+- In Studio sizing `review` or `required` mode, apply exactly one of `Extra Small (XS)`, `Small (S)`, `Medium (M)`, `Large (L)`, or `Extra Large (XL)`. Fail closed if sizing context, structured output, or the compatible label is unavailable.
+- Studio sizing `shadow` mode captures estimates without mutating issue labels or descriptions; `review` sends every Studio candidate for approval; `required` may auto-create only a high-confidence, context-sufficient assessment.
 - Issue descriptions must include the context, evidence snippet, source message permalink/identifiers when available, and a note that Roo generated the issue from Slack context.
 
 ## Response Style

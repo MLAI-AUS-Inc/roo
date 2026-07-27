@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from typing import Any, Optional
+from urllib.parse import quote
 
 import httpx
 
@@ -11,6 +12,10 @@ from roo.clients.mlai_backend import MLAIBackendClient, MLAIBackendUnavailableEr
 LINEAR_MEETING_CONTEXT_ENDPOINT = "/api/v1/integrations/linear/meeting-context"
 LINEAR_MEETING_ISSUES_ENDPOINT = "/api/v1/integrations/linear/issues"
 LINEAR_MEETING_PROJECT_UPDATES_ENDPOINT = "/api/v1/integrations/linear/project-updates"
+
+
+class LinearIssueCreationInProgressError(RuntimeError):
+    pass
 
 
 class LinearMeetingActionsClient:
@@ -36,6 +41,7 @@ class LinearMeetingActionsClient:
         *,
         payload: Optional[dict[str, Any]] = None,
         timeout: float = 30.0,
+        allow_not_found: bool = False,
     ) -> dict[str, Any]:
         try:
             response = await self.backend._request(
@@ -51,6 +57,12 @@ class LinearMeetingActionsClient:
         except ValueError as exc:
             raise RuntimeError(str(exc)) from exc
 
+        if response.status_code == 404 and allow_not_found:
+            try:
+                data = response.json()
+            except ValueError:
+                data = {}
+            return data if isinstance(data, dict) else {"status": "not_found"}
         if response.status_code >= 400:
             message = self._backend_error_message(response)
             print(
@@ -58,6 +70,16 @@ class LinearMeetingActionsClient:
                 f"status={response.status_code} endpoint={endpoint} "
                 f"body={self._backend_response_body(response)}"
             )
+            try:
+                error_payload = response.json()
+            except ValueError:
+                error_payload = {}
+            if (
+                response.status_code == 409
+                and isinstance(error_payload, dict)
+                and error_payload.get("code") == "linear_issue_creation_in_progress"
+            ):
+                raise LinearIssueCreationInProgressError(message)
             raise RuntimeError(message)
         try:
             data = response.json()
@@ -92,6 +114,27 @@ class LinearMeetingActionsClient:
         context = await self._meeting_context()
         return _dict_list(context.get("recentIssues") or context.get("recent_issues"))
 
+    async def get_project_sizing_context(self, project_id: str) -> dict[str, Any]:
+        encoded_project_id = quote(str(project_id or "").strip(), safe="")
+        if not encoded_project_id:
+            raise ValueError("project_id is required")
+        return await self._request_json(
+            "GET",
+            f"/api/v1/integrations/linear/projects/{encoded_project_id}/sizing-context",
+            timeout=45.0,
+        )
+
+    async def get_issue_receipt(self, idempotency_key: str) -> dict[str, Any]:
+        encoded_key = quote(str(idempotency_key or "").strip(), safe="")
+        if not encoded_key:
+            raise ValueError("idempotency_key is required")
+        return await self._request_json(
+            "GET",
+            f"/api/v1/integrations/linear/issues/receipts/{encoded_key}",
+            timeout=15.0,
+            allow_not_found=True,
+        )
+
     async def create_issue(
         self,
         *,
@@ -104,6 +147,7 @@ class LinearMeetingActionsClient:
         due_date: Optional[str] = None,
         label_ids: Optional[list[str]] = None,
         idempotency_key: Optional[str] = None,
+        sizing_metadata: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "title": title,
@@ -123,13 +167,37 @@ class LinearMeetingActionsClient:
             payload["label_ids"] = label_ids
         if idempotency_key:
             payload["idempotency_key"] = idempotency_key
+        if sizing_metadata:
+            payload["sizing_metadata"] = sizing_metadata
 
-        return await self._request_json(
-            "POST",
-            LINEAR_MEETING_ISSUES_ENDPOINT,
-            payload=payload,
-            timeout=30.0,
-        )
+        try:
+            return await self._request_json(
+                "POST",
+                LINEAR_MEETING_ISSUES_ENDPOINT,
+                payload=payload,
+                timeout=45.0,
+            )
+        except LinearIssueCreationInProgressError:
+            if not idempotency_key:
+                raise
+            for delay in (0.25, 0.75, 1.5):
+                await asyncio.sleep(delay)
+                receipt = await self.get_issue_receipt(idempotency_key)
+                status = str(receipt.get("status") or "")
+                if status == "completed":
+                    issue = receipt.get("issue")
+                    if isinstance(issue, dict):
+                        return {**issue, "idempotentReplay": True}
+                if status == "failed":
+                    return await self._request_json(
+                        "POST",
+                        LINEAR_MEETING_ISSUES_ENDPOINT,
+                        payload=payload,
+                        timeout=45.0,
+                    )
+            raise RuntimeError(
+                "An identical Linear issue creation is still in progress; no duplicate was created."
+            )
 
     async def create_project_update(
         self,

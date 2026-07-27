@@ -437,6 +437,118 @@ async def test_linear_client_create_issue_calls_backend(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_linear_client_reads_project_sizing_context(monkeypatch):
+    module_path = (
+        Path(__file__).resolve().parents[2]
+        / "skills"
+        / "linear_meeting_actions"
+        / "client.py"
+    )
+    spec = importlib.util.spec_from_file_location("linear_sizing_context_client_test", module_path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    calls = []
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self):
+            return {"project": {"id": "project-1", "name": "[Studio] Founder Games"}}
+
+    class FakeBackend:
+        def __init__(self, **kwargs):
+            pass
+
+        async def _request(self, method, endpoint, **kwargs):
+            calls.append((method, endpoint, kwargs))
+            return FakeResponse()
+
+    monkeypatch.setattr(module, "MLAIBackendClient", FakeBackend)
+    client = module.LinearMeetingActionsClient()
+
+    context = await client.get_project_sizing_context("project-1")
+
+    assert context["project"]["name"] == "[Studio] Founder Games"
+    assert calls[0][1] == (
+        "/api/v1/integrations/linear/projects/project-1/sizing-context"
+    )
+
+
+@pytest.mark.asyncio
+async def test_linear_client_resolves_concurrent_create_from_receipt(monkeypatch):
+    module_path = (
+        Path(__file__).resolve().parents[2]
+        / "skills"
+        / "linear_meeting_actions"
+        / "client.py"
+    )
+    spec = importlib.util.spec_from_file_location("linear_receipt_client_test", module_path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    calls = []
+
+    class FakeResponse:
+        def __init__(self, status_code, payload):
+            self.status_code = status_code
+            self.payload = payload
+
+        def json(self):
+            return self.payload
+
+    responses = [
+        FakeResponse(
+            409,
+            {
+                "detail": "An identical creation is in progress.",
+                "code": "linear_issue_creation_in_progress",
+            },
+        ),
+        FakeResponse(
+            200,
+            {
+                "status": "completed",
+                "issue": {
+                    "identifier": "STU-1",
+                    "title": "Send the run sheet",
+                    "sizingMetadata": {"effortLabel": "Small (S)"},
+                },
+            },
+        ),
+    ]
+
+    class FakeBackend:
+        def __init__(self, **kwargs):
+            pass
+
+        async def _request(self, method, endpoint, **kwargs):
+            calls.append((method, endpoint, kwargs))
+            return responses.pop(0)
+
+    async def no_sleep(_delay):
+        return None
+
+    monkeypatch.setattr(module, "MLAIBackendClient", FakeBackend)
+    monkeypatch.setattr(module.asyncio, "sleep", no_sleep)
+    client = module.LinearMeetingActionsClient()
+
+    issue = await client.create_issue(
+        title="Send the run sheet",
+        team_id="team-1",
+        project_id="project-1",
+        label_ids=["effort-small"],
+        idempotency_key="a" * 64,
+        sizing_metadata={"effortLabel": "Small (S)"},
+    )
+
+    assert issue["identifier"] == "STU-1"
+    assert issue["idempotentReplay"] is True
+    assert calls[0][1] == "/api/v1/integrations/linear/issues"
+    assert calls[1][1].endswith("/" + ("a" * 64))
+
+
+@pytest.mark.asyncio
 async def test_linear_client_create_project_update_calls_backend(monkeypatch):
     module_path = (
         Path(__file__).resolve().parents[2]

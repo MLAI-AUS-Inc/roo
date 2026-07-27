@@ -3880,6 +3880,11 @@ async def slack_actions(
             created_text = f"Created <{issue['url']}|{issue_label}> from: {title}"
         else:
             created_text = f"Created {issue_label} from: {title}"
+        if display.get("effort_label"):
+            created_text += (
+                f"\nEffort: {display['effort_label']} — "
+                f"{display.get('effort_rationale', '')}"
+            )
         if reply_channel:
             post_message(channel=reply_channel, thread_ts=reply_thread_ts, text=created_text)
         return JSONResponse(status_code=200, content={})
