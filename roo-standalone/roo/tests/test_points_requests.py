@@ -92,6 +92,70 @@ class FakeTopupPurchaseClient:
         return self.response
 
 
+class FakeTopupButtonsClient:
+    def __init__(self, response=None):
+        self.created = None
+        self.response = response or {
+            "checkout_request_id": "EvTopup123",
+            "options": [
+                {
+                    "pack_id": "topup_5",
+                    "points_amount": 10,
+                    "amount_cents": 1999,
+                    "currency": "aud",
+                    "expires_at": "2026-07-28T10:00:00Z",
+                    "checkout_session_url": (
+                        "https://checkout.stripe.com/c/pay/cs_test_topup_5#checkout"
+                    ),
+                },
+                {
+                    "pack_id": "topup_10",
+                    "points_amount": 20,
+                    "amount_cents": 3699,
+                    "currency": "aud",
+                    "expires_at": "2026-07-28T10:00:00Z",
+                    "checkout_session_url": (
+                        "https://checkout.stripe.com/c/pay/cs_test_topup_10"
+                    ),
+                },
+                {
+                    "pack_id": "topup_25",
+                    "points_amount": 50,
+                    "amount_cents": 6399,
+                    "currency": "aud",
+                    "expires_at": "2026-07-28T10:00:00Z",
+                    "checkout_session_url": (
+                        "https://checkout.stripe.com/c/pay/cs_test_topup_25"
+                    ),
+                },
+            ],
+            "errors": [],
+        }
+
+    async def create_points_checkout_options(
+        self,
+        slack_user_id,
+        *,
+        checkout_request_id,
+        pack_ids=None,
+        purchase_from=None,
+    ):
+        self.created = {
+            "slack_user_id": slack_user_id,
+            "checkout_request_id": checkout_request_id,
+            "pack_ids": pack_ids,
+            "purchase_from": purchase_from,
+        }
+        if pack_ids is None:
+            return self.response
+        selected = [
+            option
+            for option in self.response["options"]
+            if option["pack_id"] in pack_ids
+        ]
+        return {**self.response, "options": selected}
+
+
 class FakeBalanceClient:
     def __init__(self, response):
         self.response = response
@@ -692,6 +756,163 @@ async def test_topup_points_missing_pack_lists_fixed_packs(monkeypatch):
     assert "20 Top-up Roo Points - A$36.99" in result
     assert "50 Top-up Roo Points - A$63.99" in result
     assert "price per point" not in result.lower()
+
+
+@pytest.mark.asyncio
+async def test_topup_points_missing_pack_posts_three_private_stripe_buttons(
+    monkeypatch,
+):
+    executor = SkillExecutor()
+    client = FakeTopupButtonsClient()
+    delivered = {}
+
+    monkeypatch.setattr(
+        executor_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            ROO_POINTS_TOPUP_ENABLED=True,
+            ROO_POINTS_TOPUP_BUTTONS_ENABLED=True,
+            roo_points_stripe_checkout_hosts={"checkout.stripe.com"},
+        ),
+    )
+    monkeypatch.setattr(
+        executor_module,
+        "post_ephemeral",
+        lambda **kwargs: delivered.update(kwargs) or {"ok": True},
+    )
+
+    result = await executor._handle_points_action(
+        client=client,
+        action="topup_points",
+        params={},
+        text="top up Roo Points",
+        user_id="U123",
+        channel_id="C123",
+        thread_ts="111.222",
+        skill=SimpleNamespace(name="mlai-points"),
+        request_id="EvTopup123",
+    )
+
+    assert result["suppress_post"] is True
+    assert result["message"] == ""
+    assert result["data"]["delivery"] == "ephemeral"
+    assert result["data"]["pack_ids"] == ["topup_5", "topup_10", "topup_25"]
+    assert client.created == {
+        "slack_user_id": "U123",
+        "checkout_request_id": "EvTopup123",
+        "pack_ids": None,
+        "purchase_from": {
+            "source": "slack",
+            "slack_channel_id": "C123",
+            "slack_thread_ts": "111.222",
+        },
+    }
+    assert delivered["channel"] == "C123"
+    assert delivered["user"] == "U123"
+    assert delivered["thread_ts"] == "111.222"
+    buttons = delivered["blocks"][1]["elements"]
+    assert [button["text"]["text"] for button in buttons] == [
+        "10 points · A$19.99",
+        "20 points · A$36.99",
+        "50 points · A$63.99",
+    ]
+    assert all(
+        button["url"].startswith("https://checkout.stripe.com/")
+        for button in buttons
+    )
+    assert buttons[1]["style"] == "primary"
+    assert "checkout.stripe.com" not in delivered["text"]
+
+
+@pytest.mark.asyncio
+async def test_topup_points_explicit_pack_returns_one_button_in_dm(monkeypatch):
+    executor = SkillExecutor()
+    client = FakeTopupButtonsClient()
+
+    monkeypatch.setattr(
+        executor_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            ROO_POINTS_TOPUP_ENABLED=True,
+            ROO_POINTS_TOPUP_BUTTONS_ENABLED=True,
+            roo_points_stripe_checkout_hosts={"checkout.stripe.com"},
+        ),
+    )
+    monkeypatch.setattr(
+        executor_module,
+        "post_ephemeral",
+        lambda **kwargs: pytest.fail("DM checkout must not use chat.postEphemeral"),
+    )
+
+    result = await executor._handle_points_action(
+        client=client,
+        action="topup_points",
+        params={"points": 20},
+        text="topup 20 points",
+        user_id="U123",
+        channel_id="D123",
+        thread_ts="111.222",
+        skill=SimpleNamespace(name="mlai-points"),
+        request_id="EvTopup20",
+    )
+
+    assert result["data"]["delivery"] == "direct_message"
+    assert result["data"]["pack_ids"] == ["topup_10"]
+    assert client.created["pack_ids"] == ["topup_10"]
+    buttons = result["blocks"][1]["elements"]
+    assert len(buttons) == 1
+    assert buttons[0]["text"]["text"] == "20 points · A$36.99"
+    assert "checkout.stripe.com" not in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_topup_points_rejects_untrusted_checkout_url(monkeypatch):
+    executor = SkillExecutor()
+    client = FakeTopupButtonsClient(
+        response={
+            "checkout_request_id": "EvEvil",
+            "options": [
+                {
+                    "pack_id": "topup_5",
+                    "points_amount": 10,
+                    "amount_cents": 1999,
+                    "currency": "aud",
+                    "checkout_session_url": "https://evil.example/checkout",
+                }
+            ],
+            "errors": [],
+        }
+    )
+
+    monkeypatch.setattr(
+        executor_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            ROO_POINTS_TOPUP_ENABLED=True,
+            ROO_POINTS_TOPUP_BUTTONS_ENABLED=True,
+            roo_points_stripe_checkout_hosts={"checkout.stripe.com"},
+        ),
+    )
+    monkeypatch.setattr(
+        executor_module,
+        "post_ephemeral",
+        lambda **kwargs: pytest.fail("Untrusted links must never be posted"),
+    )
+
+    result = await executor._handle_points_action(
+        client=client,
+        action="topup_points",
+        params={},
+        text="topup",
+        user_id="U123",
+        channel_id="C123",
+        thread_ts="111.222",
+        skill=SimpleNamespace(name="mlai-points"),
+        request_id="EvEvil",
+    )
+
+    assert "trusted Stripe Checkout links" in result
+    assert "evil.example" not in result
 
 
 @pytest.mark.asyncio
@@ -2053,6 +2274,64 @@ async def test_backend_client_create_points_purchase_uses_canonical_endpoint(mon
     assert recorder.calls[0]["headers"]["X-API-Key"] == "api-key"
     assert recorder.calls[0]["headers"]["X-Request-ID"].startswith("roo-")
     assert recorder.calls[0]["timeout"] == 10.0
+
+
+@pytest.mark.asyncio
+async def test_backend_client_create_checkout_options_uses_canonical_endpoint(
+    monkeypatch,
+):
+    response_payload = {
+        "checkout_request_id": "EvTopup123",
+        "options": [
+            {
+                "pack_id": "topup_10",
+                "points_amount": 20,
+                "amount_cents": 3699,
+                "currency": "aud",
+                "checkout_session_url": (
+                    "https://checkout.stripe.com/c/pay/cs_test_topup_10"
+                ),
+            }
+        ],
+        "errors": [],
+    }
+    recorder = RecordingAsyncClient(json_data=response_payload)
+    monkeypatch.setattr(backend_module.httpx, "AsyncClient", lambda: recorder)
+
+    client = backend_module.MLAIBackendClient(
+        base_url="https://backend.test",
+        api_key="api-key",
+        internal_api_key="internal-key",
+    )
+
+    result = await client.create_points_checkout_options(
+        slack_user_id="<@U123>",
+        checkout_request_id="EvTopup123",
+        pack_ids=["topup_10"],
+        purchase_from={
+            "slack_channel_id": "C123",
+            "slack_thread_ts": "111.222",
+        },
+    )
+
+    assert result == response_payload
+    assert len(recorder.calls) == 1
+    assert recorder.calls[0]["method"] == "POST"
+    assert (
+        recorder.calls[0]["url"]
+        == "https://backend.test/api/v1/points/purchases/checkout-options/"
+    )
+    assert recorder.calls[0]["json"] == {
+        "slack_user_id": "U123",
+        "checkout_request_id": "EvTopup123",
+        "pack_ids": ["topup_10"],
+        "purchase_from": {
+            "source": "slack",
+            "slack_channel_id": "C123",
+            "slack_thread_ts": "111.222",
+        },
+    }
+    assert recorder.calls[0]["timeout"] == 30.0
 
 
 @pytest.mark.asyncio

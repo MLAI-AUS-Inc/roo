@@ -2417,6 +2417,33 @@ class MLAIBackendClient:
         self._raise_for_status_or_backend_unavailable(response)
         return response.json()
 
+    async def create_points_checkout_options(
+        self,
+        slack_user_id: str,
+        *,
+        checkout_request_id: str,
+        pack_ids: Optional[list[str]] = None,
+        purchase_from: Optional[dict] = None,
+    ) -> dict:
+        """Create idempotent Stripe-hosted checkout options for Roo in Slack."""
+        payload = {
+            "slack_user_id": self._clean_slack_id(slack_user_id),
+            "checkout_request_id": str(checkout_request_id or "").strip(),
+            "purchase_from": {"source": "slack", **(purchase_from or {})},
+        }
+        if pack_ids is not None:
+            payload["pack_ids"] = list(pack_ids)
+
+        response = await self._request(
+            "POST",
+            f"{self._points_base}/purchases/checkout-options/",
+            json=payload,
+            timeout=30.0,
+            circuit_breaker=True,
+        )
+        self._raise_for_status_or_backend_unavailable(response)
+        return response.json()
+
     async def attach_points_request_slack_summary(
         self,
         request_id: int,

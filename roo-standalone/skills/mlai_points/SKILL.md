@@ -319,7 +319,7 @@ Call the appropriate MLAIBackendClient method with extracted parameters.
 ### Step 4: Format Response
 Generate friendly response with relevant information:
 - Balance: Show points count and encourage engagement
-- Top-up: Show only fixed pack prices or the MLAI checkout link; never show a price-per-point value
+- Top-up: Show fixed pack prices as private Stripe Checkout buttons; never show a price-per-point value
 - Tasks: Format as a short list with task code, points, and portfolio
 - Bookings: Confirm date and show remaining balance
 - Errors: Explain what went wrong and suggest alternatives
@@ -327,13 +327,18 @@ Generate friendly response with relevant information:
 ## Top-up Roo Points
 
 Allowed fixed packs:
-- `topup_5`: 5 Top-up Roo Points - A$19.99
-- `topup_10`: 10 Top-up Roo Points - A$36.99
-- `topup_25`: 25 Top-up Roo Points - A$63.99
+- `topup_5`: 10 Top-up Roo Points - A$19.99
+- `topup_10`: 20 Top-up Roo Points - A$36.99
+- `topup_25`: 50 Top-up Roo Points - A$63.99
 
 Top-up Roo Points are MLAI's internal community reward points. They are not money, have no cash value, cannot be converted to cash, and cannot be sold or transferred. The price of Top-up Roo Points does not represent a monetary value for Roo Points.
 
 Top-up Roo Points are optional and do not count toward lifetime earned contribution.
+
+When the user asks to top up without choosing a pack, show all three Stripe
+Checkout buttons. If the user names a valid pack, show only that pack's button.
+Checkout buttons must be private to the requester in shared channels. Stripe
+collects the Roo Points terms acknowledgement before payment.
 
 ## Response Style
 
