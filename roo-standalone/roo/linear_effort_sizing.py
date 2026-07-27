@@ -6,8 +6,11 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from .llm import get_llm_client
-
+from .linear_inference import (
+    LinearInferenceValidationError,
+    LinearReasoningSignals,
+    run_linear_structured_inference,
+)
 
 STUDIO_PROJECT_PREFIX = "[Studio]"
 STUDIO_EFFORT_LABELS = (
@@ -116,9 +119,6 @@ async def assess_studio_effort_batch(
     *,
     candidates: list[dict[str, Any]],
     project_context: dict[str, Any],
-    model: str,
-    reasoning_effort: str,
-    timeout_seconds: float,
     context_max_chars: int,
     safety_identifier: str | None = None,
 ) -> dict[str, StudioEffortAssessment]:
@@ -161,12 +161,52 @@ Rules:
 {serialized_context}
 </untrusted_linear_and_slack_evidence>
 """.strip()
-    client = get_llm_client("openai")
-    parse_method = getattr(client, "responses_parse", None)
-    if parse_method is None:
-        raise RuntimeError("The OpenAI client does not support structured Responses output.")
-    batch = await parse_method(
-        [
+
+    def validate_batch(batch: StudioEffortAssessmentBatch) -> None:
+        assessments = {item.candidate_key: item for item in batch.assessments}
+        if set(assessments) != set(candidate_keys):
+            raise LinearInferenceValidationError(
+                "Studio sizing response did not contain exactly one result per candidate."
+            )
+        unknown_refs = {
+            reference
+            for assessment in assessments.values()
+            for reference in assessment.evidence_refs
+            if reference not in evidence_refs
+        }
+        if unknown_refs:
+            raise LinearInferenceValidationError(
+                "Studio sizing response cited evidence that was not supplied."
+            )
+
+    context_collections = (
+        "projectUpdates",
+        "activeIssues",
+        "terminalReferences",
+        "sizingPrecedents",
+    )
+    source_count = 1
+    context_nodes: dict[str, list[dict[str, Any]]] = {}
+    for key in context_collections:
+        value = project_context.get(key)
+        nodes = value.get("nodes") if isinstance(value, dict) else None
+        if isinstance(nodes, list):
+            source_count += len(nodes)
+            context_nodes[key] = [
+                node for node in nodes if isinstance(node, dict)
+            ]
+    active_refs = {
+        str(node.get("identifier") or node.get("id") or "")
+        for node in context_nodes.get("activeIssues", [])
+        if node.get("identifier") or node.get("id")
+    }
+    terminal_refs = {
+        str(node.get("identifier") or node.get("id") or "")
+        for node in context_nodes.get("terminalReferences", [])
+        if node.get("identifier") or node.get("id")
+    }
+    inference = await run_linear_structured_inference(
+        messages=[
             {
                 "role": "system",
                 "content": (
@@ -176,27 +216,41 @@ Rules:
             },
             {"role": "user", "content": prompt},
         ],
-        StudioEffortAssessmentBatch,
-        model=model,
-        reasoning_effort=reasoning_effort,
-        timeout=timeout_seconds,
-        max_retries=1,
+        response_format=StudioEffortAssessmentBatch,
+        signals=LinearReasoningSignals(
+            stage="studio_effort",
+            source_chars=len(serialized_context),
+            source_count=source_count,
+            candidate_count=len(candidates),
+            explicit_project=True,
+            explicit_owner=all(
+                bool((candidate.get("assignee") or {}).get("id"))
+                for candidate in candidates
+            ),
+            ambiguity=any(
+                not candidate.get("remaining_work")
+                or not candidate.get("acceptance_criteria")
+                for candidate in candidates
+            ),
+            partial_work=any(
+                bool(candidate.get("completed_work"))
+                for candidate in candidates
+            ),
+            dependency_count=sum(
+                len(candidate.get("dependencies") or [])
+                for candidate in candidates
+            ),
+            artifact_count=sum(
+                len(candidate.get("available_artifacts") or [])
+                for candidate in candidates
+            ),
+            conflicting_context=bool(active_refs & terminal_refs),
+        ),
         safety_identifier=safety_identifier,
-        store=False,
+        validator=validate_batch,
     )
-    if not isinstance(batch, StudioEffortAssessmentBatch):
-        batch = StudioEffortAssessmentBatch.model_validate(batch)
+    batch = inference.value
     assessments = {item.candidate_key: item for item in batch.assessments}
-    if set(assessments) != set(candidate_keys):
-        raise ValueError("Studio sizing response did not contain exactly one result per candidate.")
-    unknown_refs = {
-        reference
-        for assessment in assessments.values()
-        for reference in assessment.evidence_refs
-        if reference not in evidence_refs
-    }
-    if unknown_refs:
-        raise ValueError("Studio sizing response cited evidence that was not supplied.")
     return assessments
 
 

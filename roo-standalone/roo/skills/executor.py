@@ -47,6 +47,17 @@ from ..linear_effort_sizing import (
     is_studio_project,
     is_terminal_candidate,
 )
+from ..linear_inference import (
+    LINEAR_SKILL_MODEL,
+    LinearContextualIssueResult,
+    LinearDirectIssueBatch,
+    LinearMeetingActionBatch,
+    LinearProjectSourceSummary,
+    LinearProjectUpdateResult,
+    LinearReasoningSignals,
+    linear_safety_identifier,
+    run_linear_structured_inference,
+)
 from ..llm import chat, embed, extract_text_from_image, get_llm_client
 from ..points_request_approval import (
     build_points_request_metadata,
@@ -2982,45 +2993,42 @@ Known Linear users: {user_names or "none loaded"}
 Referenced Slack thread:
 {source_excerpt}
 
-Return JSON only with this shape:
-{{
-  "issue": {{
-    "title": "imperative issue title",
-    "description": "one or two sentence issue description",
-    "work_status": "open, completed, cancelled, or duplicate",
-    "completed_work": "work already completed, or empty",
-    "remaining_work": "specific work still required",
-    "available_artifacts": ["existing files, drafts, links, or other reusable outputs"],
-    "dependencies": ["blocking inputs, decisions, or related work"],
-    "acceptance_criteria": ["observable completion conditions"],
-    "owner_hint": "person, Slack mention, or email",
-    "project_hint": "project name if clear",
-    "team_hint": "team if clear",
-    "evidence": "short phrase from the thread",
-    "source_label": "Slack thread",
-    "confidence": 0.0
-  }}
-}}"""
-        settings = get_settings()
-        response = await chat(
-            [
-                {"role": "system", "content": "You draft one review-only Linear issue from Slack context. Return valid JSON only."},
-                {"role": "user", "content": prompt},
-            ],
-            model=getattr(settings, "LINEAR_MEETING_LLM_MODEL", "gpt-5.5"),
-            reasoning_effort=getattr(settings, "LINEAR_MEETING_LLM_REASONING_EFFORT", "low"),
-        )
-        content = response.content.strip()
-        if content.startswith("```"):
-            content = re.sub(r"^```\w*\n?", "", content)
-            content = re.sub(r"\n?```$", "", content)
+Return one structured issue, or null when the thread is too vague."""
         try:
-            parsed = json.loads(content)
-        except json.JSONDecodeError:
+            inference = await run_linear_structured_inference(
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "Draft one review-only Linear issue from Slack context. "
+                            "Return only the structured result."
+                        ),
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                response_format=LinearContextualIssueResult,
+                signals=LinearReasoningSignals(
+                    stage="contextual_issue",
+                    source_chars=len(source_excerpt),
+                    source_count=max(1, len(sources)),
+                    explicit_project=bool(params.get("project_hint")),
+                    explicit_owner=bool(
+                        params.get("owner_hint") or params.get("owner")
+                    ),
+                    ambiguity=not bool(
+                        params.get("project_hint")
+                        and (params.get("owner_hint") or params.get("owner"))
+                    ),
+                ),
+                safety_identifier=linear_safety_identifier(
+                    params.get("requester_slack_id")
+                ),
+            )
+        except ValueError:
             return None
-        issue = parsed.get("issue") if isinstance(parsed, dict) else None
-        if not isinstance(issue, dict):
+        if inference.value.issue is None:
             return None
+        issue = inference.value.issue.model_dump(mode="json")
         candidate = self._normalize_linear_meeting_candidate(issue)
         if not candidate.get("title"):
             return None
@@ -3092,48 +3100,37 @@ Known Linear users: {user_names or "none loaded"}
 Slack command:
 {text[:12000]}
 
-Return JSON only:
-{{
-  "issues": [
-    {{
-      "title": "imperative issue title",
-      "description": "one or two sentence issue description",
-      "work_status": "open, completed, cancelled, or duplicate",
-      "completed_work": "work already completed, or empty",
-      "remaining_work": "specific work still required",
-      "available_artifacts": ["existing files, drafts, links, or other reusable outputs"],
-      "dependencies": ["blocking inputs, decisions, or related work"],
-      "acceptance_criteria": ["observable completion conditions"],
-      "owner_hint": "{owner_hint}",
-      "project_hint": "{project_hint}",
-      "due_date": null,
-      "priority": 3,
-      "evidence": "short phrase from the command",
-      "explicit_commitment": true,
-      "source_label": "Slack command",
-      "confidence": 0.96
-    }}
-  ]
-}}"""
-        settings = get_settings()
+Return the structured issue list. Preserve the parsed project and assignee hints."""
         try:
-            response = await chat(
-                [
-                    {"role": "system", "content": "You convert explicit Slack commands into Linear issue fields. Return valid JSON only."},
+            inference = await run_linear_structured_inference(
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "Convert explicit Slack commands into Linear issue fields. "
+                            "Return only the structured result."
+                        ),
+                    },
                     {"role": "user", "content": prompt},
                 ],
-                model=getattr(settings, "LINEAR_MEETING_LLM_MODEL", "gpt-5.5"),
-                reasoning_effort=getattr(settings, "LINEAR_MEETING_LLM_REASONING_EFFORT", "low"),
+                response_format=LinearDirectIssueBatch,
+                signals=LinearReasoningSignals(
+                    stage="direct_issue",
+                    source_chars=len(text),
+                    explicit_project=bool(project_hint),
+                    explicit_owner=bool(owner_hint),
+                ),
+                safety_identifier=linear_safety_identifier(
+                    params.get("requester_slack_id")
+                ),
             )
-            content = response.content.strip()
-            if content.startswith("```"):
-                content = re.sub(r"^```\w*\n?", "", content)
-                content = re.sub(r"\n?```$", "", content)
-            parsed = json.loads(content)
+            issues = [
+                issue.model_dump(mode="json")
+                for issue in inference.value.issues
+            ]
         except Exception:
-            parsed = {}
+            issues = []
 
-        issues = parsed.get("issues") if isinstance(parsed, dict) else []
         candidates: list[dict[str, Any]] = []
         for issue in issues or []:
             if not isinstance(issue, dict):
@@ -3251,18 +3248,23 @@ Return JSON only:
         projects: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
         candidates: list[dict[str, Any]] = []
-        for source in sources:
-            for chunk in source_text_chunks(source):
-                extracted = await self._extract_linear_meeting_candidates(
-                    transcript=chunk,
-                    params=params,
-                    users=users,
-                    projects=projects,
-                    source_label=source.label,
-                )
-                for item in extracted:
-                    item.setdefault("source_label", source.label)
-                    candidates.append(item)
+        source_chunks = [
+            (source, chunk)
+            for source in sources
+            for chunk in source_text_chunks(source)
+        ]
+        for source, chunk in source_chunks:
+            extracted = await self._extract_linear_meeting_candidates(
+                transcript=chunk,
+                params=params,
+                users=users,
+                projects=projects,
+                source_label=source.label,
+                source_count=max(1, len(source_chunks)),
+            )
+            for item in extracted:
+                item.setdefault("source_label", source.label)
+                candidates.append(item)
         return self._dedupe_linear_meeting_candidates(candidates)
 
     async def _extract_linear_meeting_candidates(
@@ -3273,6 +3275,7 @@ Return JSON only:
         users: list[dict[str, Any]],
         projects: list[dict[str, Any]],
         source_label: Optional[str] = None,
+        source_count: int = 1,
     ) -> list[dict[str, Any]]:
         from ..utils import get_current_date
 
@@ -3305,57 +3308,43 @@ Known Linear users: {user_names or "none loaded"}
 Meeting notes:
 {transcript[:12000]}
 
-Return JSON only with this shape:
-{{
-  "action_items": [
-    {{
-      "title": "imperative issue title",
-      "description": "one or two sentence issue description",
-      "work_status": "open, completed, cancelled, or duplicate",
-      "completed_work": "work already completed, or empty",
-      "remaining_work": "specific work still required",
-      "available_artifacts": ["existing files, drafts, links, or other reusable outputs"],
-      "dependencies": ["blocking inputs, decisions, or related work"],
-      "acceptance_criteria": ["observable completion conditions"],
-      "owner_hint": "person, Slack mention, or email",
-      "project_hint": "project name if clear",
-      "team_hint": "team if clear",
-      "due_expression": "the exact relative or absolute due phrase, or null",
-      "due_date": "YYYY-MM-DD or null",
-      "priority": 3,
-      "evidence": "short source phrase from notes",
-      "evidence_message_ts": "Slack ts from the matching [Slack message ts=...] marker, or null",
-      "explicit_commitment": true,
-      "source_label": "{source_label or "Slack thread"}",
-      "confidence": 0.0
-    }}
-  ]
-}}
-
 Only include actionable work someone explicitly agreed, promised, or was asked to do. Preserve completed/cancelled/duplicate status when the source says the work is terminal so Roo can suppress creation. Separate completed work from the work remaining. Set explicit_commitment=false when you had to reframe a discussion into possible work. Do not include decisions, FYIs, vague follow-ups, or the user's instruction to create Linear tasks/project updates.
 Resolve relative dates such as EOW from the source-local date above. In this Australian workspace, numeric dates are day/month unless the source makes another format explicit.
-If an action item has no clear owner and a default assignee is given above, set its owner_hint to that default assignee."""
-        settings = get_settings()
-        response = await chat(
-            [
-                {"role": "system", "content": "You extract structured meeting action items. Return valid JSON only."},
-                {"role": "user", "content": prompt},
-            ],
-            model=getattr(settings, "LINEAR_MEETING_LLM_MODEL", "gpt-5.5"),
-            reasoning_effort=getattr(settings, "LINEAR_MEETING_LLM_REASONING_EFFORT", "low"),
-        )
-        content = response.content.strip()
-        if content.startswith("```"):
-            content = re.sub(r"^```\w*\n?", "", content)
-            content = re.sub(r"\n?```$", "", content)
+If an action item has no clear owner and a default assignee is given above, set its owner_hint to that default assignee.
+Return the structured action_items list."""
         try:
-            parsed = json.loads(content)
-        except json.JSONDecodeError:
+            inference = await run_linear_structured_inference(
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "Extract structured meeting action items. "
+                            "Return only the structured result."
+                        ),
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                response_format=LinearMeetingActionBatch,
+                signals=LinearReasoningSignals(
+                    stage="meeting_actions",
+                    source_chars=len(transcript),
+                    source_count=max(1, source_count),
+                    explicit_project=bool(params.get("project_hint")),
+                    explicit_owner=bool(
+                        params.get("owner_hint")
+                        or params.get("default_assignee_hint")
+                    ),
+                ),
+                safety_identifier=linear_safety_identifier(
+                    params.get("requester_slack_id")
+                ),
+            )
+        except ValueError:
             return []
-        if isinstance(parsed, list):
-            return [item for item in parsed if isinstance(item, dict)]
-        items = parsed.get("action_items") if isinstance(parsed, dict) else []
-        return [item for item in items or [] if isinstance(item, dict)]
+        return [
+            item.model_dump(mode="json")
+            for item in inference.value.action_items
+        ]
 
     def _dedupe_linear_meeting_candidates(
         self,
@@ -3610,8 +3599,17 @@ If an action item has no clear owner and a default assignee is given above, set 
         source_summary = await self._summarize_linear_project_update_sources(
             sources=sources,
             settings=settings,
+            safety_identifier=linear_safety_identifier(
+                params.get("requester_slack_id")
+            ),
         )
         previous_update = self._format_linear_project_previous_update(project.get("lastUpdate"))
+        raw_last_update = project.get("lastUpdate")
+        last_update_health = (
+            str(raw_last_update.get("health") or "")
+            if isinstance(raw_last_update, dict)
+            else ""
+        )
         project_issue_context = self._format_linear_project_recent_issues(
             project,
             recent_issues or [],
@@ -3624,12 +3622,6 @@ If an action item has no clear owner and a default assignee is given above, set 
         prompt = f"""Write a concise Linear project update for {project_name}.
 
 Use the latest Linear project update as the baseline, and the meeting notes as the primary source for what changed since then.
-
-Return JSON only:
-{{
-  "body": "Markdown project update body",
-  "health": "onTrack|atRisk|offTrack"
-}}
 
 Use this structure in the body:
 - Summary
@@ -3653,27 +3645,59 @@ Meeting note summaries:
 Extracted action candidates:
 {candidate_lines or "none"}"""
         try:
-            response = await chat(
-                [
-                    {"role": "system", "content": "You write concise Linear project updates from meeting notes. Return valid JSON only."},
+            inference = await run_linear_structured_inference(
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "Write concise Linear project updates from meeting notes. "
+                            "Return only the structured result."
+                        ),
+                    },
                     {"role": "user", "content": prompt},
                 ],
-                model=getattr(settings, "LINEAR_MEETING_LLM_MODEL", "gpt-5.5"),
-                reasoning_effort=getattr(settings, "LINEAR_MEETING_LLM_REASONING_EFFORT", "low"),
-                max_tokens=1800,
+                response_format=LinearProjectUpdateResult,
+                signals=LinearReasoningSignals(
+                    stage="project_update_compose",
+                    source_chars=sum(
+                        len(value)
+                        for value in (
+                            source_summary,
+                            previous_update,
+                            project_issue_context,
+                            candidate_lines,
+                        )
+                    ),
+                    source_count=max(1, len(sources)),
+                    candidate_count=max(1, len(candidates)),
+                    explicit_project=True,
+                    explicit_owner=all(
+                        bool(candidate.get("owner_hint"))
+                        for candidate in candidates
+                    ),
+                    ambiguity=any(
+                        not candidate.get("owner_hint")
+                        for candidate in candidates
+                    ),
+                    conflicting_context=bool(
+                        last_update_health == "onTrack"
+                        and re.search(
+                            r"\b(?:at risk|off track|blocked|delayed|delay|risk)\b",
+                            source_summary,
+                            flags=re.IGNORECASE,
+                        )
+                    ),
+                ),
+                safety_identifier=linear_safety_identifier(
+                    params.get("requester_slack_id")
+                ),
             )
-            content = response.content.strip()
-            if content.startswith("```"):
-                content = re.sub(r"^```\w*\n?", "", content)
-                content = re.sub(r"\n?```$", "", content)
-            parsed = json.loads(content)
+            body = inference.value.body.strip()
+            health = inference.value.health
         except Exception:
-            parsed = {}
-
-        body = str(parsed.get("body") or "").strip() if isinstance(parsed, dict) else ""
-        health = str(parsed.get("health") or "onTrack").strip() if isinstance(parsed, dict) else "onTrack"
-        if health not in {"onTrack", "atRisk", "offTrack"}:
+            body = ""
             health = "onTrack"
+
         if not body:
             body = self._fallback_linear_meeting_project_update_body(project_name, candidates)
         body = self._ensure_linear_project_update_footer(body)
@@ -3688,6 +3712,7 @@ Extracted action candidates:
         *,
         sources: list[ParsedSource],
         settings: Any,
+        safety_identifier: Optional[str] = None,
     ) -> str:
         chunks: list[tuple[str, str]] = []
         for source in sources:
@@ -3701,27 +3726,35 @@ Extracted action candidates:
         for index, (label, chunk) in enumerate(chunks, start=1):
             prompt = f"""Summarize this meeting-notes chunk for a Linear project update.
 
-Return concise Markdown bullets under these headings only:
-- Work done
-- Decisions
-- Risks / open questions
-- Next steps
+Populate the structured work_done, decisions, risks_open_questions, and next_steps lists.
 
 Only include facts supported by the chunk. Omit empty headings.
 
 Chunk {index} source: {label}
 {chunk[:8000]}"""
             try:
-                response = await chat(
-                    [
-                        {"role": "system", "content": "You summarize meeting notes for concise project updates."},
+                inference = await run_linear_structured_inference(
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": (
+                                "Summarize meeting notes for concise project updates. "
+                                "Return only the structured result."
+                            ),
+                        },
                         {"role": "user", "content": prompt},
                     ],
-                    model=getattr(settings, "LINEAR_MEETING_LLM_MODEL", "gpt-5.5"),
-                    reasoning_effort=getattr(settings, "LINEAR_MEETING_LLM_REASONING_EFFORT", "low"),
-                    max_tokens=900,
+                    response_format=LinearProjectSourceSummary,
+                    signals=LinearReasoningSignals(
+                        stage="project_update_summary",
+                        source_chars=len(chunk),
+                        source_count=max(1, len(chunks)),
+                        explicit_project=True,
+                        explicit_owner=True,
+                    ),
+                    safety_identifier=safety_identifier,
                 )
-                summary = response.content.strip()
+                summary = inference.value.to_markdown().strip()
             except Exception:
                 summary = ""
             if summary:
@@ -4518,35 +4551,10 @@ Chunk {index} source: {label}
                             },
                         }
                     )
-                model = str(
-                    getattr(
-                        settings,
-                        "LINEAR_STUDIO_SIZING_MODEL",
-                        "gpt-5.6-sol",
-                    )
-                    or "gpt-5.6-sol"
-                )
                 assessments = (
                     await assess_studio_effort_batch(
                         candidates=sizing_candidates,
                         project_context=project_context,
-                        model=model,
-                        reasoning_effort=str(
-                            getattr(
-                                settings,
-                                "LINEAR_STUDIO_SIZING_REASONING_EFFORT",
-                                "max",
-                            )
-                            or "max"
-                        ),
-                        timeout_seconds=float(
-                            getattr(
-                                settings,
-                                "LINEAR_STUDIO_SIZING_TIMEOUT_SECONDS",
-                                120.0,
-                            )
-                            or 120.0
-                        ),
                         context_max_chars=int(
                             getattr(
                                 settings,
@@ -4555,11 +4563,8 @@ Chunk {index} source: {label}
                             )
                             or 40000
                         ),
-                        safety_identifier=(
-                            "roo-linear-"
-                            + hashlib.sha256(
-                                str(requester_slack_id or "unknown").encode("utf-8")
-                            ).hexdigest()[:24]
+                        safety_identifier=linear_safety_identifier(
+                            requester_slack_id
                         ),
                     )
                     if sizing_candidates
@@ -4593,7 +4598,7 @@ Chunk {index} source: {label}
                         metadata = assessment_metadata(
                             assessment,
                             project=live_project,
-                            model=model,
+                            model=LINEAR_SKILL_MODEL,
                             rubric_version=str(
                                 getattr(
                                     settings,

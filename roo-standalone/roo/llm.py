@@ -311,6 +311,8 @@ class OpenAIClient(BaseLLMClient):
         reasoning_effort = kwargs.get("reasoning_effort")
         if reasoning_effort:
             create_kwargs["reasoning"] = {"effort": reasoning_effort}
+        if kwargs.get("max_output_tokens"):
+            create_kwargs["max_output_tokens"] = int(kwargs["max_output_tokens"])
         if kwargs.get("safety_identifier"):
             create_kwargs["safety_identifier"] = kwargs["safety_identifier"]
         response = await self._request_client(kwargs).responses.parse(**create_kwargs)
