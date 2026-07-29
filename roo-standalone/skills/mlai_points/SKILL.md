@@ -339,6 +339,9 @@ When the user asks to top up without choosing a pack, show all three Stripe
 Checkout buttons. If the user names a valid pack, show only that pack's button.
 Checkout buttons must be private to the requester in shared channels. Stripe
 collects the Roo Points terms acknowledgement before payment.
+After delivering private buttons in a shared channel, post a short public
+confirmation in the thread so everyone can see that Roo responded. The public
+confirmation must not contain a checkout URL or any purchase details.
 
 ## Response Style
 

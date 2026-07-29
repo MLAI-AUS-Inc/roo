@@ -8913,9 +8913,12 @@ Chunk {index} source: {label}
                 blocks=blocks,
             )
             return {
-                "message": "",
+                "message": (
+                    f"🔒 I’ve sent <@{user_id}> private Stripe Checkout buttons. "
+                    "Only they can see them."
+                ),
                 "data": response_data,
-                "suppress_post": True,
+                "suppress_post": False,
             }
         return {
             "message": message,

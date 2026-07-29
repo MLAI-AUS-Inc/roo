@@ -793,8 +793,12 @@ async def test_topup_points_missing_pack_posts_three_private_stripe_buttons(
         request_id="EvTopup123",
     )
 
-    assert result["suppress_post"] is True
-    assert result["message"] == ""
+    assert result["suppress_post"] is False
+    assert result["message"] == (
+        "🔒 I’ve sent <@U123> private Stripe Checkout buttons. "
+        "Only they can see them."
+    )
+    assert "checkout.stripe.com" not in result["message"]
     assert result["data"]["delivery"] == "ephemeral"
     assert result["data"]["pack_ids"] == ["topup_5", "topup_10", "topup_25"]
     assert client.created == {
