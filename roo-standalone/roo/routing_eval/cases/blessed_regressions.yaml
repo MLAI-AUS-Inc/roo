@@ -7,6 +7,10 @@
 # the corresponding unit test in the same PR.
 
 # --- fast path (exact commands) ---
+- id: fast-link-founder-account
+  text: "link"
+  expect: {skill: mlai-points, action: link_founder_account}
+  tags: [blessed, fast-path]
 - id: fast-points
   text: "points"
   expect: {skill: mlai-points, action: balance}

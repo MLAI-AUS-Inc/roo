@@ -3730,7 +3730,11 @@ async def test_book_coworking_nudges_founder_when_charged_standard_price(tmp_pat
 
     class FakeCoworkingClient:
         async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None):
-            return {"points_cost": 8, "monthly_update_discount_applied": False}
+            return {
+                "points_cost": 8,
+                "monthly_update_discount_applied": False,
+                "founder_tools_account_linked": False,
+            }
 
         async def get_balance(self, slack_user_id):
             return {"balance": 12}
@@ -3754,8 +3758,9 @@ async def test_book_coworking_nudges_founder_when_charged_standard_price(tmp_pat
     assert "Booked you in for **2026-05-04**" in result["message"]
     assert "Cost: 8 points" in result["message"]
     assert "Balance remaining" not in result["message"]
-    assert "submit a monthly update" in result["message"]
-    assert "https://mlai.au/platform/login?app=founder-tools&next=/founder-tools" in result["message"]
+    assert "Already did your monthly update?" in result["message"]
+    assert "`@Roo link`" in result["message"]
+    assert "https://" not in result["message"]
 
 
 @pytest.mark.asyncio
@@ -3764,7 +3769,11 @@ async def test_book_coworking_omits_nudge_when_discount_applied(tmp_path, monkey
 
     class FakeCoworkingClient:
         async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None):
-            return {"points_cost": 4, "monthly_update_discount_applied": True}
+            return {
+                "points_cost": 4,
+                "monthly_update_discount_applied": True,
+                "founder_tools_account_linked": False,
+            }
 
         async def get_balance(self, slack_user_id):
             return {"balance": 12}
@@ -3788,5 +3797,42 @@ async def test_book_coworking_omits_nudge_when_discount_applied(tmp_path, monkey
     assert "Booked you in for **2026-05-04**" in result["message"]
     assert "Cost: 4 points" in result["message"]
     assert "Balance remaining" not in result["message"]
-    assert "submit a monthly update" not in result["message"]
-    assert "founder-tools" not in result["message"]
+    assert "@Roo link" not in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_book_coworking_omits_link_nudge_when_accounts_are_linked(
+    tmp_path,
+    monkeypatch,
+):
+    store = coworking_module.CoworkingBookingIntentStore(tmp_path / "intents.db")
+
+    class FakeCoworkingClient:
+        async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None):
+            return {
+                "points_cost": 8,
+                "monthly_update_discount_applied": False,
+                "founder_tools_account_linked": True,
+            }
+
+        async def get_balance(self, slack_user_id):
+            return {"balance": 12}
+
+    executor = SkillExecutor()
+    monkeypatch.setattr("roo.utils.get_current_date", lambda: date(2026, 5, 4))
+    monkeypatch.setattr(executor_module, "get_coworking_intent_store", lambda: store)
+    monkeypatch.setattr(executor_module, "send_dm", lambda *args, **kwargs: {"ok": True})
+
+    result = await executor._handle_points_action(
+        client=FakeCoworkingClient(),
+        action="book_coworking",
+        params={"date": "2026-05-04"},
+        text="book coworking today",
+        user_id="U123",
+        channel_id="C123",
+        thread_ts="111.222",
+        skill=SimpleNamespace(name="mlai-points"),
+    )
+
+    assert "Cost: 8 points" in result["message"]
+    assert "@Roo link" not in result["message"]

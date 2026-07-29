@@ -241,6 +241,41 @@ async def test_book_coworking_many_uses_canonical_endpoint_and_deduped_payload(m
 
 
 @pytest.mark.asyncio
+async def test_start_founder_account_link_uses_current_slack_identity(monkeypatch):
+    captured = {}
+
+    async def fake_request(method, endpoint, **kwargs):
+        captured["method"] = method
+        captured["endpoint"] = endpoint
+        captured["json"] = kwargs["json"]
+        request = httpx.Request(method, f"https://backend.test{endpoint}")
+        return httpx.Response(
+            201,
+            request=request,
+            json={
+                "status": "link_required",
+                "link_url": "https://mlai.au/founder-tools/link-roo?token=secret",
+            },
+        )
+
+    client = MLAIBackendClient(
+        base_url="https://backend.test",
+        api_key="roo-api-key",
+        internal_api_key="roo-api-key",
+    )
+    monkeypatch.setattr(client, "_request", fake_request)
+
+    result = await client.start_founder_account_link("<@U123>")
+
+    assert result["status"] == "link_required"
+    assert captured == {
+        "method": "POST",
+        "endpoint": "/api/v1/users/slack-founder-link/start/",
+        "json": {"slack_user_id": "U123"},
+    }
+
+
+@pytest.mark.asyncio
 async def test_get_data_catalog_uses_canonical_endpoint(monkeypatch):
     captured = {}
 

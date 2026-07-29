@@ -841,7 +841,7 @@ class RooAgent:
             r"(?:link|link (?:my )?(?:mlai |slack )?account|link my slack)",
             text_lower,
         ):
-            return "link_account"
+            return "link_founder_account"
 
         # 2. Explicit opt-in contribution total and owner-only deletion.
         if re.match(
@@ -955,18 +955,19 @@ class RooAgent:
                 thread_ts=thread_ts,
             )
 
-        if action == "link_account":
-            return await self._execute_fast_points(
-                user_id,
-                action,
-                channel_id=channel_id,
-                thread_ts=thread_ts,
-            )
-
         if action == "balance":
             return await self._execute_fast_points(
                 user_id,
                 "balance",
+                channel_id=channel_id,
+                thread_ts=thread_ts,
+            )
+
+        if action == "link_founder_account":
+            return await self._execute_fast_points(
+                user_id,
+                "link_founder_account",
+                text=text,
                 channel_id=channel_id,
                 thread_ts=thread_ts,
             )
@@ -1022,7 +1023,7 @@ class RooAgent:
         skill = next((s for s in self.skills if s.name == "mlai-points"), None)
         if not skill:
             return None
-            
+
         ClientClass = skill.get_client_class("MLAIBackendClient")
         if not ClientClass:
             return None
@@ -1035,7 +1036,7 @@ class RooAgent:
                 internal_api_key=settings.INTERNAL_API_KEY or settings.ROO_API_KEY or settings.MLAI_API_KEY,
             )
             
-            if action in {"flex_points", "delete_flex", "link_account"}:
+            if action in {"flex_points", "delete_flex"}:
                 msg = await self.skill_executor._handle_points_action(
                     client=client,
                     action=action,
@@ -1043,11 +1044,7 @@ class RooAgent:
                     text=(
                         "flex my points"
                         if action == "flex_points"
-                        else (
-                            "delete my flex"
-                            if action == "delete_flex"
-                            else "link"
-                        )
+                        else "delete my flex"
                     ),
                     user_id=user_id,
                     channel_id=kwargs.get("channel_id"),
@@ -1066,7 +1063,19 @@ class RooAgent:
                     thread_ts=kwargs.get("thread_ts"),
                     skill=skill,
                 )
-                
+
+            elif action == "link_founder_account":
+                msg = await self.skill_executor._handle_points_action(
+                    client=client,
+                    action="link_founder_account",
+                    params={},
+                    text=kwargs.get("text", "link"),
+                    user_id=user_id,
+                    channel_id=kwargs.get("channel_id"),
+                    thread_ts=kwargs.get("thread_ts"),
+                    skill=skill,
+                )
+
             elif action == "list_tasks":
                 msg = await self.skill_executor._handle_points_action(
                     client=client,

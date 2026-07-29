@@ -5,8 +5,9 @@ routing:
   use_when: >
     The user wants to check or spend THEIR Roo points, see point history, list/claim/
     submit/manage claimable community tasks, book or cancel coworking days, browse or
-    request rewards, buy top-up packs, request points, or administer the points system
-    (award/deduct points, promote admins, allowances).
+    request rewards, buy top-up packs, link their Roo Slack account to the Founder
+    Tools account used for Monthly Updates, request points, or administer the points
+    system (award/deduct points, promote admins, allowances).
   avoid_when: >
     "Task"/"ticket"/"issue" in the context of Linear or meetings (linear-meeting-actions).
     Event attendance numbers (luma-events). Booking rooms or non-coworking logistics.
@@ -19,11 +20,19 @@ routing:
     - {text: "claim task ROO-12", action: claim_task}
     - {text: "how busy was the coworking space in may?", action: coworking_report}
     - {text: "give 10 points to @member for organising the meetup", action: award_points}
+    - {text: "I need more points", action: topup_points}
+    - {text: "add roo points", action: topup_points}
+    - {text: "link", action: link_founder_account}
+    - {text: "link my Founder Tools account", action: link_founder_account}
   negative_examples:
     - {text: "add a task to linear to fix the login bug", instead: linear-meeting-actions}
     - {text: "book club is meeting thursday, can you remind the channel?", instead: respond_in_chat}
     - {text: "how many people came to our last event?", instead: luma-events}
+    - {text: "link my GitHub account", instead: github-integration}
+    - {text: "connect me with a founder", instead: connect-users}
 actions:
+  - name: link_founder_account
+    description: Privately link the current Slack user's Roo account to their authenticated Founder Tools account.
   - name: balance
     description: Privately show the user their current points balance.
   - name: flex_points
@@ -150,6 +159,7 @@ to explicitly say `room` or `meeting room`.
 - Link their own Slack identity to an existing MLAI account with the same email
 - Check points balance and history
 - Flex a lifetime-earned total in the request thread and delete your own flex later
+- Link the current Slack account to a separate Founder Tools account used for Monthly Updates
 - Request points for yourself in Slack for admin approval
 - View task queues and claim open tasks
 - Submit completed work for approval
@@ -197,7 +207,7 @@ Example responses:
 
 ## Parameters
 
-- **action**: The action to perform (required) - e.g., "balance", "request_points", "topup_points", "book_coworking", "admin_checkin_coworking", "coworking_report", "claim_task", "submit_task", "award_points", "create_task"
+- **action**: The action to perform (required) - e.g., "link_founder_account", "balance", "request_points", "topup_points", "book_coworking", "admin_checkin_coworking", "coworking_report", "claim_task", "submit_task", "award_points", "create_task"
 - **pack_id**: Top-up pack ID for `topup_points`; one of `topup_5`, `topup_10`, or `topup_25`
 - **task_id**: Task ID number or task code (for example `42` or `ROO-0042`) for task-related actions
 - **date**: Date for coworking bookings (YYYY-MM-DD format)
@@ -235,6 +245,7 @@ Parse user messages to identify the action and parameters:
 
 | Pattern | Action | Example |
 |---------|--------|---------|
+| `link`, `link my Founder Tools account` | link_founder_account | "@Roo link" |
 | `points`, `balance` | balance | "What's my points balance?", "@Roo points" |
 | `topup`, `top up Roo Points`, `buy <n> Roo Points`, `purchase <n> Roo Points`, `pay for Roo Points`, `add Roo Points`, `I need more points` | topup_points | "@Roo buy 10 Roo Points" |
 | `request <n> points for <reason>` | request_points | "Request 5 points for helping at the event" |

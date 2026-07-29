@@ -65,6 +65,47 @@ def _patch_route(monkeypatch, decision: RouteDecision, captured: dict):
     monkeypatch.setattr(RooAgent, "_route_v2", fake_route)
 
 
+def test_founder_account_link_fast_path_is_exact_and_avoids_collisions():
+    agent = _make_agent()
+
+    assert agent._match_fast_path("link") == "link_founder_account"
+    assert agent._match_fast_path(" LINK ") == "link_founder_account"
+    assert agent._match_fast_path("link my github account") is None
+    assert agent._match_fast_path("connect me with a founder") is None
+
+
+def test_founder_account_link_fast_path_executes_with_event_context(monkeypatch):
+    agent = _make_agent()
+    captured = {}
+
+    async def fake_execute(user_id, action, **kwargs):
+        captured.update({"user_id": user_id, "action": action, **kwargs})
+        return {
+            "message": "sent privately",
+            "data": {"action": action},
+        }
+
+    monkeypatch.setattr(agent, "_execute_fast_points", fake_execute)
+
+    result = asyncio.run(
+        agent._try_fast_path(
+            "link",
+            "U123",
+            channel_id="C123",
+            thread_ts="111.222",
+        )
+    )
+
+    assert result["message"] == "sent privately"
+    assert captured == {
+        "user_id": "U123",
+        "action": "link_founder_account",
+        "text": "link",
+        "channel_id": "C123",
+        "thread_ts": "111.222",
+    }
+
+
 def test_handle_mention_normalizes_slack_link_and_passes_scan_params(monkeypatch):
     agent = _make_agent()
     captured = {}

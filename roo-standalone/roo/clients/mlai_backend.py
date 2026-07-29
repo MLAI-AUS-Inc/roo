@@ -2312,7 +2312,21 @@ class MLAIBackendClient:
         )
         response.raise_for_status()
         return response.json()
-    
+
+    async def start_founder_account_link(self, slack_user_id: str) -> dict:
+        """Create a short-lived Founder Tools link for the current Slack user."""
+        response = await self._request(
+            "POST",
+            "/api/v1/users/slack-founder-link/start/",
+            json={"slack_user_id": self._clean_slack_id(slack_user_id)},
+            timeout=15.0,
+            transport_retries=1,
+            retry_backoff_seconds=0.5,
+            circuit_breaker=True,
+        )
+        self._raise_for_status_or_backend_unavailable(response)
+        return response.json()
+
     async def get_github_auth_url(self, slack_user_id: str, domain: Optional[str] = None) -> dict:
         """Get the GitHub OAuth URL for a user from the backend."""
         params = {"slack_user_id": slack_user_id}

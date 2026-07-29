@@ -12413,6 +12413,101 @@ Chunk {index} source: {label}
             "data": response_data,
         }
 
+    @staticmethod
+    def _is_safe_founder_account_link_url(link_url: str) -> bool:
+        parsed = urlsplit(link_url)
+        try:
+            port = parsed.port
+        except ValueError:
+            return False
+        if not parsed.hostname or parsed.username or parsed.password:
+            return False
+        if parsed.scheme == "https" and port in {None, 443}:
+            return True
+        return (
+            parsed.scheme == "http"
+            and parsed.hostname.lower() in {"localhost", "127.0.0.1", "::1"}
+        )
+
+    def _founder_account_link_button_response(
+        self,
+        *,
+        link_url: str,
+        user_id: str,
+        channel_id: Optional[str],
+    ) -> dict:
+        message = (
+            "Connect Roo to the Founder Tools account you use for Monthly Updates. "
+            "Your Roo Points, bookings, and points history will stay on this Slack account."
+        )
+        blocks = [
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": message},
+            },
+            {
+                "type": "actions",
+                "elements": [
+                    {
+                        "type": "button",
+                        "text": {
+                            "type": "plain_text",
+                            "text": "Link Founder Tools account",
+                            "emoji": True,
+                        },
+                        "url": link_url,
+                        "action_id": "roo_link_founder_account",
+                        "style": "primary",
+                        "accessibility_label": (
+                            "Link this Roo Slack account to your Founder Tools account"
+                        ),
+                    }
+                ],
+            },
+            {
+                "type": "context",
+                "elements": [
+                    {
+                        "type": "mrkdwn",
+                        "text": (
+                            "This private, one-time link expires in 30 minutes. "
+                            "Only continue if you requested it."
+                        ),
+                    }
+                ],
+            },
+        ]
+        response_data = {
+            "action": "link_founder_account",
+            "delivery": "direct_message",
+        }
+        if channel_id and not channel_id.startswith("D"):
+            dm_response = send_dm(user_id, message, blocks=blocks)
+            if not dm_response or not dm_response.get("ok"):
+                return {
+                    "message": (
+                        f"I couldn't open a private Slack DM for <@{user_id}>. "
+                        "Please DM Roo `link` and I'll create a fresh account-link button there."
+                    ),
+                    "data": {
+                        **response_data,
+                        "delivery_failed": True,
+                    },
+                    "suppress_post": False,
+                }
+            return {
+                "message": (
+                    f"I sent <@{user_id}> a private account-link button. Check your DMs."
+                ),
+                "data": response_data,
+                "suppress_post": False,
+            }
+        return {
+            "message": message,
+            "blocks": blocks,
+            "data": response_data,
+        }
+
     def _normalize_points_routing_text(self, text: str) -> str:
         """Normalize common Slack typo variants before deterministic routing."""
         text_lower = str(text or "").lower()
@@ -13896,6 +13991,7 @@ Chunk {index} source: {label}
         admin_checkin: bool,
         discount_applied: bool = False,
         include_balance: bool = True,
+        founder_tools_account_linked: bool = False,
     ) -> str:
         point_word = "point" if cost == 1 else "points"
         if admin_checkin:
@@ -13921,14 +14017,10 @@ Chunk {index} source: {label}
             f"See you there, legend!"
         )
 
-        # Nudge founders who paid the standard (undiscounted) price: submitting a
-        # monthly startup update lowers the coworking cost for that month. The
-        # backend tells us whether the discount already applied.
-        if not discount_applied:
+        if not discount_applied and not founder_tools_account_linked:
             message += (
-                "\n\n💡 Startup founders get a discount on coworking bookings when they "
-                "submit a monthly update for their startup. Submit yours here: "
-                "https://mlai.au/platform/login?app=founder-tools&next=/founder-tools"
+                "\n\nAlready did your monthly update? Link your Founder Tools account "
+                "by typing `@Roo link`."
             )
 
         return message
@@ -14214,6 +14306,9 @@ Chunk {index} source: {label}
         # The backend is the single source of truth for whether the
         # monthly-update discount applied; we only render the nudge off this.
         discount_applied = bool(result.get("monthly_update_discount_applied", False))
+        founder_tools_account_linked = bool(
+            result.get("founder_tools_account_linked", False)
+        )
         from roo.clients.mlai_backend import MLAIBackendUnavailableError
 
         new_balance = None
@@ -14230,6 +14325,7 @@ Chunk {index} source: {label}
             new_balance=new_balance,
             admin_checkin=False,
             discount_applied=discount_applied,
+            founder_tools_account_linked=founder_tools_account_linked,
         )
         public_message = self._format_coworking_booking_success(
             booking_date=booking_date,
@@ -14239,6 +14335,7 @@ Chunk {index} source: {label}
             admin_checkin=admin_checkin,
             discount_applied=discount_applied,
             include_balance=False,
+            founder_tools_account_linked=founder_tools_account_linked,
         )
         return self._deliver_personal_points_message(
             recipient_user_id=target_user_id,
@@ -14268,76 +14365,46 @@ Chunk {index} source: {label}
         # Member Actions
         # =====================================================================
 
-        if action == "link_account":
-            from ..slack_client import (
-                SlackIdentityLookupError,
-                get_verified_user_email,
-            )
-
+        if action == "link_founder_account":
             try:
-                email = get_verified_user_email(user_id)
-            except SlackIdentityLookupError:
-                private_message = (
-                    "I couldn't verify an email for your Slack profile, so I didn't "
-                    "change any account link. Ask an MLAI admin to check your Slack "
-                    "profile email and try again."
+                result = await client.start_founder_account_link(user_id)
+            except MLAIBackendUnavailableError:
+                return (
+                    "I couldn't create a Founder Tools account link right now. "
+                    "Please try `link` again shortly."
                 )
-            else:
-                try:
-                    linked_user_id = await client.link_slack_user(user_id, email)
-                except httpx.HTTPStatusError as exc:
-                    if exc.response.status_code == 409:
-                        private_message = (
-                            "That MLAI account is already linked to another Slack "
-                            "profile, so I didn't change either account. Ask an MLAI "
-                            "admin to resolve the existing link."
-                        )
-                    else:
-                        print(
-                            "Slack account link failed "
-                            f"status={exc.response.status_code}"
-                        )
-                        private_message = (
-                            "I couldn't safely link your Slack and MLAI accounts right now. "
-                            "Nothing was confirmed—please try `link` again in a moment."
-                        )
-                except Exception as exc:
-                    print(
-                        "Slack account link failed "
-                        f"exc_type={exc.__class__.__name__}"
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code == 404:
+                    return (
+                        "I couldn't find your Roo Points account yet. "
+                        "Please try a points command first, then send `link` again."
                     )
-                    private_message = (
-                        "I couldn't safely link your Slack and MLAI accounts right now. "
-                        "Nothing was confirmed—please try `link` again in a moment."
-                    )
-                else:
-                    if linked_user_id is None:
-                        private_message = (
-                            "I couldn't find an existing MLAI account with the same "
-                            "email as your Slack profile. Sign in to MLAI with that "
-                            "email, or ask an MLAI admin to update your account email, "
-                            "then try `link` again."
-                        )
-                    else:
-                        private_message = (
-                            "✅ Your Slack profile is linked to your MLAI account. "
-                            "You can now try `book me in` again."
-                        )
+                return (
+                    "I couldn't create a Founder Tools account link right now. "
+                    "Please try `link` again shortly."
+                )
 
-            return self._deliver_personal_points_message(
-                recipient_user_id=user_id,
-                requester_user_id=user_id,
+            if result.get("status") == "already_linked":
+                return (
+                    "Your Roo Slack account is already linked to a Founder Tools account."
+                )
+
+            link_url = str(result.get("link_url") or "").strip()
+            if (
+                result.get("status") != "link_required"
+                or not self._is_safe_founder_account_link_url(link_url)
+            ):
+                return (
+                    "I couldn't create a trusted Founder Tools account link right now. "
+                    "Please try `link` again shortly."
+                )
+
+            return self._founder_account_link_button_response(
+                link_url=link_url,
+                user_id=user_id,
                 channel_id=channel_id,
-                thread_ts=thread_ts,
-                private_message=private_message,
-                action="link_account",
-                private_ack="I've sent your account-link result privately.",
-                private_failure_ack=(
-                    "I couldn't send you a DM. Open Roo's direct messages and "
-                    "run `link` there to see the result privately."
-                ),
             )
-        
+
         if action == "topup_points":
             settings = get_settings()
             if not getattr(settings, "ROO_POINTS_TOPUP_ENABLED", False):
