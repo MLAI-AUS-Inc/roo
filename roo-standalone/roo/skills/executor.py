@@ -51,6 +51,7 @@ from ..linear_inference import (
     LINEAR_SKILL_MODEL,
     LinearContextualIssueResult,
     LinearDirectIssueBatch,
+    LinearInferenceTimeoutError,
     LinearMeetingActionBatch,
     LinearProjectSourceSummary,
     LinearProjectUpdateResult,
@@ -94,6 +95,17 @@ VICTOR_AI_ACCESS_UNAVAILABLE_MESSAGE = (
     "Victor application data is not available in this conversation."
 )
 LINEAR_MEETING_PENDING_ACTIONS: dict[str, dict[str, Any]] = {}
+LINEAR_MEETING_EXTRACTION_CONCURRENCY = 2
+LINEAR_MEETING_EXTRACTION_TOTAL_TIMEOUT_SECONDS = 240.0
+LINEAR_MEETING_TIMEOUT_RECOVERY_MAX_CHARS = 5_000
+LINEAR_MEETING_TIMEOUT_RECOVERY_OVERLAP_CHARS = 300
+LINEAR_MEETING_TIMEOUT_RECOVERY_DEPTH = 1
+
+
+class LinearMeetingExtractionDeadlineError(RuntimeError):
+    """The complete meeting-action extraction exceeded its wall-clock budget."""
+
+
 # Pack ids are opaque and kept stable; the id number no longer matches the
 # points it grants (points were doubled for the same price). Must stay in sync
 # with mlai-backend roo/services.py ROO_TOPUP_PACKS.
@@ -2783,32 +2795,60 @@ Keep the response concise but informative."""
                 "message": f"I couldn't read Linear context yet: {detail}"
             }
 
-        if use_direct_issue_path:
-            candidates = await self._extract_linear_direct_issue_candidates(
-                text=text,
-                params=params,
-                users=users,
-                projects=projects,
-            )
-        else:
-            candidates = await self._extract_linear_meeting_candidates_from_sources(
-                sources=source_result.sources,
-                params=params,
-                users=users,
-                projects=projects,
-            )
         project_update_requested = self._linear_meeting_project_update_requested(text, params)
         contextual_review_mode = False
-        if not candidates and thread_reference_request and not project_update_requested:
-            contextual_candidate = await self._extract_linear_thread_context_candidate(
-                sources=source_result.sources,
-                params=params,
-                users=users,
-                projects=projects,
+        try:
+            if use_direct_issue_path:
+                candidates = await self._extract_linear_direct_issue_candidates(
+                    text=text,
+                    params=params,
+                    users=users,
+                    projects=projects,
+                )
+            else:
+                candidates = await self._extract_linear_meeting_candidates_from_sources(
+                    sources=source_result.sources,
+                    params=params,
+                    users=users,
+                    projects=projects,
+                )
+            if not candidates and thread_reference_request and not project_update_requested:
+                contextual_candidate = await self._extract_linear_thread_context_candidate(
+                    sources=source_result.sources,
+                    params=params,
+                    users=users,
+                    projects=projects,
+                )
+                if contextual_candidate:
+                    candidates = [contextual_candidate]
+                    contextual_review_mode = True
+        except (LinearInferenceTimeoutError, LinearMeetingExtractionDeadlineError) as exc:
+            print(
+                "LINEAR_MEETING_EXTRACTION "
+                + json.dumps(
+                    {
+                        "event": "aborted_before_writes",
+                        "error_type": type(exc).__name__,
+                        "project_hint": params.get("project_hint"),
+                        "files_parsed": source_result.files_parsed,
+                    },
+                    ensure_ascii=True,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
             )
-            if contextual_candidate:
-                candidates = [contextual_candidate]
-                contextual_review_mode = True
+            return {
+                "message": (
+                    "I timed out while extracting action items from those notes, so I stopped "
+                    "before creating any Linear tasks. Nothing was changed. Please try again."
+                ),
+                "data": {
+                    "created_count": 0,
+                    "review_count": 0,
+                    "skipped_count": 0,
+                    "timed_out": True,
+                },
+            }
         if not candidates and not project_update_requested:
             return {
                 "message": (
@@ -3691,25 +3731,144 @@ Return the structured issue list. Preserve the parsed project and assignee hints
         users: list[dict[str, Any]],
         projects: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
-        candidates: list[dict[str, Any]] = []
         source_chunks = [
             (source, chunk)
             for source in sources
             for chunk in source_text_chunks(source)
         ]
-        for source, chunk in source_chunks:
-            extracted = await self._extract_linear_meeting_candidates(
-                transcript=chunk,
-                params=params,
-                users=users,
-                projects=projects,
-                source_label=source.label,
-                source_count=max(1, len(source_chunks)),
+        if not source_chunks:
+            return []
+
+        semaphore = asyncio.Semaphore(LINEAR_MEETING_EXTRACTION_CONCURRENCY)
+        batch_chunk_count = len(source_chunks)
+
+        async def extract_chunk(
+            source: ParsedSource,
+            chunk: str,
+            *,
+            batch_chunk_index: int,
+            recovery_depth: int = 0,
+        ) -> list[dict[str, Any]]:
+            try:
+                async with semaphore:
+                    return await self._extract_linear_meeting_candidates(
+                        transcript=chunk,
+                        params=params,
+                        users=users,
+                        projects=projects,
+                        source_label=source.label,
+                        # This model request contains one source chunk. The total
+                        # batch size is logged separately and must not inflate
+                        # reasoning effort for every individual request.
+                        source_count=1,
+                        batch_chunk_index=batch_chunk_index,
+                        batch_chunk_count=batch_chunk_count,
+                        recovery_depth=recovery_depth,
+                    )
+            except LinearInferenceTimeoutError as exc:
+                if recovery_depth >= LINEAR_MEETING_TIMEOUT_RECOVERY_DEPTH:
+                    raise
+                recovery_chunks = self._linear_meeting_timeout_recovery_chunks(
+                    source=source,
+                    chunk=chunk,
+                )
+                print(
+                    "LINEAR_MEETING_EXTRACTION "
+                    + json.dumps(
+                        {
+                            "event": "chunk_timeout_recovery",
+                            "batch_chunk_index": batch_chunk_index,
+                            "batch_chunk_count": batch_chunk_count,
+                            "recovery_depth": recovery_depth + 1,
+                            "retry_chunk_count": len(recovery_chunks),
+                            "source_chars": len(chunk),
+                            "reasoning_effort": exc.decision.effort,
+                            "timeout_seconds": exc.decision.timeout_seconds,
+                        },
+                        ensure_ascii=True,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    )
+                )
+                recovered = await asyncio.gather(
+                    *(
+                        extract_chunk(
+                            source,
+                            recovery_chunk,
+                            batch_chunk_index=batch_chunk_index,
+                            recovery_depth=recovery_depth + 1,
+                        )
+                        for recovery_chunk in recovery_chunks
+                    ),
+                    return_exceptions=True,
+                )
+                recovered_candidates: list[dict[str, Any]] = []
+                for result in recovered:
+                    if isinstance(result, BaseException):
+                        raise result
+                    recovered_candidates.extend(result)
+                return self._dedupe_linear_meeting_candidates(recovered_candidates)
+
+        async def extract_all_chunks() -> list[list[dict[str, Any]]]:
+            extracted = await asyncio.gather(
+                *(
+                    extract_chunk(
+                        source,
+                        chunk,
+                        batch_chunk_index=index,
+                    )
+                    for index, (source, chunk) in enumerate(source_chunks, start=1)
+                ),
+                return_exceptions=True,
             )
+            for result in extracted:
+                if isinstance(result, BaseException):
+                    raise result
+            return extracted
+
+        try:
+            extracted_batches = await asyncio.wait_for(
+                extract_all_chunks(),
+                timeout=LINEAR_MEETING_EXTRACTION_TOTAL_TIMEOUT_SECONDS,
+            )
+        except LinearInferenceTimeoutError:
+            raise
+        except asyncio.TimeoutError as exc:
+            raise LinearMeetingExtractionDeadlineError(
+                "Meeting-action extraction exceeded its "
+                f"{LINEAR_MEETING_EXTRACTION_TOTAL_TIMEOUT_SECONDS:g} second runtime budget."
+            ) from exc
+
+        candidates: list[dict[str, Any]] = []
+        for (source, _), extracted in zip(source_chunks, extracted_batches):
             for item in extracted:
                 item.setdefault("source_label", source.label)
                 candidates.append(item)
         return self._dedupe_linear_meeting_candidates(candidates)
+
+    @staticmethod
+    def _linear_meeting_timeout_recovery_chunks(
+        *,
+        source: ParsedSource,
+        chunk: str,
+    ) -> list[str]:
+        source_header = f"Source: {source.label}\n"
+        source_text = (
+            chunk[len(source_header):]
+            if chunk.startswith(source_header)
+            else chunk
+        )
+        recovery_source = ParsedSource(
+            label=source.label,
+            text=source_text,
+            kind=source.kind,
+            metadata=source.metadata,
+        )
+        return source_text_chunks(
+            recovery_source,
+            max_chars=LINEAR_MEETING_TIMEOUT_RECOVERY_MAX_CHARS,
+            hard_split_overlap_chars=LINEAR_MEETING_TIMEOUT_RECOVERY_OVERLAP_CHARS,
+        ) or [chunk]
 
     async def _extract_linear_meeting_candidates(
         self,
@@ -3720,6 +3879,9 @@ Return the structured issue list. Preserve the parsed project and assignee hints
         projects: list[dict[str, Any]],
         source_label: Optional[str] = None,
         source_count: int = 1,
+        batch_chunk_index: int = 1,
+        batch_chunk_count: int = 1,
+        recovery_depth: int = 0,
     ) -> list[dict[str, Any]]:
         from ..utils import get_current_date
 
@@ -3773,6 +3935,9 @@ Return the structured action_items list."""
                     stage="meeting_actions",
                     source_chars=len(transcript),
                     source_count=max(1, source_count),
+                    batch_chunk_index=max(1, batch_chunk_index),
+                    batch_chunk_count=max(1, batch_chunk_count),
+                    recovery_depth=max(0, recovery_depth),
                     explicit_project=bool(params.get("project_hint")),
                     explicit_owner=bool(
                         params.get("owner_hint")
