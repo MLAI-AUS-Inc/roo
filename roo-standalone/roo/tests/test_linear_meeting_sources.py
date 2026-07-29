@@ -11,6 +11,25 @@ from roo import linear_meeting_sources as sources
 from roo import slack_client
 
 
+def test_source_text_chunks_overlap_only_when_hard_splitting_long_paragraph():
+    source = sources.ParsedSource(
+        label="notes.pdf",
+        text="A" * 12_000,
+        kind="pdf",
+    )
+
+    chunks = sources.source_text_chunks(
+        source,
+        max_chars=5_000,
+        hard_split_overlap_chars=300,
+    )
+    bodies = [chunk.split("\n", 1)[1] for chunk in chunks]
+
+    assert [len(body) for body in bodies] == [5_000, 5_000, 2_600]
+    assert bodies[0][-300:] == bodies[1][:300]
+    assert bodies[1][-300:] == bodies[2][:300]
+
+
 def test_get_thread_messages_preserves_file_metadata(monkeypatch):
     class FakeSlackClient:
         def conversations_replies(self, **kwargs):
