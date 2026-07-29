@@ -1,6 +1,7 @@
 """Unit tests for the bounded Responses API ward-agent loop."""
 
 import asyncio
+import logging
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -135,6 +136,77 @@ def test_responses_parse_forwards_reasoning_and_output_bounds():
     assert responses.calls[0]["reasoning"] == {"effort": "high"}
     assert responses.calls[0]["max_output_tokens"] == 3_000
     assert responses.calls[0]["store"] is False
+
+
+def test_missing_structured_response_logs_only_safe_diagnostics(caplog):
+    raw_secret = "RAW_STRUCTURED_CONTENT_MUST_NOT_APPEAR"
+
+    class ParsedResult(BaseModel):
+        value: str
+
+    class FakeParsedResponses:
+        async def parse(self, **kwargs):
+            return SimpleNamespace(
+                output_parsed=None,
+                status="incomplete",
+                model="gpt-5.6-sol",
+                incomplete_details=SimpleNamespace(reason="max_output_tokens"),
+                error=None,
+                output=[
+                    SimpleNamespace(
+                        type="message",
+                        content=[
+                            SimpleNamespace(
+                                type="refusal",
+                                refusal=raw_secret,
+                            )
+                        ],
+                    )
+                ],
+                usage=SimpleNamespace(
+                    input_tokens=12_000,
+                    output_tokens=8_000,
+                    total_tokens=20_000,
+                    output_tokens_details=SimpleNamespace(
+                        reasoning_tokens=7_950
+                    ),
+                ),
+            )
+
+    client = OpenAIClient.__new__(OpenAIClient)
+    client.model = "gpt-5.6-sol"
+    client.client = SimpleNamespace(
+        responses=FakeParsedResponses(),
+    )
+
+    with (
+        caplog.at_level(logging.WARNING, logger="roo.llm"),
+        pytest.raises(ToolCallParseError) as captured,
+    ):
+        _run(
+            client.responses_parse(
+                [{"role": "user", "content": "Return the structured result."}],
+                ParsedResult,
+                model="gpt-5.6-sol",
+            )
+        )
+
+    assert str(captured.value) == "structured_response_missing"
+    assert captured.value.diagnostics == {
+        "status": "incomplete",
+        "model": "gpt-5.6-sol",
+        "incomplete_reason": "max_output_tokens",
+        "output_item_types": ["message"],
+        "content_item_types": ["refusal"],
+        "input_tokens": 12_000,
+        "output_tokens": 8_000,
+        "total_tokens": 20_000,
+        "reasoning_tokens": 7_950,
+    }
+    assert "OPENAI_STRUCTURED_RESPONSE_MISSING" in caplog.text
+    assert '"incomplete_reason":"max_output_tokens"' in caplog.text
+    assert raw_secret not in caplog.text
+    assert raw_secret not in str(captured.value)
 
 
 def test_reasoning_chat_uses_completion_bound_and_safety_identifier():

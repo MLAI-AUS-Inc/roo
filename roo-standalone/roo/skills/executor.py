@@ -5048,6 +5048,65 @@ Chunk {index} source: {label}
             return "Team unclear"
         return "Low confidence mapping"
 
+    async def _assess_linear_studio_candidates_resilient(
+        self,
+        *,
+        candidates: list[dict[str, Any]],
+        project_context: dict[str, Any],
+        context_max_chars: int,
+        batch_size: int,
+        safety_identifier: str,
+    ) -> tuple[dict[str, Any], dict[str, str]]:
+        """Size bounded batches and isolate a failed batch to single candidates."""
+
+        assessments: dict[str, Any] = {}
+        errors: dict[str, str] = {}
+        batch_size = max(1, min(int(batch_size or 3), 10))
+        chunks = [
+            candidates[index : index + batch_size]
+            for index in range(0, len(candidates), batch_size)
+        ]
+        for chunk_index, chunk in enumerate(chunks, start=1):
+            try:
+                assessments.update(
+                    await assess_studio_effort_batch(
+                        candidates=chunk,
+                        project_context=project_context,
+                        context_max_chars=context_max_chars,
+                        safety_identifier=safety_identifier,
+                        batch_chunk_index=chunk_index,
+                        batch_chunk_count=len(chunks),
+                    )
+                )
+                continue
+            except Exception as batch_exc:
+                if len(chunk) == 1:
+                    candidate_key = str(chunk[0]["candidate_key"])
+                    errors[candidate_key] = (
+                        f"{batch_exc.__class__.__name__}: {batch_exc}"
+                    )
+                    continue
+
+            for candidate in chunk:
+                candidate_key = str(candidate["candidate_key"])
+                try:
+                    assessments.update(
+                        await assess_studio_effort_batch(
+                            candidates=[candidate],
+                            project_context=project_context,
+                            context_max_chars=context_max_chars,
+                            safety_identifier=safety_identifier,
+                            batch_chunk_index=chunk_index,
+                            batch_chunk_count=len(chunks),
+                            recovery_depth=1,
+                        )
+                    )
+                except Exception as candidate_exc:
+                    errors[candidate_key] = (
+                        f"{candidate_exc.__class__.__name__}: {candidate_exc}"
+                    )
+        return assessments, errors
+
     async def _size_linear_studio_prepared_candidates(
         self,
         *,
@@ -5124,61 +5183,6 @@ Chunk {index} source: {label}
                     raise RuntimeError(
                         "The project name changed after matching; rerun the Slack command."
                     )
-                sizing_candidates: list[dict[str, Any]] = []
-                for prepared in group:
-                    if prepared.get("receipt_sizing_metadata"):
-                        continue
-                    candidate = prepared["candidate"]
-                    source = prepared["source"]
-                    owner = prepared["owner_match"].get("user") or {}
-                    team = prepared["team_match"].get("team") or {}
-                    sizing_candidates.append(
-                        {
-                            "candidate_key": prepared["candidate_key"],
-                            "title": candidate.get("title"),
-                            "description": candidate.get("description"),
-                            "work_status": candidate.get("work_status"),
-                            "completed_work": candidate.get("completed_work"),
-                            "remaining_work": candidate.get("remaining_work"),
-                            "available_artifacts": candidate.get("available_artifacts"),
-                            "dependencies": candidate.get("dependencies"),
-                            "acceptance_criteria": candidate.get("acceptance_criteria"),
-                            "evidence": candidate.get("evidence"),
-                            "source_label": candidate.get("source_label"),
-                            "source_permalink": source.get("source_permalink"),
-                            "due_date": candidate.get("due_date"),
-                            "assignee": {
-                                "id": owner.get("id"),
-                                "name": owner.get("displayName")
-                                or owner.get("name")
-                                or owner.get("email"),
-                            },
-                            "team": {
-                                "id": team.get("id"),
-                                "key": team.get("key"),
-                                "name": team.get("name"),
-                            },
-                        }
-                    )
-                assessments = (
-                    await assess_studio_effort_batch(
-                        candidates=sizing_candidates,
-                        project_context=project_context,
-                        context_max_chars=int(
-                            getattr(
-                                settings,
-                                "LINEAR_STUDIO_SIZING_CONTEXT_MAX_CHARS",
-                                40000,
-                            )
-                            or 40000
-                        ),
-                        safety_identifier=linear_safety_identifier(
-                            requester_slack_id
-                        ),
-                    )
-                    if sizing_candidates
-                    else {}
-                )
                 registry = project_context.get("effortLabelRegistry")
                 registry_labels = (
                     registry.get("nodes")
@@ -5186,7 +5190,85 @@ Chunk {index} source: {label}
                     and isinstance(registry.get("nodes"), list)
                     else labels
                 )
-                for prepared in group:
+            except Exception as exc:
+                detail = f"{exc.__class__.__name__}: {exc}"
+                shadow_results.append(
+                    {
+                        "project_id": project_id,
+                        "error": detail,
+                    }
+                )
+                if mode in {"review", "required"}:
+                    for prepared in group:
+                        prepared["studio_sizing_error"] = detail
+                continue
+
+            sizing_candidates: list[dict[str, Any]] = []
+            for prepared in group:
+                if prepared.get("receipt_sizing_metadata"):
+                    continue
+                candidate = prepared["candidate"]
+                source = prepared["source"]
+                owner = prepared["owner_match"].get("user") or {}
+                team = prepared["team_match"].get("team") or {}
+                sizing_candidates.append(
+                    {
+                        "candidate_key": prepared["candidate_key"],
+                        "title": candidate.get("title"),
+                        "description": candidate.get("description"),
+                        "work_status": candidate.get("work_status"),
+                        "completed_work": candidate.get("completed_work"),
+                        "remaining_work": candidate.get("remaining_work"),
+                        "available_artifacts": candidate.get("available_artifacts"),
+                        "dependencies": candidate.get("dependencies"),
+                        "acceptance_criteria": candidate.get("acceptance_criteria"),
+                        "evidence": candidate.get("evidence"),
+                        "source_label": candidate.get("source_label"),
+                        "source_permalink": source.get("source_permalink"),
+                        "due_date": candidate.get("due_date"),
+                        "assignee": {
+                            "id": owner.get("id"),
+                            "name": owner.get("displayName")
+                            or owner.get("name")
+                            or owner.get("email"),
+                        },
+                        "team": {
+                            "id": team.get("id"),
+                            "key": team.get("key"),
+                            "name": team.get("name"),
+                        },
+                    }
+                )
+            context_max_chars = int(
+                getattr(
+                    settings,
+                    "LINEAR_STUDIO_SIZING_CONTEXT_MAX_CHARS",
+                    40000,
+                )
+                or 40000
+            )
+            assessments, sizing_errors = (
+                await self._assess_linear_studio_candidates_resilient(
+                    candidates=sizing_candidates,
+                    project_context=project_context,
+                    context_max_chars=context_max_chars,
+                    batch_size=int(
+                        getattr(
+                            settings,
+                            "LINEAR_STUDIO_SIZING_BATCH_SIZE",
+                            3,
+                        )
+                        or 3
+                    ),
+                    safety_identifier=linear_safety_identifier(
+                        requester_slack_id
+                    ),
+                )
+                if sizing_candidates
+                else ({}, {})
+            )
+            for prepared in group:
+                try:
                     stored_metadata = prepared.get("receipt_sizing_metadata")
                     if isinstance(stored_metadata, dict):
                         metadata = stored_metadata
@@ -5203,7 +5285,15 @@ Chunk {index} source: {label}
                             else metadata.get("contextSufficient", False)
                         )
                     else:
-                        assessment = assessments[prepared["candidate_key"]]
+                        candidate_key = str(prepared["candidate_key"])
+                        assessment = assessments.get(candidate_key)
+                        if assessment is None:
+                            raise RuntimeError(
+                                sizing_errors.get(
+                                    candidate_key,
+                                    "Studio sizing returned no assessment.",
+                                )
+                            )
                         metadata = assessment_metadata(
                             assessment,
                             project=live_project,
@@ -5250,16 +5340,16 @@ Chunk {index} source: {label}
                     prepared["effort_label_id"] = compatible_label_ids[0]
                     prepared["display"]["effort_label"] = effort_label
                     prepared["display"]["effort_rationale"] = rationale
-            except Exception as exc:
-                detail = f"{exc.__class__.__name__}: {exc}"
-                shadow_results.append(
-                    {
-                        "project_id": project_id,
-                        "error": detail,
-                    }
-                )
-                if mode in {"review", "required"}:
-                    for prepared in group:
+                except Exception as exc:
+                    detail = f"{exc.__class__.__name__}: {exc}"
+                    shadow_results.append(
+                        {
+                            "candidate_key": prepared["candidate_key"],
+                            "project_id": project_id,
+                            "error": detail,
+                        }
+                    )
+                    if mode in {"review", "required"}:
                         prepared["studio_sizing_error"] = detail
         return shadow_results
 

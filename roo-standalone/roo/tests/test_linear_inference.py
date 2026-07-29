@@ -19,6 +19,7 @@ from roo.linear_inference import (
     choose_linear_reasoning,
     run_linear_structured_inference,
 )
+from roo.llm import ToolCallParseError
 
 
 class ExampleResult(BaseModel):
@@ -153,6 +154,62 @@ async def test_linear_gateway_retries_once_and_only_retry_reaches_max(monkeypatc
     assert result.attempts == 2
     assert [call["reasoning_effort"] for call in calls] == ["xhigh", "max"]
     assert result.decision.retry is True
+
+
+@pytest.mark.asyncio
+async def test_studio_missing_output_retries_with_less_reasoning_and_more_headroom(
+    monkeypatch,
+    caplog,
+):
+    calls = []
+
+    class FakeClient:
+        async def responses_parse(self, messages, response_format, **kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                raise ToolCallParseError(
+                    "structured_response_missing",
+                    diagnostics={
+                        "status": "incomplete",
+                        "incomplete_reason": "max_output_tokens",
+                        "output_tokens": 16_000,
+                        "reasoning_tokens": 15_900,
+                    },
+                )
+            return ExampleResult(value="recovered")
+
+    monkeypatch.setattr(
+        inference_module,
+        "get_llm_client",
+        lambda provider: FakeClient(),
+    )
+
+    with caplog.at_level(logging.INFO):
+        result = await run_linear_structured_inference(
+            messages=[{"role": "user", "content": "Size these Studio tasks."}],
+            response_format=ExampleResult,
+            signals=LinearReasoningSignals(
+                stage="studio_effort",
+                source_chars=40_000,
+                source_count=45,
+                candidate_count=3,
+                ambiguity=True,
+            ),
+        )
+
+    assert result.value.value == "recovered"
+    assert result.attempts == 2
+    assert [call["model"] for call in calls] == [
+        "gpt-5.6-sol",
+        "gpt-5.6-sol",
+    ]
+    assert [call["reasoning_effort"] for call in calls] == ["xhigh", "high"]
+    assert [call["max_output_tokens"] for call in calls] == [16_000, 24_000]
+    assert [call["timeout"] for call in calls] == [120.0, 120.0]
+    assert result.decision.retry is True
+    assert "structured_output_budget_recovery" in result.decision.reasons
+    assert '"incomplete_reason":"max_output_tokens"' in caplog.text
+    assert '"reasoning_tokens":15900' in caplog.text
 
 
 @pytest.mark.asyncio
