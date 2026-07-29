@@ -5,6 +5,7 @@ Supports multiple LLM providers with a unified async interface.
 """
 import json
 import inspect
+import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any, Callable, Type, TypeVar
@@ -12,6 +13,8 @@ from enum import Enum
 import base64
 
 from .config import get_settings
+
+logger = logging.getLogger(__name__)
 
 
 class LLMProvider(str, Enum):
@@ -50,8 +53,68 @@ class AgentResponse:
 class ToolCallParseError(ValueError):
     """The model produced no tool call or unparsable arguments."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        diagnostics: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        super().__init__(message)
+        self.diagnostics = dict(diagnostics or {})
+
 
 StructuredResponseT = TypeVar("StructuredResponseT")
+
+
+def _response_value(value: Any, name: str, default: Any = None) -> Any:
+    if isinstance(value, dict):
+        return value.get(name, default)
+    return getattr(value, name, default)
+
+
+def _structured_response_diagnostics(response: Any) -> Dict[str, Any]:
+    """Return safe response metadata without logging generated content."""
+
+    diagnostics: Dict[str, Any] = {}
+
+    def include(name: str, value: Any) -> None:
+        if value is not None and value != "" and value != []:
+            diagnostics[name] = value
+
+    include("status", _response_value(response, "status"))
+    include("model", _response_value(response, "model"))
+
+    incomplete_details = _response_value(response, "incomplete_details")
+    include(
+        "incomplete_reason",
+        _response_value(incomplete_details, "reason"),
+    )
+    error = _response_value(response, "error")
+    include("error_code", _response_value(error, "code"))
+
+    output_item_types: list[str] = []
+    content_item_types: list[str] = []
+    for output_item in _response_value(response, "output", []) or []:
+        item_type = _response_value(output_item, "type")
+        if item_type:
+            output_item_types.append(str(item_type))
+        for content_item in _response_value(output_item, "content", []) or []:
+            content_type = _response_value(content_item, "type")
+            if content_type:
+                content_item_types.append(str(content_type))
+    include("output_item_types", sorted(set(output_item_types)))
+    include("content_item_types", sorted(set(content_item_types)))
+
+    usage = _response_value(response, "usage")
+    include("input_tokens", _response_value(usage, "input_tokens"))
+    include("output_tokens", _response_value(usage, "output_tokens"))
+    include("total_tokens", _response_value(usage, "total_tokens"))
+    output_details = _response_value(usage, "output_tokens_details")
+    include(
+        "reasoning_tokens",
+        _response_value(output_details, "reasoning_tokens"),
+    )
+    return diagnostics
 
 
 class BaseLLMClient(ABC):
@@ -318,7 +381,20 @@ class OpenAIClient(BaseLLMClient):
         response = await self._request_client(kwargs).responses.parse(**create_kwargs)
         parsed = getattr(response, "output_parsed", None)
         if parsed is None:
-            raise ToolCallParseError("structured_response_missing")
+            diagnostics = _structured_response_diagnostics(response)
+            logger.warning(
+                "OPENAI_STRUCTURED_RESPONSE_MISSING %s",
+                json.dumps(
+                    diagnostics,
+                    ensure_ascii=True,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ),
+            )
+            raise ToolCallParseError(
+                "structured_response_missing",
+                diagnostics=diagnostics,
+            )
         return parsed
 
     async def embed(self, text: str) -> List[float]:

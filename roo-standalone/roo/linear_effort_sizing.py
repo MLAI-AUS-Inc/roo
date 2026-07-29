@@ -121,6 +121,9 @@ async def assess_studio_effort_batch(
     project_context: dict[str, Any],
     context_max_chars: int,
     safety_identifier: str | None = None,
+    batch_chunk_index: int = 1,
+    batch_chunk_count: int = 1,
+    recovery_depth: int = 0,
 ) -> dict[str, StudioEffortAssessment]:
     if not candidates:
         return {}
@@ -221,6 +224,9 @@ Rules:
             stage="studio_effort",
             source_chars=len(serialized_context),
             source_count=source_count,
+            batch_chunk_index=batch_chunk_index,
+            batch_chunk_count=batch_chunk_count,
+            recovery_depth=recovery_depth,
             candidate_count=len(candidates),
             explicit_project=True,
             explicit_owner=all(
@@ -300,18 +306,73 @@ def _bounded_json(value: Any, *, max_chars: int) -> str:
     serialized = json.dumps(value, ensure_ascii=False, default=str)
     if len(serialized) <= max_chars:
         return serialized
-    compact = _compact_value(value)
-    serialized = json.dumps(compact, ensure_ascii=False, default=str)
-    if len(serialized) <= max_chars:
-        return serialized
-    return serialized[: max_chars - 80] + "\n...[context truncated by Roo]"
+
+    for string_limit, list_limit in (
+        (800, 40),
+        (600, 30),
+        (400, 20),
+        (300, 12),
+        (220, 8),
+        (160, 5),
+        (120, 3),
+    ):
+        compact = _compact_value(
+            value,
+            string_limit=string_limit,
+            list_limit=list_limit,
+        )
+        if isinstance(compact, dict):
+            compact = {"context_truncated": True, **compact}
+        serialized = json.dumps(compact, ensure_ascii=False, default=str)
+        if len(serialized) <= max_chars:
+            return serialized
+
+    # Keep the fallback valid JSON even for an unusually small configured cap.
+    compact = _compact_value(value, string_limit=80, list_limit=1)
+    compact_json = json.dumps(compact, ensure_ascii=False, default=str)
+    prefix = '{"context_truncated":true,"payload_excerpt":'
+    suffix = "}"
+    excerpt_budget = max_chars - len(prefix) - len(suffix) - 2
+    excerpt = compact_json[: max(0, excerpt_budget)]
+    fallback = prefix + json.dumps(excerpt, ensure_ascii=False) + suffix
+    while len(fallback) > max_chars and excerpt:
+        excerpt = excerpt[: max(0, len(excerpt) - (len(fallback) - max_chars))]
+        fallback = prefix + json.dumps(excerpt, ensure_ascii=False) + suffix
+    return fallback
 
 
-def _compact_value(value: Any) -> Any:
+def _compact_value(
+    value: Any,
+    *,
+    string_limit: int = 800,
+    list_limit: int = 40,
+    path: tuple[str, ...] = (),
+) -> Any:
     if isinstance(value, str):
-        return value if len(value) <= 800 else value[:800] + "…"
+        return (
+            value
+            if len(value) <= string_limit
+            else value[:string_limit] + "…"
+        )
     if isinstance(value, list):
-        return [_compact_value(item) for item in value[:40]]
+        item_limit = len(value) if path == ("candidates",) else list_limit
+        return [
+            _compact_value(
+                item,
+                string_limit=string_limit,
+                list_limit=list_limit,
+                path=(*path, str(index)),
+            )
+            for index, item in enumerate(value[:item_limit])
+        ]
     if isinstance(value, dict):
-        return {str(key): _compact_value(child) for key, child in value.items()}
+        return {
+            str(key): _compact_value(
+                child,
+                string_limit=string_limit,
+                list_limit=list_limit,
+                path=(*path, str(key)),
+            )
+            for key, child in value.items()
+        }
     return value

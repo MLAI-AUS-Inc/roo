@@ -47,8 +47,9 @@ _STAGE_MAX_OUTPUT_TOKENS: dict[LinearInferenceStage, int] = {
     "contextual_issue": 2_500,
     "project_update_summary": 1_800,
     "project_update_compose": 3_000,
-    "studio_effort": 8_000,
+    "studio_effort": 16_000,
 }
+_STUDIO_STRUCTURED_RECOVERY_MAX_OUTPUT_TOKENS = 24_000
 _STAGE_BASE_EFFORT: dict[LinearInferenceStage, LinearReasoningEffort] = {
     "direct_issue": "low",
     "meeting_actions": "medium",
@@ -287,6 +288,25 @@ def escalate_linear_reasoning(
     )
 
 
+def recover_linear_structured_output(
+    decision: LinearReasoningDecision,
+) -> LinearReasoningDecision:
+    """Trade reasoning depth for enough budget to emit the structured result."""
+
+    current_index = _EFFORT_ORDER.index(decision.effort)
+    effort = _EFFORT_ORDER[max(0, current_index - 1)]
+    return replace(
+        decision,
+        effort=effort,
+        timeout_seconds=max(
+            decision.timeout_seconds,
+            _EFFORT_TIMEOUT_SECONDS[effort],
+        ),
+        reasons=(*decision.reasons, "structured_output_budget_recovery"),
+        retry=True,
+    )
+
+
 def linear_safety_identifier(requester_id: str | None) -> str:
     digest = hashlib.sha256(str(requester_id or "unknown").encode("utf-8")).hexdigest()
     return f"roo-linear-{digest[:24]}"
@@ -299,8 +319,10 @@ def _log_linear_inference_event(
     decision: LinearReasoningDecision,
     signals: LinearReasoningSignals,
     attempt: int,
+    max_output_tokens: int,
     duration_ms: int | None = None,
     error_type: str | None = None,
+    error_diagnostics: dict[str, object] | None = None,
 ) -> None:
     payload = {
         "event": event,
@@ -311,6 +333,7 @@ def _log_linear_inference_event(
         "complexity_score": decision.complexity_score,
         "reasoning_reasons": list(decision.reasons),
         "attempt": attempt,
+        "max_output_tokens": max_output_tokens,
         "source_chars": signals.source_chars,
         "source_count": signals.source_count,
         "batch_chunk_index": signals.batch_chunk_index,
@@ -321,6 +344,23 @@ def _log_linear_inference_event(
         payload["duration_ms"] = duration_ms
     if error_type:
         payload["error_type"] = error_type
+    if error_diagnostics:
+        safe_diagnostic_keys = {
+            "status",
+            "incomplete_reason",
+            "error_code",
+            "input_tokens",
+            "output_tokens",
+            "reasoning_tokens",
+            "total_tokens",
+            "output_item_types",
+            "content_item_types",
+        }
+        payload["response_diagnostics"] = {
+            key: value
+            for key, value in error_diagnostics.items()
+            if key in safe_diagnostic_keys
+        }
     logger.log(
         level,
         "LINEAR_INFERENCE %s",
@@ -336,7 +376,7 @@ async def run_linear_structured_inference(
     safety_identifier: str | None = None,
     validator: Callable[[StructuredT], None] | None = None,
 ) -> LinearInferenceResult[StructuredT]:
-    """Run one Sol structured request and at most one higher-effort validation retry."""
+    """Run one Sol request and one bounded, failure-specific recovery attempt."""
 
     client = get_llm_client("openai")
     parse_method = getattr(client, "responses_parse", None)
@@ -352,10 +392,9 @@ async def run_linear_structured_inference(
         ValidationError,
     )
     last_error: Exception | None = None
+    attempt_decision = decision
+    attempt_max_output_tokens = _STAGE_MAX_OUTPUT_TOKENS[signals.stage]
     for attempt in range(2):
-        attempt_decision = (
-            decision if attempt == 0 else escalate_linear_reasoning(decision)
-        )
         started_at = time.monotonic()
         _log_linear_inference_event(
             logging.INFO,
@@ -363,6 +402,7 @@ async def run_linear_structured_inference(
             decision=attempt_decision,
             signals=signals,
             attempt=attempt + 1,
+            max_output_tokens=attempt_max_output_tokens,
         )
         try:
             parsed = await parse_method(
@@ -372,7 +412,7 @@ async def run_linear_structured_inference(
                 reasoning_effort=attempt_decision.effort,
                 timeout=attempt_decision.timeout_seconds,
                 max_retries=0,
-                max_output_tokens=_STAGE_MAX_OUTPUT_TOKENS[signals.stage],
+                max_output_tokens=attempt_max_output_tokens,
                 safety_identifier=safety_identifier,
                 store=False,
             )
@@ -387,6 +427,7 @@ async def run_linear_structured_inference(
                 decision=attempt_decision,
                 signals=signals,
                 attempt=attempt + 1,
+                max_output_tokens=attempt_max_output_tokens,
                 duration_ms=duration_ms,
             )
             return LinearInferenceResult(
@@ -402,6 +443,7 @@ async def run_linear_structured_inference(
                 decision=attempt_decision,
                 signals=signals,
                 attempt=attempt + 1,
+                max_output_tokens=attempt_max_output_tokens,
                 duration_ms=duration_ms,
                 error_type=type(exc).__name__,
             )
@@ -420,11 +462,26 @@ async def run_linear_structured_inference(
                 decision=attempt_decision,
                 signals=signals,
                 attempt=attempt + 1,
+                max_output_tokens=attempt_max_output_tokens,
                 duration_ms=duration_ms,
                 error_type=type(exc).__name__,
+                error_diagnostics=getattr(exc, "diagnostics", None),
             )
             if attempt == 1:
                 raise
+            if (
+                signals.stage == "studio_effort"
+                and isinstance(exc, ToolCallParseError)
+                and str(exc) == "structured_response_missing"
+            ):
+                attempt_decision = recover_linear_structured_output(
+                    attempt_decision
+                )
+                attempt_max_output_tokens = (
+                    _STUDIO_STRUCTURED_RECOVERY_MAX_OUTPUT_TOKENS
+                )
+            else:
+                attempt_decision = escalate_linear_reasoning(attempt_decision)
 
     assert last_error is not None
     raise last_error
