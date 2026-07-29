@@ -759,7 +759,7 @@ async def test_topup_points_missing_pack_lists_fixed_packs(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_topup_points_missing_pack_posts_three_private_stripe_buttons(
+async def test_topup_points_missing_pack_sends_three_stripe_buttons_by_dm(
     monkeypatch,
 ):
     executor = SkillExecutor()
@@ -777,8 +777,11 @@ async def test_topup_points_missing_pack_posts_three_private_stripe_buttons(
     )
     monkeypatch.setattr(
         executor_module,
-        "post_ephemeral",
-        lambda **kwargs: delivered.update(kwargs) or {"ok": True},
+        "send_dm",
+        lambda user_id, text, **kwargs: (
+            delivered.update({"user_id": user_id, "text": text, **kwargs})
+            or {"ok": True, "channel": "D123", "ts": "333.444"}
+        ),
     )
 
     result = await executor._handle_points_action(
@@ -795,11 +798,11 @@ async def test_topup_points_missing_pack_posts_three_private_stripe_buttons(
 
     assert result["suppress_post"] is False
     assert result["message"] == (
-        "🔒 I’ve sent <@U123> private Stripe Checkout buttons. "
-        "Only they can see them."
+        "🔒 I’ve sent <@U123> a direct message with private "
+        "Stripe Checkout buttons. Check your DMs."
     )
     assert "checkout.stripe.com" not in result["message"]
-    assert result["data"]["delivery"] == "ephemeral"
+    assert result["data"]["delivery"] == "direct_message"
     assert result["data"]["pack_ids"] == ["topup_5", "topup_10", "topup_25"]
     assert client.created == {
         "slack_user_id": "U123",
@@ -811,9 +814,9 @@ async def test_topup_points_missing_pack_posts_three_private_stripe_buttons(
             "slack_thread_ts": "111.222",
         },
     }
-    assert delivered["channel"] == "C123"
-    assert delivered["user"] == "U123"
-    assert delivered["thread_ts"] == "111.222"
+    assert delivered["user_id"] == "U123"
+    assert "private Stripe Checkout buttons" in delivered["text"]
+    assert "thread_ts" not in delivered
     buttons = delivered["blocks"][1]["elements"]
     assert [button["text"]["text"] for button in buttons] == [
         "10 points · A$19.99",
@@ -826,6 +829,44 @@ async def test_topup_points_missing_pack_posts_three_private_stripe_buttons(
     )
     assert buttons[1]["style"] == "primary"
     assert "checkout.stripe.com" not in delivered["text"]
+
+
+@pytest.mark.asyncio
+async def test_topup_points_dm_failure_posts_safe_public_recovery(monkeypatch):
+    executor = SkillExecutor()
+    client = FakeTopupButtonsClient()
+
+    monkeypatch.setattr(
+        executor_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            ROO_POINTS_TOPUP_ENABLED=True,
+            ROO_POINTS_TOPUP_BUTTONS_ENABLED=True,
+            roo_points_stripe_checkout_hosts={"checkout.stripe.com"},
+        ),
+    )
+    monkeypatch.setattr(executor_module, "send_dm", lambda *args, **kwargs: None)
+
+    result = await executor._handle_points_action(
+        client=client,
+        action="topup_points",
+        params={},
+        text="topup",
+        user_id="U123",
+        channel_id="C123",
+        thread_ts="111.222",
+        skill=SimpleNamespace(name="mlai-points"),
+        request_id="EvTopupDmFailure",
+    )
+
+    assert result["suppress_post"] is False
+    assert result["data"]["delivery"] == "direct_message"
+    assert result["data"]["delivery_failed"] is True
+    assert result["message"] == (
+        "⚠️ I couldn’t open a private Slack DM for <@U123>. "
+        "Please DM me `topup` and I’ll create fresh checkout buttons there."
+    )
+    assert "checkout.stripe.com" not in result["message"]
 
 
 @pytest.mark.asyncio
@@ -844,8 +885,10 @@ async def test_topup_points_explicit_pack_returns_one_button_in_dm(monkeypatch):
     )
     monkeypatch.setattr(
         executor_module,
-        "post_ephemeral",
-        lambda **kwargs: pytest.fail("DM checkout must not use chat.postEphemeral"),
+        "send_dm",
+        lambda *args, **kwargs: pytest.fail(
+            "An existing DM checkout must post to its current channel"
+        ),
     )
 
     result = await executor._handle_points_action(
@@ -899,8 +942,8 @@ async def test_topup_points_rejects_untrusted_checkout_url(monkeypatch):
     )
     monkeypatch.setattr(
         executor_module,
-        "post_ephemeral",
-        lambda **kwargs: pytest.fail("Untrusted links must never be posted"),
+        "send_dm",
+        lambda *args, **kwargs: pytest.fail("Untrusted links must never be posted"),
     )
 
     result = await executor._handle_points_action(

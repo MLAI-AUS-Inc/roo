@@ -67,8 +67,8 @@ from ..points_request_approval import (
 from ..slack_client import (
     get_channel_id,
     get_channel_name,
-    post_ephemeral,
     post_message,
+    send_dm,
     upload_file,
 )
 from ..config import get_settings
@@ -8896,26 +8896,32 @@ Chunk {index} source: {label}
         ]
         response_data = {
             "action": "topup_points",
-            "delivery": (
-                "direct_message"
-                if channel_id and channel_id.startswith("D")
-                else "ephemeral"
-            ),
+            "delivery": "direct_message",
             "pack_ids": [option["pack_id"] for option in options],
             "partial": had_partial_errors,
         }
         if channel_id and not channel_id.startswith("D"):
-            post_ephemeral(
-                channel=channel_id,
-                user=user_id,
-                text=message,
-                thread_ts=thread_ts,
+            dm_response = send_dm(
+                user_id,
+                message,
                 blocks=blocks,
             )
+            if not dm_response or not dm_response.get("ok"):
+                return {
+                    "message": (
+                        f"⚠️ I couldn’t open a private Slack DM for <@{user_id}>. "
+                        "Please DM me `topup` and I’ll create fresh checkout buttons there."
+                    ),
+                    "data": {
+                        **response_data,
+                        "delivery_failed": True,
+                    },
+                    "suppress_post": False,
+                }
             return {
                 "message": (
-                    f"🔒 I’ve sent <@{user_id}> private Stripe Checkout buttons. "
-                    "Only they can see them."
+                    f"🔒 I’ve sent <@{user_id}> a direct message with private "
+                    "Stripe Checkout buttons. Check your DMs."
                 ),
                 "data": response_data,
                 "suppress_post": False,
