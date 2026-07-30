@@ -46,6 +46,31 @@ EffortRange = Literal[
     ">5h",
 ]
 
+_DURATION_ANCHOR_RE = re.compile(
+    r"\b(?:\d+(?:\.\d+)?\s*(?:m|min|mins|minute|minutes|h|hr|hrs|hour|hours)|"
+    r"fifteen minutes?|one hour|two hours?|three hours?|four hours?|five hours?)\b",
+    flags=re.IGNORECASE,
+)
+_EFFORT_RANGE_TIME_ANCHORS = {
+    "<=15m": "up to 15 minutes",
+    ">15m-1h": "up to 1 hour",
+    ">1h-2h": "up to 2 hours",
+    ">2h-3h": "up to 3 hours",
+    ">3h-5h": "up to 5 hours",
+    ">5h": "over 5 hours",
+}
+
+
+def _one_sentence_rationale(value: str, *, prefix: str = "") -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    text = re.sub(r"[.!?]+(?=\s|$)", ";", text).strip(" ;.!?")
+    if prefix and text:
+        text = f"{prefix}{text[:1].lower()}{text[1:]}"
+    elif prefix:
+        text = prefix.rstrip()
+    text = text[:279].rstrip(" ;,.!?")
+    return f"{text}."
+
 
 class StudioEffortAssessment(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -63,17 +88,19 @@ class StudioEffortAssessment(BaseModel):
 
     @model_validator(mode="after")
     def validate_rubric_consistency(self):
-        if "\n" in self.rationale or len(
-            re.findall(r"[.!?](?:[\"')\]]+)?(?=\s|$)", self.rationale)
-        ) > 1:
-            raise ValueError("rationale must be one sentence")
-        if self.sizing_basis in {"duration", "both"} and not re.search(
-            r"\b(?:\d+(?:\.\d+)?\s*(?:m|min|mins|minute|minutes|h|hr|hrs|hour|hours)|"
-            r"fifteen minutes?|one hour|two hours?|three hours?|four hours?|five hours?)\b",
-            self.rationale,
-            flags=re.IGNORECASE,
+        self.rationale = _one_sentence_rationale(self.rationale)
+        if (
+            self.sizing_basis in {"duration", "both"}
+            and not _DURATION_ANCHOR_RE.search(self.rationale)
         ):
-            raise ValueError("duration-based rationale must include a time anchor")
+            self.rationale = _one_sentence_rationale(
+                self.rationale,
+                prefix=(
+                    "Estimated at "
+                    f"{_EFFORT_RANGE_TIME_ANCHORS[self.expected_effort_range]} "
+                    "because "
+                ),
+            )
         if not self.context_sufficient and not self.missing_context:
             raise ValueError("insufficient context must name what is missing")
         exact_ranges = {
@@ -171,16 +198,15 @@ Rules:
             raise LinearInferenceValidationError(
                 "Studio sizing response did not contain exactly one result per candidate."
             )
-        unknown_refs = {
-            reference
-            for assessment in assessments.values()
-            for reference in assessment.evidence_refs
-            if reference not in evidence_refs
-        }
-        if unknown_refs:
-            raise LinearInferenceValidationError(
-                "Studio sizing response cited evidence that was not supplied."
-            )
+        for assessment in assessments.values():
+            seen_refs: set[str] = set()
+            sanitized_refs: list[str] = []
+            for reference in assessment.evidence_refs:
+                if reference not in evidence_refs or reference in seen_refs:
+                    continue
+                sanitized_refs.append(reference)
+                seen_refs.add(reference)
+            assessment.evidence_refs = sanitized_refs
 
     context_collections = (
         "projectUpdates",

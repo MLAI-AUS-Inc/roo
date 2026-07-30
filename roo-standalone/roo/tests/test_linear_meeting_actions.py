@@ -67,6 +67,42 @@ def test_linear_meeting_transcript_uses_thread_history_and_message():
     assert "turn this meeting summary into Linear tasks" in transcript
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        (
+            "For the Linear project [Studio] Aaron AI, extract the to-do items "
+            "from these meeting notes. Don't write a project update."
+        ),
+        "Create the Linear tasks, but do not create a project update.",
+        "Add the to-dos to Linear without a project update.",
+        "Extract the meeting actions in Linear; skip the project update.",
+        "Create Linear issues from the transcript, not a project update.",
+    ],
+)
+def test_linear_meeting_project_update_request_honors_explicit_negation(text):
+    executor = SkillExecutor()
+
+    assert executor._linear_meeting_project_update_requested(text, {}) is False
+
+
+def test_linear_meeting_project_update_request_keeps_positive_and_explicit_actions():
+    executor = SkillExecutor()
+
+    assert executor._linear_meeting_project_update_requested(
+        "Please write a project update in Linear from these meeting notes.",
+        {},
+    )
+    assert executor._linear_meeting_project_update_requested(
+        "Don't forget to create a project update in Linear.",
+        {},
+    )
+    assert executor._linear_meeting_project_update_requested(
+        "Extract the meeting actions only.",
+        {"action": "project_update"},
+    )
+
+
 def test_linear_meeting_owner_matches_slack_mention_email(monkeypatch):
     executor = SkillExecutor()
 

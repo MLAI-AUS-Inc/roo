@@ -4109,6 +4109,30 @@ Return the structured action_items list."""
         action = self._normalize_match_text(params.get("action"))
         if action in {"projectupdate", "updateproject", "projectstatus"}:
             return True
+        request_text = re.sub(
+            r"\s+",
+            " ",
+            str(text or "").lower().replace("’", "'"),
+        ).strip()
+        negative_patterns = (
+            (
+                r"\b(?:do\s+not|don't|dont|never)\s+"
+                r"(?:write|create|add|post|make|include|generate|send)\s+"
+                r"(?:(?:a|the|any)\s+)?project\s+updates?\b"
+            ),
+            (
+                r"\b(?:no|not|without)\s+"
+                r"(?:(?:a|the|any)\s+)?project\s+updates?\b"
+            ),
+            (
+                r"\b(?:skip|omit|avoid)\s+"
+                r"(?:(?:writing|creating|adding|posting|making|including|"
+                r"generating|sending)\s+)?"
+                r"(?:(?:a|the|any)\s+)?project\s+updates?\b"
+            ),
+        )
+        if any(re.search(pattern, request_text) for pattern in negative_patterns):
+            return False
         normalized_text = self._normalize_match_text(text)
         if "projectupdate" not in normalized_text:
             return False

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -126,6 +127,24 @@ def test_effort_schema_rejects_inconsistent_range_and_split():
     assert xl.split_recommended is True
 
 
+def test_effort_schema_normalizes_duration_rationale_to_one_sentence_with_time_anchor():
+    assessment = _assessment(
+        "c1",
+        rationale=(
+            "The implementation is well scoped. "
+            "The existing endpoint can be reused."
+        ),
+    )
+
+    assert assessment.rationale.startswith("Estimated at up to 1 hour because ")
+    assert assessment.rationale.endswith(".")
+    assert "\n" not in assessment.rationale
+    assert len(
+        re.findall(r"[.!?](?:[\"')\]]+)?(?=\s|$)", assessment.rationale)
+    ) == 1
+    assert len(assessment.rationale) <= 280
+
+
 @pytest.mark.asyncio
 async def test_sizing_uses_dedicated_openai_responses_configuration(monkeypatch):
     calls = []
@@ -163,6 +182,59 @@ async def test_sizing_uses_dedicated_openai_responses_configuration(monkeypatch)
     assert kwargs["reasoning_effort"] == "xhigh"
     assert kwargs["store"] is False
     assert "untrusted data" in calls[0][0][-1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_sizing_discards_unsupplied_evidence_refs_without_retry(monkeypatch):
+    calls = []
+
+    class FakeClient:
+        async def responses_parse(self, messages, response_format, **kwargs):
+            calls.append((messages, response_format, kwargs))
+            return StudioEffortAssessmentBatch(
+                assessments=[
+                    _assessment(
+                        "c1",
+                        rationale=(
+                            "The endpoint and secure sharing steps are already "
+                            "well understood."
+                        ),
+                        evidence_refs=[
+                            "c1",
+                            "invented-reference",
+                            "project-1",
+                            "invented-reference",
+                        ],
+                    )
+                ]
+            )
+
+    monkeypatch.setattr(
+        inference_module,
+        "get_llm_client",
+        lambda provider: FakeClient() if provider == "openai" else None,
+    )
+
+    result = await assess_studio_effort_batch(
+        candidates=[
+            {
+                "candidate_key": "c1",
+                "title": "Create the Aaron AI API key",
+                "remaining_work": "Create and securely share the key.",
+            }
+        ],
+        project_context={
+            "project": {"id": "project-1", "name": "[Studio] Aaron AI"}
+        },
+        context_max_chars=40_000,
+        safety_identifier="roo-linear-test",
+    )
+
+    assert result["c1"].evidence_refs == ["c1", "project-1"]
+    assert result["c1"].rationale.startswith(
+        "Estimated at up to 1 hour because "
+    )
+    assert len(calls) == 1
 
 
 @pytest.mark.asyncio
