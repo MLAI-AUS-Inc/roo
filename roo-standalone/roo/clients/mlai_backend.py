@@ -2254,6 +2254,27 @@ class MLAIBackendClient:
         )
         response.raise_for_status()
         return response.json()
+
+    async def claim_office_manager_day(
+        self,
+        slack_user_id: str,
+        booking_date: str,
+    ) -> dict:
+        """Claim today's Office Manager role using the verified Slack actor."""
+        response = await self._request(
+            "POST",
+            f"{self._points_base}/coworking/office-manager/claim/",
+            json={
+                "slack_user_id": self._clean_slack_id(slack_user_id),
+                "date": str(booking_date or "").strip(),
+            },
+            timeout=15.0,
+            transport_retries=1,
+            retry_backoff_seconds=0.5,
+            circuit_breaker=True,
+        )
+        response.raise_for_status()
+        return response.json()
     
     async def get_github_auth_url(self, slack_user_id: str, domain: Optional[str] = None) -> dict:
         """Get the GitHub OAuth URL for a user from the backend."""

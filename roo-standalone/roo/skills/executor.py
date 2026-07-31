@@ -110,6 +110,7 @@ from ..meeting_room_booking import (
     resolve_local_date as resolve_meeting_room_date,
     supported_active_rooms,
 )
+from ..coworking_messages import NO_FOOD_REMINDER
 
 
 POINTS_SUPER_ADMIN_SLACK_ID = "U05QPB483K9"
@@ -12534,7 +12535,8 @@ Chunk {index} source: {label}
             return (
                 f"You beauty! 🎉\n\n"
                 f"Checked <@{target_user_id}> in for **{booking_date}** at the coworking space.\n"
-                f"Cost: {cost} {point_word}{balance_line}"
+                f"Cost: {cost} {point_word}{balance_line}\n\n"
+                f"{NO_FOOD_REMINDER}"
             )
 
         balance_line = ""
@@ -12545,7 +12547,8 @@ Chunk {index} source: {label}
             f"You beauty! 🎉\n\n"
             f"Booked you in for **{booking_date}** at the coworking space.\n"
             f"Cost: {cost} {point_word}{balance_line}\n\n"
-            f"See you there, legend!"
+            f"See you there, legend!\n\n"
+            f"{NO_FOOD_REMINDER}"
         )
 
         # Nudge founders who paid the standard (undiscounted) price: submitting a
@@ -12608,6 +12611,8 @@ Chunk {index} source: {label}
         lines.extend([
             "",
             "Admin Roo Points were not charged; each target user's Roo Points were used.",
+            "",
+            NO_FOOD_REMINDER,
         ])
         return "\n".join(lines)
 

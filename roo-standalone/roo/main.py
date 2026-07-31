@@ -66,9 +66,11 @@ from .slack_client import (
     get_message,
     get_recent_channel_messages,
     get_thread_messages,
+    post_ephemeral,
     post_message,
     send_dm,
 )
+from .coworking_messages import OFFICE_MANAGER_VOLUNTEER_ACTION_ID
 from .coworking_booking_intents import coworking_booking_retry_loop
 from .boost_moderation import (
     boost_post_retry_loop,
@@ -4834,6 +4836,106 @@ async def _review_admin_action(
         )
 
 
+def _office_manager_error_payload(exc: httpx.HTTPStatusError) -> dict[str, Any]:
+    try:
+        payload = exc.response.json()
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _send_office_manager_private_feedback(
+    *,
+    channel_id: str,
+    user_id: str,
+    text: str,
+) -> None:
+    try:
+        response = post_ephemeral(channel=channel_id, user=user_id, text=text)
+        if response and response.get("ok"):
+            return
+    except Exception:
+        pass
+
+    try:
+        response = send_dm(user_id, text)
+        if response and response.get("ok"):
+            return
+        raise RuntimeError("dm_delivery_failed")
+    except Exception as exc:
+        print(
+            "OFFICE_MANAGER_PRIVATE_FEEDBACK_FAILED "
+            f"error_type={exc.__class__.__name__}"
+        )
+
+
+async def _claim_office_manager_from_action(
+    *,
+    user_id: str,
+    channel_id: str,
+    booking_date: str,
+) -> None:
+    from .clients.mlai_backend import MLAIBackendClient
+
+    try:
+        result = await MLAIBackendClient().claim_office_manager_day(
+            user_id,
+            booking_date,
+        )
+        points_refunded = int(result.get("points_refunded") or 0)
+        if result.get("status") == "already_claimed_by_you":
+            message = (
+                "You are already today's Office Manager. Roo has kept your "
+                "zero-point booking in place."
+            )
+        else:
+            message = (
+                "You are today's Office Manager. Roo booked you in without "
+                "deducting Roo points. Check your DMs for the responsibilities."
+            )
+            if points_refunded:
+                message += (
+                    f" Roo also returned the {points_refunded} Roo points "
+                    "previously charged for today."
+                )
+    except httpx.HTTPStatusError as exc:
+        payload = _office_manager_error_payload(exc)
+        code = str(payload.get("code") or "")
+        assignee = str(payload.get("assignee_slack_user_id") or "").strip()
+        if code == "already_claimed":
+            selected = f" <@{assignee}> has the role." if assignee else ""
+            message = f"Someone has already volunteered for today.{selected}"
+        elif code == "claim_closed":
+            message = "The Office Manager volunteer window is closed for today."
+        elif code == "member_not_eligible":
+            message = (
+                "Roo could not confirm you as an active member, so the role "
+                "was not assigned."
+            )
+        elif code == "office_manager_day_not_found":
+            message = "Today's Office Manager volunteer request is no longer available."
+        else:
+            message = (
+                "Roo could not confirm your volunteer request. No Office "
+                "Manager booking was created for you."
+            )
+    except Exception as exc:
+        print(
+            "OFFICE_MANAGER_CLAIM_FAILED "
+            f"error_type={exc.__class__.__name__}"
+        )
+        message = (
+            "Roo could not confirm your volunteer request right now. "
+            "Please try the button again in a moment."
+        )
+
+    _send_office_manager_private_feedback(
+        channel_id=channel_id,
+        user_id=user_id,
+        text=message,
+    )
+
+
 
 def _slack_delivery_succeeded(response: Any) -> bool:
     return bool(response and response.get("ok"))
@@ -5447,6 +5549,41 @@ async def slack_actions(
     if _is_duplicate_slack_request(request):
         print("↩️ Ignoring duplicate signed Slack action request")
         return JSONResponse(status_code=200, content={})
+
+    interactive_actions = payload.get("actions", [])
+    if interactive_actions:
+        office_manager_action = interactive_actions[0]
+        if (
+            str(office_manager_action.get("action_id") or "")
+            == OFFICE_MANAGER_VOLUNTEER_ACTION_ID
+        ):
+            try:
+                action_value = json.loads(
+                    str(office_manager_action.get("value") or "{}")
+                )
+            except json.JSONDecodeError:
+                action_value = {}
+            booking_date = str(action_value.get("date") or "").strip()
+            if not user_id or not channel_id or not booking_date:
+                if user_id and channel_id:
+                    _send_office_manager_private_feedback(
+                        channel_id=str(channel_id),
+                        user_id=str(user_id),
+                        text=(
+                            "This volunteer button is no longer valid. "
+                            "Please use Roo's latest Office Manager announcement."
+                        ),
+                    )
+                return JSONResponse(status_code=200, content={})
+
+            asyncio.create_task(
+                _claim_office_manager_from_action(
+                    user_id=str(user_id),
+                    channel_id=str(channel_id),
+                    booking_date=booking_date,
+                )
+            )
+            return JSONResponse(status_code=200, content={})
 
     if settings.ROO_SURFACE == "admin":
         if payload_type == "view_submission":

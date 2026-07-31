@@ -15,6 +15,7 @@ from uuid import uuid4
 import httpx
 
 from .config import get_settings
+from .coworking_messages import NO_FOOD_REMINDER
 
 
 INTRO_POINTS = 4
@@ -820,7 +821,8 @@ def post_award_notification(submission: dict[str, Any]) -> None:
         thread_ts=str(submission["canonical_message_ts"]),
         text=(
             f"Welcome <@{submission['slack_user_id']}>! You've earned {points} Roo points "
-            "for introducing yourself or your startup."
+            "for introducing yourself or your startup.\n\n"
+            f"{NO_FOOD_REMINDER}"
         ),
     )
 

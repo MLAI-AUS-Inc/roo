@@ -433,6 +433,8 @@ Booked you in for **20 Dec 2025** at the coworking space.
 Cost: 1 point (Balance remaining: 14 points)
 
 See you there, legend!
+
+Reminder: no food is permitted in the coworking space.
 ```
 
 ### Insufficient Balance
