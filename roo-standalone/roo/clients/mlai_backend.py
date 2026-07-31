@@ -1690,11 +1690,14 @@ class MLAIBackendClient:
         self._raise_for_status_or_backend_unavailable(response)
         return response.json()
 
-    async def get_data_catalog(self) -> dict:
-        """Get Roo's curated read-only data resource catalog."""
+    async def get_data_catalog(self, requester_slack_id: str) -> dict:
+        """Get the requester's curated read-only data resource catalog."""
         response = await self._request(
             "GET",
             f"{self._data_base}/catalog/",
+            params={
+                "requester_slack_id": self._clean_slack_id(requester_slack_id),
+            },
             timeout=15.0,
             transport_retries=1,
             retry_backoff_seconds=0.25,

@@ -208,6 +208,7 @@ async def test_get_data_catalog_uses_canonical_endpoint(monkeypatch):
     async def fake_request(method, endpoint, **kwargs):
         captured["method"] = method
         captured["endpoint"] = endpoint
+        captured["params"] = kwargs["params"]
         request = httpx.Request(method, f"https://backend.test{endpoint}")
         return httpx.Response(200, request=request, json={"resources": [{"key": "vibe_raising_companies"}]})
 
@@ -218,11 +219,12 @@ async def test_get_data_catalog_uses_canonical_endpoint(monkeypatch):
     )
     monkeypatch.setattr(client, "_request", fake_request)
 
-    result = await client.get_data_catalog()
+    result = await client.get_data_catalog("<@U123>")
 
     assert result == {"resources": [{"key": "vibe_raising_companies"}]}
     assert captured["method"] == "GET"
     assert captured["endpoint"] == "/api/v1/data/catalog/"
+    assert captured["params"] == {"requester_slack_id": "U123"}
 
 
 @pytest.mark.asyncio

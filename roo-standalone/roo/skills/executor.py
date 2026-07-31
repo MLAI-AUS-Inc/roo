@@ -8555,7 +8555,7 @@ Chunk {index} source: {label}
 
         try:
             if self._data_query_catalog_requested(text, params):
-                catalog = await client.get_data_catalog()
+                catalog = await client.get_data_catalog(user_id)
                 return {
                     "message": self._format_data_catalog(catalog),
                     "data": {"action": "data_catalog", "catalog": catalog},
