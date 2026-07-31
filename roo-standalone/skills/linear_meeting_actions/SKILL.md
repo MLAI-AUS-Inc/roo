@@ -50,7 +50,7 @@ This skill turns pasted Slack meeting transcripts, summaries, supported Slack fi
 - For top-level commands such as "add this as a task", read a bounded slice of the preceding channel conversation on demand.
 - Create a Linear issue directly from an explicit Slack command such as "create a to do item in Linear project X and assign to Y".
 - Create an explicit, high-confidence contextual assignment in one step; keep discussion-derived follow-ups review-only.
-- Create a Linear project update when the request explicitly asks for a project update and Roo can confidently match the project.
+- Create a Linear project update only when the request affirmatively asks for one and Roo can confidently match the project; honor explicit instructions to skip, omit, or not write an update.
 - Use the latest Linear project update and recent project issues as context for concise PDF/transcript-derived project updates.
 - Download and parse `.pdf`, `.docx`, `.txt`, `.md`, `.csv`, `.png`, `.jpg`, `.jpeg`, `.webp`, and non-animated `.gif` files from the current Slack thread.
 - Inspect Linear teams, users, active projects, project members, labels, and recent open issues.
@@ -84,7 +84,7 @@ This skill turns pasted Slack meeting transcripts, summaries, supported Slack fi
    - Recent open issues for duplicate detection
 3. For explicit direct issue commands, parse the command itself as the issue source, including project and assignee hints.
 4. Otherwise, extract concrete action items into structured candidates with title, description, owner hint, project terms, due expression/date, explicit-commitment flag, evidence message timestamp, source label, and confidence.
-5. If a project update was requested, summarize all parsed source chunks, compare against the latest project update context, and create a concise Linear project update for the matched project.
+5. If a project update was affirmatively requested and not explicitly negated, summarize all parsed source chunks, compare against the latest project update context, and create a concise Linear project update for the matched project.
 6. If no concrete action item is found but the user asked to add the thread context to Linear, draft one contextual issue and require Slack approval before creation.
 7. Match owners by explicit requester/self-reference and Slack mention/email first, then unique Linear name/email-prefix match, then display/name similarity.
 8. Match projects by explicit project hint, exact name/slug, linked Slack channel, project description/content/update/recent issues, and true project membership as a tie-breaker.
@@ -96,10 +96,11 @@ This skill turns pasted Slack meeting transcripts, summaries, supported Slack fi
 14. Treat each extracted source chunk as one inference source; track total batch chunks separately so a long PDF does not artificially increase every chunk's reasoning effort.
 15. Retry a structured parsing or workflow-contract failure at most once. For a missing Studio structured response, lower reasoning effort and increase the output allowance so the model can emit the full schema; for other validation failures, use the next reasoning level.
 16. If meeting-action inference times out, retry only the failed chunk once at smaller paragraph/page-aligned scope with bounded concurrency. Finish extraction and deduplication before any issue write; if recovery or the total extraction deadline fails, create nothing and say so explicitly.
-17. If a Studio sizing batch still fails, retry its candidates individually and preserve successful assessments. Add the exact effort label and one-sentence rationale to the issue description and Slack preview. Never create an eligible Studio issue without exactly one valid effort label.
-18. Send an idempotency fingerprint and preserve a Slack permalink in the Linear issue.
-19. Present uncertain candidates in Slack with Approve and Reject buttons.
-20. Report created project updates, created issues, skipped duplicates, and unresolved items clearly.
+17. Discard duplicate or unrecognized optional evidence references without rejecting an otherwise valid Studio assessment. Normalize its rationale to one sentence and, when duration-based, add the rubric's canonical time anchor if the model omitted one.
+18. If a Studio sizing batch still fails its required candidate or rubric fields, retry its candidates individually and preserve successful assessments. Add the exact effort label and normalized one-sentence rationale to the issue description and Slack preview. Never create an eligible Studio issue without exactly one valid effort label.
+19. Send an idempotency fingerprint and preserve a Slack permalink in the Linear issue.
+20. Present uncertain candidates in Slack with Approve and Reject buttons.
+21. Report created project updates, created issues, skipped duplicates, and unresolved items clearly.
 
 ## Creation Rules
 
@@ -107,7 +108,7 @@ This skill turns pasted Slack meeting transcripts, summaries, supported Slack fi
 - Do not auto-create an issue without a high-confidence assignee and project.
 - A contextual command can auto-create only when its source contains an explicit assignment/commitment and the assignee, project, team, and due date are unambiguous.
 - Do not auto-create contextual discussion-thread issues; always request Slack approval first.
-- Project updates are created immediately when explicitly requested and the project match is confident.
+- Project updates are created immediately only when affirmatively requested, not when the request says not to write one, and the project match is confident.
 - Apply the compatible `meeting-action` label if it already exists.
 - In Studio sizing `review` or `required` mode, apply exactly one of `Extra Small (XS)`, `Small (S)`, `Medium (M)`, `Large (L)`, or `Extra Large (XL)`. Fail closed if sizing context, structured output, or the compatible label is unavailable.
 - Studio sizing `shadow` mode captures estimates without mutating issue labels or descriptions; `review` sends every Studio candidate for approval; `required` may auto-create only a high-confidence, context-sufficient assessment.
