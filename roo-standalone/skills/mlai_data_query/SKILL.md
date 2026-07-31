@@ -39,10 +39,12 @@ Use this skill when a Slack user asks Roo to read curated backend data across th
 
 Roo must not write data and must not send SQL. It calls the backend's read-only data access API:
 
-- `GET /api/v1/data/catalog/`
+- `GET /api/v1/data/catalog/?requester_slack_id=<actual Slack user ID>`
 - `POST /api/v1/data/query/`
 
 The backend registry is the security contract. Each resource has explicit allow-listed fields, supported operations, filters, ordering, pagination limits, and role-scoped policies. There is no "admin bypass all" mode.
+The catalog uses the same requester identity and policies, so it only includes
+resources, operations, and fields the requesting Slack user can query.
 
 ## Parameters
 

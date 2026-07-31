@@ -35,15 +35,15 @@ class FakeDataBackendClient:
         "offset": 0,
         "has_more": False,
     }
-    catalog_calls = 0
+    catalog_requesters = []
     queries = []
     last_init = None
 
     def __init__(self, *args, **kwargs):
         self.__class__.last_init = {"args": args, "kwargs": kwargs}
 
-    async def get_data_catalog(self):
-        self.__class__.catalog_calls += 1
+    async def get_data_catalog(self, requester_slack_id):
+        self.__class__.catalog_requesters.append(requester_slack_id)
         return self.catalog
 
     async def query_data(self, payload):
@@ -69,7 +69,7 @@ def _reset_fake_client():
         "offset": 0,
         "has_more": False,
     }
-    FakeDataBackendClient.catalog_calls = 0
+    FakeDataBackendClient.catalog_requesters = []
     FakeDataBackendClient.queries = []
     FakeDataBackendClient.last_init = None
 
@@ -88,7 +88,7 @@ async def test_data_query_catalog_calls_backend_catalog(monkeypatch):
         user_id="U123",
     )
 
-    assert FakeDataBackendClient.catalog_calls == 1
+    assert FakeDataBackendClient.catalog_requesters == ["U123"]
     assert FakeDataBackendClient.queries == []
     assert "Available data resources" in result["message"]
     assert "`vibe_raising_companies`" in result["message"]
@@ -133,7 +133,7 @@ async def test_data_query_specific_count_beats_bad_catalog_param(monkeypatch):
         user_id="U123",
     )
 
-    assert FakeDataBackendClient.catalog_calls == 0
+    assert FakeDataBackendClient.catalog_requesters == []
     assert FakeDataBackendClient.queries == [
         {
             "requester_slack_id": "U123",
