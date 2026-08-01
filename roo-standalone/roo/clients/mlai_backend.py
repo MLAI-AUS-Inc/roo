@@ -2966,6 +2966,40 @@ class MLAIBackendClient:
         response.raise_for_status()
         return response.json()
 
+    async def admit_boost_post(
+        self,
+        *,
+        submission_key: str,
+        workspace_id: str,
+        channel_id: str,
+        root_message_ts: str,
+        poster_slack_id: str,
+        root_text: str,
+        social_post_url: Optional[str] = None,
+        timeout: float = 30.0,
+    ) -> dict:
+        """Atomically price and debit one boost post in mlai-backend."""
+
+        payload = {
+            "submission_key": str(submission_key),
+            "workspace_id": str(workspace_id),
+            "channel_id": str(channel_id),
+            "root_message_ts": str(root_message_ts),
+            "poster_slack_id": self._clean_slack_id(poster_slack_id),
+            "root_text": str(root_text or ""),
+            "social_post_url": str(social_post_url or ""),
+            "source": "roo_slack_event",
+        }
+        response = await self._request(
+            "POST",
+            f"{self._points_base}/boost-posts/admissions/",
+            json=payload,
+            timeout=max(1.0, float(timeout)),
+            circuit_breaker=True,
+        )
+        self._raise_for_status_or_backend_unavailable(response)
+        return response.json()
+
     async def award_first_channel_post(
         self,
         slack_user_id: str,

@@ -81,6 +81,40 @@ def test_victor_ai_skill_fails_closed_for_disabled_or_invalid_configuration():
         )
 
 
+def test_boost_post_moderation_is_disabled_by_default_and_fails_closed():
+    configured = settings()
+    assert not configured.BOOST_POST_MODERATION_ENABLED
+    assert not configured.BOOST_POST_AUTO_DELETE_ENABLED
+
+    with pytest.raises(ValidationError, match="requires BOOST_LINK_LOVE_CHANNEL_ID"):
+        settings(
+            BOOST_POST_MODERATION_ENABLED=True,
+            BOOST_POST_ENFORCEMENT_CUTOFF_TS="1800000000.000000",
+            MLAI_BACKEND_URL="https://backend.test",
+        )
+
+    with pytest.raises(ValidationError, match="requires SLACK_MODERATOR_USER_TOKEN"):
+        settings(
+            BOOST_POST_MODERATION_ENABLED=True,
+            BOOST_POST_AUTO_DELETE_ENABLED=True,
+            BOOST_LINK_LOVE_CHANNEL_ID="CBOOST123",
+            BOOST_POST_ENFORCEMENT_CUTOFF_TS="1800000000.000000",
+            MLAI_BACKEND_URL="https://backend.test",
+        )
+
+    configured = settings(
+        BOOST_POST_MODERATION_ENABLED=True,
+        BOOST_POST_AUTO_DELETE_ENABLED=True,
+        BOOST_LINK_LOVE_CHANNEL_ID="CBOOST123",
+        BOOST_POST_ENFORCEMENT_CUTOFF_TS="1800000000.000000",
+        MLAI_BACKEND_URL="https://backend.test",
+        SLACK_MODERATOR_USER_TOKEN="xoxp-synthetic",
+        SLACK_MODERATOR_USER_ID="UADMIN123",
+        SLACK_MODERATOR_TEAM_ID="TTEAM123",
+    )
+    assert configured.BOOST_POST_AUTO_DELETE_ENABLED
+
+
 @pytest.mark.parametrize(
     "overrides",
     (
