@@ -15,11 +15,39 @@ import roo.skills.executor as executor_module
 from roo.linear_inference import (
     LinearCandidate,
     LinearDirectIssueBatch,
+    LinearInferenceTimeoutError,
     LinearProjectSourceSummary,
     LinearProjectUpdateResult,
+    LinearReasoningSignals,
+    choose_linear_reasoning,
 )
 from roo.linear_meeting_sources import ParsedSource, SourceParseResult
 from roo.skills.executor import SkillExecutor
+
+
+def _meeting_timeout_error(
+    *,
+    source_chars: int,
+    batch_chunk_index: int = 1,
+    batch_chunk_count: int = 1,
+    recovery_depth: int = 0,
+) -> LinearInferenceTimeoutError:
+    signals = LinearReasoningSignals(
+        stage="meeting_actions",
+        source_chars=source_chars,
+        source_count=1,
+        batch_chunk_index=batch_chunk_index,
+        batch_chunk_count=batch_chunk_count,
+        recovery_depth=recovery_depth,
+        explicit_project=True,
+        explicit_owner=True,
+    )
+    return LinearInferenceTimeoutError(
+        decision=choose_linear_reasoning(signals),
+        signals=signals,
+        attempt=1,
+        duration_ms=45_000,
+    )
 
 
 def test_linear_meeting_transcript_uses_thread_history_and_message():
@@ -37,6 +65,42 @@ def test_linear_meeting_transcript_uses_thread_history_and_message():
     assert "U1: Sam will update onboarding docs by Friday." in transcript
     assert "Bot message" not in transcript
     assert "turn this meeting summary into Linear tasks" in transcript
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        (
+            "For the Linear project [Studio] Aaron AI, extract the to-do items "
+            "from these meeting notes. Don't write a project update."
+        ),
+        "Create the Linear tasks, but do not create a project update.",
+        "Add the to-dos to Linear without a project update.",
+        "Extract the meeting actions in Linear; skip the project update.",
+        "Create Linear issues from the transcript, not a project update.",
+    ],
+)
+def test_linear_meeting_project_update_request_honors_explicit_negation(text):
+    executor = SkillExecutor()
+
+    assert executor._linear_meeting_project_update_requested(text, {}) is False
+
+
+def test_linear_meeting_project_update_request_keeps_positive_and_explicit_actions():
+    executor = SkillExecutor()
+
+    assert executor._linear_meeting_project_update_requested(
+        "Please write a project update in Linear from these meeting notes.",
+        {},
+    )
+    assert executor._linear_meeting_project_update_requested(
+        "Don't forget to create a project update in Linear.",
+        {},
+    )
+    assert executor._linear_meeting_project_update_requested(
+        "Extract the meeting actions only.",
+        {"action": "project_update"},
+    )
 
 
 def test_linear_meeting_owner_matches_slack_mention_email(monkeypatch):
@@ -721,9 +785,19 @@ async def test_linear_meeting_candidate_extraction_chunks_sources(monkeypatch):
         projects,
         source_label=None,
         source_count=1,
+        batch_chunk_index=1,
+        batch_chunk_count=1,
+        recovery_depth=0,
     ):
-        calls.append(transcript)
-        assert source_count >= 1
+        calls.append(
+            {
+                "transcript": transcript,
+                "source_count": source_count,
+                "batch_chunk_index": batch_chunk_index,
+                "batch_chunk_count": batch_chunk_count,
+                "recovery_depth": recovery_depth,
+            }
+        )
         return [
             {
                 "title": "Update onboarding docs",
@@ -744,10 +818,217 @@ async def test_linear_meeting_candidate_extraction_chunks_sources(monkeypatch):
     )
 
     assert len(calls) > 1
-    assert all(call.startswith("Source: notes.pdf") for call in calls)
-    assert all(len(call) <= 10100 for call in calls)
+    assert all(call["transcript"].startswith("Source: notes.pdf") for call in calls)
+    assert all(len(call["transcript"]) <= 10100 for call in calls)
+    assert all(call["source_count"] == 1 for call in calls)
+    assert {call["batch_chunk_count"] for call in calls} == {len(calls)}
+    assert {call["batch_chunk_index"] for call in calls} == set(
+        range(1, len(calls) + 1)
+    )
     assert len(candidates) == 1
     assert candidates[0]["source_label"] == "notes.pdf"
+
+
+@pytest.mark.asyncio
+async def test_linear_meeting_timeout_retries_only_failed_chunk_at_smaller_scope(
+    monkeypatch,
+):
+    executor = SkillExecutor()
+    calls = []
+    body = ("Sam will update the onboarding checklist after the meeting. " * 150).strip()
+    assert 5_000 < len(body) < 10_000
+
+    async def fake_extract(
+        *,
+        transcript,
+        params,
+        users,
+        projects,
+        source_label=None,
+        source_count=1,
+        batch_chunk_index=1,
+        batch_chunk_count=1,
+        recovery_depth=0,
+    ):
+        calls.append(
+            {
+                "chars": len(transcript),
+                "source_count": source_count,
+                "batch_chunk_index": batch_chunk_index,
+                "batch_chunk_count": batch_chunk_count,
+                "recovery_depth": recovery_depth,
+            }
+        )
+        if recovery_depth == 0:
+            raise _meeting_timeout_error(
+                source_chars=len(transcript),
+                batch_chunk_index=batch_chunk_index,
+                batch_chunk_count=batch_chunk_count,
+            )
+        return [
+            {
+                "title": "Update the onboarding checklist",
+                "owner_hint": "Sam",
+                "source_label": source_label,
+                "confidence": 0.9,
+            }
+        ]
+
+    monkeypatch.setattr(executor, "_extract_linear_meeting_candidates", fake_extract)
+
+    candidates = await executor._extract_linear_meeting_candidates_from_sources(
+        sources=[ParsedSource(label="notes.pdf", text=body, kind="pdf")],
+        params={"project_hint": "[Studio] Aaron AI", "default_assignee_hint": "Sam"},
+        users=[],
+        projects=[],
+    )
+
+    initial_calls = [call for call in calls if call["recovery_depth"] == 0]
+    recovery_calls = [call for call in calls if call["recovery_depth"] == 1]
+    assert len(initial_calls) == 1
+    assert len(recovery_calls) == 2
+    assert all(call["chars"] < initial_calls[0]["chars"] for call in recovery_calls)
+    assert all(call["source_count"] == 1 for call in calls)
+    assert {call["batch_chunk_index"] for call in calls} == {1}
+    assert {call["batch_chunk_count"] for call in calls} == {1}
+    assert len(candidates) == 1
+    assert candidates[0]["title"] == "Update the onboarding checklist"
+
+
+@pytest.mark.asyncio
+async def test_linear_meeting_chunk_extraction_uses_bounded_concurrency(monkeypatch):
+    executor = SkillExecutor()
+    active = 0
+    peak_active = 0
+    total_calls = 0
+
+    async def fake_extract(
+        *,
+        transcript,
+        params,
+        users,
+        projects,
+        source_label=None,
+        source_count=1,
+        batch_chunk_index=1,
+        batch_chunk_count=1,
+        recovery_depth=0,
+    ):
+        nonlocal active, peak_active, total_calls
+        total_calls += 1
+        active += 1
+        peak_active = max(peak_active, active)
+        await asyncio.sleep(0.01)
+        active -= 1
+        return [
+            {
+                "title": f"Complete action {batch_chunk_index}",
+                "owner_hint": "Sam",
+                "source_label": source_label,
+                "confidence": 0.9,
+            }
+        ]
+
+    monkeypatch.setattr(executor, "_extract_linear_meeting_candidates", fake_extract)
+    paragraphs = [
+        f"Sam will complete action {index}. " + ("context " * 550)
+        for index in range(1, 6)
+    ]
+
+    candidates = await executor._extract_linear_meeting_candidates_from_sources(
+        sources=[
+            ParsedSource(
+                label="notes.pdf",
+                text="\n\n".join(paragraphs),
+                kind="pdf",
+            )
+        ],
+        params={},
+        users=[],
+        projects=[],
+    )
+
+    assert peak_active == 2
+    assert total_calls >= 3
+    assert candidates
+
+
+@pytest.mark.asyncio
+async def test_linear_meeting_repeated_timeout_aborts_before_any_linear_write(
+    monkeypatch,
+):
+    executor = SkillExecutor()
+    write_calls = []
+
+    async def fake_source_result(**kwargs):
+        return SourceParseResult(
+            sources=[
+                ParsedSource(
+                    label="notes.pdf",
+                    text="Sam will update the Aaron AI onboarding checklist.",
+                    kind="pdf",
+                )
+            ],
+            files_seen=1,
+            files_parsed=1,
+        )
+
+    async def timed_out_extraction(**kwargs):
+        raise _meeting_timeout_error(source_chars=8_000)
+
+    class FakeClient:
+        async def list_teams(self):
+            return []
+
+        async def list_users(self):
+            return []
+
+        async def list_active_projects(self):
+            return [{"id": "project-1", "name": "[Studio] Aaron AI"}]
+
+        async def list_issue_labels(self):
+            return []
+
+        async def list_recent_open_issues(self):
+            return []
+
+        async def create_issue(self, **kwargs):
+            write_calls.append(kwargs)
+            raise AssertionError("create_issue must not be called after extraction timeout")
+
+    class FakeSkill:
+        def get_client_class(self, name):
+            assert name == "LinearMeetingActionsClient"
+            return FakeClient
+
+    monkeypatch.setattr(executor_module, "get_settings", lambda: SimpleNamespace())
+    monkeypatch.setattr(executor, "_build_linear_meeting_source_result", fake_source_result)
+    monkeypatch.setattr(
+        executor,
+        "_extract_linear_meeting_candidates_from_sources",
+        timed_out_extraction,
+    )
+
+    result = await executor._execute_linear_meeting_actions(
+        skill=FakeSkill(),
+        text=(
+            "For Linear project [Studio] Aaron AI, extract the action items from "
+            "this transcript and assign them."
+        ),
+        params={"project_hint": "[Studio] Aaron AI"},
+        user_id="U1",
+        channel_id="C1",
+        thread_ts="1.1",
+        thread_history=[],
+        event_files=[{"id": "F1", "name": "notes.pdf"}],
+    )
+
+    assert result["data"]["timed_out"] is True
+    assert result["data"]["created_count"] == 0
+    assert result["data"]["review_count"] == 0
+    assert "before creating any Linear tasks" in result["message"]
+    assert "Nothing was changed" in result["message"]
+    assert write_calls == []
 
 
 @pytest.mark.asyncio

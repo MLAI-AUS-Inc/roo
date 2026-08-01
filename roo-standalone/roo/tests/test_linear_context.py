@@ -13,6 +13,12 @@ def test_contextual_linear_reference_is_narrow():
     assert linear_context.is_contextual_linear_reference(
         "make the request above a Linear issue"
     )
+    assert linear_context.is_contextual_linear_reference(
+        (
+            "For the Linear project [Studio] Aaron AI, using this transcript "
+            "and meeting notes, add the to-do items."
+        )
+    )
     assert not linear_context.is_contextual_linear_reference(
         "create a Linear task to change the name of this project"
     )

@@ -20,7 +20,10 @@ from .slack_client import (
 CONTEXTUAL_LINEAR_REFERENCE_RE = re.compile(
     r"\b(?:add|create|make|put|send|sync|turn|log|file|raise)\s+"
     r"(?:the\s+)?(?:this|that|above|previous|last|conversation|discussion|thread|message)\b"
-    r"|\b(?:request|item|task|message)\s+above\b",
+    r"|\b(?:request|item|task|message)\s+above\b"
+    r"|\b(?:using|from|based\s+on)\s+(?:this|these|the)\s+"
+    r"(?:transcript|meeting\s+notes?|notes?|summary|conversation|discussion|"
+    r"thread|message|file|document)\b",
     flags=re.IGNORECASE,
 )
 

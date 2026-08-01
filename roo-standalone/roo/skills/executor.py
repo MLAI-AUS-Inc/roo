@@ -51,6 +51,7 @@ from ..linear_inference import (
     LINEAR_SKILL_MODEL,
     LinearContextualIssueResult,
     LinearDirectIssueBatch,
+    LinearInferenceTimeoutError,
     LinearMeetingActionBatch,
     LinearProjectSourceSummary,
     LinearProjectUpdateResult,
@@ -67,8 +68,8 @@ from ..points_request_approval import (
 from ..slack_client import (
     get_channel_id,
     get_channel_name,
-    post_ephemeral,
     post_message,
+    send_dm,
     upload_file,
 )
 from ..config import get_settings
@@ -94,6 +95,17 @@ VICTOR_AI_ACCESS_UNAVAILABLE_MESSAGE = (
     "Victor application data is not available in this conversation."
 )
 LINEAR_MEETING_PENDING_ACTIONS: dict[str, dict[str, Any]] = {}
+LINEAR_MEETING_EXTRACTION_CONCURRENCY = 2
+LINEAR_MEETING_EXTRACTION_TOTAL_TIMEOUT_SECONDS = 240.0
+LINEAR_MEETING_TIMEOUT_RECOVERY_MAX_CHARS = 5_000
+LINEAR_MEETING_TIMEOUT_RECOVERY_OVERLAP_CHARS = 300
+LINEAR_MEETING_TIMEOUT_RECOVERY_DEPTH = 1
+
+
+class LinearMeetingExtractionDeadlineError(RuntimeError):
+    """The complete meeting-action extraction exceeded its wall-clock budget."""
+
+
 # Pack ids are opaque and kept stable; the id number no longer matches the
 # points it grants (points were doubled for the same price). Must stay in sync
 # with mlai-backend roo/services.py ROO_TOPUP_PACKS.
@@ -2783,32 +2795,60 @@ Keep the response concise but informative."""
                 "message": f"I couldn't read Linear context yet: {detail}"
             }
 
-        if use_direct_issue_path:
-            candidates = await self._extract_linear_direct_issue_candidates(
-                text=text,
-                params=params,
-                users=users,
-                projects=projects,
-            )
-        else:
-            candidates = await self._extract_linear_meeting_candidates_from_sources(
-                sources=source_result.sources,
-                params=params,
-                users=users,
-                projects=projects,
-            )
         project_update_requested = self._linear_meeting_project_update_requested(text, params)
         contextual_review_mode = False
-        if not candidates and thread_reference_request and not project_update_requested:
-            contextual_candidate = await self._extract_linear_thread_context_candidate(
-                sources=source_result.sources,
-                params=params,
-                users=users,
-                projects=projects,
+        try:
+            if use_direct_issue_path:
+                candidates = await self._extract_linear_direct_issue_candidates(
+                    text=text,
+                    params=params,
+                    users=users,
+                    projects=projects,
+                )
+            else:
+                candidates = await self._extract_linear_meeting_candidates_from_sources(
+                    sources=source_result.sources,
+                    params=params,
+                    users=users,
+                    projects=projects,
+                )
+            if not candidates and thread_reference_request and not project_update_requested:
+                contextual_candidate = await self._extract_linear_thread_context_candidate(
+                    sources=source_result.sources,
+                    params=params,
+                    users=users,
+                    projects=projects,
+                )
+                if contextual_candidate:
+                    candidates = [contextual_candidate]
+                    contextual_review_mode = True
+        except (LinearInferenceTimeoutError, LinearMeetingExtractionDeadlineError) as exc:
+            print(
+                "LINEAR_MEETING_EXTRACTION "
+                + json.dumps(
+                    {
+                        "event": "aborted_before_writes",
+                        "error_type": type(exc).__name__,
+                        "project_hint": params.get("project_hint"),
+                        "files_parsed": source_result.files_parsed,
+                    },
+                    ensure_ascii=True,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
             )
-            if contextual_candidate:
-                candidates = [contextual_candidate]
-                contextual_review_mode = True
+            return {
+                "message": (
+                    "I timed out while extracting action items from those notes, so I stopped "
+                    "before creating any Linear tasks. Nothing was changed. Please try again."
+                ),
+                "data": {
+                    "created_count": 0,
+                    "review_count": 0,
+                    "skipped_count": 0,
+                    "timed_out": True,
+                },
+            }
         if not candidates and not project_update_requested:
             return {
                 "message": (
@@ -3691,25 +3731,144 @@ Return the structured issue list. Preserve the parsed project and assignee hints
         users: list[dict[str, Any]],
         projects: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
-        candidates: list[dict[str, Any]] = []
         source_chunks = [
             (source, chunk)
             for source in sources
             for chunk in source_text_chunks(source)
         ]
-        for source, chunk in source_chunks:
-            extracted = await self._extract_linear_meeting_candidates(
-                transcript=chunk,
-                params=params,
-                users=users,
-                projects=projects,
-                source_label=source.label,
-                source_count=max(1, len(source_chunks)),
+        if not source_chunks:
+            return []
+
+        semaphore = asyncio.Semaphore(LINEAR_MEETING_EXTRACTION_CONCURRENCY)
+        batch_chunk_count = len(source_chunks)
+
+        async def extract_chunk(
+            source: ParsedSource,
+            chunk: str,
+            *,
+            batch_chunk_index: int,
+            recovery_depth: int = 0,
+        ) -> list[dict[str, Any]]:
+            try:
+                async with semaphore:
+                    return await self._extract_linear_meeting_candidates(
+                        transcript=chunk,
+                        params=params,
+                        users=users,
+                        projects=projects,
+                        source_label=source.label,
+                        # This model request contains one source chunk. The total
+                        # batch size is logged separately and must not inflate
+                        # reasoning effort for every individual request.
+                        source_count=1,
+                        batch_chunk_index=batch_chunk_index,
+                        batch_chunk_count=batch_chunk_count,
+                        recovery_depth=recovery_depth,
+                    )
+            except LinearInferenceTimeoutError as exc:
+                if recovery_depth >= LINEAR_MEETING_TIMEOUT_RECOVERY_DEPTH:
+                    raise
+                recovery_chunks = self._linear_meeting_timeout_recovery_chunks(
+                    source=source,
+                    chunk=chunk,
+                )
+                print(
+                    "LINEAR_MEETING_EXTRACTION "
+                    + json.dumps(
+                        {
+                            "event": "chunk_timeout_recovery",
+                            "batch_chunk_index": batch_chunk_index,
+                            "batch_chunk_count": batch_chunk_count,
+                            "recovery_depth": recovery_depth + 1,
+                            "retry_chunk_count": len(recovery_chunks),
+                            "source_chars": len(chunk),
+                            "reasoning_effort": exc.decision.effort,
+                            "timeout_seconds": exc.decision.timeout_seconds,
+                        },
+                        ensure_ascii=True,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    )
+                )
+                recovered = await asyncio.gather(
+                    *(
+                        extract_chunk(
+                            source,
+                            recovery_chunk,
+                            batch_chunk_index=batch_chunk_index,
+                            recovery_depth=recovery_depth + 1,
+                        )
+                        for recovery_chunk in recovery_chunks
+                    ),
+                    return_exceptions=True,
+                )
+                recovered_candidates: list[dict[str, Any]] = []
+                for result in recovered:
+                    if isinstance(result, BaseException):
+                        raise result
+                    recovered_candidates.extend(result)
+                return self._dedupe_linear_meeting_candidates(recovered_candidates)
+
+        async def extract_all_chunks() -> list[list[dict[str, Any]]]:
+            extracted = await asyncio.gather(
+                *(
+                    extract_chunk(
+                        source,
+                        chunk,
+                        batch_chunk_index=index,
+                    )
+                    for index, (source, chunk) in enumerate(source_chunks, start=1)
+                ),
+                return_exceptions=True,
             )
+            for result in extracted:
+                if isinstance(result, BaseException):
+                    raise result
+            return extracted
+
+        try:
+            extracted_batches = await asyncio.wait_for(
+                extract_all_chunks(),
+                timeout=LINEAR_MEETING_EXTRACTION_TOTAL_TIMEOUT_SECONDS,
+            )
+        except LinearInferenceTimeoutError:
+            raise
+        except asyncio.TimeoutError as exc:
+            raise LinearMeetingExtractionDeadlineError(
+                "Meeting-action extraction exceeded its "
+                f"{LINEAR_MEETING_EXTRACTION_TOTAL_TIMEOUT_SECONDS:g} second runtime budget."
+            ) from exc
+
+        candidates: list[dict[str, Any]] = []
+        for (source, _), extracted in zip(source_chunks, extracted_batches):
             for item in extracted:
                 item.setdefault("source_label", source.label)
                 candidates.append(item)
         return self._dedupe_linear_meeting_candidates(candidates)
+
+    @staticmethod
+    def _linear_meeting_timeout_recovery_chunks(
+        *,
+        source: ParsedSource,
+        chunk: str,
+    ) -> list[str]:
+        source_header = f"Source: {source.label}\n"
+        source_text = (
+            chunk[len(source_header):]
+            if chunk.startswith(source_header)
+            else chunk
+        )
+        recovery_source = ParsedSource(
+            label=source.label,
+            text=source_text,
+            kind=source.kind,
+            metadata=source.metadata,
+        )
+        return source_text_chunks(
+            recovery_source,
+            max_chars=LINEAR_MEETING_TIMEOUT_RECOVERY_MAX_CHARS,
+            hard_split_overlap_chars=LINEAR_MEETING_TIMEOUT_RECOVERY_OVERLAP_CHARS,
+        ) or [chunk]
 
     async def _extract_linear_meeting_candidates(
         self,
@@ -3720,6 +3879,9 @@ Return the structured issue list. Preserve the parsed project and assignee hints
         projects: list[dict[str, Any]],
         source_label: Optional[str] = None,
         source_count: int = 1,
+        batch_chunk_index: int = 1,
+        batch_chunk_count: int = 1,
+        recovery_depth: int = 0,
     ) -> list[dict[str, Any]]:
         from ..utils import get_current_date
 
@@ -3773,6 +3935,9 @@ Return the structured action_items list."""
                     stage="meeting_actions",
                     source_chars=len(transcript),
                     source_count=max(1, source_count),
+                    batch_chunk_index=max(1, batch_chunk_index),
+                    batch_chunk_count=max(1, batch_chunk_count),
+                    recovery_depth=max(0, recovery_depth),
                     explicit_project=bool(params.get("project_hint")),
                     explicit_owner=bool(
                         params.get("owner_hint")
@@ -3944,6 +4109,30 @@ Return the structured action_items list."""
         action = self._normalize_match_text(params.get("action"))
         if action in {"projectupdate", "updateproject", "projectstatus"}:
             return True
+        request_text = re.sub(
+            r"\s+",
+            " ",
+            str(text or "").lower().replace("’", "'"),
+        ).strip()
+        negative_patterns = (
+            (
+                r"\b(?:do\s+not|don't|dont|never)\s+"
+                r"(?:write|create|add|post|make|include|generate|send)\s+"
+                r"(?:(?:a|the|any)\s+)?project\s+updates?\b"
+            ),
+            (
+                r"\b(?:no|not|without)\s+"
+                r"(?:(?:a|the|any)\s+)?project\s+updates?\b"
+            ),
+            (
+                r"\b(?:skip|omit|avoid)\s+"
+                r"(?:(?:writing|creating|adding|posting|making|including|"
+                r"generating|sending)\s+)?"
+                r"(?:(?:a|the|any)\s+)?project\s+updates?\b"
+            ),
+        )
+        if any(re.search(pattern, request_text) for pattern in negative_patterns):
+            return False
         normalized_text = self._normalize_match_text(text)
         if "projectupdate" not in normalized_text:
             return False
@@ -4883,6 +5072,65 @@ Chunk {index} source: {label}
             return "Team unclear"
         return "Low confidence mapping"
 
+    async def _assess_linear_studio_candidates_resilient(
+        self,
+        *,
+        candidates: list[dict[str, Any]],
+        project_context: dict[str, Any],
+        context_max_chars: int,
+        batch_size: int,
+        safety_identifier: str,
+    ) -> tuple[dict[str, Any], dict[str, str]]:
+        """Size bounded batches and isolate a failed batch to single candidates."""
+
+        assessments: dict[str, Any] = {}
+        errors: dict[str, str] = {}
+        batch_size = max(1, min(int(batch_size or 3), 10))
+        chunks = [
+            candidates[index : index + batch_size]
+            for index in range(0, len(candidates), batch_size)
+        ]
+        for chunk_index, chunk in enumerate(chunks, start=1):
+            try:
+                assessments.update(
+                    await assess_studio_effort_batch(
+                        candidates=chunk,
+                        project_context=project_context,
+                        context_max_chars=context_max_chars,
+                        safety_identifier=safety_identifier,
+                        batch_chunk_index=chunk_index,
+                        batch_chunk_count=len(chunks),
+                    )
+                )
+                continue
+            except Exception as batch_exc:
+                if len(chunk) == 1:
+                    candidate_key = str(chunk[0]["candidate_key"])
+                    errors[candidate_key] = (
+                        f"{batch_exc.__class__.__name__}: {batch_exc}"
+                    )
+                    continue
+
+            for candidate in chunk:
+                candidate_key = str(candidate["candidate_key"])
+                try:
+                    assessments.update(
+                        await assess_studio_effort_batch(
+                            candidates=[candidate],
+                            project_context=project_context,
+                            context_max_chars=context_max_chars,
+                            safety_identifier=safety_identifier,
+                            batch_chunk_index=chunk_index,
+                            batch_chunk_count=len(chunks),
+                            recovery_depth=1,
+                        )
+                    )
+                except Exception as candidate_exc:
+                    errors[candidate_key] = (
+                        f"{candidate_exc.__class__.__name__}: {candidate_exc}"
+                    )
+        return assessments, errors
+
     async def _size_linear_studio_prepared_candidates(
         self,
         *,
@@ -4959,61 +5207,6 @@ Chunk {index} source: {label}
                     raise RuntimeError(
                         "The project name changed after matching; rerun the Slack command."
                     )
-                sizing_candidates: list[dict[str, Any]] = []
-                for prepared in group:
-                    if prepared.get("receipt_sizing_metadata"):
-                        continue
-                    candidate = prepared["candidate"]
-                    source = prepared["source"]
-                    owner = prepared["owner_match"].get("user") or {}
-                    team = prepared["team_match"].get("team") or {}
-                    sizing_candidates.append(
-                        {
-                            "candidate_key": prepared["candidate_key"],
-                            "title": candidate.get("title"),
-                            "description": candidate.get("description"),
-                            "work_status": candidate.get("work_status"),
-                            "completed_work": candidate.get("completed_work"),
-                            "remaining_work": candidate.get("remaining_work"),
-                            "available_artifacts": candidate.get("available_artifacts"),
-                            "dependencies": candidate.get("dependencies"),
-                            "acceptance_criteria": candidate.get("acceptance_criteria"),
-                            "evidence": candidate.get("evidence"),
-                            "source_label": candidate.get("source_label"),
-                            "source_permalink": source.get("source_permalink"),
-                            "due_date": candidate.get("due_date"),
-                            "assignee": {
-                                "id": owner.get("id"),
-                                "name": owner.get("displayName")
-                                or owner.get("name")
-                                or owner.get("email"),
-                            },
-                            "team": {
-                                "id": team.get("id"),
-                                "key": team.get("key"),
-                                "name": team.get("name"),
-                            },
-                        }
-                    )
-                assessments = (
-                    await assess_studio_effort_batch(
-                        candidates=sizing_candidates,
-                        project_context=project_context,
-                        context_max_chars=int(
-                            getattr(
-                                settings,
-                                "LINEAR_STUDIO_SIZING_CONTEXT_MAX_CHARS",
-                                40000,
-                            )
-                            or 40000
-                        ),
-                        safety_identifier=linear_safety_identifier(
-                            requester_slack_id
-                        ),
-                    )
-                    if sizing_candidates
-                    else {}
-                )
                 registry = project_context.get("effortLabelRegistry")
                 registry_labels = (
                     registry.get("nodes")
@@ -5021,7 +5214,85 @@ Chunk {index} source: {label}
                     and isinstance(registry.get("nodes"), list)
                     else labels
                 )
-                for prepared in group:
+            except Exception as exc:
+                detail = f"{exc.__class__.__name__}: {exc}"
+                shadow_results.append(
+                    {
+                        "project_id": project_id,
+                        "error": detail,
+                    }
+                )
+                if mode in {"review", "required"}:
+                    for prepared in group:
+                        prepared["studio_sizing_error"] = detail
+                continue
+
+            sizing_candidates: list[dict[str, Any]] = []
+            for prepared in group:
+                if prepared.get("receipt_sizing_metadata"):
+                    continue
+                candidate = prepared["candidate"]
+                source = prepared["source"]
+                owner = prepared["owner_match"].get("user") or {}
+                team = prepared["team_match"].get("team") or {}
+                sizing_candidates.append(
+                    {
+                        "candidate_key": prepared["candidate_key"],
+                        "title": candidate.get("title"),
+                        "description": candidate.get("description"),
+                        "work_status": candidate.get("work_status"),
+                        "completed_work": candidate.get("completed_work"),
+                        "remaining_work": candidate.get("remaining_work"),
+                        "available_artifacts": candidate.get("available_artifacts"),
+                        "dependencies": candidate.get("dependencies"),
+                        "acceptance_criteria": candidate.get("acceptance_criteria"),
+                        "evidence": candidate.get("evidence"),
+                        "source_label": candidate.get("source_label"),
+                        "source_permalink": source.get("source_permalink"),
+                        "due_date": candidate.get("due_date"),
+                        "assignee": {
+                            "id": owner.get("id"),
+                            "name": owner.get("displayName")
+                            or owner.get("name")
+                            or owner.get("email"),
+                        },
+                        "team": {
+                            "id": team.get("id"),
+                            "key": team.get("key"),
+                            "name": team.get("name"),
+                        },
+                    }
+                )
+            context_max_chars = int(
+                getattr(
+                    settings,
+                    "LINEAR_STUDIO_SIZING_CONTEXT_MAX_CHARS",
+                    40000,
+                )
+                or 40000
+            )
+            assessments, sizing_errors = (
+                await self._assess_linear_studio_candidates_resilient(
+                    candidates=sizing_candidates,
+                    project_context=project_context,
+                    context_max_chars=context_max_chars,
+                    batch_size=int(
+                        getattr(
+                            settings,
+                            "LINEAR_STUDIO_SIZING_BATCH_SIZE",
+                            3,
+                        )
+                        or 3
+                    ),
+                    safety_identifier=linear_safety_identifier(
+                        requester_slack_id
+                    ),
+                )
+                if sizing_candidates
+                else ({}, {})
+            )
+            for prepared in group:
+                try:
                     stored_metadata = prepared.get("receipt_sizing_metadata")
                     if isinstance(stored_metadata, dict):
                         metadata = stored_metadata
@@ -5038,7 +5309,15 @@ Chunk {index} source: {label}
                             else metadata.get("contextSufficient", False)
                         )
                     else:
-                        assessment = assessments[prepared["candidate_key"]]
+                        candidate_key = str(prepared["candidate_key"])
+                        assessment = assessments.get(candidate_key)
+                        if assessment is None:
+                            raise RuntimeError(
+                                sizing_errors.get(
+                                    candidate_key,
+                                    "Studio sizing returned no assessment.",
+                                )
+                            )
                         metadata = assessment_metadata(
                             assessment,
                             project=live_project,
@@ -5085,16 +5364,16 @@ Chunk {index} source: {label}
                     prepared["effort_label_id"] = compatible_label_ids[0]
                     prepared["display"]["effort_label"] = effort_label
                     prepared["display"]["effort_rationale"] = rationale
-            except Exception as exc:
-                detail = f"{exc.__class__.__name__}: {exc}"
-                shadow_results.append(
-                    {
-                        "project_id": project_id,
-                        "error": detail,
-                    }
-                )
-                if mode in {"review", "required"}:
-                    for prepared in group:
+                except Exception as exc:
+                    detail = f"{exc.__class__.__name__}: {exc}"
+                    shadow_results.append(
+                        {
+                            "candidate_key": prepared["candidate_key"],
+                            "project_id": project_id,
+                            "error": detail,
+                        }
+                    )
+                    if mode in {"review", "required"}:
                         prepared["studio_sizing_error"] = detail
         return shadow_results
 
@@ -8896,26 +9175,35 @@ Chunk {index} source: {label}
         ]
         response_data = {
             "action": "topup_points",
-            "delivery": (
-                "direct_message"
-                if channel_id and channel_id.startswith("D")
-                else "ephemeral"
-            ),
+            "delivery": "direct_message",
             "pack_ids": [option["pack_id"] for option in options],
             "partial": had_partial_errors,
         }
         if channel_id and not channel_id.startswith("D"):
-            post_ephemeral(
-                channel=channel_id,
-                user=user_id,
-                text=message,
-                thread_ts=thread_ts,
+            dm_response = send_dm(
+                user_id,
+                message,
                 blocks=blocks,
             )
+            if not dm_response or not dm_response.get("ok"):
+                return {
+                    "message": (
+                        f"⚠️ I couldn’t open a private Slack DM for <@{user_id}>. "
+                        "Please DM me `topup` and I’ll create fresh checkout buttons there."
+                    ),
+                    "data": {
+                        **response_data,
+                        "delivery_failed": True,
+                    },
+                    "suppress_post": False,
+                }
             return {
-                "message": "",
+                "message": (
+                    f"🔒 I’ve sent <@{user_id}> a direct message with private "
+                    "Stripe Checkout buttons. Check your DMs."
+                ),
                 "data": response_data,
-                "suppress_post": True,
+                "suppress_post": False,
             }
         return {
             "message": message,

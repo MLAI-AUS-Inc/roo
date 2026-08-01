@@ -55,6 +55,10 @@ jobs:
             roo/tests/test_admin_pilot_smoke.py \
             roo/tests/test_admin_actions.py \
             roo/tests/test_router_catalog.py \
+            roo/tests/test_linear_inference.py \
+            roo/tests/test_linear_effort_sizing.py \
+            roo/tests/test_linear_meeting_sources.py \
+            roo/tests/test_linear_meeting_actions.py \
             roo/tests/test_ai_security.py \
             roo/tests/test_sim_patient.py \
             roo/tests/test_diagnosis_check.py \

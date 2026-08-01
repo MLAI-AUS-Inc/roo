@@ -439,8 +439,18 @@ def _is_animated_gif(file_bytes: bytes) -> bool:
     return file_bytes.count(b"\x21\xf9\x04") > 1
 
 
-def source_text_chunks(source: ParsedSource, max_chars: int = 10000) -> list[str]:
+def source_text_chunks(
+    source: ParsedSource,
+    max_chars: int = 10000,
+    *,
+    hard_split_overlap_chars: int = 0,
+) -> list[str]:
     """Split source text into chunks without dropping source attribution."""
+    if max_chars <= 0:
+        raise ValueError("max_chars must be positive")
+    if hard_split_overlap_chars < 0 or hard_split_overlap_chars >= max_chars:
+        raise ValueError("hard_split_overlap_chars must be between 0 and max_chars")
+
     text = source.text.strip()
     if len(text) <= max_chars:
         return [f"Source: {source.label}\n{text}"] if text else []
@@ -452,14 +462,21 @@ def source_text_chunks(source: ParsedSource, max_chars: int = 10000) -> list[str
         paragraph = paragraph.strip()
         if not paragraph:
             continue
+        if len(paragraph) > max_chars:
+            if current:
+                chunks.append(f"Source: {source.label}\n{current}")
+                current = ""
+            step = max_chars - hard_split_overlap_chars
+            for start in range(0, len(paragraph), step):
+                chunk_text = paragraph[start:start + max_chars]
+                chunks.append(f"Source: {source.label}\n{chunk_text}")
+                if start + max_chars >= len(paragraph):
+                    break
+            continue
         next_value = f"{current}\n\n{paragraph}".strip() if current else paragraph
         if len(next_value) > max_chars and current:
             chunks.append(f"Source: {source.label}\n{current}")
             current = paragraph
-        elif len(next_value) > max_chars:
-            for start in range(0, len(paragraph), max_chars):
-                chunks.append(f"Source: {source.label}\n{paragraph[start:start + max_chars]}")
-            current = ""
         else:
             current = next_value
     if current:

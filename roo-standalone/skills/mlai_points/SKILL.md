@@ -337,8 +337,13 @@ Top-up Roo Points are optional and do not count toward lifetime earned contribut
 
 When the user asks to top up without choosing a pack, show all three Stripe
 Checkout buttons. If the user names a valid pack, show only that pack's button.
-Checkout buttons must be private to the requester in shared channels. Stripe
-collects the Roo Points terms acknowledgement before payment.
+From a shared channel, send checkout buttons in a persistent direct message to
+the requester; do not use a transient ephemeral channel message. Stripe collects
+the Roo Points terms acknowledgement before payment. After DM delivery, post a
+short public confirmation in the original thread so everyone can see that Roo
+responded. The public confirmation must not contain a checkout URL or purchase
+details. If opening the DM fails, tell the requester publicly to DM Roo `topup`
+so fresh buttons can be created safely in that conversation.
 
 ## Response Style
 
