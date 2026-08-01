@@ -1,3 +1,4 @@
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -58,6 +59,58 @@ class ApprovedClient:
             "discount_applied": True,
             "new_balance": 16,
         }
+
+
+def test_invalid_post_notice_explains_supported_links_and_retry() -> None:
+    notice = module._rejection_notice(
+        {
+            "poster_slack_id": "UPOSTER1",
+            "status": "rejected_invalid",
+            "rejection_reason": "Missing required fields: social_post_url",
+        }
+    )
+
+    assert "couldn't find a supported social link" in notice
+    assert "LinkedIn or lnkd.in" in notice
+    assert "X/Twitter, Instagram, or Facebook" in notice
+    assert (
+        "General website, product, signup, and article links aren't eligible" in notice
+    )
+    assert "create a new top-level post" in notice
+
+
+def test_insufficient_points_notice_shows_price_balance_and_discount() -> None:
+    notice = module._rejection_notice(
+        {
+            "poster_slack_id": "UPOSTER1",
+            "status": "rejected_insufficient_points",
+            "backend_result_json": json.dumps(
+                {
+                    "charged_points": 4,
+                    "new_balance": 3,
+                    "discount_applied": True,
+                }
+            ),
+        }
+    )
+
+    assert "costs 4 Roo points" in notice
+    assert "currently have 3" in notice
+    assert "50% Australian-startup monthly-update discount" in notice
+    assert "what's my points balance?" in notice
+
+
+def test_unlinked_member_notice_explains_how_to_fix_account_link() -> None:
+    notice = module._rejection_notice(
+        {
+            "poster_slack_id": "UPOSTER1",
+            "status": "rejected_member_unlinked",
+        }
+    )
+
+    assert "can't match your Slack profile to a Roo Points account" in notice
+    assert "what's my points balance?" in notice
+    assert "ask an MLAI admin to link your Slack profile" in notice
 
 
 @pytest.mark.asyncio

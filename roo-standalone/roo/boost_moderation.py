@@ -520,20 +520,59 @@ def _approval_notice(admission: dict[str, Any]) -> str:
     return f":white_check_mark: Approved — {charged} Roo points deducted.{discount_text}{balance_text}"
 
 
+def _backend_result(admission: dict[str, Any]) -> dict[str, Any]:
+    """Return the stored backend decision without trusting its shape."""
+
+    raw = admission.get("backend_result_json")
+    if isinstance(raw, dict):
+        return raw
+    try:
+        parsed = json.loads(str(raw or "{}"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
 def _rejection_notice(admission: dict[str, Any]) -> str:
     poster = str(admission.get("poster_slack_id") or "")
     status = str(admission.get("status") or "")
     if status == "rejected_insufficient_points":
+        result = _backend_result(admission)
+        required = result.get("charged_points")
+        available = result.get("new_balance", result.get("balance_before"))
+        if required is not None and available is not None:
+            balance_detail = (
+                f"This boost costs {required} Roo points, and you currently have {available}. "
+            )
+        else:
+            balance_detail = "Your Roo points balance is below the price of this boost. "
+        discount_detail = (
+            "Your 50% Australian-startup monthly-update discount was included in that price. "
+            if bool(result.get("discount_applied"))
+            else ""
+        )
         return (
-            f"<@{poster}> this boost was not approved because you do not have enough Roo points. "
-            "I will remove the post; earn or top up points, then post it again."
+            f"<@{poster}> I couldn't approve this boost because you don't have enough Roo points. "
+            f"{balance_detail}{discount_detail}"
+            "I'll remove this message so nobody engages with an unapproved campaign. "
+            "Earn enough points, then create a new top-level post with the social link. "
+            "You can DM me “what's my points balance?” at any time."
         )
     if status == "rejected_member_unlinked":
         return (
-            f"<@{poster}> I could not connect this Slack account to a Roo points account. "
-            "I will remove the post; link your account, then try again."
+            f"<@{poster}> I couldn't approve this boost because I can't match your Slack profile "
+            "to a Roo Points account, so I can't check or charge your balance. I'll remove this "
+            "message. DM me “what's my points balance?” to check whether I can see your account. "
+            "If I still can't find it, ask an MLAI admin to link your Slack profile, then create a "
+            "new top-level post."
         )
-    return f"<@{poster}> this post is not eligible for boosting, so I will remove it."
+    return (
+        f"<@{poster}> I couldn't approve this boost because I couldn't find a supported social "
+        "link in the message. To qualify, create a new top-level post containing a direct "
+        "LinkedIn or lnkd.in, X/Twitter, Instagram, or Facebook link. General website, product, "
+        "signup, and article links aren't eligible right now. I'll remove this message; add a "
+        "supported social link and try again."
+    )
 
 
 def _post_decision_notice(
