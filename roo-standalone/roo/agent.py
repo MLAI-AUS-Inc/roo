@@ -550,17 +550,17 @@ class RooAgent:
                 "skill_used": "admin-brain",
                 "data": {"admin_brain": True, "routed_surface": "admin"},
             }
-        if not str(channel_id).startswith(("D", "G")):
+        if not str(channel_id).startswith(("C", "D", "G")):
             return {
                 "message": (
                     "I can only use internal organisational memory in an approved "
-                    "DM or private Slack channel."
+                    "Slack context."
                 ),
                 "skill_used": "admin-brain",
                 "data": {
                     "admin_brain": True,
                     "routed_surface": "admin",
-                    "reason": "private_context_required",
+                    "reason": "slack_context_unsupported",
                 },
             }
 
@@ -637,9 +637,27 @@ class RooAgent:
             }
         data = dict(result.get("data") or {})
         data["routed_surface"] = "admin"
+        public_channel_delivery = str(channel_id).startswith("C")
+        data["public_channel_delivery"] = public_channel_delivery
+        message = result["message"]
+        blocks = result.get("blocks")
+        if public_channel_delivery:
+            warning = (
+                "*⚠️ Admin Roo answer posted publicly — everyone in this "
+                "channel can read it.*"
+            )
+            message = f"{warning}\n\n{message}"
+            if isinstance(blocks, list):
+                blocks = [
+                    {
+                        "type": "section",
+                        "text": {"type": "mrkdwn", "text": warning},
+                    },
+                    *blocks,
+                ]
         return {
-            "message": result["message"],
-            "blocks": result.get("blocks"),
+            "message": message,
+            "blocks": blocks,
             "suppress_post": bool(result.get("suppress_post")),
             "skill_used": "admin-brain",
             "data": data,

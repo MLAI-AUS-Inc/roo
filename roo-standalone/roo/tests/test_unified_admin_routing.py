@@ -180,7 +180,7 @@ def test_admin_task_uses_content_free_eligibility_then_internal_dispatch(monkeyp
     assert captured["dispatch"]["context"] == _context()
 
 
-def test_admin_route_fails_closed_for_non_private_context_or_denied_actor(monkeypatch):
+def test_admin_route_checks_public_context_and_fails_closed_for_denied_actor(monkeypatch):
     agent = _agent()
     calls = []
 
@@ -205,8 +205,8 @@ def test_admin_route_fails_closed_for_non_private_context_or_denied_actor(monkey
                 thread_ts="1700000000.123",
             )
         )
-    assert public_result["data"]["reason"] == "private_context_required"
-    assert calls == []
+    assert public_result["data"]["reason"] == "committee_policy_denied"
+    assert calls == ["eligibility"]
 
     with use_backend_actor_context(_context()):
         denied_result = asyncio.run(
@@ -219,4 +219,61 @@ def test_admin_route_fails_closed_for_non_private_context_or_denied_actor(monkey
             )
         )
     assert denied_result["data"]["reason"] == "committee_policy_denied"
-    assert calls == ["eligibility"]
+    assert calls == ["eligibility", "eligibility"]
+
+
+def test_eligible_admin_task_dispatches_in_public_channel_with_warning(monkeypatch):
+    agent = _agent()
+    captured = {}
+
+    class EligibleClient:
+        def __init__(self, **kwargs):
+            pass
+
+        async def get_admin_routing_eligibility(self):
+            return {"admin_brain_eligible": True}
+
+    class FakeDispatchClient:
+        def __init__(self, **kwargs):
+            pass
+
+        async def dispatch(self, **kwargs):
+            captured["dispatch"] = kwargs
+            return {
+                "result": {
+                    "message": "*🔒 Internal organisational memory*\nAnswer",
+                    "blocks": [
+                        {
+                            "type": "section",
+                            "text": {"type": "mrkdwn", "text": "Answer"},
+                        }
+                    ],
+                    "data": {"query_id": "q-public"},
+                },
+                "destination": {
+                    "channel_id": "CPUBLIC123",
+                    "thread_ts": "1700000000.123",
+                    "requester_user_id": "UADMIN123",
+                },
+            }
+
+    monkeypatch.setattr("roo.agent.get_settings", _settings)
+    monkeypatch.setattr("roo.agent.MLAIBackendClient", EligibleClient)
+    monkeypatch.setattr("roo.agent.AdminDispatchClient", FakeDispatchClient)
+
+    with use_backend_actor_context(_context("CPUBLIC123")):
+        result = asyncio.run(
+            agent._execute_unified_admin_brain(
+                text="Summarise committee decisions",
+                params={},
+                user_id="UADMIN123",
+                channel_id="CPUBLIC123",
+                thread_ts="1700000000.123",
+            )
+        )
+
+    assert result["data"]["routed_surface"] == "admin"
+    assert result["data"]["public_channel_delivery"] is True
+    assert "everyone in this channel can read it" in result["message"]
+    assert "everyone in this channel can read it" in str(result["blocks"][0])
+    assert captured["dispatch"]["context"] == _context("CPUBLIC123")

@@ -10,8 +10,10 @@ from typing import Any, Mapping
 
 
 _ACTOR_RE = re.compile(r"^slack:[UW][A-Z0-9]{1,63}$")
+PUBLIC_PILOT_ADMIN_CONTEXT = "public_channels:pilot_admins"
 _CONTEXT_RE = re.compile(
-    r"^(?:dm:[UW][A-Z0-9]{1,63}|channel:G[A-Z0-9]{1,63})$"
+    r"^(?:dm:[UW][A-Z0-9]{1,63}|channel:G[A-Z0-9]{1,63}|"
+    r"public_channels:pilot_admins)$"
 )
 
 
@@ -45,7 +47,7 @@ def admin_pilot_config_report(
     organization_domain: str,
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    """Compare effective Roo settings with an exact private pilot manifest."""
+    """Compare effective Roo settings with an exact pilot manifest."""
 
     now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     blockers: list[str] = []

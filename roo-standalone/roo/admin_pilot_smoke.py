@@ -7,7 +7,10 @@ from typing import Any, Awaitable, Callable, Mapping
 
 import httpx
 
-from .admin_pilot_config import admin_pilot_config_report
+from .admin_pilot_config import (
+    PUBLIC_PILOT_ADMIN_CONTEXT,
+    admin_pilot_config_report,
+)
 from .backend_identity import (
     BackendActorContext,
     BackendIdentityError,
@@ -111,6 +114,10 @@ async def admin_pilot_signed_smoke_report(
         for reference in approval_manifest["allowed_slack_contexts"]
         if reference.startswith("dm:")
     ]
+    public_channels_for_pilot_admins = (
+        PUBLIC_PILOT_ADMIN_CONTEXT
+        in approval_manifest["allowed_slack_contexts"]
+    )
     probe_request = probe or (
         lambda context: _live_probe(settings, context)
     )
@@ -137,6 +144,11 @@ async def admin_pilot_signed_smoke_report(
         allowed_statuses.append(
             await status_for(actor_id, "DPILOTSMOKECHECK")
         )
+    if public_channels_for_pilot_admins:
+        for actor_id in actor_ids:
+            allowed_statuses.append(
+                await status_for(actor_id, "CPILOTSMOKECHECK")
+            )
 
     synthetic_actor_id = "UPILOTSMOKEDENY"
     while synthetic_actor_id in actor_ids:
@@ -158,17 +170,31 @@ async def admin_pilot_signed_smoke_report(
         denied_statuses.append(
             await status_for(actor_id, synthetic_private_channel_id)
         )
+        if not public_channels_for_pilot_admins:
+            denied_statuses.append(
+                await status_for(actor_id, synthetic_public_channel_id)
+            )
+    if public_channels_for_pilot_admins:
         denied_statuses.append(
-            await status_for(actor_id, synthetic_public_channel_id)
+            await status_for(
+                synthetic_actor_id,
+                synthetic_public_channel_id,
+            )
         )
 
     approved_context = (
         private_channel_ids[0]
         if private_channel_ids
-        else "DPILOTSMOKECHECK"
+        else (
+            "DPILOTSMOKECHECK"
+            if dm_actor_ids
+            else "CPILOTSMOKECHECK"
+        )
     )
     approved_actor = (
-        actor_ids[0] if private_channel_ids else dm_actor_ids[0]
+        actor_ids[0]
+        if private_channel_ids or public_channels_for_pilot_admins
+        else dm_actor_ids[0]
     )
     public_client = MLAIBackendClient(
         base_url=settings.MLAI_BACKEND_URL,

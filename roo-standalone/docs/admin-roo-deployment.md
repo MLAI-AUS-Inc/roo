@@ -151,9 +151,13 @@ After deployment, verify in Slack:
 
 - an eligible committee member can ask an internal-memory question in a DM or
   approved private channel;
+- when the reviewed manifest contains `public_channels:pilot_admins`, an
+  eligible committee member can also ask in any public channel; Roo adds a
+  warning that everyone in the channel can read the answer;
 - that same member's points request still uses the normal Public Roo flow;
 - other PointsAdmin classes and unmapped users receive a generic denial;
-- public-channel internal-memory requests are denied before backend retrieval;
+- public-channel internal-memory requests from non-pilot actors are denied
+  before backend retrieval;
 - a mixed memory-plus-action request asks to split the tasks; and
 - normal Public Roo behavior is unchanged.
 

@@ -49,6 +49,7 @@ def approval_manifest():
         "allowed_slack_contexts": [
             "dm:UADMIN123",
             "channel:GADMIN123",
+            "public_channels:pilot_admins",
         ],
         "approved_providers": ["google_drive"],
         "approved_source_scopes": {
@@ -74,7 +75,11 @@ async def test_signed_smoke_checks_allow_deny_and_public_client_boundaries():
         if (
             context.acting_slack_user_id == "UADMIN123"
             and context.slack_channel_id
-            in {"GADMIN123", "DPILOTSMOKECHECK"}
+            in {
+                "GADMIN123",
+                "DPILOTSMOKECHECK",
+                "CPILOTSMOKECHECK",
+            }
         ):
             return 200
         if context.acting_slack_user_id == "UPILOTSMOKEDENY":
@@ -91,13 +96,13 @@ async def test_signed_smoke_checks_allow_deny_and_public_client_boundaries():
 
     assert report["ready"]
     assert report["metrics"] == {
-        "expected_allow_cases": 2,
-        "allowed_cases": 2,
+        "expected_allow_cases": 3,
+        "allowed_cases": 3,
         "expected_deny_cases": 4,
         "denied_cases": 4,
         "public_client_isolated": True,
     }
-    assert len(calls) == 6
+    assert len(calls) == 7
     rendered = str(report)
     assert "UADMIN123" not in rendered
     assert "GADMIN123" not in rendered
