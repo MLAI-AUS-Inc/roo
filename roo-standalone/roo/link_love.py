@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import sqlite3
 import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from uuid import uuid4
 
 import httpx
@@ -23,6 +25,15 @@ DEFAULT_PROCESSING_LEASE_SECONDS = 90.0
 DEFAULT_MAX_RETRY_ATTEMPTS = 5
 DEFAULT_MAX_ROOT_AGE_DAYS = 7
 SECONDS_PER_DAY = 24 * 60 * 60
+SUPPORTED_SOCIAL_HOSTS = (
+    "linkedin.com",
+    "lnkd.in",
+    "x.com",
+    "twitter.com",
+    "instagram.com",
+    "facebook.com",
+)
+TRACKING_QUERY_KEYS = {"fbclid", "gclid", "lipi", "trk", "trackingid"}
 
 
 def _now() -> float:
@@ -55,6 +66,43 @@ def link_love_max_root_age_seconds() -> float:
     except Exception:
         days = DEFAULT_MAX_ROOT_AGE_DAYS
     return max(0.0, days) * SECONDS_PER_DAY
+
+
+def extract_social_post_url(text: str) -> Optional[str]:
+    """Return a stable supported social-post URL without fetching content."""
+
+    candidates = re.findall(r"https?://[^\s<>|]+", str(text or ""), flags=re.IGNORECASE)
+    candidates.extend(
+        match.group(1)
+        for match in re.finditer(
+            r"<(https?://[^>|]+)(?:\|[^>]+)?>", str(text or ""), re.IGNORECASE
+        )
+    )
+    for candidate in candidates:
+        candidate = candidate.rstrip(".,;:!?)\\]}\"")
+        try:
+            parts = urlsplit(candidate)
+            host = (parts.hostname or "").lower().rstrip(".")
+            port = parts.port
+        except ValueError:
+            continue
+        if not any(
+            host == allowed or host.endswith(f".{allowed}")
+            for allowed in SUPPORTED_SOCIAL_HOSTS
+        ):
+            continue
+        netloc = host
+        if port and port not in {80, 443}:
+            netloc = f"{host}:{port}"
+        filtered_query = [
+            (key, value)
+            for key, value in parse_qsl(parts.query, keep_blank_values=True)
+            if not key.lower().startswith("utm_")
+            and key.lower() not in TRACKING_QUERY_KEYS
+        ]
+        path = parts.path.rstrip("/") or "/"
+        return urlunsplit(("https", netloc, path, urlencode(filtered_query), ""))
+    return None
 
 
 def slack_timestamp_to_epoch_seconds(slack_ts: str) -> float:
@@ -742,6 +790,23 @@ async def process_link_love_award(
     max_retry_attempts: Optional[int] = None,
 ) -> dict[str, Any]:
     store = store or get_link_love_store()
+    from .boost_moderation import boost_reward_admission_decision
+
+    admission_decision = boost_reward_admission_decision(
+        str(award.get("channel_id") or ""),
+        str(award.get("root_message_ts") or ""),
+    )
+    if admission_decision not in {"legacy", "approved"}:
+        error = f"boost root admission is {admission_decision}"
+        if admission_decision == "rejected":
+            updated = store.mark_blocked(int(award["id"]), error=error)
+            return {"status": "blocked_admission", "award": updated, "error": error}
+        updated = store.mark_retryable_failure(
+            int(award["id"]),
+            error=error,
+            max_attempts=max_retry_attempts or link_love_max_retry_attempts(),
+        )
+        return {"status": "pending_admission", "award": updated, "error": error}
     client = client or _build_backend_client()
     if bot_user_id is None:
         from .slack_client import get_bot_user_id
@@ -823,6 +888,14 @@ async def handle_link_love_reply(
     reply_text = str(event.get("text") or "")
     if not channel_id or not root_message_ts or not reply_message_ts or not slack_user_id:
         return {"status": "ignored", "reason": "missing_required_event_fields"}
+
+    from .boost_moderation import boost_reward_admission_decision
+
+    admission_decision = boost_reward_admission_decision(channel_id, root_message_ts)
+    if admission_decision == "pending":
+        return {"status": "ignored", "reason": "boost_admission_pending"}
+    if admission_decision == "rejected":
+        return {"status": "ignored", "reason": "boost_admission_rejected"}
 
     if store.get_reply_check(channel_id, reply_message_ts):
         return {"status": "duplicate_reply"}

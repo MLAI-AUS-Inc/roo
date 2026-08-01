@@ -98,6 +98,43 @@ async def test_circuit_breaker_probes_readiness_before_main_request(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_admit_boost_post_uses_strict_roo_key_headers(monkeypatch):
+    captured = {}
+
+    async def fake_request(method, endpoint, **kwargs):
+        captured.update(method=method, endpoint=endpoint, kwargs=kwargs)
+        request = httpx.Request(method, f"https://backend.test{endpoint}")
+        return httpx.Response(
+            201,
+            request=request,
+            json={"status": "approved", "charged_points": 8},
+        )
+
+    client = MLAIBackendClient(
+        base_url="https://backend.test",
+        api_key="roo-api-key",
+        internal_api_key="admin-api-key",
+    )
+    monkeypatch.setattr(client, "_request", fake_request)
+
+    result = await client.admit_boost_post(
+        submission_key="boost-post:TTEAM123:CBOOST123:1800000000.123456",
+        workspace_id="TTEAM123",
+        channel_id="CBOOST123",
+        root_message_ts="1800000000.123456",
+        poster_slack_id="<@UPOSTER1>",
+        root_text="Boost this",
+        social_post_url="https://www.linkedin.com/posts/example-123",
+    )
+
+    assert result["status"] == "approved"
+    assert captured["method"] == "POST"
+    assert captured["endpoint"] == "/api/v1/points/boost-posts/admissions/"
+    assert captured["kwargs"]["json"]["poster_slack_id"] == "UPOSTER1"
+    assert "use_admin_headers" not in captured["kwargs"]
+
+
+@pytest.mark.asyncio
 async def test_trigger_repo_scan_sends_request_source(monkeypatch):
     captured = {}
 

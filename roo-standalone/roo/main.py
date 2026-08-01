@@ -59,7 +59,14 @@ from .slack_client import (
     send_dm,
 )
 from .coworking_booking_intents import coworking_booking_retry_loop
+from .boost_moderation import (
+    boost_post_retry_loop,
+    handle_boost_root_edit,
+    handle_boost_root_post,
+    mark_boost_root_removed,
+)
 from .link_love import handle_link_love_reply, link_love_retry_loop
+from .slack_moderation import validate_slack_moderator_configuration
 from .start_here_introductions import (
     handle_start_here_intro,
     normalize_intro_event,
@@ -1815,6 +1822,7 @@ async def lifespan(app: FastAPI):
     validate_runtime_security(settings)
     app.state.startup_complete = False
     coworking_retry_task: Optional[asyncio.Task] = None
+    boost_post_retry_task: Optional[asyncio.Task] = None
     link_love_task: Optional[asyncio.Task] = None
     start_here_intro_task: Optional[asyncio.Task] = None
     jobs_scheduler_task: Optional[asyncio.Task] = None
@@ -1832,6 +1840,19 @@ async def lifespan(app: FastAPI):
         if settings.BOOST_LINK_LOVE_ENABLED:
             link_love_task = asyncio.create_task(link_love_retry_loop())
             app.state.link_love_task = link_love_task
+        if getattr(settings, "BOOST_POST_MODERATION_ENABLED", False):
+            if getattr(settings, "BOOST_POST_AUTO_DELETE_ENABLED", False):
+                moderator_status = await asyncio.to_thread(
+                    validate_slack_moderator_configuration,
+                    settings=settings,
+                )
+                print(
+                    "   Slack boost moderator verified "
+                    f"team_id={moderator_status['team_id']} "
+                    f"user_id={moderator_status['user_id']}"
+                )
+            boost_post_retry_task = asyncio.create_task(boost_post_retry_loop())
+            app.state.boost_post_retry_task = boost_post_retry_task
         if getattr(settings, "START_HERE_INTRO_ENABLED", True):
             start_here_intro_task = asyncio.create_task(start_here_intro_retry_loop())
             app.state.start_here_intro_task = start_here_intro_task
@@ -1864,6 +1885,10 @@ async def lifespan(app: FastAPI):
             coworking_retry_task.cancel()
             with suppress(asyncio.CancelledError):
                 await coworking_retry_task
+        if boost_post_retry_task:
+            boost_post_retry_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await boost_post_retry_task
         if link_love_task:
             link_love_task.cancel()
             with suppress(asyncio.CancelledError):
@@ -2104,8 +2129,33 @@ async def slack_events(
         asyncio.create_task(_handle_reaction_added(event))
         return JSONResponse(status_code=200, content={})
 
+    if event_type == "message" and event.get("subtype") == "message_deleted":
+        boost_channel_id = str(
+            getattr(settings, "BOOST_LINK_LOVE_CHANNEL_ID", "") or ""
+        )
+        deleted_ts = str(event.get("deleted_ts") or "")
+        if (
+            getattr(settings, "BOOST_POST_MODERATION_ENABLED", False)
+            and boost_channel_id
+            and event.get("channel") == boost_channel_id
+            and deleted_ts
+        ):
+            mark_boost_root_removed(boost_channel_id, deleted_ts)
+        return JSONResponse(status_code=200, content={})
+
     if event_type == "message" and event.get("subtype") == "message_changed":
         from .slack_client import get_channel_id
+
+        boost_channel_id = str(
+            getattr(settings, "BOOST_LINK_LOVE_CHANNEL_ID", "") or ""
+        )
+        if (
+            getattr(settings, "BOOST_POST_MODERATION_ENABLED", False)
+            and boost_channel_id
+            and event.get("channel") == boost_channel_id
+        ):
+            asyncio.create_task(handle_boost_root_edit(event))
+            return JSONResponse(status_code=200, content={})
 
         try:
             settings = get_settings()
@@ -2151,18 +2201,33 @@ async def slack_events(
             settings = get_settings()
             boost_link_love_enabled = settings.BOOST_LINK_LOVE_ENABLED
             boost_channel_name = settings.BOOST_LINK_LOVE_CHANNEL_NAME
+            configured_boost_channel_id = str(
+                getattr(settings, "BOOST_LINK_LOVE_CHANNEL_ID", "") or ""
+            )
         except Exception as exc:
             print(f"⚠️ Link-love config unavailable; skipping boost channel routing: {exc}")
             boost_link_love_enabled = False
             boost_channel_name = "boost-my-startup"
+            configured_boost_channel_id = ""
 
         if boost_link_love_enabled:
-            boost_channel_id = get_channel_id(boost_channel_name)
+            boost_channel_id = configured_boost_channel_id or get_channel_id(
+                boost_channel_name
+            )
             if boost_channel_id and event.get("channel") == boost_channel_id:
                 thread_ts = str(event.get("thread_ts") or "")
                 message_ts = str(event.get("ts") or "")
                 if thread_ts and message_ts and thread_ts != message_ts:
                     asyncio.create_task(handle_link_love_reply(event))
+                elif not thread_ts:
+                    asyncio.create_task(
+                        handle_boost_root_post(
+                            event,
+                            workspace_id=str(
+                                payload.get("team_id") or payload.get("team") or ""
+                            ),
+                        )
+                    )
                 return JSONResponse(status_code=200, content={})
         
         is_dm = event.get("channel_type") == "im"

@@ -48,6 +48,9 @@ class Settings(BaseSettings):
     SLACK_RECEIPT_TTL_SECONDS: int = 10 * 60
     SLACK_RECEIPTS_DB_PATH: str = "data/slack_request_receipts.db"
     SLACK_CONTEXTUAL_STATE_DB_PATH: str = "data/slack_contextual_responses.db"
+    SLACK_MODERATOR_USER_TOKEN: Optional[str] = None
+    SLACK_MODERATOR_USER_ID: str = ""
+    SLACK_MODERATOR_TEAM_ID: str = ""
 
     # Context-aware channel replies. Disabled by default and restricted to an
     # explicit channel allowlist before any untagged message can be considered.
@@ -142,11 +145,18 @@ class Settings(BaseSettings):
     ROO_POINTS_STRIPE_CHECKOUT_HOSTS: str = "checkout.stripe.com"
     BOOST_LINK_LOVE_ENABLED: bool = True
     BOOST_LINK_LOVE_CHANNEL_NAME: str = "boost-my-startup"
+    BOOST_LINK_LOVE_CHANNEL_ID: str = ""
     BOOST_LINK_LOVE_DB_PATH: str = "data/link_love_awards.db"
     BOOST_LINK_LOVE_NOTIFICATION_DELAY_SECONDS: int = 60
     BOOST_LINK_LOVE_RETRY_POLL_SECONDS: float = 15.0
     BOOST_LINK_LOVE_MAX_RETRY_ATTEMPTS: int = 5
     BOOST_LINK_LOVE_MAX_ROOT_AGE_DAYS: int = 7
+    BOOST_POST_MODERATION_ENABLED: bool = False
+    BOOST_POST_AUTO_DELETE_ENABLED: bool = False
+    BOOST_POST_ENFORCEMENT_CUTOFF_TS: str = ""
+    BOOST_POST_DECISION_TIMEOUT_SECONDS: float = 30.0
+    BOOST_POST_RETRY_POLL_SECONDS: float = 15.0
+    BOOST_POST_MAX_RETRY_ATTEMPTS: int = 5
     START_HERE_INTRO_ENABLED: bool = True
     START_HERE_INTRO_CHANNEL_NAME: str = "_start-here"
     START_HERE_INTRO_DB_PATH: str = "data/start_here_introductions.db"
@@ -339,6 +349,52 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "VICTOR_AI_BACKEND_TIMEOUT_SECONDS must be between 1 and 60"
                 )
+
+        boost_channel_id = str(self.BOOST_LINK_LOVE_CHANNEL_ID or "").strip()
+        moderator_user_id = str(self.SLACK_MODERATOR_USER_ID or "").strip()
+        moderator_team_id = str(self.SLACK_MODERATOR_TEAM_ID or "").strip()
+        cutoff_ts = str(self.BOOST_POST_ENFORCEMENT_CUTOFF_TS or "").strip()
+        if boost_channel_id and not re.fullmatch(r"C[A-Z0-9]+", boost_channel_id):
+            raise ValueError("BOOST_LINK_LOVE_CHANNEL_ID must be a public Slack channel ID")
+        if moderator_user_id and not re.fullmatch(r"[UW][A-Z0-9]+", moderator_user_id):
+            raise ValueError("SLACK_MODERATOR_USER_ID is invalid")
+        if moderator_team_id and not re.fullmatch(r"T[A-Z0-9]+", moderator_team_id):
+            raise ValueError("SLACK_MODERATOR_TEAM_ID is invalid")
+        if cutoff_ts and not re.fullmatch(r"\d{8,}\.\d+", cutoff_ts):
+            raise ValueError("BOOST_POST_ENFORCEMENT_CUTOFF_TS must be a Slack timestamp")
+        if not 1 <= self.BOOST_POST_DECISION_TIMEOUT_SECONDS <= 120:
+            raise ValueError("BOOST_POST_DECISION_TIMEOUT_SECONDS must be between 1 and 120")
+        if not 1 <= self.BOOST_POST_RETRY_POLL_SECONDS <= 300:
+            raise ValueError("BOOST_POST_RETRY_POLL_SECONDS must be between 1 and 300")
+        if not 1 <= self.BOOST_POST_MAX_RETRY_ATTEMPTS <= 20:
+            raise ValueError("BOOST_POST_MAX_RETRY_ATTEMPTS must be between 1 and 20")
+        if self.BOOST_POST_MODERATION_ENABLED:
+            if self.ROO_SURFACE != "public":
+                raise ValueError("Boost-post moderation is available only on Public Roo")
+            if not self.BOOST_LINK_LOVE_ENABLED:
+                raise ValueError("Boost-post moderation requires BOOST_LINK_LOVE_ENABLED")
+            if not boost_channel_id:
+                raise ValueError("Boost-post moderation requires BOOST_LINK_LOVE_CHANNEL_ID")
+            if not cutoff_ts:
+                raise ValueError(
+                    "Boost-post moderation requires BOOST_POST_ENFORCEMENT_CUTOFF_TS"
+                )
+            if not self.MLAI_BACKEND_URL:
+                raise ValueError("Boost-post moderation requires MLAI_BACKEND_URL")
+        if self.BOOST_POST_AUTO_DELETE_ENABLED:
+            if not self.BOOST_POST_MODERATION_ENABLED:
+                raise ValueError("Boost-post auto-delete requires moderation to be enabled")
+            if not self.SLACK_MODERATOR_USER_TOKEN:
+                raise ValueError("Boost-post auto-delete requires SLACK_MODERATOR_USER_TOKEN")
+            if not moderator_user_id or not moderator_team_id:
+                raise ValueError(
+                    "Boost-post auto-delete requires moderator user and team IDs"
+                )
+            token = str(self.SLACK_MODERATOR_USER_TOKEN)
+            if not (token.startswith("xoxp-") or token.startswith("xoxe.xoxp-")):
+                raise ValueError("SLACK_MODERATOR_USER_TOKEN must be a Slack user token")
+        if self.ROO_SURFACE == "admin" and self.SLACK_MODERATOR_USER_TOKEN:
+            raise ValueError("Admin Roo cannot receive the Slack moderator user token")
 
         enabled_skills = self.enabled_skill_names
         invalid_skill_names = {
