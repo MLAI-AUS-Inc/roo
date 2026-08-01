@@ -1,209 +1,175 @@
-# Roo Admin development deployment
+# Unified Roo Admin Brain production deployment
 
-The existing Slack app and `docker-compose.yml` remain Public Roo. Admin Roo is a second Slack app, hostname, deployment, bot token, signing secret, receipt database, data volume, and scoped backend service principal.
+MLAI uses one Slack app and one user-facing identity: the existing `@Roo`.
+There is no `@Roo Admin` app and no separate staging environment. Two runtime
+processes preserve the security boundary:
 
-## Create the development Slack app
+- Public Roo verifies Slack, routes requests, runs all existing public skills,
+  and posts responses. It has a route-only backend principal and never the
+  organisational-memory credential.
+- The internal Admin worker has no Slack or LLM credentials and no public
+  ingress. It alone holds the read-only memory principal.
 
-1. In the MLAI Slack app console, create an app from `slack-app-manifests/roo-admin-development.yaml`.
-2. Replace `admin-roo-dev.example.invalid` with the dedicated development hostname before enabling events or interactivity.
-3. Install it only in the MLAI workspace and copy its bot token and signing secret into `.env.admin`.
-4. Do not add channel-history, file, search, admin, user-token, or source-ingestion scopes. This app is the conversational Admin surface, not the Slack ingestion connector.
-5. Invite it only to a private development channel whose Slack ID begins with
-   `G`. Record that channel ID in `ROO_ALLOWED_CHANNEL_IDS`, or record
-   individual pilot Slack user IDs in `ROO_ALLOWED_DM_USER_IDS`. Public
-   `C...` channels and raw `D...` conversation IDs are rejected at startup.
+## Runtime flow
 
-## Start the isolated deployment
+1. Slack signs a mention to the existing `/slack/events` endpoint.
+2. Roo routes the task by intent. Points and other existing tasks stay Public,
+   including when the caller is a committee member.
+3. For an internal-memory intent, Public Roo first rejects public `C...`
+   channels locally, then calls the backend's content-free eligibility endpoint.
+4. The backend permits the route only when the verified caller has active
+   identity, membership, capability, pilot actor/context approval, and an
+   active `PointsAdmin` record with exact role `committee`.
+5. Public Roo sends a short-lived, HMAC-signed, single-use envelope to the
+   internal worker. It is bound to the Slack team, user, channel, thread,
+   event, request kind, and payload.
+6. The Admin worker calls the memory backend with its own `org_memory.read`
+   principal. Public Roo posts the answer only if the returned destination
+   exactly matches the verified Slack request.
 
-```bash
-cp .env.admin.example .env.admin
-# Fill Slack credentials, one LLM key, and an explicit Admin channel/DM allowlist.
-docker compose -f docker-compose.admin.yml up -d --build
-curl http://127.0.0.1:8081/healthz/ready
-```
+Mixed private-memory and public-action requests produce a clarification asking
+the user to send two requests. Denied or unavailable Admin routes fail closed;
+they do not search Slack, invoke another skill, or fabricate an answer.
 
-`docker-compose.admin.yml` uses the dedicated `roo-admin` Compose project.
-Public Roo keeps its existing project and data volume, so either deployment's
-orphan cleanup cannot remove the other surface.
+## Provision the two backend principals
 
-For a Slack-envelope smoke test, leave `ORG_BRAIN_ENABLED=false` and
-`ROO_ENABLED_SKILLS` empty. The service will accept only signed, allowlisted
-mentions/DMs but cannot retrieve memory.
-
-## Enable the read-only pilot
-
-Provision the service principal in `mlai-backend` after the pilot Slack
-workspace, users, memberships, roles, and capabilities have been mapped:
+Create the Admin worker principal:
 
 ```bash
 python manage.py create_service_principal \
-  --name roo-admin-pilot \
+  --name roo-admin-production \
   --organization-domain mlai.au \
   --scope org_memory.read \
   --surface admin_roo
 ```
 
-Store the one-time credential only in `.env.admin`, then set:
+Store its one-time token only in `ADMIN_ROO_ORG_BRAIN_API_KEY`.
 
-```text
-ROO_ENABLED_SKILLS=admin-brain
-ORG_BRAIN_ENABLED=true
-ORG_BRAIN_API_KEY=mlai_sp_<credential-id>.<secret>
-ORG_BRAIN_BACKEND_TIMEOUT_SECONDS=20
-ORG_BRAIN_MAX_CONTEXT_TOKENS=6000
+Create the Public Roo routing principal separately:
+
+```bash
+python manage.py create_service_principal \
+  --name roo-public-admin-router \
+  --organization-domain mlai.au \
+  --scope org_memory.route \
+  --surface roo_gateway
 ```
 
-Before starting a live read-only container, compare the effective Roo
-allowlists with the exact restricted approval manifest:
+Store it only in `ROO_ADMIN_ROUTER_API_KEY`. The two tokens must be distinct.
+Generate a separate random dispatch secret of at least 32 characters and store
+the same value in `ROO_ADMIN_DISPATCH_SECRET` for both runtimes.
+
+## Required production secrets
+
+The `Deploy internal Admin Brain production` workflow uses:
+
+- the existing `DO_HOST`, `DO_USERNAME`, and `DO_SSH_KEY`;
+- `ADMIN_ROO_ORG_BRAIN_API_KEY` for the internal worker;
+- `ROO_ADMIN_ROUTER_API_KEY` for Public Roo eligibility only;
+- `ROO_ADMIN_DISPATCH_SECRET` for private runtime dispatch;
+- `ADMIN_ROO_SLACK_TEAM_ID` for the signed pilot probe; and
+- `ADMIN_ROO_APPROVAL_MANIFEST` for the current production pilot policy.
+
+Do not configure Admin Slack bot/signing secrets, an Admin OpenAI key, or local
+Admin Slack allowlists. The existing Public Roo app remains the only Slack app,
+and the backend pilot manifest is the authoritative actor/context allowlist.
+
+Each eligible caller must also have an active `PointsAdmin` record with exact
+role `committee`. The `admin`, `partner`, and `portfolio_lead` classes are
+deliberately denied unless their stored class is changed to `committee`.
+
+## Deployment behavior
+
+The workflow accepts only a full reviewed commit SHA already on `main`. It:
+
+1. runs the trust-boundary, dispatch, worker, interaction, and policy tests;
+2. checks out that exact SHA in `/root/roo-admin` and `/root/roo`;
+3. validates the current approval and exercises allowed/denied backend actor
+   and private-context combinations through both backend principals without
+   retrieving memory;
+4. starts `roo.admin_worker:app` on the private `roo-admin-gateway` network;
+5. verifies the worker reports internal-only, read-only readiness;
+6. atomically adds the route principal, internal URL, dispatch secret, and
+   `ROO_UNIFIED_ADMIN_ROUTING_ENABLED=true` to Public Roo; and
+7. restarts Public Roo and verifies unified routing is live with shadow mode off.
+
+If any post-start check fails, the workflow restores the previous Public Roo
+environment, restarts Public Roo, and stops the new Admin worker. No Admin
+endpoint is added to nginx. `/admin/slack/events`, `/admin/slack/actions`, and
+`/admin/healthz/ready` remain 404 at the public edge.
+
+## Enforced worker shape
+
+The internal environment is documented in `.env.admin.example` and must keep:
+
+```text
+ROO_ENVIRONMENT=production
+ROO_SURFACE=admin
+ROO_ADMIN_INTERNAL_ONLY=true
+ROO_ENABLED_SKILLS=admin-brain
+ORG_BRAIN_ENABLED=true
+ORG_BRAIN_ACTIONS_ENABLED=false
+ROO_CONTEXTUAL_RESPONSES_ENABLED=false
+ROO_CONTEXTUAL_SHADOW_MODE=false
+```
+
+Startup rejects Slack credentials on the internal worker, private-memory
+credentials on Public Roo, missing dispatch controls, extra Admin skills, and
+enabled Admin actions. Dispatch receipts are stored durably in the Admin data
+volume so a signed envelope cannot be replayed across workers or restarts.
+
+Answers show the `🔒 Internal organisational memory` label, freshness and
+warnings, up to five citations, and Helpful/Incorrect/Stale/Missing feedback.
+Feedback returns through the same signed worker boundary. Incorrect feedback
+enters human review and never overwrites memory directly.
+
+## Verification
+
+Before enabling the route, the workflow runs:
 
 ```bash
 python scripts/check_admin_pilot_config.py \
   --env-file .env.admin \
   --approval-manifest /secure/operations/pilot-approval.json \
   --organization-domain mlai.au
-```
 
-The report contains only the approval hash, counts, and stable blocker codes.
-It rejects expired/draft approvals, public channels, allowlist mismatches,
-extra skills, and enabled controlled actions without printing Slack IDs or
-credentials.
-
-Restart Admin Roo and verify `/healthz/ready` reports `surface=admin`, only
-`admin-brain` in `enabled_skills`, and `org_brain_enabled=true`. Then run the
-credential-bound signed-request gate:
-
-```bash
 python scripts/check_admin_pilot_access.py \
+  --env-file .env.admin \
+  --approval-manifest /secure/operations/pilot-approval.json \
+  --organization-domain mlai.au \
+  --slack-team-id T_REPLACE
+
+UNIFIED_ROUTE_PROBE_TOKEN=mlai_sp_REPLACE \
+python scripts/check_unified_admin_route.py \
   --env-file .env.admin \
   --approval-manifest /secure/operations/pilot-approval.json \
   --organization-domain mlai.au \
   --slack-team-id T_REPLACE
 ```
 
-This sends no query and retrieves no memory. It signs fresh requests with the
-real Admin Roo service-principal credential and proves that every approved
-actor/private-channel pair and actor-bound DM reaches the backend's active
-pilot probe. Representative unknown actors and unapproved private/public
-contexts must return 401/403. The Public Roo client must remain unable to build
-private-memory headers. Output contains only the approval hash, aggregate
-expected/pass counts, and stable blocker codes. The backend still records its
-normal credential-use timestamp, assertion replay receipt, and security audit
-event for each probe.
+After deployment, verify in Slack:
 
-After that automated gate, test a real Slack mention with each named pilot user
-in each allowlisted DM/private channel. Confirm an unmapped user, unlisted
-channel, Public Roo, and `/api/mention` cannot retrieve memory.
-
-The pilot Admin deployment has:
-
-- `ROO_SURFACE=admin`;
-- only `admin-brain` in its explicit skill allowlist;
-- a scoped `org_memory.read` credential unavailable to Public Roo;
-- no Public Roo background workflows or commands; Admin Roo interactions are limited to answer-feedback controls;
-- signed Slack events limited to allowlisted private contexts.
-
-Answers are rendered from the backend's permission-filtered response with
-freshness, warnings, up to five citations, and Helpful/Incorrect/Stale/Missing
-context feedback. Incorrect opens a correction form and enters human review;
-it does not overwrite memory. If the backend fails, Admin Roo does not search
-Slack, invoke another skill, or fabricate an answer.
-
-The backend service-identity provisioning and rotation procedure lives in the
-mlai-backend `docs/org-memory-service-identity.md` runbook. Its one-time
-`mlai_sp_...` credential is valid only as `ORG_BRAIN_API_KEY`; never place it in
-the Public Roo environment or reuse a legacy shared API key.
-
-## Manual staging deployment
-
-The `Deploy Admin Roo staging` GitHub Actions workflow is manual-only and uses
-the protected `admin-roo-staging` environment. Configure these repository or
-environment secrets before running it:
-
-- `ADMIN_ROO_DO_HOST`;
-- `ADMIN_ROO_DO_USERNAME`;
-- `ADMIN_ROO_DO_SSH_KEY`;
-- `ADMIN_ROO_SLACK_TEAM_ID`.
-
-The target host must already contain a separate Roo checkout at
-`/root/roo-admin`, a mode-0600
-`/root/roo-admin/roo-standalone/.env.admin`, and the restricted approval at
-`/root/roo-admin-operations/pilot-approval.json`. Start the workflow with the
-full reviewed commit SHA after that commit has been merged into `main`. The
-workflow rejects unmerged commits, checks out that exact SHA in detached mode,
-runs all Admin trust-boundary tests against it, validates exact approval/config
-alignment inside a one-off container, deploys only the isolated `roo-admin`
-project, and verifies that readiness exposes only the read-only `admin-brain`
-skill. It then runs the aggregate-only signed-request gate against the deployed
-backend. It never queries memory, creates an approval, issues a backend
-credential, enables the backend query flag, or deploys Public Roo.
-
-## Enable controlled actions after the read-only pilot
-
-Keep actions disabled until the read-only release gates have passed. Rotate or
-replace the Admin Roo principal with one carrying both scopes:
-
-```bash
-python manage.py create_service_principal \
-  --name roo-admin-actions-pilot \
-  --organization-domain mlai.au \
-  --scope org_memory.read \
-  --scope org_memory.actions \
-  --surface admin_roo
-```
-
-Grant `approve_actions` only to named reviewers, then set:
-
-```text
-ROO_ENABLED_SKILLS=admin-brain,admin-actions
-ORG_BRAIN_ENABLED=true
-ORG_BRAIN_ACTIONS_ENABLED=true
-```
-
-The backend action gateway and Linear execution kill switches remain separate
-and must also be deliberately enabled. Start with Linear execution disabled:
-local Gmail, Slack, and Notion drafts can be exercised without sending or
-posting anything. Then test two-person Linear approval in a private staging
-channel. The proposer must not be able to approve their own action.
-
-Action cards contain an opaque proposal UUID, risk, state, and a bounded
-preview. Approve re-reads the authoritative proposal, refreshes live provider
-preconditions, records the clicking reviewer, and executes only if the backend
-still permits it. Reject opens a reason form. Replayed Slack requests and
-repeated clicks are idempotent; ambiguous provider failures are never retried
-automatically.
-
-The initial UI does not offer email sending, direct Slack/Notion posting,
-payments, finance changes, contracts, roles, permissions, governance changes,
-or automatic reversal. Backend operators retain the controlled reversal API
-and must reconcile provider state before using it.
-
-## Production invariants
-
-- Public Roo must fail startup if an organisational-brain key or private skill is present.
-- Admin Roo must fail startup without a Slack context allowlist.
-- Enabling Admin Brain requires `admin-brain` in `ROO_ENABLED_SKILLS` and a separate scoped `ORG_BRAIN_API_KEY`.
-- Enabling controlled actions additionally requires `admin-actions`, `ORG_BRAIN_ACTIONS_ENABLED=true`, the `org_memory.actions` service scope, and named `approve_actions` reviewers.
-- Never reuse Public Roo's bot token, signing secret, hostname, data volume, receipt database, or backend key.
-- Keep `/api/mention` disabled on Admin Roo. On Public Roo it is disabled unless `INTERNAL_MENTION_API_KEY` is configured, then requires an exact bearer token.
+- an eligible committee member can ask an internal-memory question in a DM or
+  approved private channel;
+- that same member's points request still uses the normal Public Roo flow;
+- other PointsAdmin classes and unmapped users receive a generic denial;
+- public-channel internal-memory requests are denied before backend retrieval;
+- a mixed memory-plus-action request asks to split the tasks; and
+- normal Public Roo behavior is unchanged.
 
 ## Rollback
 
-First disable retrieval without stopping the Slack app:
-
-```text
-ORG_BRAIN_ENABLED=false
-ORG_BRAIN_ACTIONS_ENABLED=false
-ROO_ENABLED_SKILLS=
-ORG_BRAIN_API_KEY=
-```
-
-Restart the Admin service. Public Roo and backend ingestion continue normally.
-To stop Admin Roo entirely:
-
-Stop or revoke the Admin app/deployment independently:
+Disable unified routing by restoring Public Roo's previous `.env` and
+restarting its `roo` service, then stop the worker:
 
 ```bash
-docker compose -f docker-compose.admin.yml down
+docker compose -f docker-compose.admin.yml stop roo-admin
 ```
 
-This does not change Public Roo. If a credential may have leaked, revoke it in Slack and the backend before restarting.
+Revoke the route principal for a routing-boundary incident. Revoke the Admin
+worker principal first for any possible memory-credential incident. Neither
+action affects backend ingestion or ordinary Public Roo skills.
+
+Controlled Admin actions remain disabled. Enabling them later requires a
+separate design and release gate; this read-only deployment must not be widened
+by adding `admin-actions` or `org_memory.actions` scopes.

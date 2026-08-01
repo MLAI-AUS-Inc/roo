@@ -11,22 +11,23 @@ from roo.config import Settings
 
 
 SERVICE_PRINCIPAL_TOKEN = f"mlai_sp_{'a' * 32}.{'s' * 48}"
+DISPATCH_SECRET = "dispatch-secret-" + ("s" * 32)
 
 
 def configured_settings():
     return Settings(
         _env_file=None,
-        SLACK_BOT_TOKEN="xoxb-synthetic-admin",
-        SLACK_SIGNING_SECRET="synthetic-admin-signing-secret",
-        OPENAI_API_KEY="synthetic-openai-key",
+        SLACK_BOT_TOKEN=None,
+        SLACK_SIGNING_SECRET=None,
+        OPENAI_API_KEY=None,
         MLAI_BACKEND_URL="https://backend.test",
         ROO_SURFACE="admin",
+        ROO_ADMIN_INTERNAL_ONLY=True,
         ROO_ENABLED_SKILLS="admin-brain",
-        ROO_ALLOWED_CHANNEL_IDS="GADMIN123",
-        ROO_ALLOWED_DM_USER_IDS="UADMIN123",
         ORG_BRAIN_ENABLED=True,
         ORG_BRAIN_ACTIONS_ENABLED=False,
         ORG_BRAIN_API_KEY=SERVICE_PRINCIPAL_TOKEN,
+        ROO_ADMIN_DISPATCH_SECRET=DISPATCH_SECRET,
     )
 
 

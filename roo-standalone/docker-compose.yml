@@ -22,6 +22,9 @@ services:
     volumes:
       - ./skills:/app/skills:ro
       - roo-data:/app/data
+    networks:
+      - default
+      - roo-admin-gateway
 
   nginx:
     image: nginx:1.28.3-alpine
@@ -37,3 +40,8 @@ services:
 
 volumes:
   roo-data:
+
+networks:
+  roo-admin-gateway:
+    external: true
+    name: roo-admin-gateway

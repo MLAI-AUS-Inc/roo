@@ -43,6 +43,8 @@ cannot choose between two specific skills. If the skill is clear and only a \
 detail is missing, pick the skill anyway — skills ask for missing details \
 themselves.
 - When torn between a skill and respond_in_chat, prefer respond_in_chat.
+- If a request combines an organisational-memory question with a public action,
+  use ask_clarification and ask the user to send them as two separate requests.
 - Fill parameters only with values actually present in the message or context; \
 never invent values.
 - Honour each tool's "Do NOT use" notes."""

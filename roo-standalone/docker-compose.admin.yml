@@ -3,12 +3,14 @@ name: roo-admin
 services:
   roo-admin:
     build: .
-    ports:
-      - "8081:8000"
+    expose:
+      - "8000"
     env_file:
-      - .env.admin
+      - ${ADMIN_ROO_ENV_FILE:-.env.admin}
     environment:
       ROO_SURFACE: admin
+      ROO_ADMIN_INTERNAL_ONLY: "true"
+    command: ["uvicorn", "roo.admin_worker:app", "--host", "0.0.0.0", "--port", "8000"]
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz/ready', timeout=5).read()"]
@@ -17,8 +19,17 @@ services:
       retries: 3
       start_period: 15s
     volumes:
-      - ./skills:/app/skills:ro
       - roo-admin-data:/app/data
+    networks:
+      default:
+      roo-admin-gateway:
+        aliases:
+          - roo-admin
 
 volumes:
   roo-admin-data:
+
+networks:
+  roo-admin-gateway:
+    external: true
+    name: roo-admin-gateway

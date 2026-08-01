@@ -481,3 +481,47 @@ def test_nginx_exposes_only_slack_health_and_vpc_service_routes():
         assert "allow 10.126.0.0/16" in block
         assert "deny all" in block
     assert "location / { return 404; }" in nginx
+
+
+def test_admin_production_deploy_is_enforced_without_staging_or_shadow():
+    workflow = (
+        REPO_ROOT / ".github/workflows/deploy-admin-production.yml"
+    ).read_text()
+    public_compose = (
+        REPO_ROOT / "roo-standalone/docker-compose.yml"
+    ).read_text()
+    admin_compose = (
+        REPO_ROOT / "roo-standalone/docker-compose.admin.yml"
+    ).read_text()
+    nginx = (REPO_ROOT / "roo-standalone/nginx/roo.conf").read_text()
+
+    assert "push:" in workflow
+    assert "branches:" in workflow
+    assert "- main" in workflow
+    assert "environment: admin-roo-staging" not in workflow
+    assert "ADMIN_ROO_DO_HOST" not in workflow
+    assert "secrets.DO_HOST" in workflow
+    assert "git merge-base --is-ancestor" in workflow
+    assert "ROO_ENVIRONMENT=production" in workflow
+    assert "ROO_ENABLED_SKILLS=admin-brain" in workflow
+    assert "ORG_BRAIN_ENABLED=true" in workflow
+    assert "ORG_BRAIN_ACTIONS_ENABLED=false" in workflow
+    assert "ROO_CONTEXTUAL_RESPONSES_ENABLED=false" in workflow
+    assert "ROO_CONTEXTUAL_SHADOW_MODE=false" in workflow
+    assert "check_admin_pilot_config.py" in workflow
+    assert "check_admin_pilot_access.py" in workflow
+    assert "contextual_shadow_mode" in workflow
+    assert "ROO_ADMIN_INTERNAL_ONLY=true" in workflow
+    assert "ROO_UNIFIED_ADMIN_ROUTING_ENABLED" in workflow
+    assert "ROO_ADMIN_ROUTER_API_KEY" in workflow
+    assert "ROO_ADMIN_DISPATCH_SECRET" in workflow
+    assert "ADMIN_ROO_SLACK_BOT_TOKEN" not in workflow
+    assert "ADMIN_ROO_SLACK_SIGNING_SECRET" not in workflow
+    assert "ADMIN_ROO_OPENAI_API_KEY" not in workflow
+    assert "roo-admin-gateway" in public_compose
+    assert "roo-admin-gateway" in admin_compose
+    assert "ports:" not in admin_compose
+    assert "roo.admin_worker:app" in admin_compose
+    assert "location = /admin/slack/events" not in nginx
+    assert "location = /admin/slack/actions" not in nginx
+    assert "location = /admin/healthz/ready" not in nginx

@@ -1,3 +1,4 @@
+import asyncio
 import sys
 from pathlib import Path
 
@@ -20,6 +21,7 @@ BASE_SETTINGS = {
     "OPENAI_API_KEY": "synthetic-openai-key",
 }
 SERVICE_PRINCIPAL_TOKEN = f"mlai_sp_{'a' * 32}.{'s' * 48}"
+DISPATCH_SECRET = "dispatch-secret-" + ("s" * 32)
 
 
 def settings(**overrides):
@@ -94,6 +96,62 @@ def test_public_surface_rejects_every_private_brain_configuration(overrides):
         settings(**overrides)
 
 
+def test_public_surface_accepts_only_route_scoped_unified_admin_configuration():
+    configured = settings(
+        MLAI_BACKEND_URL="https://backend.test",
+        ROO_UNIFIED_ADMIN_ROUTING_ENABLED=True,
+        ORG_BRAIN_ROUTER_API_KEY=SERVICE_PRINCIPAL_TOKEN,
+        ROO_ADMIN_INTERNAL_URL="http://roo-admin:8000",
+        ROO_ADMIN_DISPATCH_SECRET=DISPATCH_SECRET,
+    )
+
+    assert configured.ROO_SURFACE == "public"
+    assert configured.ROO_UNIFIED_ADMIN_ROUTING_ENABLED is True
+    assert configured.ORG_BRAIN_API_KEY is None
+    assert "admin-brain" not in configured.enabled_skill_names
+
+    with pytest.raises(ValidationError, match="require ROO_UNIFIED"):
+        settings(ORG_BRAIN_ROUTER_API_KEY=SERVICE_PRINCIPAL_TOKEN)
+
+
+def test_internal_admin_worker_has_no_slack_or_public_runtime_credentials():
+    configured = Settings(
+        _env_file=None,
+        SLACK_BOT_TOKEN=None,
+        SLACK_SIGNING_SECRET=None,
+        OPENAI_API_KEY=None,
+        ROO_ENVIRONMENT="production",
+        ROO_SURFACE="admin",
+        ROO_ADMIN_INTERNAL_ONLY=True,
+        ROO_ENABLED_SKILLS="admin-brain",
+        ORG_BRAIN_ENABLED=True,
+        ORG_BRAIN_API_KEY=SERVICE_PRINCIPAL_TOKEN,
+        MLAI_BACKEND_URL="https://backend.test",
+        ROO_ADMIN_DISPATCH_SECRET=DISPATCH_SECRET,
+    )
+
+    from roo.config import validate_runtime_security
+
+    validate_runtime_security(configured)
+    assert configured.SLACK_BOT_TOKEN is None
+    assert configured.OPENAI_API_KEY is None
+    assert configured.allowed_channel_ids == frozenset()
+
+    with pytest.raises(ValidationError, match="must not receive Slack"):
+        Settings(
+            _env_file=None,
+            SLACK_SIGNING_SECRET=None,
+            OPENAI_API_KEY=None,
+            ROO_SURFACE="admin",
+            ROO_ADMIN_INTERNAL_ONLY=True,
+            ROO_ENABLED_SKILLS="admin-brain",
+            ORG_BRAIN_ENABLED=True,
+            ORG_BRAIN_API_KEY=SERVICE_PRINCIPAL_TOKEN,
+            ROO_ADMIN_DISPATCH_SECRET=DISPATCH_SECRET,
+            SLACK_BOT_TOKEN="xoxb-forbidden",
+        )
+
+
 def test_admin_surface_requires_an_explicit_slack_context_allowlist():
     with pytest.raises(ValidationError, match="requires ROO_ALLOWED_CHANNEL_IDS"):
         settings(ROO_SURFACE="admin")
@@ -108,6 +166,7 @@ def test_admin_development_surface_starts_with_no_skills_or_brain_access():
 
     assert configured.enabled_skill_names == frozenset()
     assert not configured.ORG_BRAIN_ENABLED
+    assert configured.ROO_CONTEXTUAL_SHADOW_MODE is False
     assert configured.is_slack_context_allowed(
         channel_id="GADMIN123",
         user_id="UOTHER123",
@@ -132,6 +191,15 @@ def test_admin_surface_rejects_public_and_direct_message_channel_ids():
                 ROO_SURFACE="admin",
                 ROO_ALLOWED_CHANNEL_IDS=channel_id,
             )
+
+
+def test_admin_surface_rejects_contextual_shadow_mode():
+    with pytest.raises(ValidationError, match="cannot enable contextual shadow mode"):
+        settings(
+            ROO_SURFACE="admin",
+            ROO_ALLOWED_CHANNEL_IDS="GADMIN123",
+            ROO_CONTEXTUAL_SHADOW_MODE=True,
+        )
 
 
 def test_admin_brain_requires_scoped_key_and_explicit_skill():
@@ -252,3 +320,30 @@ def test_admin_surface_hides_public_only_http_capabilities(path):
         main_module.app.dependency_overrides.clear()
 
     assert response.status_code == 404
+
+
+def test_admin_readiness_reports_the_enforced_runtime_shape(monkeypatch):
+    configured = settings(
+        ROO_SURFACE="admin",
+        ROO_ALLOWED_CHANNEL_IDS="GADMIN123",
+        ROO_ENABLED_SKILLS="admin-brain",
+        ORG_BRAIN_ENABLED=True,
+        ORG_BRAIN_ACTIONS_ENABLED=False,
+        ORG_BRAIN_API_KEY=SERVICE_PRINCIPAL_TOKEN,
+        ROO_CONTEXTUAL_SHADOW_MODE=False,
+    )
+    monkeypatch.setattr(main_module, "get_settings", lambda: configured)
+    monkeypatch.setattr(
+        main_module.app.state,
+        "startup_complete",
+        True,
+        raising=False,
+    )
+
+    payload = asyncio.run(main_module.readiness_check())
+
+    assert payload["surface"] == "admin"
+    assert payload["enabled_skills"] == ["admin-brain"]
+    assert payload["org_brain_enabled"] is True
+    assert payload["org_brain_actions_enabled"] is False
+    assert payload["contextual_shadow_mode"] is False

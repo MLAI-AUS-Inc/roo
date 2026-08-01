@@ -169,7 +169,7 @@ def build_admin_brain_response(
 
     blocks: list[dict] = []
     for index, chunk in enumerate(_chunk_text(answer)):
-        prefix = "*Admin Roo*\n" if index == 0 else ""
+        prefix = "*🔒 Internal organisational memory*\n" if index == 0 else ""
         blocks.append(
             {
                 "type": "section",
@@ -318,7 +318,7 @@ def build_incorrect_feedback_modal(
         "type": "modal",
         "callback_id": ADMIN_BRAIN_INCORRECT_CALLBACK,
         "private_metadata": metadata,
-        "title": {"type": "plain_text", "text": "Correct Admin Roo"},
+        "title": {"type": "plain_text", "text": "Correct memory answer"},
         "submit": {"type": "plain_text", "text": "Submit"},
         "close": {"type": "plain_text", "text": "Cancel"},
         "blocks": [

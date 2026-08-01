@@ -74,6 +74,7 @@ from .backend_identity import (
     get_backend_actor_context,
     use_backend_actor_context,
 )
+from .admin_dispatch import AdminDispatchClient
 from .admin_brain import (
     ADMIN_ACTION_APPROVE,
     ADMIN_ACTION_REJECT,
@@ -1941,12 +1942,32 @@ async def readiness_check():
             },
             status_code=503,
         )
-    return {
+    settings = get_settings()
+    payload = {
         "status": "ok",
         "service": "roo",
-        "surface": get_settings().ROO_SURFACE,
+        "surface": settings.ROO_SURFACE,
         "message": "Roo startup complete",
     }
+    if settings.ROO_SURFACE == "admin":
+        payload.update(
+            {
+                "enabled_skills": sorted(settings.enabled_skill_names),
+                "org_brain_enabled": settings.ORG_BRAIN_ENABLED,
+                "org_brain_actions_enabled": settings.ORG_BRAIN_ACTIONS_ENABLED,
+                "contextual_shadow_mode": settings.ROO_CONTEXTUAL_SHADOW_MODE,
+            }
+        )
+    else:
+        payload.update(
+            {
+                "unified_admin_routing_enabled": (
+                    settings.ROO_UNIFIED_ADMIN_ROUTING_ENABLED
+                ),
+                "contextual_shadow_mode": settings.ROO_CONTEXTUAL_SHADOW_MODE,
+            }
+        )
+    return payload
 
 
 @app.get("/healthz/dependencies")
@@ -4055,6 +4076,89 @@ async def _record_admin_brain_feedback(
         )
 
 
+async def _record_unified_admin_brain_feedback(
+    *,
+    settings: Settings,
+    user_id: str,
+    team_id: str,
+    channel_id: str,
+    thread_ts: str,
+    feedback: dict[str, str],
+    feedback_type: str,
+    correction_text: Optional[str] = None,
+) -> None:
+    """Re-authorize and relay Admin feedback without exposing its credential."""
+
+    query_id = str(feedback.get("query_id") or "").strip()
+    claim_id = str(feedback.get("claim_id") or "").strip() or None
+    requester_user_id = str(feedback.get("requester_user_id") or "").strip()
+    if not query_id or requester_user_id != user_id:
+        message = "Only the person who requested this answer can submit its feedback."
+    elif feedback_type == "incorrect" and (not claim_id or not correction_text):
+        message = "I need the specific correction before I can send this answer for review."
+    else:
+        context = BackendActorContext(
+            slack_team_id=team_id,
+            acting_slack_user_id=user_id,
+            slack_channel_id=channel_id,
+            slack_thread_ts=thread_ts,
+            event_id=f"Ia{uuid4().hex}",
+        )
+        try:
+            from .clients.mlai_backend import MLAIBackendClient
+
+            eligibility = await MLAIBackendClient(
+                base_url=settings.MLAI_BACKEND_URL,
+                service_principal_key=settings.ORG_BRAIN_ROUTER_API_KEY,
+                surface="gateway",
+                actor_context=context,
+            ).get_admin_routing_eligibility()
+            if not bool(eligibility.get("admin_brain_eligible")):
+                message = "Your current Roo access does not allow internal-memory feedback."
+            else:
+                response = await AdminDispatchClient(
+                    base_url=settings.ROO_ADMIN_INTERNAL_URL,
+                    secret=settings.ROO_ADMIN_DISPATCH_SECRET,
+                    timeout=float(settings.ORG_BRAIN_BACKEND_TIMEOUT_SECONDS) + 5,
+                ).dispatch(
+                    kind="feedback",
+                    context=context,
+                    payload={
+                        "query_id": query_id,
+                        "claim_id": claim_id or "",
+                        "feedback_type": feedback_type,
+                        "correction_text": correction_text or "",
+                        "requester_user_id": requester_user_id,
+                    },
+                )
+                destination = response.get("destination") or {}
+                if (
+                    destination.get("channel_id") != channel_id
+                    or str(destination.get("thread_ts") or "") != str(thread_ts or "")
+                    or destination.get("requester_user_id") != user_id
+                ):
+                    raise ValueError("Admin feedback response destination did not match")
+                message = str(response.get("message") or "").strip()
+                if not message:
+                    raise ValueError("Admin feedback response was empty")
+        except Exception as exc:
+            print(
+                "UNIFIED_ADMIN_BRAIN_FEEDBACK_FAILED "
+                f"error={exc.__class__.__name__} query_id={query_id}"
+            )
+            message = (
+                "I couldn't record that internal-memory feedback just now. "
+                "The answer itself was not changed."
+            )
+
+    if channel_id:
+        post_message(
+            channel=channel_id,
+            thread_ts=thread_ts or None,
+            text=message,
+        )
+
+
 def _open_admin_brain_correction_modal(
     *,
     payload: dict,
@@ -4475,6 +4579,45 @@ async def slack_actions(
         )
         return JSONResponse(status_code=200, content={})
 
+    unified_admin = bool(
+        settings.ROO_SURFACE == "public"
+        and settings.ROO_UNIFIED_ADMIN_ROUTING_ENABLED
+    )
+    if unified_admin and payload_type == "view_submission" and correction_submission:
+        team_id = str(payload.get("team", {}).get("id") or "")
+        if (
+            correction_submission.get("requester_user_id") != user_id
+            or correction_submission.get("team_id") != team_id
+            or not correction_submission.get("query_id")
+            or not correction_submission.get("claim_id")
+            or not correction_submission.get("correction_text")
+        ):
+            return JSONResponse(
+                status_code=200,
+                content={
+                    "response_action": "errors",
+                    "errors": {
+                        "admin_brain_correction": (
+                            "This correction could not be verified. "
+                            "Reopen it from the original answer."
+                        )
+                    },
+                },
+            )
+        asyncio.create_task(
+            _record_unified_admin_brain_feedback(
+                settings=settings,
+                user_id=str(user_id or ""),
+                team_id=team_id,
+                channel_id=str(channel_id or ""),
+                thread_ts=correction_submission.get("thread_ts") or "",
+                feedback=correction_submission,
+                feedback_type="incorrect",
+                correction_text=correction_submission.get("correction_text"),
+            )
+        )
+        return JSONResponse(status_code=200, content={"response_action": "clear"})
+
     actions = payload.get("actions", [])
     if not actions:
         return JSONResponse(status_code=200, content={})
@@ -4485,6 +4628,35 @@ async def slack_actions(
     thread_ts = message.get("thread_ts") or message.get("ts")
     
     print(f"🖱️ Action: {action_id} from {user_id}")
+
+    if unified_admin and action_id == ADMIN_BRAIN_INCORRECT_ACTION:
+        _open_admin_brain_correction_modal(
+            payload=payload,
+            action=actions[0],
+            user_id=str(user_id or ""),
+            team_id=str(payload.get("team", {}).get("id") or ""),
+            channel_id=str(channel_id or ""),
+            thread_ts=str(thread_ts or ""),
+        )
+        return JSONResponse(status_code=200, content={})
+    unified_feedback_type = (
+        ADMIN_BRAIN_FEEDBACK_ACTIONS.get(str(action_id or ""))
+        if unified_admin
+        else None
+    )
+    if unified_feedback_type:
+        asyncio.create_task(
+            _record_unified_admin_brain_feedback(
+                settings=settings,
+                user_id=str(user_id or ""),
+                team_id=str(payload.get("team", {}).get("id") or ""),
+                channel_id=str(channel_id or ""),
+                thread_ts=str(thread_ts or ""),
+                feedback=parse_feedback_value(actions[0].get("value")),
+                feedback_type=unified_feedback_type,
+            )
+        )
+        return JSONResponse(status_code=200, content={})
 
     if action_id in {"linear_meeting_approve", "linear_meeting_reject"}:
         value = actions[0].get("value", "")

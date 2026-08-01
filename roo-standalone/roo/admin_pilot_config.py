@@ -57,10 +57,15 @@ def admin_pilot_config_report(
 
     if getattr(settings, "ROO_SURFACE", "") != "admin":
         blockers.append("roo_surface_not_admin")
+    internal_worker = bool(getattr(settings, "ROO_ADMIN_INTERNAL_ONLY", False))
+    if not internal_worker:
+        blockers.append("admin_worker_not_internal_only")
     if not bool(getattr(settings, "ORG_BRAIN_ENABLED", False)):
         blockers.append("admin_brain_not_enabled")
     if bool(getattr(settings, "ORG_BRAIN_ACTIONS_ENABLED", False)):
         blockers.append("admin_actions_must_remain_disabled")
+    if bool(getattr(settings, "ROO_CONTEXTUAL_SHADOW_MODE", False)):
+        blockers.append("admin_shadow_mode_must_remain_disabled")
     if set(getattr(settings, "enabled_skill_names", ())) != {"admin-brain"}:
         blockers.append("admin_skill_allowlist_not_exact")
 
@@ -117,10 +122,14 @@ def admin_pilot_config_report(
     }
     if not approved_dm_users.issubset(approved_actor_ids):
         blockers.append("approval_dm_actor_mismatch")
-    if set(getattr(settings, "allowed_channel_ids", ())) != approved_channels:
-        blockers.append("roo_channel_allowlist_mismatch")
-    if set(getattr(settings, "allowed_dm_user_ids", ())) != approved_dm_users:
-        blockers.append("roo_dm_allowlist_mismatch")
+    # The backend pilot manifest is authoritative for the single-app design.
+    # The internal worker has no Slack ingress and therefore carries no local
+    # Slack actor/channel allowlist to drift from that backend-owned policy.
+    if not internal_worker:
+        if set(getattr(settings, "allowed_channel_ids", ())) != approved_channels:
+            blockers.append("roo_channel_allowlist_mismatch")
+        if set(getattr(settings, "allowed_dm_user_ids", ())) != approved_dm_users:
+            blockers.append("roo_dm_allowlist_mismatch")
 
     blockers = sorted(set(blockers))
     return {
