@@ -36,7 +36,11 @@ def _manifest():
         "approval_status": "approved",
         "review_due_at": (now + timedelta(days=30)).isoformat(),
         "pilot_admin_refs": ["slack:UADMIN123"],
-        "allowed_slack_contexts": ["dm:UADMIN123", "channel:GADMIN123"],
+        "allowed_slack_contexts": [
+            "dm:UADMIN123",
+            "channel:GADMIN123",
+            "public_channels:pilot_admins",
+        ],
     }
 
 
@@ -48,7 +52,11 @@ async def test_route_smoke_accepts_only_eligible_private_cases():
         calls.append(context)
         if context.acting_slack_user_id != "UADMIN123":
             return 401, False
-        if context.slack_channel_id in {"GADMIN123", "DPILOTROUTECHECK"}:
+        if context.slack_channel_id in {
+            "GADMIN123",
+            "DPILOTROUTECHECK",
+            "CPILOTROUTECHECK",
+        }:
             return 200, True
         return 200, False
 
@@ -63,12 +71,12 @@ async def test_route_smoke_accepts_only_eligible_private_cases():
 
     assert report["ready"]
     assert report["metrics"] == {
-        "expected_allow_cases": 2,
-        "eligible_cases": 2,
+        "expected_allow_cases": 3,
+        "eligible_cases": 3,
         "expected_deny_cases": 3,
         "denied_cases": 3,
     }
-    assert len(calls) == 5
+    assert len(calls) == 6
     assert "UADMIN123" not in str(report)
 
 

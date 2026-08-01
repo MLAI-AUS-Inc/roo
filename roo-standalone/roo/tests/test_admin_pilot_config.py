@@ -112,7 +112,7 @@ def test_shadow_mode_fails_the_production_config_gate():
     assert "admin_shadow_mode_must_remain_disabled" in report["blockers"]
 
 
-def test_public_channel_approval_and_expiry_fail_closed():
+def test_literal_public_channel_id_and_expiry_fail_closed():
     now = datetime.now(timezone.utc)
     manifest = approval_manifest(now)
     manifest["allowed_slack_contexts"] = ["channel:CPUBLIC123"]
@@ -131,3 +131,21 @@ def test_public_channel_approval_and_expiry_fail_closed():
     assert not report["ready"]
     assert "approval_not_current" in report["blockers"]
     assert "approval_private_contexts_invalid" in report["blockers"]
+
+
+def test_actor_bound_public_channel_scope_is_valid():
+    now = datetime.now(timezone.utc)
+    manifest = approval_manifest(now)
+    manifest["allowed_slack_contexts"].append(
+        "public_channels:pilot_admins"
+    )
+
+    report = admin_pilot_config_report(
+        configured_settings(),
+        manifest,
+        organization_domain="mlai.au",
+        now=now,
+    )
+
+    assert report["ready"]
+    assert report["blockers"] == []

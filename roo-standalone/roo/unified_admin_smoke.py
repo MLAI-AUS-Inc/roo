@@ -6,7 +6,10 @@ from typing import Awaitable, Callable
 
 import httpx
 
-from .admin_pilot_config import admin_pilot_config_report
+from .admin_pilot_config import (
+    PUBLIC_PILOT_ADMIN_CONTEXT,
+    admin_pilot_config_report,
+)
 from .backend_identity import BackendActorContext
 from .clients.mlai_backend import MLAIBackendClient, MLAIBackendUnavailableError
 
@@ -67,7 +70,12 @@ async def unified_admin_route_smoke_report(
 
     actor_ids = [value.split(":", 1)[1] for value in approval_manifest["pilot_admin_refs"]]
     contexts = []
+    public_channels_for_pilot_admins = False
     for value in approval_manifest["allowed_slack_contexts"]:
+        if value == PUBLIC_PILOT_ADMIN_CONTEXT:
+            public_channels_for_pilot_admins = True
+            contexts.append("CPILOTROUTECHECK")
+            continue
         kind, identifier = value.split(":", 1)
         if kind == "channel":
             contexts.append(identifier)
@@ -105,7 +113,10 @@ async def unified_admin_route_smoke_report(
         denied.append(await decision(synthetic_actor, contexts[0]))
     for actor_id in actor_ids:
         denied.append(await decision(actor_id, "GROUTESMOKEDENY"))
-        denied.append(await decision(actor_id, "CROUTESMOKEDENY"))
+        if not public_channels_for_pilot_admins:
+            denied.append(await decision(actor_id, "CROUTESMOKEDENY"))
+    if public_channels_for_pilot_admins:
+        denied.append(await decision(synthetic_actor, "CROUTESMOKEDENY"))
 
     report["metrics"] = {
         "expected_allow_cases": len(allowed),
