@@ -511,6 +511,10 @@ def test_admin_production_deploy_is_enforced_without_staging_or_shadow():
     assert "check_admin_pilot_config.py" in workflow
     assert "check_admin_pilot_access.py" in workflow
     assert "contextual_shadow_mode" in workflow
+    assert "nginx_ready=0" in workflow
+    assert workflow.index("nginx_ready=0") < workflow.index(
+        "for path in /admin/slack/events"
+    )
     assert "ROO_ADMIN_INTERNAL_ONLY=true" in workflow
     assert "ROO_UNIFIED_ADMIN_ROUTING_ENABLED" in workflow
     assert "ROO_ADMIN_ROUTER_API_KEY" in workflow

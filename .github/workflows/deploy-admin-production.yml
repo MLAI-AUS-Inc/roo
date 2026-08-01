@@ -216,6 +216,16 @@ jobs:
             # starts, regardless of which serialized main workflow runs first.
             cd "$PUBLIC_DEPLOY_DIR/roo-standalone"
             docker compose up -d --no-deps --force-recreate nginx
+            nginx_ready=0
+            for attempt in $(seq 1 18); do
+              if curl --silent --show-error --fail --max-time 5 \
+                http://127.0.0.1/healthz/ready >/dev/null; then
+                nginx_ready=1
+                break
+              fi
+              sleep 2
+            done
+            test "$nginx_ready" = "1"
             for path in /admin/slack/events /admin/slack/actions /admin/healthz/ready; do
               status="$(curl --silent --show-error --max-time 5 \
                 --output /dev/null --write-out '%{http_code}' \
