@@ -22,7 +22,7 @@ import httpx
 
 from .clients.mlai_backend import MLAIBackendClient, MLAIBackendUnavailableError
 from .config import get_settings
-from .link_love import extract_social_post_url
+from .link_love import extract_boost_url
 
 DEFAULT_PROCESSING_LEASE_SECONDS = 90.0
 TERMINAL_REJECTION_STATUSES = {
@@ -520,20 +520,58 @@ def _approval_notice(admission: dict[str, Any]) -> str:
     return f":white_check_mark: Approved — {charged} Roo points deducted.{discount_text}{balance_text}"
 
 
+def _backend_result(admission: dict[str, Any]) -> dict[str, Any]:
+    """Return the stored backend decision without trusting its shape."""
+
+    raw = admission.get("backend_result_json")
+    if isinstance(raw, dict):
+        return raw
+    try:
+        parsed = json.loads(str(raw or "{}"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
 def _rejection_notice(admission: dict[str, Any]) -> str:
     poster = str(admission.get("poster_slack_id") or "")
     status = str(admission.get("status") or "")
     if status == "rejected_insufficient_points":
+        result = _backend_result(admission)
+        required = result.get("charged_points")
+        available = result.get("new_balance", result.get("balance_before"))
+        if required is not None and available is not None:
+            balance_detail = (
+                f"This boost costs {required} Roo points, and you currently have {available}. "
+            )
+        else:
+            balance_detail = "Your Roo points balance is below the price of this boost. "
+        discount_detail = (
+            "Your 50% Australian-startup monthly-update discount was included in that price. "
+            if bool(result.get("discount_applied"))
+            else ""
+        )
         return (
-            f"<@{poster}> this boost was not approved because you do not have enough Roo points. "
-            "I will remove the post; earn or top up points, then post it again."
+            f"<@{poster}> I couldn't approve this boost because you don't have enough Roo points. "
+            f"{balance_detail}{discount_detail}"
+            "I'll remove this message so nobody engages with an unapproved campaign. "
+            "Earn enough points, then create a new top-level post with the campaign. "
+            "You can DM me “what's my points balance?” at any time."
         )
     if status == "rejected_member_unlinked":
         return (
-            f"<@{poster}> I could not connect this Slack account to a Roo points account. "
-            "I will remove the post; link your account, then try again."
+            f"<@{poster}> I couldn't approve this boost because I can't match your Slack profile "
+            "to a Roo Points account, so I can't check or charge your balance. I'll remove this "
+            "message. DM me “what's my points balance?” to check whether I can see your account. "
+            "If I still can't find it, ask an MLAI admin to link your Slack profile, then create a "
+            "new top-level post."
         )
-    return f"<@{poster}> this post is not eligible for boosting, so I will remove it."
+    return (
+        f"<@{poster}> I couldn't process this boost because some required Slack information was "
+        "missing or invalid. No Roo points were charged. I'll remove this message; create a new "
+        "top-level post and try again. Any website or social link is allowed. If this happens "
+        "again, please ask an MLAI admin for help."
+    )
 
 
 def _post_decision_notice(
@@ -773,7 +811,7 @@ async def handle_boost_root_post(
         root_message_ts=root_message_ts,
         poster_slack_id=poster_slack_id,
         root_text=root_text,
-        social_post_url=extract_social_post_url(root_text) or "",
+        social_post_url=extract_boost_url(root_text) or "",
     )
     return await process_boost_post_admission(
         admission,
@@ -801,39 +839,13 @@ async def handle_boost_root_edit(
     admission = store.get(channel_id, root_ts)
     if admission is None:
         return {"status": "ignored", "reason": "unknown_root"}
-    old_url = str(admission.get("social_post_url") or "")
-    new_url = extract_social_post_url(text) or ""
+    new_url = extract_boost_url(text) or ""
     updated = store.update_root_text(
         channel_id=channel_id,
         root_message_ts=root_ts,
         root_text=text,
         social_post_url=new_url,
     )
-    if str(admission.get("status") or "") == "approved" and new_url != old_url:
-        rejected = store.mark_rejected(
-            int(admission["id"]),
-            status="rejected_invalid",
-            reason="approved boost root changed its social post URL",
-        )
-        notice = (
-            f"<@{rejected['poster_slack_id']}> the approved link was changed. "
-            "To prevent a paid boost being swapped for a different post, I will remove this root. "
-            "Post the new link separately for a new approval."
-        )
-        _post_decision_notice(
-            rejected,
-            store=store,
-            text=notice,
-            post_message_fn=post_message_fn,
-        )
-        refreshed = store.get_by_id(int(rejected["id"]))
-        _dm_rejection(refreshed, store=store, text=notice, send_dm_fn=send_dm_fn)
-        moderated = _moderate_rejected_root(
-            store.get_by_id(int(rejected["id"])),
-            store=store,
-            delete_fn=delete_fn,
-        )
-        return {"status": str(moderated["status"]), "admission": moderated}
     return {"status": "updated", "admission": updated}
 
 

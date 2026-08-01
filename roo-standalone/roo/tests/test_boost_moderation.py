@@ -1,3 +1,4 @@
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -60,6 +61,65 @@ class ApprovedClient:
         }
 
 
+def test_boost_url_accepts_any_http_or_https_domain() -> None:
+    assert link_love.extract_boost_url(
+        "Share https://example.com/product?id=12&utm_source=slack#pricing"
+    ) == "https://example.com/product?id=12&utm_source=slack#pricing"
+    assert link_love.extract_boost_url("Read http://news.example.org/story/") == (
+        "http://news.example.org/story"
+    )
+    assert link_love.extract_boost_url("No campaign link here") is None
+
+
+def test_invalid_post_notice_explains_internal_validation_and_retry() -> None:
+    notice = module._rejection_notice(
+        {
+            "poster_slack_id": "UPOSTER1",
+            "status": "rejected_invalid",
+            "rejection_reason": "Missing required fields: social_post_url",
+        }
+    )
+
+    assert "required Slack information was missing or invalid" in notice
+    assert "No Roo points were charged" in notice
+    assert "Any website or social link is allowed" in notice
+    assert "create a new top-level post" in notice
+
+
+def test_insufficient_points_notice_shows_price_balance_and_discount() -> None:
+    notice = module._rejection_notice(
+        {
+            "poster_slack_id": "UPOSTER1",
+            "status": "rejected_insufficient_points",
+            "backend_result_json": json.dumps(
+                {
+                    "charged_points": 4,
+                    "new_balance": 3,
+                    "discount_applied": True,
+                }
+            ),
+        }
+    )
+
+    assert "costs 4 Roo points" in notice
+    assert "currently have 3" in notice
+    assert "50% Australian-startup monthly-update discount" in notice
+    assert "what's my points balance?" in notice
+
+
+def test_unlinked_member_notice_explains_how_to_fix_account_link() -> None:
+    notice = module._rejection_notice(
+        {
+            "poster_slack_id": "UPOSTER1",
+            "status": "rejected_member_unlinked",
+        }
+    )
+
+    assert "can't match your Slack profile to a Roo Points account" in notice
+    assert "what's my points balance?" in notice
+    assert "ask an MLAI admin to link your Slack profile" in notice
+
+
 @pytest.mark.asyncio
 async def test_root_admission_is_durable_idempotent_and_posts_discount_notice(
     tmp_path, monkeypatch
@@ -96,6 +156,27 @@ async def test_root_admission_is_durable_idempotent_and_posts_discount_notice(
     assert admission["discount_applied"] == 1
     assert len(notices) == 1
     assert "monthly-update discount" in notices[0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_root_without_a_link_is_still_eligible_for_points_admission(
+    tmp_path, monkeypatch
+):
+    settings = moderation_settings()
+    monkeypatch.setattr(module, "get_settings", lambda: settings)
+    store = BoostPostAdmissionStore(tmp_path / "admissions.db")
+    client = ApprovedClient()
+
+    result = await handle_boost_root_post(
+        root_event(text="Please help boost my startup update"),
+        workspace_id="TTEAM123",
+        store=store,
+        client=client,
+        post_message_fn=lambda **kwargs: None,
+    )
+
+    assert result["status"] == "approved"
+    assert client.calls[0]["social_post_url"] == ""
 
 
 @pytest.mark.asyncio
@@ -179,7 +260,9 @@ def test_reward_decision_preserves_pre_cutoff_roots(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_approved_root_cannot_swap_to_a_different_link(tmp_path, monkeypatch):
+async def test_approved_root_can_change_to_any_link_without_another_charge(
+    tmp_path, monkeypatch
+):
     settings = moderation_settings(BOOST_POST_AUTO_DELETE_ENABLED=True)
     monkeypatch.setattr(module, "get_settings", lambda: settings)
     store = BoostPostAdmissionStore(tmp_path / "admissions.db")
@@ -197,7 +280,7 @@ async def test_approved_root_cannot_swap_to_a_different_link(tmp_path, monkeypat
             "channel": "CBOOST123",
             "message": {
                 "ts": "1800000000.123456",
-                "text": "Swap https://www.linkedin.com/posts/different-456",
+                "text": "Swap https://example.com/products/different-456",
             },
         },
         store=store,
@@ -211,8 +294,11 @@ async def test_approved_root_cannot_swap_to_a_different_link(tmp_path, monkeypat
         ),
     )
 
-    assert result["status"] == "deleted"
-    assert len(deleted) == 1
+    assert result["status"] == "updated"
+    assert deleted == []
+    admission = store.get("CBOOST123", "1800000000.123456")
+    assert admission["status"] == "approved"
+    assert admission["social_post_url"] == "https://example.com/products/different-456"
 
 
 @pytest.mark.asyncio
