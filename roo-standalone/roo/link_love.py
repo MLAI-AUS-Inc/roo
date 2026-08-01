@@ -9,7 +9,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
 import httpx
@@ -25,17 +25,6 @@ DEFAULT_PROCESSING_LEASE_SECONDS = 90.0
 DEFAULT_MAX_RETRY_ATTEMPTS = 5
 DEFAULT_MAX_ROOT_AGE_DAYS = 7
 SECONDS_PER_DAY = 24 * 60 * 60
-SUPPORTED_SOCIAL_HOSTS = (
-    "linkedin.com",
-    "lnkd.in",
-    "x.com",
-    "twitter.com",
-    "instagram.com",
-    "facebook.com",
-)
-TRACKING_QUERY_KEYS = {"fbclid", "gclid", "lipi", "trk", "trackingid"}
-
-
 def _now() -> float:
     return time.time()
 
@@ -68,8 +57,8 @@ def link_love_max_root_age_seconds() -> float:
     return max(0.0, days) * SECONDS_PER_DAY
 
 
-def extract_social_post_url(text: str) -> Optional[str]:
-    """Return a stable supported social-post URL without fetching content."""
+def extract_boost_url(text: str) -> Optional[str]:
+    """Return the first HTTP(S) campaign URL without restricting its domain."""
 
     candidates = re.findall(r"https?://[^\s<>|]+", str(text or ""), flags=re.IGNORECASE)
     candidates.extend(
@@ -82,27 +71,25 @@ def extract_social_post_url(text: str) -> Optional[str]:
         candidate = candidate.rstrip(".,;:!?)\\]}\"")
         try:
             parts = urlsplit(candidate)
+            scheme = parts.scheme.lower()
             host = (parts.hostname or "").lower().rstrip(".")
             port = parts.port
         except ValueError:
             continue
-        if not any(
-            host == allowed or host.endswith(f".{allowed}")
-            for allowed in SUPPORTED_SOCIAL_HOSTS
-        ):
+        if scheme not in {"http", "https"} or not host:
             continue
-        netloc = host
+        netloc = f"[{host}]" if ":" in host else host
         if port and port not in {80, 443}:
-            netloc = f"{host}:{port}"
-        filtered_query = [
-            (key, value)
-            for key, value in parse_qsl(parts.query, keep_blank_values=True)
-            if not key.lower().startswith("utm_")
-            and key.lower() not in TRACKING_QUERY_KEYS
-        ]
+            netloc = f"{netloc}:{port}"
         path = parts.path.rstrip("/") or "/"
-        return urlunsplit(("https", netloc, path, urlencode(filtered_query), ""))
+        return urlunsplit((scheme, netloc, path, parts.query, parts.fragment))
     return None
+
+
+def extract_social_post_url(text: str) -> Optional[str]:
+    """Backward-compatible alias for callers that still use the old name."""
+
+    return extract_boost_url(text)
 
 
 def slack_timestamp_to_epoch_seconds(slack_ts: str) -> float:
