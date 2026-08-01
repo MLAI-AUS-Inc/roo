@@ -18,6 +18,7 @@ COPY roo/ ./roo/
 COPY skills/ ./skills/
 COPY ops/ ./ops/
 COPY bridge/ ./bridge/
+COPY scripts/ ./scripts/
 
 EXPOSE 8000
 

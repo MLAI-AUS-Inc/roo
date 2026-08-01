@@ -493,6 +493,7 @@ def test_admin_production_deploy_is_enforced_without_staging_or_shadow():
     admin_compose = (
         REPO_ROOT / "roo-standalone/docker-compose.admin.yml"
     ).read_text()
+    dockerfile = (REPO_ROOT / "roo-standalone/Dockerfile").read_text()
     nginx = (REPO_ROOT / "roo-standalone/nginx/roo.conf").read_text()
 
     assert "push:" in workflow
@@ -524,6 +525,7 @@ def test_admin_production_deploy_is_enforced_without_staging_or_shadow():
     assert "ADMIN_ROO_OPENAI_API_KEY" not in workflow
     assert "roo-admin-gateway" in public_compose
     assert "roo-admin-gateway" in admin_compose
+    assert "COPY scripts/ ./scripts/" in dockerfile
     assert "ports:" not in admin_compose
     assert "roo.admin_worker:app" in admin_compose
     assert "location = /admin/slack/events" not in nginx
