@@ -75,9 +75,52 @@ def build_org_memory_identity_headers(
     ttl_seconds: int = 45,
     nonce: Optional[str] = None,
 ) -> dict[str, str]:
+    return build_service_principal_identity_headers(
+        service_principal_token,
+        context=context,
+        request_id=request_id,
+        surface="admin_roo",
+        issued_at=issued_at,
+        ttl_seconds=ttl_seconds,
+        nonce=nonce,
+    )
+
+
+def build_roo_gateway_identity_headers(
+    service_principal_token: str,
+    *,
+    context: BackendActorContext,
+    request_id: str,
+    issued_at: Optional[int] = None,
+    ttl_seconds: int = 45,
+    nonce: Optional[str] = None,
+) -> dict[str, str]:
+    return build_service_principal_identity_headers(
+        service_principal_token,
+        context=context,
+        request_id=request_id,
+        surface="roo_gateway",
+        issued_at=issued_at,
+        ttl_seconds=ttl_seconds,
+        nonce=nonce,
+    )
+
+
+def build_service_principal_identity_headers(
+    service_principal_token: str,
+    *,
+    context: BackendActorContext,
+    request_id: str,
+    surface: str,
+    issued_at: Optional[int] = None,
+    ttl_seconds: int = 45,
+    nonce: Optional[str] = None,
+) -> dict[str, str]:
     match = SERVICE_TOKEN_PATTERN.fullmatch(str(service_principal_token or "").strip())
     if not match:
-        raise BackendIdentityError("ORG_BRAIN_API_KEY is not a service-principal credential")
+        raise BackendIdentityError("A valid service-principal credential is required")
+    if surface not in {"admin_roo", "roo_gateway"}:
+        raise BackendIdentityError("Unsupported Roo service-principal surface")
     if not request_id:
         raise BackendIdentityError("A request ID is required for an actor assertion")
     if (
@@ -92,7 +135,7 @@ def build_org_memory_identity_headers(
     payload = {
         "v": 1,
         "kid": str(UUID(hex=match.group("credential_id"))),
-        "surface": "admin_roo",
+        "surface": surface,
         "slack_team_id": context.slack_team_id,
         "acting_slack_user_id": context.acting_slack_user_id,
         "slack_channel_id": context.slack_channel_id or "",
@@ -114,7 +157,7 @@ def build_org_memory_identity_headers(
         "Content-Type": "application/json",
         "Authorization": f"ServicePrincipal {service_principal_token}",
         "X-MLAI-Actor-Assertion": assertion,
-        "X-Roo-Surface": "admin_roo",
+        "X-Roo-Surface": surface,
         "X-Slack-Team-ID": context.slack_team_id,
         "X-Acting-Slack-User-ID": context.acting_slack_user_id,
         "X-Slack-Channel-ID": context.slack_channel_id or "",

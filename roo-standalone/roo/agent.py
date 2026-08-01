@@ -12,7 +12,15 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, List
 from pathlib import Path
 
-from .admin_brain import ADMIN_BRAIN_UNAVAILABLE_MESSAGE
+import httpx
+
+from .admin_brain import (
+    ADMIN_BRAIN_ACCESS_DENIED_MESSAGE,
+    ADMIN_BRAIN_UNAVAILABLE_MESSAGE,
+)
+from .admin_dispatch import AdminDispatchClient, AdminDispatchUnavailable
+from .backend_identity import BackendIdentityError, get_backend_actor_context
+from .clients.mlai_backend import MLAIBackendClient, MLAIBackendUnavailableError
 from .config import get_settings
 from .content_intent import (
     extract_content_factory_delegation,
@@ -66,6 +74,17 @@ class RooAgent:
                 )
         self.skill_executor = SkillExecutor()
         self._thread_skill_context: Dict[str, Dict[str, Any]] = {}
+        self._admin_routing_skill: Optional[Skill] = None
+        if self._surface == "public" and settings.ROO_UNIFIED_ADMIN_ROUTING_ENABLED:
+            admin_route_skills = load_skills(
+                skills_dir,
+                allowed_names={"admin-brain"},
+            )
+            if len(admin_route_skills) != 1:
+                raise ValueError(
+                    "Unified Admin routing requires exactly one admin-brain route definition"
+                )
+            self._admin_routing_skill = admin_route_skills[0]
 
         print(f"🦘 RooAgent initialized with {len(self.skills)} skills:")
         for skill in self.skills:
@@ -137,7 +156,11 @@ class RooAgent:
         
         # 0. Fetch Thread Context (if available)
         thread_history = []
-        if channel_id and thread_ts:
+        admin_thread = bool(
+            thread_context
+            and thread_context.get("skill_name") == "admin-brain"
+        )
+        if channel_id and thread_ts and not admin_thread:
             try:
                 # Fetch last 10 messages for context
                 raw_history = get_thread_messages(channel=channel_id, thread_ts=thread_ts)
@@ -192,7 +215,9 @@ class RooAgent:
                 "data": {"router": "v2", "clarification": True},
             }
 
-        available_skills = self._skills_for_slack_context(channel_id=channel_id)
+        available_skills = self._routing_skills_for_slack_context(
+            channel_id=channel_id
+        )
         skill = (
             next(
                 (
@@ -225,6 +250,20 @@ class RooAgent:
                 v2_decision.action,
             ):
                 return self._implicit_action_blocked(skill.name, v2_decision.action)
+            if skill.name == "admin-brain" and self._surface == "public":
+                self._remember_selected_skill(
+                    skill.name,
+                    channel_id,
+                    thread_ts,
+                    clean_text,
+                )
+                return await self._execute_unified_admin_brain(
+                    text=clean_text,
+                    params=self._v2_param_overrides(v2_decision, thread_context),
+                    user_id=user_id,
+                    channel_id=channel_id,
+                    thread_ts=thread_ts,
+                )
             self._remember_selected_skill(
                 skill.name,
                 channel_id,
@@ -470,6 +509,142 @@ class RooAgent:
             if skill.name != "victor-ai-applications" or victor_allowed
         ]
 
+    def _routing_skills_for_slack_context(
+        self,
+        *,
+        channel_id: Optional[str],
+        channel_name: Optional[str] = None,
+    ) -> List[Skill]:
+        skills = self._skills_for_slack_context(
+            channel_id=channel_id,
+            channel_name=channel_name,
+        )
+        admin_routing_skill = getattr(self, "_admin_routing_skill", None)
+        if admin_routing_skill is not None:
+            skills.append(admin_routing_skill)
+        return skills
+
+    async def _execute_unified_admin_brain(
+        self,
+        *,
+        text: str,
+        params: Dict[str, Any],
+        user_id: str,
+        channel_id: Optional[str],
+        thread_ts: Optional[str],
+    ) -> Dict[str, Any]:
+        """Authorize then relay one read-only query to the isolated Admin worker."""
+
+        settings = get_settings()
+        context = get_backend_actor_context()
+        if (
+            not settings.ROO_UNIFIED_ADMIN_ROUTING_ENABLED
+            or context is None
+            or not channel_id
+            or context.acting_slack_user_id != user_id
+            or context.slack_channel_id != channel_id
+            or str(context.slack_thread_ts or "") != str(thread_ts or "")
+        ):
+            return {
+                "message": ADMIN_BRAIN_UNAVAILABLE_MESSAGE,
+                "skill_used": "admin-brain",
+                "data": {"admin_brain": True, "routed_surface": "admin"},
+            }
+        if not str(channel_id).startswith(("D", "G")):
+            return {
+                "message": (
+                    "I can only use internal organisational memory in an approved "
+                    "DM or private Slack channel."
+                ),
+                "skill_used": "admin-brain",
+                "data": {
+                    "admin_brain": True,
+                    "routed_surface": "admin",
+                    "reason": "private_context_required",
+                },
+            }
+
+        eligibility_client = MLAIBackendClient(
+            base_url=settings.MLAI_BACKEND_URL,
+            service_principal_key=settings.ORG_BRAIN_ROUTER_API_KEY,
+            surface="gateway",
+            actor_context=context,
+        )
+        try:
+            eligibility = await eligibility_client.get_admin_routing_eligibility()
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code in {401, 403, 404}:
+                message = ADMIN_BRAIN_ACCESS_DENIED_MESSAGE
+            else:
+                message = ADMIN_BRAIN_UNAVAILABLE_MESSAGE
+            return {
+                "message": message,
+                "skill_used": "admin-brain",
+                "data": {"admin_brain": True, "routed_surface": "admin"},
+            }
+        except (MLAIBackendUnavailableError, BackendIdentityError, ValueError):
+            return {
+                "message": ADMIN_BRAIN_UNAVAILABLE_MESSAGE,
+                "skill_used": "admin-brain",
+                "data": {"admin_brain": True, "routed_surface": "admin"},
+            }
+        if not bool(eligibility.get("admin_brain_eligible")):
+            return {
+                "message": ADMIN_BRAIN_ACCESS_DENIED_MESSAGE,
+                "skill_used": "admin-brain",
+                "data": {
+                    "admin_brain": True,
+                    "routed_surface": "admin",
+                    "reason": "committee_policy_denied",
+                },
+            }
+
+        dispatcher = AdminDispatchClient(
+            base_url=settings.ROO_ADMIN_INTERNAL_URL,
+            secret=settings.ROO_ADMIN_DISPATCH_SECRET,
+            timeout=float(settings.ORG_BRAIN_BACKEND_TIMEOUT_SECONDS) + 5,
+        )
+        try:
+            response = await dispatcher.dispatch(
+                kind="query",
+                context=context,
+                payload={"text": text, "params": dict(params or {})},
+            )
+        except (AdminDispatchUnavailable, ValueError):
+            return {
+                "message": ADMIN_BRAIN_UNAVAILABLE_MESSAGE,
+                "skill_used": "admin-brain",
+                "data": {"admin_brain": True, "routed_surface": "admin"},
+            }
+
+        destination = response.get("destination") or {}
+        if (
+            destination.get("channel_id") != channel_id
+            or str(destination.get("thread_ts") or "") != str(thread_ts or "")
+            or destination.get("requester_user_id") != user_id
+        ):
+            return {
+                "message": ADMIN_BRAIN_UNAVAILABLE_MESSAGE,
+                "skill_used": "admin-brain",
+                "data": {"admin_brain": True, "routed_surface": "admin"},
+            }
+        result = response.get("result")
+        if not isinstance(result, dict) or not result.get("message"):
+            return {
+                "message": ADMIN_BRAIN_UNAVAILABLE_MESSAGE,
+                "skill_used": "admin-brain",
+                "data": {"admin_brain": True, "routed_surface": "admin"},
+            }
+        data = dict(result.get("data") or {})
+        data["routed_surface"] = "admin"
+        return {
+            "message": result["message"],
+            "blocks": result.get("blocks"),
+            "suppress_post": bool(result.get("suppress_post")),
+            "skill_used": "admin-brain",
+            "data": data,
+        }
+
     def _is_implicit_action_allowed(
         self,
         skill_name: str,
@@ -572,7 +747,7 @@ class RooAgent:
         from . import router as router_v2
 
         channel_name = self._safe_channel_name(channel_id)
-        available_skills = self._skills_for_slack_context(
+        available_skills = self._routing_skills_for_slack_context(
             channel_id=channel_id,
             channel_name=channel_name,
         )

@@ -21,6 +21,7 @@ BASE_SETTINGS = {
     "OPENAI_API_KEY": "synthetic-openai-key",
 }
 SERVICE_PRINCIPAL_TOKEN = f"mlai_sp_{'a' * 32}.{'s' * 48}"
+DISPATCH_SECRET = "dispatch-secret-" + ("s" * 32)
 
 
 def settings(**overrides):
@@ -93,6 +94,62 @@ def test_victor_ai_skill_fails_closed_for_disabled_or_invalid_configuration():
 def test_public_surface_rejects_every_private_brain_configuration(overrides):
     with pytest.raises(ValidationError, match="Public Roo"):
         settings(**overrides)
+
+
+def test_public_surface_accepts_only_route_scoped_unified_admin_configuration():
+    configured = settings(
+        MLAI_BACKEND_URL="https://backend.test",
+        ROO_UNIFIED_ADMIN_ROUTING_ENABLED=True,
+        ORG_BRAIN_ROUTER_API_KEY=SERVICE_PRINCIPAL_TOKEN,
+        ROO_ADMIN_INTERNAL_URL="http://roo-admin:8000",
+        ROO_ADMIN_DISPATCH_SECRET=DISPATCH_SECRET,
+    )
+
+    assert configured.ROO_SURFACE == "public"
+    assert configured.ROO_UNIFIED_ADMIN_ROUTING_ENABLED is True
+    assert configured.ORG_BRAIN_API_KEY is None
+    assert "admin-brain" not in configured.enabled_skill_names
+
+    with pytest.raises(ValidationError, match="require ROO_UNIFIED"):
+        settings(ORG_BRAIN_ROUTER_API_KEY=SERVICE_PRINCIPAL_TOKEN)
+
+
+def test_internal_admin_worker_has_no_slack_or_public_runtime_credentials():
+    configured = Settings(
+        _env_file=None,
+        SLACK_BOT_TOKEN=None,
+        SLACK_SIGNING_SECRET=None,
+        OPENAI_API_KEY=None,
+        ROO_ENVIRONMENT="production",
+        ROO_SURFACE="admin",
+        ROO_ADMIN_INTERNAL_ONLY=True,
+        ROO_ENABLED_SKILLS="admin-brain",
+        ORG_BRAIN_ENABLED=True,
+        ORG_BRAIN_API_KEY=SERVICE_PRINCIPAL_TOKEN,
+        MLAI_BACKEND_URL="https://backend.test",
+        ROO_ADMIN_DISPATCH_SECRET=DISPATCH_SECRET,
+    )
+
+    from roo.config import validate_runtime_security
+
+    validate_runtime_security(configured)
+    assert configured.SLACK_BOT_TOKEN is None
+    assert configured.OPENAI_API_KEY is None
+    assert configured.allowed_channel_ids == frozenset()
+
+    with pytest.raises(ValidationError, match="must not receive Slack"):
+        Settings(
+            _env_file=None,
+            SLACK_SIGNING_SECRET=None,
+            OPENAI_API_KEY=None,
+            ROO_SURFACE="admin",
+            ROO_ADMIN_INTERNAL_ONLY=True,
+            ROO_ENABLED_SKILLS="admin-brain",
+            ORG_BRAIN_ENABLED=True,
+            ORG_BRAIN_API_KEY=SERVICE_PRINCIPAL_TOKEN,
+            ROO_ADMIN_DISPATCH_SECRET=DISPATCH_SECRET,
+            SLACK_BOT_TOKEN="xoxb-forbidden",
+        )
 
 
 def test_admin_surface_requires_an_explicit_slack_context_allowlist():

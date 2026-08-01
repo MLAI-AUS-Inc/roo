@@ -6,6 +6,7 @@ Pydantic Settings for environment-based configuration.
 import hmac
 import re
 from typing import ClassVar, Literal, Optional
+from urllib.parse import urlparse
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -41,8 +42,8 @@ class Settings(BaseSettings):
     )
     
     # Slack
-    SLACK_BOT_TOKEN: str
-    SLACK_SIGNING_SECRET: str
+    SLACK_BOT_TOKEN: Optional[str] = None
+    SLACK_SIGNING_SECRET: Optional[str] = None
     SLACK_REQUEST_MAX_AGE_SECONDS: int = 300
     SLACK_RECEIPT_TTL_SECONDS: int = 10 * 60
     SLACK_RECEIPTS_DB_PATH: str = "data/slack_request_receipts.db"
@@ -91,6 +92,14 @@ class Settings(BaseSettings):
     ORG_BRAIN_API_KEY: Optional[str] = None
     ORG_BRAIN_BACKEND_TIMEOUT_SECONDS: float = 20.0
     ORG_BRAIN_MAX_CONTEXT_TOKENS: int = 6000
+    ROO_UNIFIED_ADMIN_ROUTING_ENABLED: bool = False
+    ORG_BRAIN_ROUTER_API_KEY: Optional[str] = None
+    ROO_ADMIN_INTERNAL_URL: Optional[str] = None
+    ROO_ADMIN_DISPATCH_SECRET: Optional[str] = None
+    ROO_ADMIN_INTERNAL_ONLY: bool = False
+    ROO_ADMIN_DISPATCH_MAX_AGE_SECONDS: int = 60
+    ROO_ADMIN_DISPATCH_RECEIPT_TTL_SECONDS: int = 10 * 60
+    ROO_ADMIN_DISPATCH_RECEIPTS_DB_PATH: str = "data/admin_dispatch_receipts.db"
 
     # Read-only Victor AI application reports. Access is based on the resolved
     # Slack channel name, so channel or user ID allowlists are not required.
@@ -254,6 +263,14 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_contextual_responses(self):
+        internal_admin = bool(
+            self.ROO_SURFACE == "admin" and self.ROO_ADMIN_INTERNAL_ONLY
+        )
+        if not internal_admin and (
+            not str(self.SLACK_BOT_TOKEN or "").strip()
+            or not str(self.SLACK_SIGNING_SECRET or "").strip()
+        ):
+            raise ValueError("Slack bot token and signing secret are required")
         if not 1 <= self.SLACK_REQUEST_MAX_AGE_SECONDS <= 300:
             raise ValueError("SLACK_REQUEST_MAX_AGE_SECONDS must be between 1 and 300")
         if self.SLACK_RECEIPT_TTL_SECONDS < self.SLACK_REQUEST_MAX_AGE_SECONDS:
@@ -358,6 +375,61 @@ class Settings(BaseSettings):
                     "Public Roo cannot enable private skills: "
                     + ", ".join(sorted(private_skills))
                 )
+            unified_values_present = bool(
+                self.ORG_BRAIN_ROUTER_API_KEY
+                or self.ROO_ADMIN_INTERNAL_URL
+                or self.ROO_ADMIN_DISPATCH_SECRET
+            )
+            if self.ROO_UNIFIED_ADMIN_ROUTING_ENABLED:
+                if not str(self.MLAI_BACKEND_URL or "").strip():
+                    raise ValueError(
+                        "Unified Admin routing requires MLAI_BACKEND_URL"
+                    )
+                if not re.fullmatch(
+                    r"mlai_sp_[0-9a-f]{32}\.[A-Za-z0-9_-]{32,128}",
+                    str(self.ORG_BRAIN_ROUTER_API_KEY or ""),
+                ):
+                    raise ValueError(
+                        "Unified Admin routing requires a scoped router service principal"
+                    )
+                parsed_admin_url = urlparse(
+                    str(self.ROO_ADMIN_INTERNAL_URL or "").strip()
+                )
+                if (
+                    parsed_admin_url.scheme not in {"http", "https"}
+                    or not parsed_admin_url.hostname
+                    or parsed_admin_url.username
+                    or parsed_admin_url.password
+                    or parsed_admin_url.query
+                    or parsed_admin_url.fragment
+                    or parsed_admin_url.path not in {"", "/"}
+                ):
+                    raise ValueError(
+                        "Unified Admin routing requires a valid internal Admin URL"
+                    )
+                if self.is_production and (
+                    parsed_admin_url.scheme != "http"
+                    or parsed_admin_url.hostname != "roo-admin"
+                    or parsed_admin_url.port != 8000
+                ):
+                    raise ValueError(
+                        "Production Admin routing must use http://roo-admin:8000"
+                    )
+                if len(str(self.ROO_ADMIN_DISPATCH_SECRET or "")) < 32:
+                    raise ValueError(
+                        "Unified Admin routing requires a 32-character dispatch secret"
+                    )
+                if hmac.compare_digest(
+                    str(self.ROO_ADMIN_DISPATCH_SECRET),
+                    str(self.SLACK_SIGNING_SECRET),
+                ):
+                    raise ValueError(
+                        "Admin dispatch and Slack signing secrets must be distinct"
+                    )
+            elif unified_values_present:
+                raise ValueError(
+                    "Unified Admin routing credentials require ROO_UNIFIED_ADMIN_ROUTING_ENABLED"
+                )
             return self
 
         if not 1 <= self.ORG_BRAIN_BACKEND_TIMEOUT_SECONDS <= 60:
@@ -368,7 +440,11 @@ class Settings(BaseSettings):
             raise ValueError(
                 "ORG_BRAIN_MAX_CONTEXT_TOKENS must be between 1000 and 12000"
             )
-        if not self.allowed_channel_ids and not self.allowed_dm_user_ids:
+        if (
+            not internal_admin
+            and not self.allowed_channel_ids
+            and not self.allowed_dm_user_ids
+        ):
             raise ValueError(
                 "Admin Roo requires ROO_ALLOWED_CHANNEL_IDS or ROO_ALLOWED_DM_USER_IDS"
             )
@@ -418,6 +494,49 @@ class Settings(BaseSettings):
             raise ValueError(
                 "admin-actions cannot be enabled while ORG_BRAIN_ACTIONS_ENABLED is false"
             )
+        if internal_admin:
+            if self.SLACK_BOT_TOKEN or self.SLACK_SIGNING_SECRET:
+                raise ValueError(
+                    "Internal Admin Roo must not receive Slack application credentials"
+                )
+            if self.OPENAI_API_KEY or self.GOOGLE_API_KEY or self.ANTHROPIC_API_KEY:
+                raise ValueError(
+                    "Internal Admin Roo must not receive an LLM provider credential"
+                )
+            if (
+                self.ROO_UNIFIED_ADMIN_ROUTING_ENABLED
+                or self.ORG_BRAIN_ROUTER_API_KEY
+                or self.ROO_ADMIN_INTERNAL_URL
+            ):
+                raise ValueError(
+                    "Internal Admin Roo cannot act as the public routing gateway"
+                )
+            if len(str(self.ROO_ADMIN_DISPATCH_SECRET or "")) < 32:
+                raise ValueError(
+                    "Internal Admin Roo requires a 32-character dispatch secret"
+                )
+            if not str(self.MLAI_BACKEND_URL or "").strip():
+                raise ValueError("Internal Admin Roo requires MLAI_BACKEND_URL")
+            if hmac.compare_digest(
+                str(self.ROO_ADMIN_DISPATCH_SECRET),
+                str(self.ORG_BRAIN_API_KEY),
+            ):
+                raise ValueError(
+                    "Admin dispatch and memory credentials must be distinct"
+                )
+            if not str(self.ROO_ADMIN_DISPATCH_RECEIPTS_DB_PATH or "").strip():
+                raise ValueError("Internal Admin Roo requires a dispatch receipt database")
+            if not 1 <= self.ROO_ADMIN_DISPATCH_MAX_AGE_SECONDS <= 60:
+                raise ValueError(
+                    "ROO_ADMIN_DISPATCH_MAX_AGE_SECONDS must be between 1 and 60"
+                )
+            if (
+                self.ROO_ADMIN_DISPATCH_RECEIPT_TTL_SECONDS
+                < self.ROO_ADMIN_DISPATCH_MAX_AGE_SECONDS
+            ):
+                raise ValueError(
+                    "ROO_ADMIN_DISPATCH_RECEIPT_TTL_SECONDS must cover the replay window"
+                )
         return self
 
     @property
@@ -473,6 +592,14 @@ def validate_runtime_security(settings: Settings) -> None:
     model endpoints because an environment variable was omitted.
     """
     if not settings.is_production:
+        return
+
+    # The internal Admin worker has no Public Roo HTTP capabilities and does
+    # not receive Public Roo's registry or simulated-patient credentials.
+    if (
+        getattr(settings, "ROO_SURFACE", "") == "admin"
+        and bool(getattr(settings, "ROO_ADMIN_INTERNAL_ONLY", False))
+    ):
         return
 
     api_key = (settings.SIM_PATIENT_API_KEY or "").strip()

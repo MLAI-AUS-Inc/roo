@@ -511,9 +511,17 @@ def test_admin_production_deploy_is_enforced_without_staging_or_shadow():
     assert "check_admin_pilot_config.py" in workflow
     assert "check_admin_pilot_access.py" in workflow
     assert "contextual_shadow_mode" in workflow
+    assert "ROO_ADMIN_INTERNAL_ONLY=true" in workflow
+    assert "ROO_UNIFIED_ADMIN_ROUTING_ENABLED" in workflow
+    assert "ROO_ADMIN_ROUTER_API_KEY" in workflow
+    assert "ROO_ADMIN_DISPATCH_SECRET" in workflow
+    assert "ADMIN_ROO_SLACK_BOT_TOKEN" not in workflow
+    assert "ADMIN_ROO_SLACK_SIGNING_SECRET" not in workflow
+    assert "ADMIN_ROO_OPENAI_API_KEY" not in workflow
     assert "roo-admin-gateway" in public_compose
     assert "roo-admin-gateway" in admin_compose
     assert "ports:" not in admin_compose
-    assert "location = /admin/slack/events" in nginx
-    assert "location = /admin/slack/actions" in nginx
-    assert "location = /admin/healthz/ready" in nginx
+    assert "roo.admin_worker:app" in admin_compose
+    assert "location = /admin/slack/events" not in nginx
+    assert "location = /admin/slack/actions" not in nginx
+    assert "location = /admin/healthz/ready" not in nginx

@@ -16,6 +16,7 @@ from roo.backend_identity import (
     BackendActorContext,
     BackendIdentityError,
     build_org_memory_identity_headers,
+    build_roo_gateway_identity_headers,
     build_victor_ai_identity_headers,
     get_backend_actor_context,
     use_backend_actor_context,
@@ -99,6 +100,71 @@ def test_public_client_cannot_build_private_memory_headers():
 
     with pytest.raises(BackendIdentityError, match="Only Admin Roo"):
         client.org_memory_headers("roo-test-request")
+
+
+def test_gateway_assertion_is_route_only_and_binds_verified_actor():
+    token = _service_token()
+    headers = build_roo_gateway_identity_headers(
+        token,
+        context=_actor_context(),
+        request_id="roo-route-request",
+        issued_at=1_700_000_000,
+        nonce="fixed_nonce_123456789012345",
+    )
+
+    payload = _decode_payload(headers["X-MLAI-Actor-Assertion"])
+    assert payload["surface"] == "roo_gateway"
+    assert payload["acting_slack_user_id"] == "UADMIN123"
+    assert payload["slack_channel_id"] == "GADMIN123"
+    assert headers["X-Roo-Surface"] == "roo_gateway"
+
+    gateway = MLAIBackendClient(
+        base_url="https://backend.test",
+        service_principal_key=token,
+        surface="gateway",
+        actor_context=_actor_context(),
+    )
+    with pytest.raises(BackendIdentityError, match="Only Admin Roo"):
+        gateway.org_memory_headers("roo-private-request")
+
+
+@pytest.mark.asyncio
+async def test_gateway_eligibility_uses_one_matching_request_id(monkeypatch):
+    captured = {}
+
+    class FakeAsyncClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def request(self, method, url, **kwargs):
+            captured.update({"method": method, "url": url, **kwargs})
+            request = httpx.Request(method, url)
+            return httpx.Response(
+                200,
+                request=request,
+                json={"admin_brain_eligible": True},
+            )
+
+    monkeypatch.setattr("roo.clients.mlai_backend.httpx.AsyncClient", FakeAsyncClient)
+    client = MLAIBackendClient(
+        base_url="https://backend.test",
+        service_principal_key=_service_token(),
+        surface="gateway",
+        actor_context=_actor_context(),
+    )
+
+    result = await client.get_admin_routing_eligibility()
+    assertion = _decode_payload(captured["headers"]["X-MLAI-Actor-Assertion"])
+
+    assert result["admin_brain_eligible"] is True
+    assert captured["method"] == "POST"
+    assert captured["url"].endswith("/api/v1/org-memory/routing/eligibility")
+    assert captured["json"] == {}
+    assert assertion["request_id"] == captured["headers"]["X-Request-ID"]
+    assert assertion["surface"] == "roo_gateway"
 
 
 def test_victor_assertion_binds_verified_actor_context_with_hmac():

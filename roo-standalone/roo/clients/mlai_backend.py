@@ -20,6 +20,7 @@ from ..backend_identity import (
     BackendActorContext,
     BackendIdentityError,
     build_org_memory_identity_headers,
+    build_roo_gateway_identity_headers,
     build_victor_ai_identity_headers,
     get_backend_actor_context,
 )
@@ -410,6 +411,22 @@ class MLAIBackendClient:
             request_id=request_id,
         )
 
+    def roo_gateway_headers(self, request_id: str) -> dict:
+        """Build a route-only actor assertion that cannot retrieve memory."""
+        if self.surface not in {"gateway", "roo_gateway"}:
+            raise BackendIdentityError(
+                "Only the Roo gateway can call routing eligibility"
+            )
+        if not self.service_principal_key:
+            raise BackendIdentityError("ORG_BRAIN_ROUTER_API_KEY is not configured")
+        if not self.actor_context:
+            raise BackendIdentityError("No verified Slack actor context is active")
+        return build_roo_gateway_identity_headers(
+            self.service_principal_key,
+            context=self.actor_context,
+            request_id=request_id,
+        )
+
     def victor_ai_headers(self, request_id: str) -> dict:
         """Build a fresh signed Slack actor assertion for one Victor read."""
 
@@ -585,6 +602,21 @@ class MLAIBackendClient:
             timeout=10.0,
             circuit_breaker=True,
             use_org_memory_identity=True,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def get_admin_routing_eligibility(self) -> dict:
+        """Return the backend-owned, content-free Admin Brain route decision."""
+        request_id = self._new_request_id()
+        response = await self._request(
+            "POST",
+            self._org_memory_endpoint("routing/eligibility"),
+            headers=self.roo_gateway_headers(request_id),
+            json={},
+            timeout=10.0,
+            request_id=request_id,
+            circuit_breaker=True,
         )
         response.raise_for_status()
         return response.json()

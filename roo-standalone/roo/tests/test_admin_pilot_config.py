@@ -9,21 +9,22 @@ from roo.config import Settings
 
 
 SERVICE_PRINCIPAL_TOKEN = f"mlai_sp_{'a' * 32}.{'s' * 48}"
+DISPATCH_SECRET = "dispatch-secret-" + ("s" * 32)
 
 
 def configured_settings(**overrides):
     values = {
         "_env_file": None,
-        "SLACK_BOT_TOKEN": "xoxb-synthetic-admin",
-        "SLACK_SIGNING_SECRET": "synthetic-admin-signing-secret",
-        "OPENAI_API_KEY": "synthetic-openai-key",
+        "SLACK_BOT_TOKEN": None,
+        "SLACK_SIGNING_SECRET": None,
+        "OPENAI_API_KEY": None,
         "ROO_SURFACE": "admin",
+        "ROO_ADMIN_INTERNAL_ONLY": True,
         "ROO_ENABLED_SKILLS": "admin-brain",
-        "ROO_ALLOWED_CHANNEL_IDS": "GADMIN123",
-        "ROO_ALLOWED_DM_USER_IDS": "UADMIN123",
         "ORG_BRAIN_ENABLED": True,
         "ORG_BRAIN_ACTIONS_ENABLED": False,
         "ORG_BRAIN_API_KEY": SERVICE_PRINCIPAL_TOKEN,
+        "ROO_ADMIN_DISPATCH_SECRET": DISPATCH_SECRET,
     }
     return Settings(**{**values, **overrides})
 
@@ -76,11 +77,10 @@ def test_exact_private_binding_is_ready_and_content_free():
     assert "GADMIN123" not in str(report)
 
 
-def test_allowlist_mismatch_and_actions_fail_closed():
+def test_backend_manifest_is_authoritative_and_actions_fail_closed():
     now = datetime.now(timezone.utc)
     report = admin_pilot_config_report(
         configured_settings(
-            ROO_ALLOWED_CHANNEL_IDS="GOTHER123",
             ORG_BRAIN_ACTIONS_ENABLED=True,
             ROO_ENABLED_SKILLS="admin-brain admin-actions",
         ),
@@ -92,7 +92,7 @@ def test_allowlist_mismatch_and_actions_fail_closed():
     assert not report["ready"]
     assert "admin_actions_must_remain_disabled" in report["blockers"]
     assert "admin_skill_allowlist_not_exact" in report["blockers"]
-    assert "roo_channel_allowlist_mismatch" in report["blockers"]
+    assert "roo_channel_allowlist_mismatch" not in report["blockers"]
 
 
 def test_shadow_mode_fails_the_production_config_gate():

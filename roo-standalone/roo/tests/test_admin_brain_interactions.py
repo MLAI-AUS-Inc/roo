@@ -22,6 +22,7 @@ from roo.slack_security import get_slack_receipt_store
 
 
 SERVICE_TOKEN = f"mlai_sp_{'a' * 32}.{'s' * 48}"
+DISPATCH_SECRET = "dispatch-secret-" + ("s" * 32)
 
 
 def _settings(tmp_path):
@@ -37,6 +38,22 @@ def _settings(tmp_path):
         ROO_ENABLED_SKILLS="admin-brain",
         ORG_BRAIN_ENABLED=True,
         ORG_BRAIN_API_KEY=SERVICE_TOKEN,
+    )
+
+
+def _unified_settings(tmp_path):
+    return Settings(
+        _env_file=None,
+        SLACK_BOT_TOKEN="xoxb-synthetic",
+        SLACK_SIGNING_SECRET="synthetic-signing-secret",
+        SLACK_RECEIPTS_DB_PATH=str(tmp_path / "slack-receipts.db"),
+        OPENAI_API_KEY="synthetic-openai-key",
+        MLAI_BACKEND_URL="https://backend.test",
+        ROO_SURFACE="public",
+        ROO_UNIFIED_ADMIN_ROUTING_ENABLED=True,
+        ORG_BRAIN_ROUTER_API_KEY=SERVICE_TOKEN,
+        ROO_ADMIN_INTERNAL_URL="http://roo-admin:8000",
+        ROO_ADMIN_DISPATCH_SECRET=DISPATCH_SECRET,
     )
 
 
@@ -144,6 +161,40 @@ def test_incorrect_button_opens_correction_modal(tmp_path, monkeypatch):
     assert response.status_code == 200
     assert opened["trigger_id"] == "123.456.abc"
     assert opened["view"]["callback_id"] == ADMIN_BRAIN_INCORRECT_CALLBACK
+
+
+def test_single_public_app_relays_admin_feedback_instead_of_using_memory_key(
+    tmp_path,
+    monkeypatch,
+):
+    configured = _unified_settings(tmp_path)
+    main_module.app.dependency_overrides[get_settings] = lambda: configured
+    captured = []
+
+    def fake_feedback(**kwargs):
+        captured.append(kwargs)
+
+        async def complete():
+            return None
+
+        return complete()
+
+    def fake_create_task(coro):
+        coro.close()
+
+    monkeypatch.setattr(
+        main_module,
+        "_record_unified_admin_brain_feedback",
+        fake_feedback,
+    )
+    monkeypatch.setattr(main_module.asyncio, "create_task", fake_create_task)
+
+    response = _post_action(TestClient(main_module.app), configured, _button_payload())
+
+    assert response.status_code == 200
+    assert captured[0]["feedback_type"] == "relevant"
+    assert captured[0]["feedback"]["query_id"] == "query-1"
+    assert configured.ORG_BRAIN_API_KEY is None
 
 
 def test_verified_modal_submission_schedules_correction_feedback(tmp_path, monkeypatch):
