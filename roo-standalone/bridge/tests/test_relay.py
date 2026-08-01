@@ -351,6 +351,78 @@ def test_explicit_destination_only_handle_becomes_native_mention():
     assert out == "please ask <@URALICE> and <@URALICE>"
 
 
+def test_unique_first_name_and_typo_become_native_mentions():
+    r = IdentityResolver()
+    r.index_workspace(
+        "T_M",
+        [
+            _member(
+                "UMSHAN",
+                "samyang102238188",
+                display_name="Shan Yang",
+            ),
+            _member("UMSHANE", "shane", display_name="Shane Antonio"),
+        ],
+    )
+
+    out = r.translate(
+        FakeClient(),
+        "ask mlai:shan or mlai:shna",
+        "T_R",
+        dst_team="T_M",
+        src_alias="hex",
+        dst_alias="mlai",
+        mention_mode="native",
+    )
+
+    assert out == "ask <@UMSHAN> or <@UMSHAN>"
+    assert r.health()["mention_counts"]["explicit_fuzzy"] == 1
+
+
+def test_honorific_is_skipped_for_unique_first_name():
+    r = IdentityResolver()
+    r.index_workspace(
+        "T_M",
+        [_member("UMSAM", "samdonegan", display_name="Dr Sam Donegan")],
+    )
+
+    out = r.translate(
+        FakeClient(),
+        "mlai:sam",
+        "T_R",
+        dst_team="T_M",
+        src_alias="hex",
+        dst_alias="mlai",
+        mention_mode="native",
+    )
+
+    assert out == "<@UMSAM>"
+
+
+def test_shared_first_name_and_typo_never_ping():
+    r = IdentityResolver()
+    r.index_workspace(
+        "T_M",
+        [
+            _member("UMSHANONE", "shan-one", display_name="Shan Yang"),
+            _member("UMSHANTWO", "shan-two", display_name="Shan Smith"),
+        ],
+    )
+
+    out = r.translate(
+        FakeClient(),
+        "mlai:shan mlai:shna",
+        "T_R",
+        dst_team="T_M",
+        src_alias="hex",
+        dst_alias="mlai",
+        mention_mode="native",
+    )
+
+    assert out == "mlai:shan mlai:shna"
+    assert "<@" not in out
+
+
 def test_exact_destination_bot_handle_becomes_native_mention_without_fuzzy_guessing():
     r = IdentityResolver()
     r.index_workspace(
@@ -377,14 +449,14 @@ def test_human_and_bot_with_same_qualified_handle_are_ambiguous():
     r.index_workspace(
         "T_M",
         [
-            _member("UMHUMAN", "roo", display_name="Roo"),
-            _member("UMROOBOT", "roo-bot", display_name="Roo", is_bot=True),
+            _member("UMHUMAN", "alex-human", display_name="Alex Smith"),
+            _member("UMROOBOT", "alex", display_name="Alex", is_bot=True),
         ],
     )
 
     out = r.translate(
         FakeClient(),
-        "mlai:roo",
+        "mlai:alex",
         "T_R",
         dst_team="T_M",
         src_alias="hex",
@@ -392,7 +464,7 @@ def test_human_and_bot_with_same_qualified_handle_are_ambiguous():
         mention_mode="native",
     )
 
-    assert out == "mlai:roo"
+    assert out == "mlai:alex"
 
 
 def test_ambiguous_or_inactive_explicit_human_handles_never_ping():

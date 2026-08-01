@@ -21,7 +21,7 @@ import threading
 import time
 from collections import Counter
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, Mapping, Optional, Tuple
+from typing import Any, Dict, FrozenSet, Iterable, Mapping, Optional, Tuple
 
 _USER_RE = re.compile(r"<@([UW][A-Z0-9]+)(?:\|([^>]+))?>")
 _CHANNEL_RE = re.compile(r"<#(C[A-Z0-9]+)(?:\|([^>]*))?>")
@@ -34,6 +34,10 @@ _EXPLICIT_MENTION_RE = re.compile(
     re.UNICODE,
 )
 _USER_ID_RE = re.compile(r"^[UW][A-Z0-9]+$")
+_NAME_TOKEN_RE = re.compile(r"[^\W_]+(?:[-'][^\W_]+)*", re.UNICODE)
+_HONORIFICS = frozenset(
+    {"dr", "miss", "mr", "mrs", "ms", "prof", "professor", "sir"}
+)
 
 
 def _normalized_email(value: str) -> str:
@@ -117,6 +121,34 @@ class UserProfile:
         }
 
 
+def _first_name_alias(value: str) -> str:
+    """Return the likely given-name token, skipping common honorifics."""
+    tokens = _NAME_TOKEN_RE.findall(value or "")
+    while tokens and tokens[0].casefold().rstrip(".") in _HONORIFICS:
+        tokens.pop(0)
+    if not tokens:
+        return ""
+    alias = _normalized_handle(tokens[0])
+    return alias if len(alias) >= 2 else ""
+
+
+def _profile_aliases(
+    profile: UserProfile, *, include_first_names: bool
+) -> FrozenSet[str]:
+    aliases = {
+        _normalized_handle(value)
+        for value in (profile.name, profile.display_name, profile.real_name)
+        if value
+    }
+    if include_first_names:
+        aliases.update(
+            _first_name_alias(value)
+            for value in (profile.display_name, profile.real_name)
+            if value
+        )
+    return frozenset(alias for alias in aliases if alias)
+
+
 @dataclass(frozen=True)
 class WorkspaceDirectory:
     by_id: Dict[str, UserProfile] = field(default_factory=dict)
@@ -124,6 +156,7 @@ class WorkspaceDirectory:
     by_handle: Dict[str, UserProfile] = field(default_factory=dict)
     qualified_by_id: Dict[str, UserProfile] = field(default_factory=dict)
     qualified_by_handle: Dict[str, UserProfile] = field(default_factory=dict)
+    ambiguous_qualified_handles: FrozenSet[str] = field(default_factory=frozenset)
     refreshed_at: float = 0.0
 
     @property
@@ -135,7 +168,9 @@ class WorkspaceDirectory:
         return max(0, len(self.qualified_by_id) - len(self.by_id))
 
 
-def _unique_index(entries: Iterable[Tuple[str, UserProfile]]) -> Dict[str, UserProfile]:
+def _unique_index_details(
+    entries: Iterable[Tuple[str, UserProfile]],
+) -> Tuple[Dict[str, UserProfile], FrozenSet[str]]:
     """Build an index that drops ambiguous keys instead of picking a winner."""
     result: Dict[str, UserProfile] = {}
     ambiguous = set()
@@ -149,7 +184,11 @@ def _unique_index(entries: Iterable[Tuple[str, UserProfile]]) -> Dict[str, UserP
             ambiguous.add(key)
         else:
             result[key] = profile
-    return result
+    return result, frozenset(ambiguous)
+
+
+def _unique_index(entries: Iterable[Tuple[str, UserProfile]]) -> Dict[str, UserProfile]:
+    return _unique_index_details(entries)[0]
 
 
 class IdentityResolver:
@@ -253,19 +292,30 @@ class IdentityResolver:
         handle_entries = []
         for profile in profiles:
             # Slack's unique `name` is preferred, but unique normalized display
-            # and real names make hex:alice-smith ergonomic too.
-            for value in (profile.name, profile.display_name, profile.real_name):
-                handle_entries.append((_normalized_handle(value), profile))
+            # and real names make hex:alice-smith ergonomic too. First names are
+            # added here as candidates; `_unique_index` drops them when shared.
+            for alias in _profile_aliases(profile, include_first_names=True):
+                handle_entries.append((alias, profile))
         qualified_handle_entries = []
+        human_ids = set(by_id)
         for profile in qualified_profiles:
-            for value in (profile.name, profile.display_name, profile.real_name):
-                qualified_handle_entries.append((_normalized_handle(value), profile))
+            # Bots remain addressable only by their full exact handles. Human
+            # first names are allowed only after the combined human/bot index
+            # proves that the alias is unique.
+            for alias in _profile_aliases(
+                profile, include_first_names=profile.id in human_ids
+            ):
+                qualified_handle_entries.append((alias, profile))
+        qualified_by_handle, ambiguous_qualified_handles = _unique_index_details(
+            qualified_handle_entries
+        )
         directory = WorkspaceDirectory(
             by_id=by_id,
             by_email=by_email,
             by_handle=_unique_index(handle_entries),
             qualified_by_id={profile.id: profile for profile in qualified_profiles},
-            qualified_by_handle=_unique_index(qualified_handle_entries),
+            qualified_by_handle=qualified_by_handle,
+            ambiguous_qualified_handles=ambiguous_qualified_handles,
             refreshed_at=time.time(),
         )
         with self._lock:
@@ -513,6 +563,8 @@ class IdentityResolver:
             return destination.qualified_by_id.get(handle.upper()), False
 
         normalized = _normalized_handle(handle)
+        if normalized in destination.ambiguous_qualified_handles:
+            return None, False
         exact = destination.qualified_by_handle.get(normalized)
         if exact is not None:
             return exact, False
@@ -525,12 +577,7 @@ class IdentityResolver:
             return None, False
         candidates: Dict[str, Tuple[int, UserProfile]] = {}
         for profile in destination.by_id.values():
-            aliases = {
-                _normalized_handle(value)
-                for value in (profile.name, profile.display_name, profile.real_name)
-                if value
-            }
-            for alias in aliases:
+            for alias in _profile_aliases(profile, include_first_names=True):
                 longest = max(len(normalized), len(alias))
                 if longest < 4:
                     continue

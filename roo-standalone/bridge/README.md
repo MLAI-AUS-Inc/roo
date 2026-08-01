@@ -68,6 +68,9 @@ plain-text handle:
   Slack handle is `roo`.
 - Spaces in a unique display name become hyphens, so `Alice Smith` can be
   addressed as `hex:alice-smith`. An exact destination member ID also works.
+- A unique first name also works, so `mlai:shan` resolves a sole `Shan Yang`.
+  Common honorifics are ignored (`Dr Sam Donegan` contributes `sam`). If two
+  destination identities share that first name, neither is selected.
 - Small typos are tolerated when exactly one person is the clear nearby match
   (one edit for short handles, up to two for longer handles). Ambiguous or
   low-confidence guesses stay plain text and do not notify anyone.
