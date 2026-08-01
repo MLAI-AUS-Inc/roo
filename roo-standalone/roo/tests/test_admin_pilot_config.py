@@ -18,6 +18,7 @@ def configured_settings(**overrides):
         "SLACK_BOT_TOKEN": None,
         "SLACK_SIGNING_SECRET": None,
         "OPENAI_API_KEY": None,
+        "MLAI_BACKEND_URL": "https://backend.test",
         "ROO_SURFACE": "admin",
         "ROO_ADMIN_INTERNAL_ONLY": True,
         "ROO_ENABLED_SKILLS": "admin-brain",
