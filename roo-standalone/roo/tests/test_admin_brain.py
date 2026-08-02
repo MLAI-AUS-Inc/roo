@@ -171,7 +171,7 @@ def test_admin_brain_does_not_present_request_time_as_latest_evidence():
             "contains_stale_memory": False,
         },
         "warnings": [],
-        "citations": [],
+        "citations": [{}],
     }
 
     result = build_admin_brain_response(

@@ -161,6 +161,10 @@ def build_admin_brain_response(
         citation
         for citation in list(payload.get("citations") or [])[:5]
         if isinstance(citation, dict)
+        and any(
+            citation.get(field)
+            for field in ("source_id", "source_version_id", "source_url", "label")
+        )
     ]
     has_citations = bool(citations)
     sufficiency = str(payload.get("evidence_sufficiency") or "unknown").replace("_", " ")
