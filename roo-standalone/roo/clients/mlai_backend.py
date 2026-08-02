@@ -11,7 +11,7 @@ import re
 import secrets
 import time
 from typing import Optional, Dict, Any, List, Union
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 from uuid import UUID, uuid4
 
 import httpx
@@ -1747,6 +1747,269 @@ class MLAIBackendClient:
         )
         self._raise_for_status_or_backend_unavailable(response)
         return response.json()
+
+    async def get_statement_reconciliation_readiness(
+        self,
+        slack_user_id: str,
+        *,
+        domain: str = "mlai.au",
+    ) -> dict:
+        """Check queue freshness, monthly context and Xero write configuration."""
+        response = await self._request(
+            "GET",
+            "/api/v1/integrations/reconciliation/readiness",
+            params={
+                "slack_user_id": self._clean_slack_id(slack_user_id),
+                "domain": str(domain or "mlai.au").strip().lower(),
+            },
+            timeout=30.0,
+            transport_retries=1,
+            retry_backoff_seconds=0.25,
+            circuit_breaker=True,
+        )
+        self._raise_for_status_or_backend_unavailable(response)
+        return response.json()
+
+    async def start_statement_reconciliation_run(
+        self,
+        slack_user_id: str,
+        *,
+        domain: str = "mlai.au",
+        instruction: Optional[str] = None,
+        statement_line_ids: Optional[List[str]] = None,
+    ) -> dict:
+        """Start a preview-only Xero statement reconciliation agent run."""
+        payload: Dict[str, Any] = {
+            "slack_user_id": self._clean_slack_id(slack_user_id),
+            "domain": str(domain or "mlai.au").strip().lower(),
+        }
+        if instruction:
+            payload["instruction"] = str(instruction).strip()
+        if statement_line_ids:
+            payload["statement_line_ids"] = [
+                str(item).strip() for item in statement_line_ids if str(item).strip()
+            ]
+        response = await self._request(
+            "POST",
+            "/api/v1/integrations/reconciliation/agent-runs",
+            json=payload,
+            timeout=30.0,
+            circuit_breaker=True,
+        )
+        self._raise_for_status_or_backend_unavailable(response)
+        return response.json()
+
+    async def get_statement_reconciliation_outcomes(
+        self,
+        slack_user_id: str,
+        *,
+        domain: str = "mlai.au",
+        limit: int = 50,
+    ) -> dict:
+        """Get confirmed human outcomes and read-only learning candidates."""
+        response = await self._request(
+            "GET",
+            "/api/v1/integrations/reconciliation/outcomes",
+            params={
+                "slack_user_id": self._clean_slack_id(slack_user_id),
+                "domain": str(domain or "mlai.au").strip().lower(),
+                "limit": max(1, min(int(limit), 200)),
+            },
+            timeout=30.0,
+            transport_retries=1,
+            retry_backoff_seconds=0.25,
+            circuit_breaker=True,
+        )
+        self._raise_for_status_or_backend_unavailable(response)
+        return response.json()
+
+    async def decide_statement_reconciliation_learning_candidate(
+        self,
+        slack_user_id: str,
+        candidate_id: str,
+        *,
+        candidate_version: str,
+        decision: str,
+        reason: Optional[str] = None,
+        domain: str = "mlai.au",
+    ) -> dict:
+        """Explicitly promote or reject one previously reviewed learning candidate."""
+        payload = {
+            "slack_user_id": self._clean_slack_id(slack_user_id),
+            "domain": str(domain or "mlai.au").strip().lower(),
+            "candidate_version": str(candidate_version or "").strip(),
+            "decision": str(decision or "").strip().lower(),
+            "confirm": True,
+        }
+        if reason:
+            payload["reason"] = str(reason).strip()
+        response = await self._request(
+            "POST",
+            (
+                "/api/v1/integrations/reconciliation/learning-candidates/"
+                f"{quote(str(candidate_id).strip(), safe='')}"
+            ),
+            json=payload,
+            timeout=30.0,
+            circuit_breaker=True,
+        )
+        self._raise_for_status_or_backend_unavailable(response)
+        return response.json()
+
+    async def get_statement_reconciliation_run(
+        self,
+        slack_user_id: str,
+        run_id: str,
+        *,
+        domain: str = "mlai.au",
+    ) -> dict:
+        """Get the current state and suggestions for one reconciliation run."""
+        response = await self._request(
+            "GET",
+            f"/api/v1/integrations/reconciliation/agent-runs/{quote(str(run_id).strip(), safe='')}",
+            params={
+                "slack_user_id": self._clean_slack_id(slack_user_id),
+                "domain": str(domain or "mlai.au").strip().lower(),
+            },
+            timeout=30.0,
+            transport_retries=1,
+            retry_backoff_seconds=0.25,
+            circuit_breaker=True,
+        )
+        self._raise_for_status_or_backend_unavailable(response)
+        return response.json()
+
+    async def retry_statement_reconciliation_run(
+        self,
+        slack_user_id: str,
+        run_id: str,
+        *,
+        domain: str = "mlai.au",
+    ) -> dict:
+        """Retry only the context-analysis dispatch for an existing durable run."""
+        response = await self._request(
+            "POST",
+            (
+                "/api/v1/integrations/reconciliation/agent-runs/"
+                f"{quote(str(run_id).strip(), safe='')}/retry"
+            ),
+            json={
+                "slack_user_id": self._clean_slack_id(slack_user_id),
+                "domain": str(domain or "mlai.au").strip().lower(),
+                "confirm": True,
+            },
+            timeout=30.0,
+            circuit_breaker=True,
+        )
+        self._raise_for_status_or_backend_unavailable(response)
+        return response.json()
+
+    async def preview_statement_reconciliation_run(
+        self,
+        slack_user_id: str,
+        run_id: str,
+        *,
+        domain: str = "mlai.au",
+    ) -> dict:
+        """Build current write previews without recording approval or writing Xero."""
+        response = await self._request(
+            "GET",
+            f"/api/v1/integrations/reconciliation/agent-runs/{quote(str(run_id).strip(), safe='')}/preview",
+            params={
+                "slack_user_id": self._clean_slack_id(slack_user_id),
+                "domain": str(domain or "mlai.au").strip().lower(),
+            },
+            timeout=30.0,
+            transport_retries=1,
+            retry_backoff_seconds=0.25,
+            circuit_breaker=True,
+        )
+        self._raise_for_status_or_backend_unavailable(response)
+        return response.json()
+
+    async def approve_ready_statement_reconciliation_run(
+        self,
+        slack_user_id: str,
+        run_id: str,
+        *,
+        domain: str = "mlai.au",
+        decision_request_id: Optional[str] = None,
+    ) -> dict:
+        """Record an explicit admin approval for every currently ready preview."""
+        payload = {
+            "slack_user_id": self._clean_slack_id(slack_user_id),
+            "domain": str(domain or "mlai.au").strip().lower(),
+            "confirm": True,
+            "approve_all_ready": True,
+            "decision_request_id": decision_request_id or f"roo-{uuid4().hex}",
+        }
+        response = await self._request(
+            "POST",
+            f"/api/v1/integrations/reconciliation/agent-runs/{quote(str(run_id).strip(), safe='')}/decisions",
+            json=payload,
+            timeout=30.0,
+            circuit_breaker=True,
+        )
+        self._raise_for_status_or_backend_unavailable(response)
+        return response.json()
+
+    async def reject_statement_reconciliation_suggestions(
+        self,
+        slack_user_id: str,
+        run_id: str,
+        suggestion_ids: List[int],
+        *,
+        reason: str,
+        domain: str = "mlai.au",
+        decision_request_id: Optional[str] = None,
+    ) -> dict:
+        """Record an explicit admin rejection for selected run suggestions."""
+        payload = {
+            "slack_user_id": self._clean_slack_id(slack_user_id),
+            "domain": str(domain or "mlai.au").strip().lower(),
+            "confirm": True,
+            "decision_request_id": decision_request_id or f"roo-{uuid4().hex}",
+            "decisions": [
+                {"suggestion_id": int(item), "decision": "reject", "reason": str(reason).strip()}
+                for item in suggestion_ids
+            ],
+        }
+        response = await self._request(
+            "POST",
+            f"/api/v1/integrations/reconciliation/agent-runs/{quote(str(run_id).strip(), safe='')}/decisions",
+            json=payload,
+            timeout=30.0,
+            circuit_breaker=True,
+        )
+        self._raise_for_status_or_backend_unavailable(response)
+        return response.json()
+
+    async def execute_approved_statement_reconciliation_run(
+        self,
+        slack_user_id: str,
+        run_id: str,
+        *,
+        domain: str = "mlai.au",
+        suggestion_ids: Optional[List[int]] = None,
+    ) -> dict:
+        """Write only explicitly approved, unchanged suggestions to Xero."""
+        payload: Dict[str, Any] = {
+            "slack_user_id": self._clean_slack_id(slack_user_id),
+            "domain": str(domain or "mlai.au").strip().lower(),
+            "confirm": True,
+        }
+        if suggestion_ids:
+            payload["suggestion_ids"] = [int(item) for item in suggestion_ids]
+        response = await self._request(
+            "POST",
+            f"/api/v1/integrations/reconciliation/agent-runs/{quote(str(run_id).strip(), safe='')}/execute",
+            json=payload,
+            timeout=60.0,
+            circuit_breaker=True,
+        )
+        self._raise_for_status_or_backend_unavailable(response)
+        return response.json()
+
 
     async def get_data_catalog(self, requester_slack_id: str) -> dict:
         """Get the requester's curated read-only data resource catalog."""

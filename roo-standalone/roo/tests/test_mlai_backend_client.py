@@ -541,6 +541,95 @@ async def test_confirm_article_topic_includes_requested_by_when_provided(monkeyp
     assert captured["json"]["requested_by_slack_user_id"] == "U05QPB483K9"
 
 
+
+@pytest.mark.asyncio
+async def test_statement_reconciliation_client_uses_run_scoped_guarded_endpoints(monkeypatch):
+    captured = []
+
+    async def fake_request(method, endpoint, **kwargs):
+        captured.append({"method": method, "endpoint": endpoint, **kwargs})
+        request = httpx.Request(method, f"https://backend.test{endpoint}")
+        return httpx.Response(200, request=request, json={"run_id": "run/123"})
+
+    client = MLAIBackendClient(
+        base_url="https://backend.test",
+        api_key="roo-api-key",
+        internal_api_key="roo-api-key",
+    )
+    monkeypatch.setattr(client, "_request", fake_request)
+
+    await client.get_statement_reconciliation_readiness("UADMIN")
+    await client.start_statement_reconciliation_run(
+        "UADMIN",
+        instruction="Use the Aaron AI context.",
+        statement_line_ids=["line-1"],
+    )
+    await client.retry_statement_reconciliation_run("UADMIN", "run/123")
+    await client.get_statement_reconciliation_outcomes("UADMIN", limit=25)
+    await client.decide_statement_reconciliation_learning_candidate(
+        "UADMIN",
+        "candidate/123",
+        candidate_version="version-123",
+        decision="promote",
+    )
+    await client.preview_statement_reconciliation_run("UADMIN", "run/123")
+    await client.approve_ready_statement_reconciliation_run(
+        "UADMIN", "run/123", decision_request_id="roo-decision-1"
+    )
+    await client.reject_statement_reconciliation_suggestions(
+        "UADMIN",
+        "run/123",
+        [12],
+        reason="Wrong project.",
+        decision_request_id="roo-decision-2",
+    )
+    await client.execute_approved_statement_reconciliation_run(
+        "UADMIN", "run/123", suggestion_ids=[10, 11]
+    )
+
+    assert [(item["method"], item["endpoint"]) for item in captured] == [
+        ("GET", "/api/v1/integrations/reconciliation/readiness"),
+        ("POST", "/api/v1/integrations/reconciliation/agent-runs"),
+        ("POST", "/api/v1/integrations/reconciliation/agent-runs/run%2F123/retry"),
+        ("GET", "/api/v1/integrations/reconciliation/outcomes"),
+        ("POST", "/api/v1/integrations/reconciliation/learning-candidates/candidate%2F123"),
+        ("GET", "/api/v1/integrations/reconciliation/agent-runs/run%2F123/preview"),
+        ("POST", "/api/v1/integrations/reconciliation/agent-runs/run%2F123/decisions"),
+        ("POST", "/api/v1/integrations/reconciliation/agent-runs/run%2F123/decisions"),
+        ("POST", "/api/v1/integrations/reconciliation/agent-runs/run%2F123/execute"),
+    ]
+    assert captured[0]["params"] == {
+        "slack_user_id": "UADMIN",
+        "domain": "mlai.au",
+    }
+    assert captured[1]["json"]["statement_line_ids"] == ["line-1"]
+    assert captured[2]["json"] == {
+        "slack_user_id": "UADMIN",
+        "domain": "mlai.au",
+        "confirm": True,
+    }
+    assert captured[3]["params"]["limit"] == 25
+    assert captured[4]["json"] == {
+        "slack_user_id": "UADMIN",
+        "domain": "mlai.au",
+        "candidate_version": "version-123",
+        "decision": "promote",
+        "confirm": True,
+    }
+    assert captured[6]["json"] == {
+        "slack_user_id": "UADMIN",
+        "domain": "mlai.au",
+        "confirm": True,
+        "approve_all_ready": True,
+        "decision_request_id": "roo-decision-1",
+    }
+    assert captured[7]["json"]["decisions"] == [{
+        "suggestion_id": 12,
+        "decision": "reject",
+        "reason": "Wrong project.",
+    }]
+    assert captured[8]["json"]["suggestion_ids"] == [10, 11]
+
 @pytest.mark.asyncio
 async def test_event_finance_audit_uses_read_only_bounded_endpoint(monkeypatch):
     captured = {}

@@ -1,5 +1,6 @@
 import base64
 import importlib
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -114,19 +115,190 @@ class FakeReconBackendClient:
     unavailable = False
     status_code = None
     calls = []
+    operation_results = {}
 
     def __init__(self, *args, **kwargs):
         pass
 
     async def get_reconciliation_report(self, slack_user_id, **kwargs):
         self.__class__.calls.append({"slack_user_id": slack_user_id, **kwargs})
+        self._raise_if_needed("/api/v1/integrations/reconciliation/report")
+        return self.report
+
+    async def get_statement_reconciliation_readiness(self, slack_user_id, **kwargs):
+        self.__class__.calls.append({
+            "action": "readiness",
+            "slack_user_id": slack_user_id,
+            **kwargs,
+        })
+        self._raise_if_needed("/api/v1/integrations/reconciliation/readiness")
+        return self.operation_results.get("readiness", {
+            "ready_to_start": True,
+            "ready_to_execute_bank_transactions": True,
+            "ready_to_execute_bill_payments": True,
+            "tracking_ready": True,
+            "latest_statement_scan": {
+                "id": 12,
+                "fresh": True,
+                "candidate_count": 8,
+            },
+            "monthly_context": {
+                "run_id": "monthly-2026-07",
+                "status": "completed",
+            },
+            "blockers": [],
+            "warnings": [],
+            "recommended_next_action": "Start Xero reconciliation in preview-only mode.",
+        })
+
+    def _raise_if_needed(self, endpoint):
         if self.unavailable:
             raise backend_module.MLAIBackendUnavailableError("backend unavailable")
         if self.status_code:
-            request = httpx.Request("GET", "https://backend.test/api/v1/integrations/reconciliation/report")
+            request = httpx.Request("POST", f"https://backend.test{endpoint}")
             response = httpx.Response(self.status_code, json={"error": f"backend {self.status_code}"}, request=request)
             raise httpx.HTTPStatusError("backend error", request=request, response=response)
-        return self.report
+
+    async def start_statement_reconciliation_run(self, slack_user_id, **kwargs):
+        self.__class__.calls.append({"action": "start", "slack_user_id": slack_user_id, **kwargs})
+        self._raise_if_needed("/api/v1/integrations/reconciliation/agent-runs")
+        return self.operation_results.get("start", {
+            "run_id": "xero-reconciliation-123",
+            "status": "queued",
+            "dry_run": True,
+            "deterministic_suggestion_count": 1,
+            "rule_conflict_count": 0,
+            "deferred_bill_count": 0,
+            "agent_line_count": 1,
+            "valley_dispatched": True,
+        })
+
+    async def get_statement_reconciliation_outcomes(self, slack_user_id, **kwargs):
+        self.__class__.calls.append({"action": "outcomes", "slack_user_id": slack_user_id, **kwargs})
+        self._raise_if_needed("/api/v1/integrations/reconciliation/outcomes")
+        return self.operation_results.get("outcomes", {
+            "confirmed_reconciled_count": 3,
+            "pending_human_match_count": 1,
+            "rule_review_candidate_count": 1,
+            "automatic_rule_creation": False,
+            "recent_confirmed": [{
+                "transaction_date": "2026-07-20",
+                "currency": "AUD",
+                "amount": "845.00",
+                "description": "Contractor work for Present Studio.",
+                "project_name": "[Studio] Present Studio",
+            }],
+            "learning_candidates": [{
+                "candidate_id": "candidate-present-studio",
+                "candidate_version": "version-present-studio",
+                "merchant_key": "transfer to contractor one",
+                "confirmed_example_count": 2,
+                "eligible_for_rule_review": True,
+                "eligible_for_promotion": True,
+                "review_status": "pending",
+                "suggested_rule": {
+                    "account_code": "405",
+                    "account_name": "Contractor Expenses",
+                    "project_name": "[Studio] Present Studio",
+                },
+            }],
+        })
+
+    async def decide_statement_reconciliation_learning_candidate(
+        self, slack_user_id, candidate_id, **kwargs
+    ):
+        self.__class__.calls.append({
+            "action": "decide_candidate",
+            "slack_user_id": slack_user_id,
+            "candidate_id": candidate_id,
+            **kwargs,
+        })
+        self._raise_if_needed(
+            f"/api/v1/integrations/reconciliation/learning-candidates/{candidate_id}"
+        )
+        decision = kwargs["decision"]
+        return self.operation_results.get("decide_candidate", {
+            "decision": "promoted" if decision == "promote" else "rejected",
+            "idempotent": False,
+            "rule": {
+                "id": 77,
+                "name": "Learned: Contractor One",
+                "status": "verified",
+            } if decision == "promote" else None,
+        })
+
+    async def get_statement_reconciliation_run(self, slack_user_id, run_id, **kwargs):
+        self.__class__.calls.append({"action": "status", "slack_user_id": slack_user_id, "run_id": run_id, **kwargs})
+        self._raise_if_needed(f"/api/v1/integrations/reconciliation/agent-runs/{run_id}")
+        return self.operation_results.get("status", {
+            "run_id": run_id, "status": "completed", "suggestions": [{"id": 10}],
+        })
+
+    async def retry_statement_reconciliation_run(self, slack_user_id, run_id, **kwargs):
+        self.__class__.calls.append({"action": "retry", "slack_user_id": slack_user_id, "run_id": run_id, **kwargs})
+        self._raise_if_needed(f"/api/v1/integrations/reconciliation/agent-runs/{run_id}/retry")
+        return self.operation_results.get("retry", {
+            "run_id": run_id,
+            "status": "queued",
+            "valley_dispatched": True,
+            "idempotent": False,
+        })
+
+    async def preview_statement_reconciliation_run(self, slack_user_id, run_id, **kwargs):
+        self.__class__.calls.append({"action": "preview", "slack_user_id": slack_user_id, "run_id": run_id, **kwargs})
+        self._raise_if_needed(f"/api/v1/integrations/reconciliation/agent-runs/{run_id}/preview")
+        return self.operation_results.get("preview", {
+            "run_id": run_id,
+            "run_status": "completed",
+            "suggestion_count": 1,
+            "ready_count": 1,
+            "approved_count": 0,
+            "results": [{
+                "suggestion": {
+                    "id": 10,
+                    "description": "Contractor payment for Aaron AI coding",
+                    "project": {"tracking_option_name": "[Studio] Aaron AI"},
+                    "routing": {
+                        "source": "verified_rule",
+                        "verified_rule_id": 77,
+                    },
+                },
+                "preview": {"ready": True, "operation": "bank_transaction"},
+            }],
+        })
+
+    async def approve_ready_statement_reconciliation_run(self, slack_user_id, run_id, **kwargs):
+        self.__class__.calls.append({"action": "approve", "slack_user_id": slack_user_id, "run_id": run_id, **kwargs})
+        self._raise_if_needed(f"/api/v1/integrations/reconciliation/agent-runs/{run_id}/decisions")
+        return self.operation_results.get("approve", {
+            "run_id": run_id, "requested_count": 2, "recorded_count": 1,
+        })
+
+    async def reject_statement_reconciliation_suggestions(
+        self, slack_user_id, run_id, suggestion_ids, **kwargs
+    ):
+        self.__class__.calls.append({
+            "action": "reject",
+            "slack_user_id": slack_user_id,
+            "run_id": run_id,
+            "suggestion_ids": suggestion_ids,
+            **kwargs,
+        })
+        self._raise_if_needed(f"/api/v1/integrations/reconciliation/agent-runs/{run_id}/decisions")
+        return self.operation_results.get("reject", {
+            "run_id": run_id,
+            "requested_count": len(suggestion_ids),
+            "recorded_count": len(suggestion_ids),
+        })
+
+    async def execute_approved_statement_reconciliation_run(self, slack_user_id, run_id, **kwargs):
+        self.__class__.calls.append({"action": "execute", "slack_user_id": slack_user_id, "run_id": run_id, **kwargs})
+        self._raise_if_needed(f"/api/v1/integrations/reconciliation/agent-runs/{run_id}/execute")
+        return self.operation_results.get("execute", {
+            "run_id": run_id, "approved_candidate_count": 2, "executed_count": 1,
+            "human_reconciliation_required": True,
+        })
+
 
     async def get_event_finance_audit(self, slack_user_id, **kwargs):
         self.__class__.calls.append({"method": "audit", "slack_user_id": slack_user_id, **kwargs})
@@ -157,6 +329,7 @@ def _reset(monkeypatch, *, uploaded=None, settings_overrides=None):
     FakeReconBackendClient.unavailable = False
     FakeReconBackendClient.status_code = None
     FakeReconBackendClient.calls = []
+    FakeReconBackendClient.operation_results = {}
     executor = SkillExecutor()
     monkeypatch.setattr(executor_module, "get_settings", lambda: _settings(**(settings_overrides or {})))
     monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeReconBackendClient)
@@ -273,6 +446,442 @@ async def test_rate_limited(monkeypatch):
     FakeReconBackendClient.status_code = 429
     result = await _run(executor)
     assert "rate-limited" in result.lower() or "429" in result
+
+
+@pytest.mark.asyncio
+async def test_start_statement_reconciliation_is_preview_only(monkeypatch):
+    executor = _reset(monkeypatch)
+
+    result = await _run(
+        executor,
+        text="analyse these transactions for the Aaron AI project",
+        params={
+            "action": "start_statement_reconciliation",
+            "statement_line_ids": ["line-1", "line-2"],
+        },
+        channel_id=None,
+    )
+
+    assert "Started reconciliation run `xero-reconciliation-123`" in result["message"]
+    assert "preview-only" in result["message"]
+    assert "1 prepared from verified rules" in result["message"]
+    assert "1 sent for monthly-context analysis" in result["message"]
+    assert FakeReconBackendClient.calls[0]["statement_line_ids"] == ["line-1", "line-2"]
+    assert FakeReconBackendClient.calls[0]["instruction"].startswith("analyse these transactions")
+
+
+@pytest.mark.asyncio
+async def test_start_uses_treasurer_agent_when_configured(monkeypatch):
+    executor = _reset(
+        monkeypatch,
+        settings_overrides={
+            "RECONCILIATION_AGENT_URL": "https://roo.mlai.au",
+            "RECONCILIATION_AGENT_TIMEOUT_SECONDS": 30,
+        },
+    )
+    captured = {}
+
+    async def fake_trigger(**kwargs):
+        captured.update(kwargs)
+        return {
+            "accepted": True,
+            "request_id": "roo-request-123",
+            "status": "queued",
+            "xero_writes": False,
+        }
+
+    monkeypatch.setattr(
+        executor,
+        "_trigger_reconciliation_agent_prepare",
+        fake_trigger,
+    )
+
+    result = await _run(
+        executor,
+        text=(
+            "Use the monthly updates and treasurer email to plan every "
+            "outstanding Xero transaction."
+        ),
+        params={"action": "start_statement_reconciliation"},
+    )
+
+    assert "dedicated treasurer mailbox will sync" in result["message"]
+    assert "exact-preview approval buttons" in result["message"]
+    assert "final Match/OK tick" in result["message"]
+    assert result["data"]["xero_writes"] is False
+    assert captured["agent_url"] == "https://roo.mlai.au"
+    assert captured["user_id"] == "UADMIN"
+    assert captured["channel_id"] == "C123"
+    assert FakeReconBackendClient.calls == []
+
+
+@pytest.mark.asyncio
+async def test_treasurer_agent_trigger_is_authenticated_and_idempotency_scoped(monkeypatch):
+    captured = {}
+
+    def handler(request):
+        captured["request"] = request
+        return httpx.Response(
+            202,
+            request=request,
+            json={
+                "accepted": True,
+                "request_id": "roo-backend-id",
+                "status": "queued",
+                "xero_writes": False,
+            },
+        )
+
+    real_async_client = httpx.AsyncClient
+
+    def fake_async_client(*args, **kwargs):
+        return real_async_client(
+            transport=httpx.MockTransport(handler),
+            timeout=kwargs.get("timeout"),
+        )
+
+    monkeypatch.setattr(executor_module.httpx, "AsyncClient", fake_async_client)
+    settings = _settings(
+        MLAI_API_KEY="shared-service-key",
+        RECONCILIATION_AGENT_TIMEOUT_SECONDS=30,
+    )
+
+    result = await SkillExecutor._trigger_reconciliation_agent_prepare(
+        settings=settings,
+        agent_url="https://roo.mlai.au/",
+        user_id="UADMIN",
+        channel_id="C123",
+        thread_ts="1700000000.000001",
+        instruction="Plan every outstanding line.",
+    )
+
+    request = captured["request"]
+    assert request.url == (
+        "https://roo.mlai.au/internal/reconciliation/prepare"
+    )
+    assert request.headers["Authorization"] == "Bearer shared-service-key"
+    body = json.loads(request.content)
+    assert body["slack_user_id"] == "UADMIN"
+    assert body["channel_id"] == "C123"
+    assert body["instruction"] == "Plan every outstanding line."
+    assert body["request_id"].startswith("roo-")
+    assert result["xero_writes"] is False
+
+
+@pytest.mark.asyncio
+async def test_check_reconciliation_readiness_explains_safe_next_action(monkeypatch):
+    executor = _reset(monkeypatch)
+
+    result = await _run(
+        executor,
+        params={"action": "check_reconciliation_readiness", "domain": "mlai.au"},
+        channel_id=None,
+    )
+
+    assert "ready to analyse" in result["message"]
+    assert "8 current candidate(s)" in result["message"]
+    assert "monthly context `monthly-2026-07`" in result["message"]
+    assert "Spend/Receive Money ready" in result["message"]
+    assert "bill payments ready" in result["message"]
+    assert "Start Xero reconciliation in preview-only mode" in result["message"]
+    assert FakeReconBackendClient.calls[0] == {
+        "action": "readiness",
+        "slack_user_id": "UADMIN",
+        "domain": "mlai.au",
+    }
+
+
+@pytest.mark.asyncio
+async def test_repeated_start_reports_reused_run_without_duplicate(monkeypatch):
+    executor = _reset(monkeypatch)
+    FakeReconBackendClient.operation_results["start"] = {
+        "run_id": "xero-reconciliation-existing",
+        "status": "queued",
+        "dry_run": True,
+        "deterministic_suggestion_count": 1,
+        "rule_conflict_count": 0,
+        "deferred_bill_count": 0,
+        "agent_line_count": 1,
+        "valley_dispatched": False,
+        "idempotent": True,
+    }
+
+    result = await _run(
+        executor,
+        params={"action": "start_statement_reconciliation"},
+        channel_id=None,
+    )
+
+    assert "Reused existing reconciliation run" in result["message"]
+    assert "did not create or dispatch a duplicate" in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_start_completed_deterministic_run_can_be_previewed_immediately(monkeypatch):
+    executor = _reset(monkeypatch)
+    FakeReconBackendClient.operation_results["start"] = {
+        "run_id": "xero-reconciliation-rules",
+        "status": "completed",
+        "dry_run": True,
+        "deterministic_suggestion_count": 3,
+        "rule_conflict_count": 0,
+        "deferred_bill_count": 0,
+        "agent_line_count": 0,
+        "valley_dispatched": False,
+    }
+
+    result = await _run(
+        executor,
+        params={"action": "start_statement_reconciliation"},
+        channel_id=None,
+    )
+
+    assert "3 prepared from verified rules" in result["message"]
+    assert "0 sent for monthly-context analysis" in result["message"]
+    assert "ask me to preview it now" in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_outcomes_reports_confirmed_matches_without_creating_rules(monkeypatch):
+    executor = _reset(monkeypatch)
+
+    result = await _run(
+        executor,
+        params={"action": "reconciliation_outcomes", "limit": 25},
+        channel_id=None,
+    )
+
+    assert "3 confirmed reconciled" in result["message"]
+    assert "1 still waiting for Xero Match/OK" in result["message"]
+    assert "[Studio] Present Studio" in result["message"]
+    assert "candidate-present-studio" in result["message"]
+    assert "version-present-studio" in result["message"]
+    assert "No rule was created automatically" in result["message"]
+    assert FakeReconBackendClient.calls[0] == {
+        "action": "outcomes",
+        "slack_user_id": "UADMIN",
+        "domain": "mlai.au",
+        "limit": 25,
+    }
+
+
+@pytest.mark.asyncio
+async def test_admin_can_explicitly_promote_reviewed_rule_candidate(monkeypatch):
+    executor = _reset(monkeypatch)
+
+    result = await _run(
+        executor,
+        params={
+            "action": "decide_reconciliation_rule_candidate",
+            "candidate_id": "candidate-present-studio",
+            "candidate_version": "version-present-studio",
+            "decision": "promote",
+        },
+        channel_id=None,
+    )
+
+    assert "Verified reconciliation rule #77" in result["message"]
+    assert "no Xero transaction was created" in result["message"]
+    assert FakeReconBackendClient.calls[0] == {
+        "action": "decide_candidate",
+        "slack_user_id": "UADMIN",
+        "candidate_id": "candidate-present-studio",
+        "candidate_version": "version-present-studio",
+        "decision": "promote",
+        "reason": None,
+        "domain": "mlai.au",
+    }
+
+
+@pytest.mark.asyncio
+async def test_reject_rule_candidate_requires_a_reason(monkeypatch):
+    executor = _reset(monkeypatch)
+
+    result = await _run(
+        executor,
+        params={
+            "action": "decide_reconciliation_rule_candidate",
+            "candidate_id": "candidate-present-studio",
+            "candidate_version": "version-present-studio",
+            "decision": "reject",
+        },
+        channel_id=None,
+    )
+
+    assert "short reason" in result
+    assert FakeReconBackendClient.calls == []
+
+
+@pytest.mark.asyncio
+async def test_preview_shows_project_and_requires_separate_approval(monkeypatch):
+    executor = _reset(monkeypatch)
+
+    result = await _run(
+        executor,
+        params={"action": "preview_statement_reconciliation", "run_id": "xero-reconciliation-123"},
+        channel_id=None,
+    )
+
+    assert "1/1 ready, 0 approved" in result["message"]
+    assert "Contractor payment for Aaron AI coding" in result["message"]
+    assert "[Studio] Aaron AI" in result["message"]
+    assert "verified rule #77" in result["message"]
+    assert "explicitly ask me to approve" in result["message"]
+    assert FakeReconBackendClient.calls[0]["action"] == "preview"
+
+
+@pytest.mark.asyncio
+async def test_status_exposes_retry_for_failed_context_dispatch(monkeypatch):
+    executor = _reset(monkeypatch)
+    FakeReconBackendClient.operation_results["status"] = {
+        "run_id": "xero-reconciliation-123",
+        "status": "queued",
+        "retry_available": True,
+        "suggestions": [{"id": 10}],
+    }
+
+    result = await _run(
+        executor,
+        params={
+            "action": "status_statement_reconciliation",
+            "run_id": "xero-reconciliation-123",
+        },
+        channel_id=None,
+    )
+
+    assert "can be retried" in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_retry_reuses_run_without_xero_write(monkeypatch):
+    executor = _reset(monkeypatch)
+
+    result = await _run(
+        executor,
+        params={
+            "action": "retry_statement_reconciliation",
+            "run_id": "xero-reconciliation-123",
+        },
+        channel_id=None,
+    )
+
+    assert "Re-queued monthly-context analysis" in result["message"]
+    assert "Existing deterministic suggestions were kept" in result["message"]
+    assert "no Xero transaction was created" in result["message"]
+    assert FakeReconBackendClient.calls[0]["action"] == "retry"
+
+
+@pytest.mark.asyncio
+async def test_retry_is_idempotent_while_run_is_already_queued(monkeypatch):
+    executor = _reset(monkeypatch)
+    FakeReconBackendClient.operation_results["retry"] = {
+        "run_id": "xero-reconciliation-123",
+        "status": "queued",
+        "valley_dispatched": False,
+        "idempotent": True,
+    }
+
+    result = await _run(
+        executor,
+        params={
+            "action": "retry_statement_reconciliation",
+            "run_id": "xero-reconciliation-123",
+        },
+        channel_id=None,
+    )
+
+    assert "did not create or dispatch a duplicate" in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_approve_records_ready_but_does_not_execute(monkeypatch):
+    executor = _reset(monkeypatch)
+
+    result = await _run(
+        executor,
+        params={"action": "approve_ready_reconciliation", "run_id": "xero-reconciliation-123"},
+        channel_id=None,
+    )
+
+    assert "Approved 1 ready suggestion" in result["message"]
+    assert "1 were not ready" in result["message"]
+    assert "No Xero transactions were created yet" in result["message"]
+    assert [call["action"] for call in FakeReconBackendClient.calls] == ["approve"]
+
+
+@pytest.mark.asyncio
+async def test_execute_only_approved_and_keeps_human_match_step(monkeypatch):
+    executor = _reset(monkeypatch)
+
+    result = await _run(
+        executor,
+        params={
+            "action": "execute_approved_reconciliation",
+            "run_id": "xero-reconciliation-123",
+            "suggestion_ids": [10, 11],
+        },
+        channel_id=None,
+    )
+
+    assert "Created 1 approved matching Xero transaction" in result["message"]
+    assert "1 approved item(s) were safely blocked" in result["message"]
+    assert "green Match/OK" in result["message"]
+    assert FakeReconBackendClient.calls[0]["suggestion_ids"] == [10, 11]
+
+
+@pytest.mark.asyncio
+async def test_reject_selected_suggestions_records_reason_without_xero_write(monkeypatch):
+    executor = _reset(monkeypatch)
+
+    result = await _run(
+        executor,
+        params={
+            "action": "reject_reconciliation_suggestions",
+            "run_id": "xero-reconciliation-123",
+            "suggestion_ids": [10],
+            "reason": "This belongs to Present Studio.",
+        },
+        channel_id=None,
+    )
+
+    assert "Rejected 1/1 selected suggestion" in result["message"]
+    assert "No Xero transactions were created" in result["message"]
+    assert FakeReconBackendClient.calls[0] == {
+        "action": "reject",
+        "slack_user_id": "UADMIN",
+        "run_id": "xero-reconciliation-123",
+        "suggestion_ids": [10],
+        "reason": "This belongs to Present Studio.",
+        "domain": "mlai.au",
+    }
+
+
+@pytest.mark.asyncio
+async def test_statement_reconciliation_requires_exact_run_id(monkeypatch):
+    executor = _reset(monkeypatch)
+
+    result = await _run(
+        executor,
+        params={"action": "execute_approved_reconciliation"},
+        channel_id=None,
+    )
+
+    assert "exact preview" in result
+    assert FakeReconBackendClient.calls == []
+
+
+@pytest.mark.asyncio
+async def test_stale_scan_tells_admin_to_run_chrome_backfill(monkeypatch):
+    executor = _reset(monkeypatch)
+    FakeReconBackendClient.status_code = 409
+
+    result = await _run(
+        executor,
+        params={"action": "start_statement_reconciliation"},
+        channel_id=None,
+    )
+
+    assert "Chrome backfill" in result
 
 
 @pytest.mark.asyncio
