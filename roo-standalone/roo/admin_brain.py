@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime
 from typing import Any, Optional
 from urllib.parse import urlparse
@@ -56,6 +57,20 @@ WARNING_LABELS = {
     "partial_source_freshness": "One or more connected sources may not be fully up to date.",
     "no_authorized_memory_classes": "No authorised memory class was available for this request.",
 }
+
+_INTERNAL_MEMORY_CITATION_RE = re.compile(
+    r"\s*\[(?:(?:claim|chunk):[^\]\s;]+)(?:\s*;\s*(?:claim|chunk):[^\]\s;]+)*\]",
+    re.IGNORECASE,
+)
+
+
+def strip_internal_memory_citations(value: Any) -> str:
+    """Keep backend-only memory identifiers out of Slack answer text."""
+
+    text = _INTERNAL_MEMORY_CITATION_RE.sub("", str(value or ""))
+    text = re.sub(r"[ \t]+\n", "\n", text)
+    text = re.sub(r" {2,}", " ", text)
+    return text.strip()
 
 
 def slack_safe_text(value: Any, *, limit: Optional[int] = None) -> str:
@@ -145,7 +160,7 @@ def build_admin_brain_response(
     requester_user_id: str,
     primary_claim_id: Optional[str] = None,
 ) -> dict:
-    answer = slack_safe_text(payload.get("answer") or "")
+    answer = slack_safe_text(strip_internal_memory_citations(payload.get("answer") or ""))
     query_id = str(payload.get("query_id") or "").strip()
     warnings = [
         WARNING_LABELS.get(str(value), "Organisational memory returned a caution for this answer.")
@@ -167,32 +182,40 @@ def build_admin_brain_response(
         )
     ]
     has_citations = bool(citations)
+    presentation = (
+        payload.get("presentation")
+        if isinstance(payload.get("presentation"), dict)
+        else {}
+    )
+    source_display = str(presentation.get("source_display") or "none").casefold()
+    show_source_links = source_display == "links"
+    show_evidence_status = bool(presentation.get("show_evidence_status"))
     sufficiency = str(payload.get("evidence_sufficiency") or "unknown").replace("_", " ")
-    confidence = payload.get("confidence")
-    try:
-        confidence_text = f"{max(0, min(float(confidence), 1)):.0%} confidence"
-    except (TypeError, ValueError):
-        confidence_text = "confidence unavailable"
-    if not has_citations:
-        evidence_context = (
-            "⚪ No authorised evidence selected · "
-            f"{slack_safe_text(sufficiency.title())} evidence · {confidence_text}"
-        )
-    else:
-        freshness_label = "⚠️ Contains stale memory" if stale else "✅ Current authorised evidence"
+    if not show_evidence_status:
+        evidence_context = "🔒 From MLAI's internal memory"
+    elif not has_citations:
+        evidence_context = "⚠️ I couldn't find enough reliable internal evidence for this answer."
+    elif stale:
         time_label = latest or "time unavailable"
         evidence_context = (
-            f"{freshness_label} · Latest evidence: {slack_safe_text(time_label)} · "
-            f"{slack_safe_text(sufficiency.title())} evidence · {confidence_text}"
+            "⚠️ Some supporting information may be stale · "
+            f"Latest evidence: {slack_safe_text(time_label)}"
         )
+    elif sufficiency.casefold() != "sufficient":
+        time_label = latest or "time unavailable"
+        evidence_context = (
+            f"⚠️ The available internal evidence is {slack_safe_text(sufficiency)} · "
+            f"Latest evidence: {slack_safe_text(time_label)}"
+        )
+    else:
+        evidence_context = "🔒 From MLAI's internal memory"
 
     blocks: list[dict] = []
-    for index, chunk in enumerate(_chunk_text(answer)):
-        prefix = "*🔒 Internal organisational memory*\n" if index == 0 else ""
+    for chunk in _chunk_text(answer):
         blocks.append(
             {
                 "type": "section",
-                "text": {"type": "mrkdwn", "text": f"{prefix}{chunk}"},
+                "text": {"type": "mrkdwn", "text": chunk},
             }
         )
     blocks.append(
@@ -228,7 +251,7 @@ def build_admin_brain_response(
         provider = slack_safe_text(citation.get("provider") or "", limit=60)
         detail = " · ".join(value for value in (provider, occurred) if value)
         citation_lines.append(f"• {link}" + (f" — {detail}" if detail else ""))
-    if citation_lines:
+    if citation_lines and show_source_links:
         blocks.append(
             {
                 "type": "section",
@@ -244,7 +267,7 @@ def build_admin_brain_response(
         blocks.append(
             {
                 "type": "context",
-                "elements": [{"type": "mrkdwn", "text": f"Suggested follow-up: {follow_up}"}],
+                "elements": [{"type": "mrkdwn", "text": f"💡 {follow_up}"}],
             }
         )
 
@@ -298,7 +321,7 @@ def build_admin_brain_response(
         )
 
     fallback_lines = [answer]
-    if citation_lines:
+    if citation_lines and show_source_links:
         fallback_lines.extend(("", "Sources", *citation_lines))
     return {
         "message": "\n".join(fallback_lines).strip(),
@@ -307,6 +330,7 @@ def build_admin_brain_response(
             "query_id": query_id,
             "primary_claim_id": primary_claim_id,
             "admin_brain": True,
+            "source_display": source_display,
         },
     }
 

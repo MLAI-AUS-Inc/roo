@@ -118,8 +118,10 @@ credentials on Public Roo, missing dispatch controls, extra Admin skills, and
 enabled Admin actions. Dispatch receipts are stored durably in the Admin data
 volume so a signed envelope cannot be replayed across workers or restarts.
 
-Answers show the `🔒 Internal organisational memory` label, freshness and
-warnings, up to five citations, and Helpful/Incorrect/Stale/Missing feedback.
+Healthy answers use conversational text with a subtle internal-memory label.
+Material freshness and evidence warnings remain visible; source links appear
+only when the user explicitly asks for them. Helpful/Incorrect/Stale/Missing
+feedback remains available.
 Feedback returns through the same signed worker boundary. Incorrect feedback
 enters human review and never overwrites memory directly.
 
