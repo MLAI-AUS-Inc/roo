@@ -83,6 +83,8 @@ class Settings(BaseSettings):
     INTERNAL_API_KEY: Optional[str] = None
     INTERNAL_MENTION_API_KEY: Optional[str] = None
     RECONCILIATION_DOMAIN: str = "mlai.au"
+    RECONCILIATION_AGENT_URL: Optional[str] = None
+    RECONCILIATION_AGENT_TIMEOUT_SECONDS: float = 30.0
     LINEAR_DEFAULT_TEAM: Optional[str] = None
 
     # Public/Admin trust boundary. Admin starts with no skills and no private
