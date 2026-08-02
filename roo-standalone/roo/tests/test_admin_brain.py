@@ -159,6 +159,67 @@ def test_admin_brain_blocks_escape_mentions_and_render_citations_and_feedback():
     }
 
 
+def test_admin_brain_does_not_present_request_time_as_latest_evidence():
+    payload = {
+        "query_id": "query-abstained",
+        "answer": "I do not have enough authorised evidence to answer that reliably.",
+        "confidence": 0,
+        "evidence_sufficiency": "insufficient",
+        "freshness": {
+            "as_of": "2026-08-02T05:04:00+00:00",
+            "latest_evidence_at": None,
+            "contains_stale_memory": False,
+        },
+        "warnings": [],
+        "citations": [{}],
+    }
+
+    result = build_admin_brain_response(
+        payload,
+        requester_user_id="UADMIN123",
+    )
+
+    rendered = str(result["blocks"])
+    assert "No authorised evidence selected" in rendered
+    assert "Current authorised evidence" not in rendered
+    assert "Latest evidence" not in rendered
+    assert "02 Aug 2026" not in rendered
+
+
+def test_admin_brain_labels_real_cited_evidence_with_its_timestamp():
+    payload = {
+        "query_id": "query-answered",
+        "answer": "The committee approved the launch.",
+        "confidence": 0.88,
+        "evidence_sufficiency": "sufficient",
+        "freshness": {
+            "as_of": "2026-08-02T05:04:00+00:00",
+            "latest_evidence_at": "2026-07-20T08:30:00+00:00",
+            "contains_stale_memory": False,
+        },
+        "warnings": [],
+        "citations": [
+            {
+                "provider": "google_drive",
+                "label": "Committee meeting notes",
+                "source_url": "https://drive.example/document/committee",
+                "occurred_at": "2026-07-20T08:30:00+00:00",
+            }
+        ],
+    }
+
+    result = build_admin_brain_response(
+        payload,
+        requester_user_id="UADMIN123",
+    )
+
+    rendered = str(result["blocks"])
+    assert "Current authorised evidence" in rendered
+    assert "Latest evidence" in rendered
+    assert "20 Jul 2026" in rendered
+    assert "02 Aug 2026" not in rendered
+
+
 @pytest.mark.asyncio
 async def test_executor_returns_grounded_blocks_and_never_calls_generic_fallback(monkeypatch):
     configured = _settings()

@@ -154,18 +154,37 @@ def build_admin_brain_response(
     warnings = list(dict.fromkeys(warnings))
     freshness = payload.get("freshness") if isinstance(payload.get("freshness"), dict) else {}
     latest = _display_datetime(freshness.get("latest_evidence_at"))
-    as_of = _display_datetime(freshness.get("as_of"))
     stale = bool(freshness.get("contains_stale_memory")) or "stale_memory" in (
         payload.get("warnings") or []
     )
+    citations = [
+        citation
+        for citation in list(payload.get("citations") or [])[:5]
+        if isinstance(citation, dict)
+        and any(
+            citation.get(field)
+            for field in ("source_id", "source_version_id", "source_url", "label")
+        )
+    ]
+    has_citations = bool(citations)
     sufficiency = str(payload.get("evidence_sufficiency") or "unknown").replace("_", " ")
     confidence = payload.get("confidence")
     try:
         confidence_text = f"{max(0, min(float(confidence), 1)):.0%} confidence"
     except (TypeError, ValueError):
         confidence_text = "confidence unavailable"
-    freshness_label = "⚠️ Contains stale memory" if stale else "✅ Current authorised evidence"
-    time_label = latest or as_of or "time unavailable"
+    if not has_citations:
+        evidence_context = (
+            "⚪ No authorised evidence selected · "
+            f"{slack_safe_text(sufficiency.title())} evidence · {confidence_text}"
+        )
+    else:
+        freshness_label = "⚠️ Contains stale memory" if stale else "✅ Current authorised evidence"
+        time_label = latest or "time unavailable"
+        evidence_context = (
+            f"{freshness_label} · Latest evidence: {slack_safe_text(time_label)} · "
+            f"{slack_safe_text(sufficiency.title())} evidence · {confidence_text}"
+        )
 
     blocks: list[dict] = []
     for index, chunk in enumerate(_chunk_text(answer)):
@@ -182,10 +201,7 @@ def build_admin_brain_response(
             "elements": [
                 {
                     "type": "mrkdwn",
-                    "text": (
-                        f"{freshness_label} · Latest evidence: {slack_safe_text(time_label)} · "
-                        f"{slack_safe_text(sufficiency.title())} evidence · {confidence_text}"
-                    ),
+                    "text": evidence_context,
                 }
             ],
         }
@@ -202,9 +218,7 @@ def build_admin_brain_response(
         )
 
     citation_lines = []
-    for citation in list(payload.get("citations") or [])[:5]:
-        if not isinstance(citation, dict):
-            continue
+    for citation in citations:
         label = slack_safe_text(
             citation.get("label") or citation.get("provider") or "Source",
             limit=180,
