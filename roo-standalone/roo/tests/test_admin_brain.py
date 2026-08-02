@@ -124,6 +124,7 @@ def test_admin_brain_blocks_escape_mentions_and_render_citations_and_feedback():
             "contains_stale_memory": True,
         },
         "warnings": ["stale_memory", "unresolved_conflict"],
+        "presentation": {"source_display": "links", "show_evidence_status": True},
         "citations": [
             {
                 "provider": "google_drive",
@@ -145,6 +146,7 @@ def test_admin_brain_blocks_escape_mentions_and_render_citations_and_feedback():
     assert "<@USECRET>" not in rendered
     assert "&lt;!channel&gt;" in rendered
     assert "https://drive.example/document/1" in rendered
+    assert "Sources" in rendered
     action_ids = {
         element["action_id"]
         for block in result["blocks"]
@@ -171,6 +173,7 @@ def test_admin_brain_does_not_present_request_time_as_latest_evidence():
             "contains_stale_memory": False,
         },
         "warnings": [],
+        "presentation": {"source_display": "none", "show_evidence_status": True},
         "citations": [{}],
     }
 
@@ -180,24 +183,25 @@ def test_admin_brain_does_not_present_request_time_as_latest_evidence():
     )
 
     rendered = str(result["blocks"])
-    assert "No authorised evidence selected" in rendered
+    assert "couldn't find enough reliable internal evidence" in rendered
     assert "Current authorised evidence" not in rendered
     assert "Latest evidence" not in rendered
     assert "02 Aug 2026" not in rendered
 
 
-def test_admin_brain_labels_real_cited_evidence_with_its_timestamp():
+def test_admin_brain_surfaces_partial_evidence_with_its_timestamp():
     payload = {
         "query_id": "query-answered",
         "answer": "The committee approved the launch.",
         "confidence": 0.88,
-        "evidence_sufficiency": "sufficient",
+        "evidence_sufficiency": "partial",
         "freshness": {
             "as_of": "2026-08-02T05:04:00+00:00",
             "latest_evidence_at": "2026-07-20T08:30:00+00:00",
             "contains_stale_memory": False,
         },
         "warnings": [],
+        "presentation": {"source_display": "none", "show_evidence_status": True},
         "citations": [
             {
                 "provider": "google_drive",
@@ -214,10 +218,79 @@ def test_admin_brain_labels_real_cited_evidence_with_its_timestamp():
     )
 
     rendered = str(result["blocks"])
-    assert "Current authorised evidence" in rendered
+    assert "available internal evidence is partial" in rendered
     assert "Latest evidence" in rendered
     assert "20 Jul 2026" in rendered
     assert "02 Aug 2026" not in rendered
+
+
+def test_admin_brain_keeps_grounding_internal_for_normal_answers():
+    payload = {
+        "query_id": "query-conversational",
+        "answer": (
+            "We agreed to focus on fewer, higher-quality events. "
+            "[claim:957f1ddb-099f-4937-b862-38fb5d37863b]"
+        ),
+        "confidence": 0.88,
+        "evidence_sufficiency": "sufficient",
+        "freshness": {
+            "latest_evidence_at": "2026-07-20T08:30:00+00:00",
+            "contains_stale_memory": False,
+        },
+        "warnings": [],
+        "presentation": {"source_display": "none", "show_evidence_status": False},
+        "citations": [
+            {
+                "provider": "google_drive",
+                "label": "Committee meeting notes",
+                "source_url": "https://drive.example/document/committee",
+                "occurred_at": "2026-07-20T08:30:00+00:00",
+            }
+        ],
+    }
+
+    result = build_admin_brain_response(
+        payload,
+        requester_user_id="UADMIN123",
+        primary_claim_id="claim-1",
+    )
+
+    rendered = str(result["blocks"])
+    assert "We agreed to focus on fewer, higher-quality events." in rendered
+    assert "claim:" not in rendered
+    assert "https://drive.example" not in rendered
+    assert "Sources" not in rendered
+    assert "confidence" not in rendered
+    assert "Current authorised evidence" not in rendered
+    assert "From MLAI's internal memory" in rendered
+    assert "claim:" not in result["message"]
+    assert result["data"]["source_display"] == "none"
+
+
+def test_admin_brain_title_mode_does_not_add_a_sources_block():
+    payload = {
+        "query_id": "query-titles",
+        "answer": "That came from the 20 July committee notes.",
+        "confidence": 0.88,
+        "evidence_sufficiency": "sufficient",
+        "freshness": {},
+        "warnings": [],
+        "presentation": {"source_display": "titles", "show_evidence_status": False},
+        "citations": [
+            {
+                "provider": "google_drive",
+                "label": "Committee meeting notes",
+                "source_url": "https://drive.example/document/committee",
+            }
+        ],
+    }
+
+    result = build_admin_brain_response(payload, requester_user_id="UADMIN123")
+
+    rendered = str(result["blocks"])
+    assert "20 July committee notes" in rendered
+    assert "https://drive.example" not in rendered
+    assert "Sources" not in rendered
 
 
 @pytest.mark.asyncio
