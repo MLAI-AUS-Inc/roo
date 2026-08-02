@@ -43,8 +43,74 @@ def _report(**overrides):
     return report
 
 
+def _audit(**overrides):
+    audit = {
+        "schema_version": 1,
+        "audit_version": "reconciliation-event-finance-audit-v1",
+        "period_start": "2026-02-02",
+        "period_end": "2026-08-02",
+        "required_categories": [
+            {"key": "ticket_sales", "label": "Ticket sales", "kind": "revenue"},
+            {"key": "sponsorship_revenue", "label": "Sponsorship revenue", "kind": "revenue"},
+            {"key": "catering_cost", "label": "Catering cost", "kind": "cost"},
+            {"key": "contractor_cost", "label": "Contractor cost", "kind": "cost"},
+        ],
+        "events": [
+            {
+                "event_name": "Complete Gala",
+                "start_at": "2026-06-10T10:00:00+00:00",
+                "completeness_status": "complete",
+                "present_categories": ["ticket_sales", "sponsorship_revenue", "catering_cost", "contractor_cost"],
+                "missing_categories": [],
+                "categories": {
+                    "ticket_sales": {
+                        "status": "present",
+                        "evidence": [{"source_type": "luma_event", "source_id": "evt-1", "amount_cents": 10000}],
+                    },
+                    "sponsorship_revenue": {
+                        "status": "present",
+                        "evidence": [{"source_type": "xero_bank_transaction_line", "source_id": "bt-1:0", "amount_cents": 50000, "date": "2026-06-11", "account_name": "Sponsorships & Grants", "contact_name": "Sponsor Co"}],
+                    },
+                    "catering_cost": {"status": "present", "evidence": [{"source_type": "xero_bank_transaction_line", "source_id": "bt-2:0", "amount_cents": 20000, "account_name": "Catering / Food & Beverages"}]},
+                    "contractor_cost": {"status": "present", "evidence": [{"source_type": "xero_bank_transaction_line", "source_id": "bt-3:0", "amount_cents": 30000, "account_name": "Contractor Expenses"}]},
+                },
+            },
+            {
+                "event_name": "Ticket Only Night",
+                "start_at": "2026-07-01T10:00:00+00:00",
+                "completeness_status": "incomplete",
+                "present_categories": ["ticket_sales"],
+                "missing_categories": ["sponsorship_revenue", "catering_cost", "contractor_cost"],
+                "categories": {
+                    "ticket_sales": {"status": "present", "evidence": [{"source_type": "luma_event", "source_id": "evt-2", "amount_cents": 7500}]},
+                    "sponsorship_revenue": {"status": "missing", "evidence": []},
+                    "catering_cost": {"status": "missing", "evidence": []},
+                    "contractor_cost": {"status": "missing", "evidence": []},
+                },
+            },
+        ],
+        "summary": {
+            "event_count": 2,
+            "complete_count": 1,
+            "incomplete_count": 1,
+            "missing_counts": {
+                "ticket_sales": 0,
+                "sponsorship_revenue": 1,
+                "catering_cost": 1,
+                "contractor_cost": 1,
+            },
+        },
+        "account_resolution_warnings": [],
+        "limitations": ["Missing means no tracked evidence was found in this period."],
+        "xero_writes": False,
+    }
+    audit.update(overrides)
+    return audit
+
+
 class FakeReconBackendClient:
     report = _report()
+    audit = _audit()
     unavailable = False
     status_code = None
     calls = []
@@ -62,6 +128,16 @@ class FakeReconBackendClient:
             raise httpx.HTTPStatusError("backend error", request=request, response=response)
         return self.report
 
+    async def get_event_finance_audit(self, slack_user_id, **kwargs):
+        self.__class__.calls.append({"method": "audit", "slack_user_id": slack_user_id, **kwargs})
+        if self.unavailable:
+            raise backend_module.MLAIBackendUnavailableError("backend unavailable")
+        if self.status_code:
+            request = httpx.Request("GET", "https://backend.test/api/v1/integrations/reconciliation/event-finance-audit")
+            response = httpx.Response(self.status_code, json={"error": f"backend {self.status_code}"}, request=request)
+            raise httpx.HTTPStatusError("backend error", request=request, response=response)
+        return self.audit
+
 
 def _settings(**overrides):
     values = {
@@ -69,6 +145,7 @@ def _settings(**overrides):
         "MLAI_API_KEY": "api-key",
         "ROO_API_KEY": "roo-api-key",
         "INTERNAL_API_KEY": "internal-key",
+        "RECONCILIATION_DOMAIN": "mlai.au",
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -76,6 +153,7 @@ def _settings(**overrides):
 
 def _reset(monkeypatch, *, uploaded=None, settings_overrides=None):
     FakeReconBackendClient.report = _report()
+    FakeReconBackendClient.audit = _audit()
     FakeReconBackendClient.unavailable = False
     FakeReconBackendClient.status_code = None
     FakeReconBackendClient.calls = []
@@ -195,3 +273,60 @@ async def test_rate_limited(monkeypatch):
     FakeReconBackendClient.status_code = 429
     result = await _run(executor)
     assert "rate-limited" in result.lower() or "429" in result
+
+
+@pytest.mark.asyncio
+async def test_event_finance_audit_uses_six_calendar_months_and_uploads_markdown(monkeypatch):
+    uploaded = []
+    executor = _reset(monkeypatch, uploaded=uploaded)
+
+    result = await _run(
+        executor,
+        text="audit all events in the last 6 months for ticket sales, sponsorship, catering and contractors",
+        params={"action": "audit_event_finances", "months": 6, "until": "2026-08-02"},
+    )
+
+    call = FakeReconBackendClient.calls[0]
+    assert call == {
+        "method": "audit",
+        "slack_user_id": "UADMIN",
+        "since": "2026-02-02",
+        "until": "2026-08-02",
+        "domain": "mlai.au",
+    }
+    assert len(uploaded) == 1
+    assert uploaded[0]["filename"] == "event-finance-audit-2026-02-02-to-2026-08-02.md"
+    assert "| Complete Gala | 2026-06-10 | Yes | Yes | Yes | Yes |" in uploaded[0]["content"]
+    assert "Ticket Only Night: missing sponsorship, catering, contractors" in result["message"]
+    assert "Read-only" in result["message"]
+    assert result["data"]["action"] == "event_finance_audit"
+    assert result["data"]["xero_writes"] is False
+
+
+@pytest.mark.asyncio
+async def test_event_finance_audit_preserves_explicit_since(monkeypatch):
+    executor = _reset(monkeypatch, uploaded=[])
+
+    await _run(
+        executor,
+        params={
+            "action": "audit_event_finances",
+            "since": "2026-03-01",
+            "until": "2026-08-02",
+        },
+    )
+
+    assert FakeReconBackendClient.calls[0]["since"] == "2026-03-01"
+
+
+@pytest.mark.asyncio
+async def test_event_finance_audit_non_admin_message(monkeypatch):
+    executor = _reset(monkeypatch, uploaded=[])
+    FakeReconBackendClient.status_code = 403
+
+    result = await _run(
+        executor,
+        params={"action": "audit_event_finances", "until": "2026-08-02"},
+    )
+
+    assert "Points Admin" in result
