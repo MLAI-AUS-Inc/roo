@@ -539,3 +539,41 @@ async def test_confirm_article_topic_includes_requested_by_when_provided(monkeyp
 
     assert captured["json"]["slack_user_id"] == "U0AQV5X9G0J"
     assert captured["json"]["requested_by_slack_user_id"] == "U05QPB483K9"
+
+
+@pytest.mark.asyncio
+async def test_event_finance_audit_uses_read_only_bounded_endpoint(monkeypatch):
+    captured = {}
+
+    async def fake_request(method, endpoint, **kwargs):
+        captured.update(method=method, endpoint=endpoint, kwargs=kwargs)
+        request = httpx.Request(method, f"https://backend.test{endpoint}")
+        return httpx.Response(
+            200,
+            request=request,
+            json={"summary": {"event_count": 3}, "xero_writes": False},
+        )
+
+    client = MLAIBackendClient(
+        base_url="https://backend.test",
+        api_key="roo-api-key",
+        internal_api_key="roo-api-key",
+    )
+    monkeypatch.setattr(client, "_request", fake_request)
+
+    result = await client.get_event_finance_audit(
+        "<@UADMIN>",
+        since="2026-02-02",
+        until="2026-08-02",
+        domain="MLAI.AU",
+    )
+
+    assert captured["method"] == "GET"
+    assert captured["endpoint"] == "/api/v1/integrations/reconciliation/event-finance-audit"
+    assert captured["kwargs"]["params"] == {
+        "slack_user_id": "UADMIN",
+        "domain": "mlai.au",
+        "since": "2026-02-02",
+        "until": "2026-08-02",
+    }
+    assert result["xero_writes"] is False

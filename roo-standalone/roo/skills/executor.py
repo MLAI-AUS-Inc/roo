@@ -5913,6 +5913,14 @@ Chunk {index} source: {label}
         the report, posts a summary, and uploads the Cowork brief (.md) + audit
         workbook (.xlsx) to the thread.
         """
+        if str(params.get("action") or "").strip().lower() == "audit_event_finances":
+            return await self._execute_event_finance_audit(
+                params=params,
+                user_id=user_id,
+                channel_id=channel_id,
+                thread_ts=thread_ts,
+            )
+
         settings = get_settings()
         if not getattr(settings, "MLAI_BACKEND_URL", None):
             return (
@@ -6009,6 +6017,251 @@ Chunk {index} source: {label}
                 "uploaded_filenames": uploaded,
             },
         }
+
+    async def _execute_event_finance_audit(
+        self,
+        *,
+        params: dict,
+        user_id: str,
+        channel_id: Optional[str],
+        thread_ts: Optional[str],
+    ) -> Any:
+        """Audit recent events for expected revenue and cost evidence."""
+        settings = get_settings()
+        if not getattr(settings, "MLAI_BACKEND_URL", None):
+            return (
+                "The event finance audit needs mlai-backend to be configured. "
+                "Ask the team to set `MLAI_BACKEND_URL`."
+            )
+        if not channel_id:
+            return "I need a Slack channel or DM to upload the event finance audit."
+
+        since, until = self._resolve_event_finance_audit_period(params)
+        if since > until:
+            return "The audit start date needs to be on or before the end date."
+
+        from roo.clients.mlai_backend import MLAIBackendClient, MLAIBackendUnavailableError
+
+        backend_client = MLAIBackendClient(
+            base_url=settings.MLAI_BACKEND_URL,
+            api_key=settings.ROO_API_KEY or settings.MLAI_API_KEY,
+            internal_api_key=(
+                settings.INTERNAL_API_KEY
+                or settings.ROO_API_KEY
+                or settings.MLAI_API_KEY
+            ),
+        )
+        try:
+            audit = await backend_client.get_event_finance_audit(
+                user_id,
+                since=since.isoformat(),
+                until=until.isoformat(),
+                domain=getattr(settings, "RECONCILIATION_DOMAIN", "mlai.au"),
+            )
+        except MLAIBackendUnavailableError:
+            return "I'm having trouble reaching mlai-backend for the event finance audit right now. Try again in a tick."
+        except httpx.HTTPStatusError as exc:
+            status_code = exc.response.status_code
+            detail = self._extract_luma_http_error_detail(exc)
+            if status_code == 403:
+                return (
+                    "Sorry mate, you'll need to be a Points Admin (`admin`, `committee`, "
+                    "or `portfolio_lead`) to run the event finance audit. 🔒"
+                )
+            return detail or f"mlai-backend returned HTTP {status_code} for the event finance audit."
+
+        from ..slack_client import upload_file
+
+        filename = f"event-finance-audit-{since.isoformat()}-to-{until.isoformat()}.md"
+        upload_file(
+            channel=channel_id,
+            content=self._event_finance_audit_markdown(audit),
+            filename=filename,
+            title="Event finance completeness audit",
+            thread_ts=thread_ts,
+        )
+        return {
+            "message": self._format_event_finance_audit(audit, filename),
+            "data": {
+                "action": "event_finance_audit",
+                "period_start": audit.get("period_start"),
+                "period_end": audit.get("period_end"),
+                "event_count": (audit.get("summary") or {}).get("event_count"),
+                "complete_count": (audit.get("summary") or {}).get("complete_count"),
+                "incomplete_count": (audit.get("summary") or {}).get("incomplete_count"),
+                "uploaded_filenames": [filename],
+                "xero_writes": bool(audit.get("xero_writes", False)),
+            },
+        }
+
+    def _resolve_event_finance_audit_period(
+        self,
+        params: dict,
+    ) -> tuple[date, date]:
+        until_text = self._clean_optional_iso_date(params.get("until"))
+        until = date.fromisoformat(until_text) if until_text else date.today()
+        since_text = self._clean_optional_iso_date(params.get("since"))
+        if since_text:
+            return date.fromisoformat(since_text), until
+        try:
+            months = int(params.get("months") or 6)
+        except (TypeError, ValueError):
+            months = 6
+        months = max(1, min(months, 24))
+        month_index = until.year * 12 + until.month - 1 - months
+        since_year, since_month_zero = divmod(month_index, 12)
+        since_month = since_month_zero + 1
+        since_day = min(until.day, calendar.monthrange(since_year, since_month)[1])
+        return date(since_year, since_month, since_day), until
+
+    @staticmethod
+    def _markdown_cell(value: Any) -> str:
+        return str(value or "").replace("|", "\\|").replace("\n", " ").strip()
+
+    def _event_finance_audit_markdown(self, audit: dict) -> str:
+        summary = audit.get("summary") or {}
+        requirements = audit.get("required_categories") or []
+        labels = {item.get("key"): item.get("label") for item in requirements}
+        lines = [
+            "# Event finance completeness audit",
+            "",
+            f"Period: {audit.get('period_start')} to {audit.get('period_end')}",
+            "",
+            (
+                f"Events: {summary.get('event_count', 0)}; complete: "
+                f"{summary.get('complete_count', 0)}; incomplete: "
+                f"{summary.get('incomplete_count', 0)}."
+            ),
+            "",
+            "> Missing means no tracked evidence was found in the period. It does not prove the event had no such revenue or cost.",
+            "",
+            "| Event | Date | Ticket sales | Sponsorship | Catering | Contractors | Missing |",
+            "|---|---|---:|---:|---:|---:|---|",
+        ]
+        symbols = {"present": "Yes", "missing": "Missing"}
+        for event in audit.get("events") or []:
+            categories = event.get("categories") or {}
+            start_at = str(event.get("start_at") or "")[:10] or "—"
+            missing = ", ".join(
+                str(labels.get(key) or key) for key in event.get("missing_categories") or []
+            ) or "—"
+            lines.append(
+                "| "
+                + " | ".join(
+                    [
+                        self._markdown_cell(event.get("event_name")),
+                        start_at,
+                        symbols.get((categories.get("ticket_sales") or {}).get("status"), "Missing"),
+                        symbols.get((categories.get("sponsorship_revenue") or {}).get("status"), "Missing"),
+                        symbols.get((categories.get("catering_cost") or {}).get("status"), "Missing"),
+                        symbols.get((categories.get("contractor_cost") or {}).get("status"), "Missing"),
+                        self._markdown_cell(missing),
+                    ]
+                )
+                + " |"
+            )
+
+        lines.extend(["", "## Evidence", ""])
+        for event in audit.get("events") or []:
+            lines.append(f"### {event.get('event_name')}")
+            lines.append("")
+            for requirement in requirements:
+                category = (event.get("categories") or {}).get(requirement.get("key")) or {}
+                evidence = category.get("evidence") or []
+                if not evidence:
+                    lines.append(f"- {requirement.get('label')}: **Missing**")
+                    continue
+                observations = []
+                for item in evidence:
+                    amount = int(item.get("amount_cents") or 0) / 100
+                    if item.get("source_type") == "xero_bank_transaction_line":
+                        context = "; ".join(
+                            value
+                            for value in (
+                                str(item.get("date") or ""),
+                                str(item.get("account_name") or item.get("account_code") or ""),
+                                str(item.get("contact_name") or ""),
+                                str(item.get("description") or ""),
+                                str(item.get("reference") or ""),
+                            )
+                            if value
+                        )
+                    else:
+                        context = f"{item.get('source_type')} {item.get('source_id')}"
+                    observations.append(f"AUD {amount:,.2f} ({context})")
+                lines.append(
+                    f"- {requirement.get('label')}: **Present** — "
+                    + "; ".join(observations)
+                )
+            lines.append("")
+
+        warnings = audit.get("account_resolution_warnings") or []
+        if warnings:
+            lines.extend(
+                [
+                    "## Account resolution warnings",
+                    "",
+                    "The following category accounts could not be resolved from Xero: "
+                    + ", ".join(warnings),
+                    "",
+                ]
+            )
+        lines.extend(["## Limitations", ""])
+        lines.extend(f"- {item}" for item in audit.get("limitations") or [])
+        lines.extend(["", "This audit is read-only and made no Xero writes.", ""])
+        return "\n".join(lines)
+
+    def _format_event_finance_audit(self, audit: dict, filename: str) -> str:
+        summary = audit.get("summary") or {}
+        event_count = int(summary.get("event_count") or 0)
+        if not event_count:
+            return (
+                f"*Event finance audit* — no events were found from {audit.get('period_start')} "
+                f"to {audit.get('period_end')}.\n📎 Uploaded `{filename}`.\n"
+                "Read-only: no Xero changes were made."
+            )
+        missing_counts = summary.get("missing_counts") or {}
+        labels = {
+            "ticket_sales": "ticket sales",
+            "sponsorship_revenue": "sponsorship",
+            "catering_cost": "catering",
+            "contractor_cost": "contractors",
+        }
+        lines = [
+            f"*Event finance audit* — {audit.get('period_start')} to {audit.get('period_end')}",
+            (
+                f"✅ {summary.get('complete_count', 0)} of {event_count} event(s) have all four "
+                f"categories; ⚠️ {summary.get('incomplete_count', 0)} are missing evidence."
+            ),
+            "Missing across events: "
+            + ", ".join(
+                f"{labels[key]} {int(missing_counts.get(key) or 0)}"
+                for key in labels
+            )
+            + ".",
+        ]
+        incomplete = [
+            event
+            for event in audit.get("events") or []
+            if event.get("completeness_status") == "incomplete"
+        ]
+        for event in incomplete[:10]:
+            missing = ", ".join(
+                labels.get(key, key) for key in event.get("missing_categories") or []
+            )
+            lines.append(f"• {event.get('event_name')}: missing {missing}")
+        if len(incomplete) > 10:
+            lines.append(f"• …and {len(incomplete) - 10} more in the attachment.")
+        if audit.get("account_resolution_warnings"):
+            lines.append("⚠️ One or more expected Xero accounts could not be resolved; see the attachment.")
+        lines.extend(
+            [
+                "",
+                f"📎 Uploaded `{filename}` with every event and its evidence.",
+                "Read-only: no Xero changes were made. “Missing” means no tracked evidence in the period, not proof the category did not exist.",
+            ]
+        )
+        return "\n".join(lines)
 
     def _resolve_reconciliation_days(self, params: dict) -> int:
         raw = params.get("days")

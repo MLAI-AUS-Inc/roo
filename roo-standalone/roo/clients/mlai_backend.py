@@ -1722,6 +1722,32 @@ class MLAIBackendClient:
         self._raise_for_status_or_backend_unavailable(response)
         return response.json()
 
+    async def get_event_finance_audit(
+        self,
+        slack_user_id: str,
+        *,
+        since: str,
+        until: str,
+        domain: str = "mlai.au",
+    ) -> dict:
+        """Get the read-only event revenue/cost completeness audit."""
+        response = await self._request(
+            "GET",
+            "/api/v1/integrations/reconciliation/event-finance-audit",
+            params={
+                "slack_user_id": self._clean_slack_id(slack_user_id),
+                "domain": str(domain or "mlai.au").strip().lower(),
+                "since": since,
+                "until": until,
+            },
+            timeout=90.0,
+            transport_retries=1,
+            retry_backoff_seconds=0.25,
+            circuit_breaker=True,
+        )
+        self._raise_for_status_or_backend_unavailable(response)
+        return response.json()
+
     async def get_data_catalog(self, requester_slack_id: str) -> dict:
         """Get the requester's curated read-only data resource catalog."""
         response = await self._request(

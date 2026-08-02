@@ -1,0 +1,12 @@
+- id: event-finance-audit-user-phrase
+  text: "for all the events we have, they should usually have ticket sales and sponsorship as revenue, and catering and contractors as costs. audit all events in the last 6 months and tell me which have these and which are missing"
+  expect:
+    skill: reconciliation-report
+    action: audit_event_finances
+    params_subset: {months: 6}
+  tags: [event-finance-audit, v2]
+
+- id: event-finance-audit-missing-categories
+  text: "which recent events are missing sponsorship revenue, catering, or contractor expenses?"
+  expect: {skill: reconciliation-report, action: audit_event_finances}
+  tags: [event-finance-audit, v2, paraphrase]
