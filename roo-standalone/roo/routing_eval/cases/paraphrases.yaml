@@ -92,6 +92,20 @@
   expect: {skill: content-factory}
   tags: [paraphrase]
 
+# --- committee-candidate-emails ---
+- id: para-committee-list-eligible
+  text: "show me all MLAI emails for people with at least 100 earned Roo points"
+  expect: {skill: committee-candidate-emails, action: list_eligible_emails}
+  tags: [paraphrase]
+- id: para-committee-email-export
+  text: "give me the email list for eligible committee contributors"
+  expect: {skill: committee-candidate-emails, action: list_eligible_emails}
+  tags: [paraphrase]
+- id: para-committee-luma-copy
+  text: "export emails for members with 100 or more lifetime earned points so Alisa can invite them in Luma"
+  expect: {skill: committee-candidate-emails, action: list_eligible_emails}
+  tags: [paraphrase]
+
 # --- mlai-points ---
 - id: para-points-how-many
   text: "how many points do I have right now?"

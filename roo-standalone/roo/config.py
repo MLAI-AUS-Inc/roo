@@ -16,6 +16,7 @@ class Settings(BaseSettings):
 
     PUBLIC_DEFAULT_SKILLS: ClassVar[frozenset[str]] = frozenset(
         {
+            "committee-candidate-emails",
             "connect-users",
             "content-factory",
             "github-integration",
