@@ -7,8 +7,12 @@ avoid_when: >
   requests to manually grant points.
 examples:
   - text: "Hi, I'm Mei, a data engineer building scheduling software for allied-health clinics."
+  - text: "Hi, I'm Mei."
+  - text: "We're Acme, building scheduling software for allied-health clinics."
   - text: "I'm Carlos, a first-time founder. We're exploring an AI tutor for apprentices."
   - text: "Hey, I'm Nisha from Melbourne. My startup helps hospitality teams reduce food waste."
 negative_examples:
+  - text: "Hey everyone!"
+    instead: ignore
   - text: "give me four Roo points"
     instead: mlai-points

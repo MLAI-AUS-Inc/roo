@@ -53,6 +53,14 @@ async def missing_startup_llm(*args, **kwargs):
     )
 
 
+async def startup_only_llm(*args, **kwargs):
+    return FakeLLMResponse(
+        '{"introduces_person": false, "describes_startup": true, '
+        '"confidence": 0.97, "missing_fields": ["person"], '
+        '"reason": "brief startup introduction"}'
+    )
+
+
 def make_store(tmp_path):
     return intro.StartHereIntroductionStore(tmp_path / "start-here.db")
 
@@ -98,8 +106,16 @@ def test_normalize_intro_event_accepts_canonical_edits_and_rejects_threads_and_b
     bot["bot_id"] = "B123"
     assert intro.normalize_intro_event(bot) is None
 
+    file_share = message_event(text="I'm Jordan, building tools for tradies.")
+    file_share["subtype"] = "file_share"
+    assert intro.normalize_intro_event(file_share) is not None
 
-def test_parse_classification_fails_closed_for_non_boolean_true():
+    channel_join = message_event(text="Jordan joined the channel")
+    channel_join["subtype"] = "channel_join"
+    assert intro.normalize_intro_event(channel_join) is None
+
+
+def test_parse_classification_accepts_either_valid_intro_signal():
     result = intro.parse_classification(
         '{"introduces_person": "true", "describes_startup": true, '
         '"confidence": 0.99, "missing_fields": []}'
@@ -108,7 +124,43 @@ def test_parse_classification_fails_closed_for_non_boolean_true():
     assert result.introduces_person is False
     assert result.describes_startup is True
     assert "person" in result.missing_fields
+    assert result.qualifies(min_confidence=0.8) is True
+
+
+def test_parse_classification_rejects_when_neither_intro_signal_is_present():
+    result = intro.parse_classification(
+        '{"introduces_person": false, "describes_startup": false, '
+        '"confidence": 0.99, "missing_fields": ["person", "startup"]}'
+    )
+
     assert result.qualifies(min_confidence=0.8) is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("text", "llm_chat"),
+    [
+        ("I'm Jordan.", missing_startup_llm),
+        ("We're Acme, building better invoicing.", startup_only_llm),
+    ],
+)
+async def test_flexible_person_or_startup_intro_qualifies(
+    tmp_path, monkeypatch, text, llm_chat
+):
+    store = make_store(tmp_path)
+    client = FakeAwardClient()
+    monkeypatch.setattr(intro, "post_award_notification", lambda submission: None)
+
+    result = await intro.handle_start_here_intro(
+        message_event(text=text),
+        store=store,
+        client=client,
+        llm_chat=llm_chat,
+        min_confidence=0.8,
+    )
+
+    assert result["status"] == "awarded"
+    assert client.calls == [("UNEW", "CSTART")]
 
 
 @pytest.mark.asyncio
@@ -145,16 +197,15 @@ async def test_valid_first_intro_awards_four_points_once(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_incomplete_intro_requests_edit_without_award(tmp_path):
+async def test_greeting_only_post_requests_edit_without_award(tmp_path):
     store = make_store(tmp_path)
     client = FakeAwardClient()
     feedback = []
 
     result = await intro.handle_start_here_intro(
-        message_event(text="Hi, I'm Jordan and I work in product management."),
+        message_event(text="Hey everyone!"),
         store=store,
         client=client,
-        llm_chat=missing_startup_llm,
         min_confidence=0.8,
         post_feedback=lambda **kwargs: feedback.append(kwargs),
     )
@@ -162,7 +213,7 @@ async def test_incomplete_intro_requests_edit_without_award(tmp_path):
     assert result["status"] == "awaiting_edit"
     assert client.calls == []
     assert feedback[0]["thread_ts"] == "111.000"
-    assert "what your startup does" in feedback[0]["text"]
+    assert "either yourself or your startup" in feedback[0]["text"]
     assert "edit this original post" in feedback[0]["text"]
 
 

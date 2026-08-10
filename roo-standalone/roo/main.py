@@ -2189,7 +2189,7 @@ async def slack_events(
             intro_enabled = True
             intro_channel_name = "_start-here"
         start_here_id = get_channel_id(intro_channel_name) if intro_enabled else None
-        if start_here_id and event.get("channel") == start_here_id and not event.get("subtype"):
+        if start_here_id and event.get("channel") == start_here_id:
             if event.get("thread_ts"):
                 print(f"🧵 Ignoring thread reply in #_start-here from {event.get('user')}")
                 return JSONResponse(status_code=200, content={})

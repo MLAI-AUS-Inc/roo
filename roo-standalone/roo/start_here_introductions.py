@@ -93,8 +93,7 @@ class IntroClassification:
 
     def qualifies(self, *, min_confidence: float) -> bool:
         return (
-            self.introduces_person
-            and self.describes_startup
+            (self.introduces_person or self.describes_startup)
             and self.confidence >= min_confidence
         )
 
@@ -105,7 +104,7 @@ def normalize_intro_event(event: dict[str, Any]) -> Optional[IntroEvent]:
 
     subtype = str(event.get("subtype") or "")
     is_edit = subtype == "message_changed"
-    if subtype and not is_edit:
+    if subtype not in {"", "file_share", "message_changed"}:
         return None
 
     message = event.get("message") if is_edit else event
@@ -144,13 +143,14 @@ def build_classification_messages(text: str) -> list[dict[str, str]]:
                 "Return only JSON with keys introduces_person, describes_startup, "
                 "confidence, missing_fields, and reason. "
                 "introduces_person is true when the writer shares something identifying "
-                "or personal about themselves, such as their name, role, background, skills, "
-                "location, interests, or founder journey. "
-                "describes_startup is true when they describe a startup, venture, project, "
-                "or startup idea they are building or exploring, including what it does, "
-                "the problem, intended users, or current stage. A legal company name is not required. "
-                "Both must be substantively present. Greetings, links, slogans, requests for help, "
-                "and descriptions of a company with no personal introduction do not satisfy both. "
+                "or personal about themselves, even briefly, such as their name, role, background, "
+                "skills, location, interests, founder journey, or that they are new to the community. "
+                "describes_startup is true when they introduce a startup, venture, project, or idea, "
+                "even briefly, by naming it or mentioning what they are building or exploring. Details "
+                "about the problem, users, or stage are welcome but not required. Be deliberately "
+                "generous: either a personal introduction OR a startup/project introduction is enough. "
+                "Only greeting-only posts, link-only posts, generic requests, and unrelated chatter "
+                "should have both fields false. "
                 "missing_fields must contain only 'person' and/or 'startup'."
             ),
         },
@@ -161,9 +161,11 @@ def build_classification_messages(text: str) -> list[dict[str, str]]:
                 '"Hi, I\'m Priya, a product designer in Melbourne. I\'m building a tool that helps clinics reduce appointment no-shows." '
                 '-> {"introduces_person": true, "describes_startup": true, "confidence": 0.99, "missing_fields": [], "reason": "introduces the founder and explains the startup"}\n'
                 '"Hi, I\'m Alex and I work in data science." '
-                '-> {"introduces_person": true, "describes_startup": false, "confidence": 0.98, "missing_fields": ["startup"], "reason": "no startup described"}\n'
-                '"We make AI agents for accountants." '
-                '-> {"introduces_person": false, "describes_startup": true, "confidence": 0.95, "missing_fields": ["person"], "reason": "startup described without a personal introduction"}\n'
+                '-> {"introduces_person": true, "describes_startup": false, "confidence": 0.99, "missing_fields": ["startup"], "reason": "brief personal introduction"}\n'
+                '"We\'re Acme, building AI agents for accountants." '
+                '-> {"introduces_person": false, "describes_startup": true, "confidence": 0.99, "missing_fields": ["person"], "reason": "brief startup introduction"}\n'
+                '"I\'m Mei." '
+                '-> {"introduces_person": true, "describes_startup": false, "confidence": 0.99, "missing_fields": ["startup"], "reason": "shares the writer\'s name"}\n'
                 '"Hey everyone!" '
                 '-> {"introduces_person": false, "describes_startup": false, "confidence": 0.99, "missing_fields": ["person", "startup"], "reason": "greeting only"}\n\n'
                 f"Post to classify:\n{text[:4000]}"
@@ -229,9 +231,26 @@ def parse_classification(raw_content: str) -> IntroClassification:
 
 
 def _obviously_incomplete(text: str) -> Optional[IntroClassification]:
-    words = re.findall(r"[A-Za-z0-9][A-Za-z0-9'-]*", str(text or ""))
     non_url_text = re.sub(r"https?://\S+", "", str(text or "")).strip()
-    if len(words) >= 5 and non_url_text:
+    words = [
+        word.lower()
+        for word in re.findall(r"[A-Za-z0-9][A-Za-z0-9'-]*", non_url_text)
+    ]
+    greeting_only_words = {
+        "all",
+        "day",
+        "everyone",
+        "folks",
+        "g'day",
+        "good",
+        "hello",
+        "hey",
+        "hi",
+        "morning",
+        "team",
+        "there",
+    }
+    if words and any(word not in greeting_only_words for word in words):
         return None
     return IntroClassification(
         introduces_person=False,
@@ -766,16 +785,10 @@ def is_retryable_award_exception(exc: Exception) -> bool:
 
 
 def build_incomplete_message(slack_user_id: str, missing_fields: tuple[str, ...]) -> str:
-    missing = set(missing_fields)
-    if not missing or missing == {"person", "startup"}:
-        requirement = "a short introduction to you and what your startup does"
-    elif "person" in missing:
-        requirement = "a short introduction to you"
-    else:
-        requirement = "what your startup does, the problem it tackles, or who it helps"
     return (
         f"Thanks <@{slack_user_id}>! Before I can award the 4 Roo points, "
-        f"please edit this original post to add {requirement}. "
+        "please edit this original post to briefly introduce either yourself or "
+        "your startup, project, or idea. "
         "I'll check the edit automatically—please don't create a second introduction post."
     )
 
@@ -789,7 +802,7 @@ def post_award_notification(submission: dict[str, Any]) -> None:
         thread_ts=str(submission["canonical_message_ts"]),
         text=(
             f"Welcome <@{submission['slack_user_id']}>! You've earned {points} Roo points "
-            "for introducing yourself and your startup."
+            "for introducing yourself or your startup."
         ),
     )
 
