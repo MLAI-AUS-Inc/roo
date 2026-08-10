@@ -1899,7 +1899,8 @@ def test_linear_meeting_file_request_helper_allows_short_attached_file_prompt():
 
 
 @pytest.mark.asyncio
-async def test_slack_events_start_here_message_triggers_intro_handler(monkeypatch):
+@pytest.mark.parametrize("subtype", [None, "file_share"])
+async def test_slack_events_start_here_message_triggers_intro_handler(monkeypatch, subtype):
     handled_events = []
     scheduled_tasks = []
     real_create_task = asyncio.create_task
@@ -1916,14 +1917,16 @@ async def test_slack_events_start_here_message_triggers_intro_handler(monkeypatc
     monkeypatch.setattr(main_module, "_handle_start_here_intro", fake_handle_start_here_intro)
     monkeypatch.setattr(main_module.asyncio, "create_task", fake_create_task)
 
-    payload = {
-        "event": {
-            "type": "message",
-            "user": "UINTRO",
-            "channel": "CSTART",
-            "ts": "111.222",
-        }
+    event = {
+        "type": "message",
+        "user": "UINTRO",
+        "channel": "CSTART",
+        "ts": "111.222",
+        "text": "I'm Jordan, building tools for tradies.",
     }
+    if subtype:
+        event["subtype"] = subtype
+    payload = {"event": event}
 
     class FakeRequest:
         async def json(self):
