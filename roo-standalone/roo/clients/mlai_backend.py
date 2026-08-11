@@ -3298,6 +3298,7 @@ class MLAIBackendClient:
         root_text: str,
         social_post_url: Optional[str] = None,
         timeout: float = 30.0,
+        recheck_insufficient_points: bool = False,
     ) -> dict:
         """Atomically price and debit one boost post in mlai-backend."""
 
@@ -3310,6 +3311,7 @@ class MLAIBackendClient:
             "root_text": str(root_text or ""),
             "social_post_url": str(social_post_url or ""),
             "source": "roo_slack_event",
+            "recheck_insufficient_points": bool(recheck_insufficient_points),
         }
         response = await self._request(
             "POST",

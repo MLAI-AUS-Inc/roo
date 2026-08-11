@@ -1702,6 +1702,30 @@ async def test_reaction_approval_posts_confirmation(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_boost_recheck_reaction_short_circuits_points_request_approval(monkeypatch):
+    calls = []
+
+    async def fake_boost_recheck(event):
+        calls.append(event)
+        return {"handled": True, "status": "restored"}
+
+    async def fail_points_lookup(*args, **kwargs):
+        raise AssertionError("A handled boost recheck must not enter points approval")
+
+    monkeypatch.setattr(main_module, "handle_boost_recheck_reaction", fake_boost_recheck)
+    monkeypatch.setattr(main_module, "_resolve_points_request_for_reaction", fail_points_lookup)
+
+    event = {
+        "user": "UFOUNDER",
+        "reaction": "white_check_mark",
+        "item": {"type": "message", "channel": "CBOOST", "ts": "222.333"},
+    }
+    await main_module._handle_reaction_added(event)
+
+    assert calls == [event]
+
+
+@pytest.mark.asyncio
 async def test_reaction_approval_failure_dms_reactor(monkeypatch):
     posted_messages = []
     direct_messages = []
