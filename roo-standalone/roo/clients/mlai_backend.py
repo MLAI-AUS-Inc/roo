@@ -1468,6 +1468,25 @@ class MLAIBackendClient:
         )
         response.raise_for_status()
         return response.json()
+
+    async def list_committee_candidate_emails(
+        self,
+        requester_slack_id: str,
+    ) -> dict:
+        """Return eligible member emails for an authorised committee admin."""
+        response = await self._request(
+            "POST",
+            f"{self._points_base}/committee-candidates/emails/",
+            json={
+                "requester_slack_id": self._clean_slack_id(requester_slack_id),
+            },
+            timeout=10.0,
+            transport_retries=1,
+            retry_backoff_seconds=0.25,
+            circuit_breaker=True,
+        )
+        response.raise_for_status()
+        return response.json()
     
     async def get_history(self, slack_user_id: str, limit: int = 10) -> List[dict]:
         """Get recent ledger entries for a user."""
