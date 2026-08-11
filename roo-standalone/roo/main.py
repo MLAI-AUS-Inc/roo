@@ -61,6 +61,7 @@ from .slack_client import (
 from .coworking_booking_intents import coworking_booking_retry_loop
 from .boost_moderation import (
     boost_post_retry_loop,
+    handle_boost_recheck_reaction,
     handle_boost_root_edit,
     handle_boost_root_post,
     mark_boost_root_removed,
@@ -2489,6 +2490,10 @@ async def _handle_reaction_added(event: dict):
     print(f"✅ Reaction approval attempt from {reactor_user_id} on {channel_id}:{message_ts}")
 
     try:
+        boost_recheck = await handle_boost_recheck_reaction(event)
+        if boost_recheck.get("handled"):
+            return
+
         import httpx
         from .clients.mlai_backend import MLAIBackendClient
 

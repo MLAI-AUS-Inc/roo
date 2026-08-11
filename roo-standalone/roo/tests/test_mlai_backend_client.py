@@ -125,12 +125,14 @@ async def test_admit_boost_post_uses_strict_roo_key_headers(monkeypatch):
         poster_slack_id="<@UPOSTER1>",
         root_text="Boost this",
         social_post_url="https://www.linkedin.com/posts/example-123",
+        recheck_insufficient_points=True,
     )
 
     assert result["status"] == "approved"
     assert captured["method"] == "POST"
     assert captured["endpoint"] == "/api/v1/points/boost-posts/admissions/"
     assert captured["kwargs"]["json"]["poster_slack_id"] == "UPOSTER1"
+    assert captured["kwargs"]["json"]["recheck_insufficient_points"] is True
     assert "use_admin_headers" not in captured["kwargs"]
 
 

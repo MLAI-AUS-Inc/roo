@@ -16,7 +16,7 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 import httpx
 
@@ -35,10 +35,21 @@ TERMINAL_REJECTION_STATUSES = {
     "blocked",
 }
 RETRYABLE_STATUSES = {"pending", "retry"}
+BOOST_RECHECK_REACTIONS = frozenset({"white_check_mark", "heavy_check_mark"})
 
 
 def _now() -> float:
     return time.time()
+
+
+def _json_object(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    try:
+        parsed = json.loads(str(value or "{}"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
 def boost_post_submission_key(
@@ -102,8 +113,11 @@ class BoostPostAdmissionStore:
                         last_error TEXT,
                         pending_notified_at REAL,
                         decision_notified_at REAL,
+                        decision_message_ts TEXT,
                         dm_notified_at REAL,
                         deleted_at REAL,
+                        restore_requested_at REAL,
+                        restored_message_ts TEXT,
                         created_at REAL NOT NULL,
                         updated_at REAL NOT NULL,
                         UNIQUE(channel_id, root_message_ts)
@@ -118,10 +132,25 @@ class BoostPostAdmissionStore:
                     conn.execute(
                         "ALTER TABLE boost_post_admissions ADD COLUMN pending_notified_at REAL"
                     )
+                for column, column_type in (
+                    ("decision_message_ts", "TEXT"),
+                    ("restore_requested_at", "REAL"),
+                    ("restored_message_ts", "TEXT"),
+                ):
+                    if column not in columns:
+                        conn.execute(
+                            f"ALTER TABLE boost_post_admissions ADD COLUMN {column} {column_type}"
+                        )
                 conn.execute(
                     """
                     CREATE INDEX IF NOT EXISTS idx_boost_post_admissions_due
                     ON boost_post_admissions (status, next_attempt_at)
+                    """
+                )
+                conn.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_boost_post_decision_message
+                    ON boost_post_admissions (channel_id, decision_message_ts)
                     """
                 )
             self._initialized = True
@@ -138,6 +167,21 @@ class BoostPostAdmissionStore:
                     """SELECT * FROM boost_post_admissions
                        WHERE channel_id = ? AND root_message_ts = ?""",
                     (channel_id, root_message_ts),
+                ).fetchone()
+            )
+
+    def get_for_decision_message(
+        self,
+        channel_id: str,
+        decision_message_ts: str,
+    ) -> dict[str, Any] | None:
+        self._ensure_schema()
+        with self._connect() as conn:
+            return self._row(
+                conn.execute(
+                    """SELECT * FROM boost_post_admissions
+                       WHERE channel_id = ? AND decision_message_ts = ?""",
+                    (channel_id, decision_message_ts),
                 ).fetchone()
             )
 
@@ -269,6 +313,290 @@ class BoostPostAdmissionStore:
         claimed = [self.claim_one(row_id, owner=owner) for row_id in ids]
         return [row for row in claimed if row is not None]
 
+    def claim_recheck(
+        self,
+        admission_id: int,
+        *,
+        owner: str,
+        lease_seconds: float = DEFAULT_PROCESSING_LEASE_SECONDS,
+    ) -> dict[str, Any] | None:
+        """Claim one explicit founder-requested balance recheck."""
+
+        self._ensure_schema()
+        now = _now()
+        with self._lock, self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT * FROM boost_post_admissions WHERE id = ?",
+                (int(admission_id),),
+            ).fetchone()
+            if row is None:
+                conn.execute("COMMIT")
+                return None
+            current = dict(row)
+            status = str(current.get("status") or "")
+            claimable = status in {
+                "deleted",
+                "delete_failed",
+                "rejected_insufficient_points",
+            } or (
+                status == "recheck_processing"
+                and float(current.get("locked_until") or 0) <= now
+            )
+            backend_result = _json_object(current.get("backend_result_json"))
+            backend_status = str(
+                backend_result.get("status") or backend_result.get("code") or ""
+            ).strip().lower()
+            if not claimable or backend_status not in {
+                "insufficient_points",
+                "insufficient_balance",
+                "not_enough_points",
+            }:
+                conn.execute("COMMIT")
+                return None
+            conn.execute(
+                """
+                UPDATE boost_post_admissions
+                SET status = 'recheck_processing', locked_by = ?, locked_until = ?,
+                    last_error = NULL, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    owner,
+                    now + max(10.0, float(lease_seconds)),
+                    now,
+                    int(admission_id),
+                ),
+            )
+            claimed = conn.execute(
+                "SELECT * FROM boost_post_admissions WHERE id = ?",
+                (int(admission_id),),
+            ).fetchone()
+            conn.execute("COMMIT")
+        return self._row(claimed)
+
+    def mark_recheck_insufficient(
+        self,
+        admission_id: int,
+        result: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Return a completed recheck to its removed or rejected state."""
+
+        self._ensure_schema()
+        current = self.get_by_id(admission_id)
+        status = (
+            "deleted"
+            if current.get("deleted_at") is not None
+            else "rejected_insufficient_points"
+        )
+        now = _now()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE boost_post_admissions
+                SET status = ?, locked_by = NULL, locked_until = NULL,
+                    base_cost_points = ?, charged_points = ?, discount_applied = ?,
+                    new_balance = ?, backend_result_json = ?, rejection_reason = ?,
+                    last_error = NULL, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    status,
+                    int(result.get("base_cost_points") or 8),
+                    result.get("charged_points"),
+                    1 if bool(result.get("discount_applied")) else 0,
+                    result.get("new_balance", result.get("balance_before")),
+                    json.dumps(result, sort_keys=True, default=str),
+                    str(result.get("message") or "Insufficient Roo points"),
+                    now,
+                    int(admission_id),
+                ),
+            )
+        return self.get_by_id(admission_id)
+
+    def mark_recheck_failed(self, admission_id: int, *, error: str) -> dict[str, Any]:
+        self._ensure_schema()
+        current = self.get_by_id(admission_id)
+        status = (
+            "deleted"
+            if current.get("deleted_at") is not None
+            else "rejected_insufficient_points"
+        )
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE boost_post_admissions
+                SET status = ?, locked_by = NULL, locked_until = NULL,
+                    last_error = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (status, error[:1000], _now(), int(admission_id)),
+            )
+        return self.get_by_id(admission_id)
+
+    def request_restore(self, admission_id: int) -> dict[str, Any]:
+        self._ensure_schema()
+        now = _now()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE boost_post_admissions
+                SET restore_requested_at = COALESCE(restore_requested_at, ?),
+                    next_attempt_at = ?, updated_at = ?
+                WHERE id = ? AND status = 'approved'
+                """,
+                (now, now, now, int(admission_id)),
+            )
+        return self.get_by_id(admission_id)
+
+    def claim_restore(
+        self,
+        admission_id: int,
+        *,
+        owner: str,
+        lease_seconds: float = DEFAULT_PROCESSING_LEASE_SECONDS,
+    ) -> dict[str, Any] | None:
+        self._ensure_schema()
+        now = _now()
+        with self._lock, self._connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE boost_post_admissions
+                SET status = 'restoring', locked_by = ?, locked_until = ?, updated_at = ?
+                WHERE id = ? AND restored_message_ts IS NULL
+                  AND restore_requested_at IS NOT NULL AND next_attempt_at <= ?
+                  AND (
+                    status = 'approved'
+                    OR (status = 'restoring' AND COALESCE(locked_until, 0) <= ?)
+                  )
+                """,
+                (
+                    owner,
+                    now + max(10.0, float(lease_seconds)),
+                    now,
+                    int(admission_id),
+                    now,
+                    now,
+                ),
+            )
+            if cursor.rowcount != 1:
+                return None
+        return self.get_by_id(admission_id)
+
+    def claim_due_restores(self, *, limit: int, owner: str) -> list[dict[str, Any]]:
+        self._ensure_schema()
+        now = _now()
+        with self._connect() as conn:
+            ids = [
+                int(row[0])
+                for row in conn.execute(
+                    """
+                    SELECT id FROM boost_post_admissions
+                    WHERE restored_message_ts IS NULL
+                      AND restore_requested_at IS NOT NULL AND next_attempt_at <= ?
+                      AND (
+                        status = 'approved'
+                        OR (status = 'restoring' AND COALESCE(locked_until, 0) <= ?)
+                      )
+                    ORDER BY next_attempt_at, id LIMIT ?
+                    """,
+                    (now, now, max(1, int(limit))),
+                ).fetchall()
+            ]
+        claimed = [self.claim_restore(row_id, owner=owner) for row_id in ids]
+        return [row for row in claimed if row is not None]
+
+    def mark_restore_failed(self, admission_id: int, *, error: str) -> dict[str, Any]:
+        self._ensure_schema()
+        current = self.get_by_id(admission_id)
+        attempt_count = int(current.get("attempt_count") or 1) + 1
+        now = _now()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE boost_post_admissions
+                SET status = 'approved', attempt_count = ?, next_attempt_at = ?,
+                    locked_by = NULL, locked_until = NULL, last_error = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    attempt_count,
+                    now + _retry_delay(attempt_count),
+                    error[:1000],
+                    now,
+                    int(admission_id),
+                ),
+            )
+        return self.get_by_id(admission_id)
+
+    def mark_restored(
+        self,
+        admission_id: int,
+        *,
+        restored_message_ts: str,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Record the bot-restored root as an approved alias of the paid campaign."""
+
+        self._ensure_schema()
+        source = self.get_by_id(admission_id)
+        now = _now()
+        restored_key = boost_post_submission_key(
+            str(source["workspace_id"]),
+            str(source["channel_id"]),
+            restored_message_ts,
+        )
+        with self._lock, self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO boost_post_admissions (
+                    submission_key, workspace_id, channel_id, root_message_ts,
+                    poster_slack_id, root_text, social_post_url, status,
+                    next_attempt_at, backend_admission_id, base_cost_points,
+                    charged_points, discount_applied, new_balance, backend_result_json,
+                    decision_notified_at, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'approved', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    restored_key,
+                    source["workspace_id"],
+                    source["channel_id"],
+                    restored_message_ts,
+                    source["poster_slack_id"],
+                    source.get("root_text") or "",
+                    source.get("social_post_url") or "",
+                    now,
+                    source.get("backend_admission_id"),
+                    source.get("base_cost_points"),
+                    source.get("charged_points"),
+                    source.get("discount_applied"),
+                    source.get("new_balance"),
+                    source.get("backend_result_json"),
+                    now,
+                    now,
+                    now,
+                ),
+            )
+            alias = conn.execute(
+                """SELECT * FROM boost_post_admissions
+                   WHERE channel_id = ? AND root_message_ts = ?""",
+                (source["channel_id"], restored_message_ts),
+            ).fetchone()
+            if alias is None or str(alias["poster_slack_id"]) != str(source["poster_slack_id"]):
+                conn.execute("ROLLBACK")
+                raise RuntimeError("Restored boost root conflicts with an existing admission")
+            conn.execute(
+                """
+                UPDATE boost_post_admissions
+                SET status = 'approved', restored_message_ts = ?, locked_by = NULL,
+                    locked_until = NULL, last_error = NULL, updated_at = ?
+                WHERE id = ?
+                """,
+                (restored_message_ts, now, int(admission_id)),
+            )
+            conn.execute("COMMIT")
+        return self.get_by_id(admission_id), dict(alias)
+
     def mark_approved(self, admission_id: int, result: dict[str, Any]) -> dict[str, Any]:
         self._ensure_schema()
         now = _now()
@@ -361,14 +689,30 @@ class BoostPostAdmissionStore:
             )
         return self.get_by_id(admission_id)
 
-    def mark_notification(self, admission_id: int, *, dm: bool = False) -> None:
+    def mark_notification(
+        self,
+        admission_id: int,
+        *,
+        dm: bool = False,
+        message_ts: str | None = None,
+    ) -> None:
         column = "dm_notified_at" if dm else "decision_notified_at"
         self._ensure_schema()
         with self._connect() as conn:
-            conn.execute(
-                f"UPDATE boost_post_admissions SET {column} = ?, updated_at = ? WHERE id = ?",
-                (_now(), _now(), int(admission_id)),
-            )
+            if dm or not message_ts:
+                conn.execute(
+                    f"UPDATE boost_post_admissions SET {column} = ?, updated_at = ? WHERE id = ?",
+                    (_now(), _now(), int(admission_id)),
+                )
+            else:
+                conn.execute(
+                    """
+                    UPDATE boost_post_admissions
+                    SET decision_notified_at = ?, decision_message_ts = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (_now(), message_ts, _now(), int(admission_id)),
+                )
 
     def mark_pending_notification(self, admission_id: int) -> None:
         self._ensure_schema()
@@ -481,6 +825,20 @@ def boost_reward_admission_decision(
     return "pending"
 
 
+def boost_reward_root_poster(
+    channel_id: str,
+    root_message_ts: str,
+    *,
+    store: BoostPostAdmissionStore | None = None,
+) -> str:
+    """Return the attributed founder for an approved original or restored root."""
+
+    admission = (store or get_boost_post_store()).get(channel_id, root_message_ts)
+    if not admission or str(admission.get("status") or "") != "approved":
+        return ""
+    return str(admission.get("poster_slack_id") or "")
+
+
 def _backend_error_payload(exc: Exception) -> tuple[str, dict[str, Any]]:
     if not isinstance(exc, httpx.HTTPStatusError) or exc.response is None:
         return "", {}
@@ -523,14 +881,7 @@ def _approval_notice(admission: dict[str, Any]) -> str:
 def _backend_result(admission: dict[str, Any]) -> dict[str, Any]:
     """Return the stored backend decision without trusting its shape."""
 
-    raw = admission.get("backend_result_json")
-    if isinstance(raw, dict):
-        return raw
-    try:
-        parsed = json.loads(str(raw or "{}"))
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
+    return _json_object(admission.get("backend_result_json"))
 
 
 def _rejection_notice(admission: dict[str, Any]) -> str:
@@ -555,8 +906,12 @@ def _rejection_notice(admission: dict[str, Any]) -> str:
             f"<@{poster}> I couldn't approve this boost because you don't have enough Roo points. "
             f"{balance_detail}{discount_detail}"
             "I'll remove this message so nobody engages with an unapproved campaign. "
-            "Earn enough points, then create a new top-level post with the campaign. "
-            "You can DM me “what's my points balance?” at any time."
+            "You can earn more points by liking or meaningfully engaging with other founders' "
+            "posts in this channel—helping everyone get more engagement—or buy a fixed Top-up "
+            "Roo Points pack by DMing me `topup` for a private Stripe Checkout link. "
+            "Once you have enough points, react to this Roo guidance reply with ✅ or ✔️. "
+            "I'll recheck your balance and restore your post automatically. "
+            "To check your balance, DM me `points` or ask “what's my points balance?”."
         )
     if status == "rejected_member_unlinked":
         return (
@@ -588,12 +943,20 @@ def _post_decision_notice(
 
         post_message_fn = post_message
     try:
-        post_message_fn(
+        response = post_message_fn(
             channel=str(admission["channel_id"]),
             thread_ts=str(admission["root_message_ts"]),
             text=text,
         )
-        store.mark_notification(int(admission["id"]))
+        response_ts = ""
+        if isinstance(response, dict):
+            response_ts = str(response.get("ts") or "")
+        elif hasattr(response, "get"):
+            response_ts = str(response.get("ts") or "")
+        store.mark_notification(
+            int(admission["id"]),
+            message_ts=response_ts or None,
+        )
     except Exception as exc:  # noqa: BLE001 - Slack SDK errors vary by transport.
         print(
             "BOOST_POST_NOTICE_FAILED "
@@ -676,6 +1039,232 @@ def _moderate_rejected_root(
         ok=bool(getattr(result, "ok", False)),
         error=getattr(result, "error_code", None),
     )
+
+
+def _post_recheck_feedback(
+    admission: dict[str, Any],
+    text: str,
+    *,
+    post_message_fn: Callable[..., Any] | None = None,
+) -> None:
+    if post_message_fn is None:
+        from .slack_client import post_message
+
+        post_message_fn = post_message
+    try:
+        post_message_fn(
+            channel=str(admission["channel_id"]),
+            thread_ts=str(admission["root_message_ts"]),
+            text=text,
+        )
+    except Exception as exc:  # noqa: BLE001 - feedback must not roll back the recheck.
+        print(
+            "BOOST_POST_RECHECK_FEEDBACK_FAILED "
+            f"admission_id={admission.get('id')} error_type={exc.__class__.__name__}"
+        )
+
+
+def _restored_boost_text(admission: dict[str, Any]) -> str:
+    poster = str(admission.get("poster_slack_id") or "")
+    root_text = str(admission.get("root_text") or "").strip()
+    heading = (
+        f":white_check_mark: Restored for <@{poster}> after Roo confirmed the points charge."
+    )
+    return f"{heading}\n\n{root_text}" if root_text else heading
+
+
+async def process_boost_restore(
+    admission: dict[str, Any],
+    *,
+    store: BoostPostAdmissionStore | None = None,
+    claimed: bool = False,
+    owner: str | None = None,
+    post_message_fn: Callable[..., Any] | None = None,
+) -> dict[str, Any]:
+    """Repost a paid, previously deleted campaign and register its approved alias."""
+
+    store = store or get_boost_post_store()
+    worker = owner or f"roo-boost-restore-{uuid4().hex}"
+    current = admission if claimed else store.claim_restore(int(admission["id"]), owner=worker)
+    if current is None:
+        return {"status": "restore_not_due"}
+    if post_message_fn is None:
+        from .slack_client import post_message
+
+        post_message_fn = post_message
+    try:
+        response = post_message_fn(
+            channel=str(current["channel_id"]),
+            text=_restored_boost_text(current),
+            client_msg_id=str(
+                uuid5(NAMESPACE_URL, f"{current['submission_key']}:restore")
+            ),
+            metadata={
+                "event_type": "roo_restored_boost",
+                "event_payload": {
+                    "admission_id": str(current["id"]),
+                    "poster_slack_id": str(current["poster_slack_id"]),
+                },
+            },
+        )
+        restored_ts = ""
+        if isinstance(response, dict):
+            restored_ts = str(response.get("ts") or "")
+        elif hasattr(response, "get"):
+            restored_ts = str(response.get("ts") or "")
+        if not restored_ts:
+            raise RuntimeError("Slack did not return the restored message timestamp")
+        source, restored = store.mark_restored(
+            int(current["id"]),
+            restored_message_ts=restored_ts,
+        )
+        return {
+            "status": "restored",
+            "admission": source,
+            "restored_admission": restored,
+        }
+    except Exception as exc:  # noqa: BLE001 - Slack SDK failures vary.
+        error = f"{exc.__class__.__name__}: {exc}"
+        updated = store.mark_restore_failed(int(current["id"]), error=error)
+        print(
+            "BOOST_POST_RESTORE_RETRY "
+            f"admission_id={current.get('id')} error_type={exc.__class__.__name__}"
+        )
+        return {"status": "restore_pending", "admission": updated, "error": error}
+
+
+async def handle_boost_recheck_reaction(
+    event: dict[str, Any],
+    *,
+    store: BoostPostAdmissionStore | None = None,
+    client: Any = None,
+    post_message_fn: Callable[..., Any] | None = None,
+) -> dict[str, Any]:
+    """Recheck and restore an insufficient-points boost on its author's check reaction."""
+
+    reaction = str(event.get("reaction") or "")
+    item = event.get("item") if isinstance(event.get("item"), dict) else {}
+    channel_id = str(item.get("channel") or "")
+    decision_message_ts = str(item.get("ts") or "")
+    reactor_user_id = str(event.get("user") or "")
+    if (
+        reaction not in BOOST_RECHECK_REACTIONS
+        or item.get("type") != "message"
+        or not channel_id
+        or not decision_message_ts
+        or not reactor_user_id
+    ):
+        return {"handled": False, "status": "ignored"}
+
+    try:
+        settings = get_settings()
+    except (RuntimeError, ValueError):
+        return {"handled": False, "status": "ignored"}
+    if (
+        not bool(getattr(settings, "BOOST_POST_MODERATION_ENABLED", False))
+        or channel_id
+        != str(getattr(settings, "BOOST_LINK_LOVE_CHANNEL_ID", "") or "")
+    ):
+        return {"handled": False, "status": "ignored"}
+
+    store = store or get_boost_post_store()
+    admission = store.get_for_decision_message(channel_id, decision_message_ts)
+    if admission is None:
+        return {"handled": False, "status": "ignored"}
+    if reactor_user_id != str(admission.get("poster_slack_id") or ""):
+        return {"handled": True, "status": "ignored_not_poster"}
+
+    claimed = store.claim_recheck(
+        int(admission["id"]),
+        owner=f"roo-boost-recheck-{uuid4().hex}",
+    )
+    if claimed is None:
+        refreshed = store.get_by_id(int(admission["id"]))
+        if refreshed.get("restored_message_ts"):
+            status = "already_restored"
+        elif refreshed.get("status") == "recheck_processing":
+            status = "recheck_in_progress"
+        else:
+            status = "not_recheckable"
+        return {"handled": True, "status": status, "admission": refreshed}
+
+    client = client or MLAIBackendClient()
+    try:
+        result = await client.admit_boost_post(
+            submission_key=str(claimed["submission_key"]),
+            workspace_id=str(claimed["workspace_id"]),
+            channel_id=str(claimed["channel_id"]),
+            root_message_ts=str(claimed["root_message_ts"]),
+            poster_slack_id=str(claimed["poster_slack_id"]),
+            root_text=str(claimed.get("root_text") or ""),
+            social_post_url=str(claimed.get("social_post_url") or ""),
+            timeout=float(
+                getattr(settings, "BOOST_POST_DECISION_TIMEOUT_SECONDS", 30.0)
+            ),
+            recheck_insufficient_points=True,
+        )
+    except Exception as exc:  # noqa: BLE001 - backend client exceptions vary.
+        code, payload = _backend_error_payload(exc)
+        rejection = _rejection_from_code(code, payload)
+        if rejection and rejection[0] == "rejected_insufficient_points":
+            result = payload
+        else:
+            error = f"{exc.__class__.__name__}: {exc}"
+            updated = store.mark_recheck_failed(int(claimed["id"]), error=error)
+            _post_recheck_feedback(
+                updated,
+                (
+                    f"<@{reactor_user_id}> I couldn't recheck your Roo points just now. "
+                    "Nothing was charged; please try the ✅ reaction again shortly."
+                ),
+                post_message_fn=post_message_fn,
+            )
+            return {"handled": True, "status": "recheck_failed", "admission": updated}
+
+    backend_status = str(result.get("status") or result.get("code") or "").strip().lower()
+    if backend_status in {"approved", "charged", "already_approved"}:
+        approved = store.mark_approved(int(claimed["id"]), result)
+        if approved.get("deleted_at") is None:
+            _post_recheck_feedback(
+                approved,
+                _approval_notice(approved),
+                post_message_fn=post_message_fn,
+            )
+            return {"handled": True, "status": "approved", "admission": approved}
+        queued = store.request_restore(int(approved["id"]))
+        restored = await process_boost_restore(
+            queued,
+            store=store,
+            post_message_fn=post_message_fn,
+        )
+        return {"handled": True, **restored}
+
+    rejection = _rejection_from_code(backend_status, result)
+    if rejection and rejection[0] == "rejected_insufficient_points":
+        updated = store.mark_recheck_insufficient(int(claimed["id"]), result)
+        backend_result = _backend_result(updated)
+        required = backend_result.get("charged_points")
+        available = backend_result.get("new_balance", backend_result.get("balance_before"))
+        if required is not None and available is not None:
+            detail = f"You currently have {available}; this boost needs {required} Roo points. "
+        else:
+            detail = "Your balance is still below this boost's Roo points price. "
+        _post_recheck_feedback(
+            updated,
+            (
+                f"<@{reactor_user_id}> I checked again, but there still aren't enough points. "
+                f"{detail}Keep engaging with other founders or DM me `topup`, "
+                "then react ✅ again."
+            ),
+            post_message_fn=post_message_fn,
+        )
+        return {"handled": True, "status": "still_insufficient", "admission": updated}
+
+    updated = store.mark_recheck_failed(
+        int(claimed["id"]),
+        error=f"Unexpected boost admission status: {backend_status or 'missing'}",
+    )
+    return {"handled": True, "status": "recheck_failed", "admission": updated}
 
 
 async def process_boost_post_admission(
@@ -883,12 +1472,36 @@ async def process_due_boost_posts_once(
     return results
 
 
+async def process_due_boost_restores_once(
+    *,
+    store: BoostPostAdmissionStore | None = None,
+    limit: int = 20,
+    post_message_fn: Callable[..., Any] | None = None,
+) -> list[dict[str, Any]]:
+    store = store or get_boost_post_store()
+    owner = f"roo-boost-restore-worker-{uuid4().hex}"
+    claimed = store.claim_due_restores(limit=limit, owner=owner)
+    results = []
+    for admission in claimed:
+        results.append(
+            await process_boost_restore(
+                admission,
+                store=store,
+                claimed=True,
+                owner=owner,
+                post_message_fn=post_message_fn,
+            )
+        )
+    return results
+
+
 async def boost_post_retry_loop() -> None:
     settings = get_settings()
     poll_seconds = max(1.0, float(getattr(settings, "BOOST_POST_RETRY_POLL_SECONDS", 15.0)))
     while True:
         try:
             await process_due_boost_posts_once()
+            await process_due_boost_restores_once()
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 - keep the durable worker alive.

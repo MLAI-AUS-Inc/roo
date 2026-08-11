@@ -13,8 +13,11 @@ from roo import link_love
 from roo.boost_moderation import (
     BoostPostAdmissionStore,
     boost_reward_admission_decision,
+    boost_reward_root_poster,
+    handle_boost_recheck_reaction,
     handle_boost_root_edit,
     handle_boost_root_post,
+    process_due_boost_restores_once,
 )
 from roo.slack_moderation import ModeratorDeleteResult
 
@@ -61,6 +64,51 @@ class ApprovedClient:
         }
 
 
+class InsufficientClient:
+    def __init__(self, *, balance=3, required=8):
+        self.balance = balance
+        self.required = required
+        self.calls = []
+
+    async def admit_boost_post(self, **payload):
+        self.calls.append(payload)
+        return {
+            "status": "insufficient_points",
+            "code": "insufficient_points",
+            "message": f"Needs {self.required} points but balance is {self.balance}",
+            "base_cost_points": 8,
+            "charged_points": self.required,
+            "discount_applied": self.required == 4,
+            "balance_before": self.balance,
+            "new_balance": self.balance,
+        }
+
+
+class RecheckApprovedClient:
+    def __init__(self):
+        self.calls = []
+
+    async def admit_boost_post(self, **payload):
+        self.calls.append(payload)
+        return {
+            "status": "approved",
+            "admission_id": "admission-1",
+            "base_cost_points": 8,
+            "charged_points": 8,
+            "discount_applied": False,
+            "new_balance": 4,
+        }
+
+
+def successful_delete(**kwargs):
+    return ModeratorDeleteResult(
+        True,
+        "deleted",
+        kwargs["channel_id"],
+        kwargs["message_ts"],
+    )
+
+
 def test_boost_url_accepts_any_http_or_https_domain() -> None:
     assert link_love.extract_boost_url(
         "Share https://example.com/product?id=12&utm_source=slack#pricing"
@@ -104,6 +152,10 @@ def test_insufficient_points_notice_shows_price_balance_and_discount() -> None:
     assert "costs 4 Roo points" in notice
     assert "currently have 3" in notice
     assert "50% Australian-startup monthly-update discount" in notice
+    assert "engaging with other founders' posts" in notice
+    assert "DMing me `topup`" in notice
+    assert "react to this Roo guidance reply with ✅ or ✔️" in notice
+    assert "DM me `points`" in notice
     assert "what's my points balance?" in notice
 
 
@@ -185,14 +237,8 @@ async def test_insufficient_points_is_committed_before_root_is_deleted(tmp_path,
     monkeypatch.setattr(module, "get_settings", lambda: settings)
     store = BoostPostAdmissionStore(tmp_path / "admissions.db")
 
-    class InsufficientClient:
-        async def admit_boost_post(self, **payload):
-            return {
-                "status": "insufficient_points",
-                "message": "Needs 8 points but balance is 3",
-            }
-
     status_seen_by_delete = []
+    notices = []
 
     def delete_fn(**kwargs):
         status_seen_by_delete.append(
@@ -207,16 +253,258 @@ async def test_insufficient_points_is_committed_before_root_is_deleted(tmp_path,
         workspace_id="TTEAM123",
         store=store,
         client=InsufficientClient(),
-        post_message_fn=lambda **kwargs: None,
+        post_message_fn=lambda **kwargs: notices.append(kwargs) or {"ts": "1800000001.000100"},
         send_dm_fn=lambda *args, **kwargs: None,
         delete_fn=delete_fn,
     )
 
     assert status_seen_by_delete == ["rejected_insufficient_points"]
     assert result["status"] == "deleted"
+    assert store.get("CBOOST123", "1800000000.123456")["decision_message_ts"] == (
+        "1800000001.000100"
+    )
     assert boost_reward_admission_decision(
         "CBOOST123", "1800000000.123456", store=store
     ) == "rejected"
+
+
+@pytest.mark.asyncio
+async def test_founder_check_reaction_rechecks_charges_and_restores_post(
+    tmp_path,
+    monkeypatch,
+):
+    settings = moderation_settings(BOOST_POST_AUTO_DELETE_ENABLED=True)
+    monkeypatch.setattr(module, "get_settings", lambda: settings)
+    store = BoostPostAdmissionStore(tmp_path / "admissions.db")
+    posted = []
+
+    def post_message(**kwargs):
+        posted.append(kwargs)
+        if kwargs.get("thread_ts"):
+            return {"ts": "1800000001.000100"}
+        return {"ts": "1800000002.000200"}
+
+    initial = await handle_boost_root_post(
+        root_event(),
+        workspace_id="TTEAM123",
+        store=store,
+        client=InsufficientClient(),
+        post_message_fn=post_message,
+        send_dm_fn=lambda *args, **kwargs: None,
+        delete_fn=successful_delete,
+    )
+    client = RecheckApprovedClient()
+
+    restored = await handle_boost_recheck_reaction(
+        {
+            "user": "UPOSTER1",
+            "reaction": "white_check_mark",
+            "item": {
+                "type": "message",
+                "channel": "CBOOST123",
+                "ts": "1800000001.000100",
+            },
+        },
+        store=store,
+        client=client,
+        post_message_fn=post_message,
+    )
+    duplicate = await handle_boost_recheck_reaction(
+        {
+            "user": "UPOSTER1",
+            "reaction": "heavy_check_mark",
+            "item": {
+                "type": "message",
+                "channel": "CBOOST123",
+                "ts": "1800000001.000100",
+            },
+        },
+        store=store,
+        client=client,
+        post_message_fn=post_message,
+    )
+
+    assert initial["status"] == "deleted"
+    assert restored["status"] == "restored"
+    assert duplicate["status"] == "already_restored"
+    assert len(client.calls) == 1
+    assert client.calls[0]["recheck_insufficient_points"] is True
+    assert posted[-1].get("thread_ts") is None
+    assert "Restored for <@UPOSTER1>" in posted[-1]["text"]
+    assert root_event()["text"] in posted[-1]["text"]
+    source = store.get("CBOOST123", "1800000000.123456")
+    alias = store.get("CBOOST123", "1800000002.000200")
+    assert source["restored_message_ts"] == "1800000002.000200"
+    assert alias["status"] == "approved"
+    assert alias["poster_slack_id"] == "UPOSTER1"
+    assert boost_reward_admission_decision(
+        "CBOOST123", "1800000002.000200", store=store
+    ) == "approved"
+    assert boost_reward_root_poster(
+        "CBOOST123", "1800000002.000200", store=store
+    ) == "UPOSTER1"
+
+    monkeypatch.setattr(module, "get_boost_post_store", lambda: store)
+
+    class AwardClient:
+        def __init__(self):
+            self.calls = []
+
+        async def system_award_points(self, **kwargs):
+            self.calls.append(kwargs)
+            return {"points_awarded": 1, "new_balance": 1}
+
+    award_client = AwardClient()
+
+    async def fail_if_called(*args, **kwargs):
+        raise AssertionError("The founder's own reply must not reach classification")
+
+    self_reply = await link_love.handle_link_love_reply(
+        {
+            "type": "message",
+            "channel": "CBOOST123",
+            "thread_ts": "1800000002.000200",
+            "ts": "1800000003.000300",
+            "user": "UPOSTER1",
+            "text": "Liked and commented",
+        },
+        store=link_love.LinkLoveAwardStore(tmp_path / "awards.db"),
+        client=award_client,
+        get_root_message=lambda channel, ts: {
+            "user": "UROO",
+            "text": posted[-1]["text"],
+        },
+        llm_chat=fail_if_called,
+        bot_user_id="UROO",
+        notification_delay_seconds=0,
+    )
+    assert self_reply == {"status": "ignored", "reason": "root_author_reply"}
+    assert award_client.calls == []
+
+
+@pytest.mark.asyncio
+async def test_check_reaction_from_someone_else_does_not_recheck(tmp_path, monkeypatch):
+    settings = moderation_settings(BOOST_POST_AUTO_DELETE_ENABLED=True)
+    monkeypatch.setattr(module, "get_settings", lambda: settings)
+    store = BoostPostAdmissionStore(tmp_path / "admissions.db")
+    await handle_boost_root_post(
+        root_event(),
+        workspace_id="TTEAM123",
+        store=store,
+        client=InsufficientClient(),
+        post_message_fn=lambda **kwargs: {"ts": "1800000001.000100"},
+        send_dm_fn=lambda *args, **kwargs: None,
+        delete_fn=successful_delete,
+    )
+    client = RecheckApprovedClient()
+
+    result = await handle_boost_recheck_reaction(
+        {
+            "user": "UOTHER1",
+            "reaction": "white_check_mark",
+            "item": {
+                "type": "message",
+                "channel": "CBOOST123",
+                "ts": "1800000001.000100",
+            },
+        },
+        store=store,
+        client=client,
+    )
+
+    assert result["handled"] is True
+    assert result["status"] == "ignored_not_poster"
+    assert client.calls == []
+
+
+@pytest.mark.asyncio
+async def test_still_insufficient_recheck_keeps_post_removed_and_explains_next_step(
+    tmp_path,
+    monkeypatch,
+):
+    settings = moderation_settings(BOOST_POST_AUTO_DELETE_ENABLED=True)
+    monkeypatch.setattr(module, "get_settings", lambda: settings)
+    store = BoostPostAdmissionStore(tmp_path / "admissions.db")
+    posted = []
+    await handle_boost_root_post(
+        root_event(),
+        workspace_id="TTEAM123",
+        store=store,
+        client=InsufficientClient(balance=3),
+        post_message_fn=lambda **kwargs: posted.append(kwargs) or {"ts": "1800000001.000100"},
+        send_dm_fn=lambda *args, **kwargs: None,
+        delete_fn=successful_delete,
+    )
+    client = InsufficientClient(balance=6)
+
+    result = await handle_boost_recheck_reaction(
+        {
+            "user": "UPOSTER1",
+            "reaction": "white_check_mark",
+            "item": {
+                "type": "message",
+                "channel": "CBOOST123",
+                "ts": "1800000001.000100",
+            },
+        },
+        store=store,
+        client=client,
+        post_message_fn=lambda **kwargs: posted.append(kwargs) or {"ts": "1800000001.000200"},
+    )
+
+    assert result["status"] == "still_insufficient"
+    assert store.get("CBOOST123", "1800000000.123456")["status"] == "deleted"
+    assert "currently have 6" in posted[-1]["text"]
+    assert "react ✅ again" in posted[-1]["text"]
+
+
+@pytest.mark.asyncio
+async def test_restore_failure_is_durable_and_retry_worker_completes_it(tmp_path, monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr(module, "_now", lambda: clock[0])
+    settings = moderation_settings(BOOST_POST_AUTO_DELETE_ENABLED=True)
+    monkeypatch.setattr(module, "get_settings", lambda: settings)
+    store = BoostPostAdmissionStore(tmp_path / "admissions.db")
+    await handle_boost_root_post(
+        root_event(),
+        workspace_id="TTEAM123",
+        store=store,
+        client=InsufficientClient(),
+        post_message_fn=lambda **kwargs: {"ts": "1800000001.000100"},
+        send_dm_fn=lambda *args, **kwargs: None,
+        delete_fn=successful_delete,
+    )
+
+    def fail_restore(**kwargs):
+        if not kwargs.get("thread_ts"):
+            raise RuntimeError("Slack unavailable")
+        return {"ts": "1800000001.000100"}
+
+    first = await handle_boost_recheck_reaction(
+        {
+            "user": "UPOSTER1",
+            "reaction": "white_check_mark",
+            "item": {
+                "type": "message",
+                "channel": "CBOOST123",
+                "ts": "1800000001.000100",
+            },
+        },
+        store=store,
+        client=RecheckApprovedClient(),
+        post_message_fn=fail_restore,
+    )
+    clock[0] = 1031.0
+    retried = await process_due_boost_restores_once(
+        store=store,
+        post_message_fn=lambda **kwargs: {"ts": "1800000002.000200"},
+    )
+
+    assert first["status"] == "restore_pending"
+    assert retried[0]["status"] == "restored"
+    assert store.get("CBOOST123", "1800000000.123456")["restored_message_ts"] == (
+        "1800000002.000200"
+    )
 
 
 @pytest.mark.asyncio

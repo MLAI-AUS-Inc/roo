@@ -876,7 +876,10 @@ async def handle_link_love_reply(
     if not channel_id or not root_message_ts or not reply_message_ts or not slack_user_id:
         return {"status": "ignored", "reason": "missing_required_event_fields"}
 
-    from .boost_moderation import boost_reward_admission_decision
+    from .boost_moderation import (
+        boost_reward_admission_decision,
+        boost_reward_root_poster,
+    )
 
     admission_decision = boost_reward_admission_decision(channel_id, root_message_ts)
     if admission_decision == "pending":
@@ -899,7 +902,10 @@ async def handle_link_love_reply(
         )
         return {"status": "ignored", "reason": "missing_root_message"}
 
-    root_author_slack_id = clean_slack_user_id(root_message.get("user"))
+    root_author_slack_id = clean_slack_user_id(
+        boost_reward_root_poster(channel_id, root_message_ts)
+        or root_message.get("user")
+    )
     root_text = str(root_message.get("text") or "")
     reply_check = store.create_reply_check(
         channel_id=channel_id,
