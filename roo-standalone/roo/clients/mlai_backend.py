@@ -1674,6 +1674,120 @@ class MLAIBackendClient:
         self._raise_for_status_or_backend_unavailable(response)
         return response.json()
 
+    async def list_meeting_rooms(self) -> List[dict]:
+        """List active meeting rooms available through Roo."""
+        response = await self._request(
+            "GET",
+            f"{self._points_base}/meeting-rooms/rooms/",
+            timeout=10.0,
+            transport_retries=1,
+            retry_backoff_seconds=0.25,
+            circuit_breaker=True,
+        )
+        response.raise_for_status()
+        return response.json().get("rooms", [])
+
+    async def check_meeting_room_availability(
+        self,
+        slack_user_id: str,
+        *,
+        room_slug: str = "meeting-room",
+        date: Optional[str] = None,
+        starts_at: Optional[str] = None,
+        ends_at: Optional[str] = None,
+    ) -> dict:
+        """Check one room date or exact interval without exposing booker identity."""
+        payload = {
+            "slack_user_id": self._clean_slack_id(slack_user_id),
+            "room_slug": room_slug,
+        }
+        if date:
+            payload["date"] = date
+        if starts_at:
+            payload["starts_at"] = starts_at
+        if ends_at:
+            payload["ends_at"] = ends_at
+        response = await self._request(
+            "POST",
+            f"{self._points_base}/meeting-rooms/availability/",
+            json=payload,
+            timeout=10.0,
+            transport_retries=1,
+            retry_backoff_seconds=0.25,
+            circuit_breaker=True,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def book_meeting_room(
+        self,
+        slack_user_id: str,
+        *,
+        room_slug: str,
+        starts_at: str,
+        ends_at: str,
+        client_request_id: str,
+        confirmation_expires_at: str,
+        slack_channel_id: Optional[str] = None,
+    ) -> dict:
+        """Confirm and charge one self-service meeting-room booking."""
+        payload = {
+            "slack_user_id": self._clean_slack_id(slack_user_id),
+            "room_slug": room_slug,
+            "starts_at": starts_at,
+            "ends_at": ends_at,
+            "client_request_id": client_request_id,
+            "confirmation_expires_at": confirmation_expires_at,
+        }
+        if slack_channel_id:
+            payload["slack_channel_id"] = slack_channel_id
+        response = await self._request(
+            "POST",
+            f"{self._points_base}/meeting-rooms/book/",
+            json=payload,
+            timeout=15.0,
+            transport_retries=1,
+            retry_backoff_seconds=0.5,
+            circuit_breaker=True,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def get_my_meeting_room_bookings(self, slack_user_id: str) -> List[dict]:
+        """Return the requesting member's upcoming active room bookings."""
+        response = await self._request(
+            "POST",
+            f"{self._points_base}/meeting-rooms/my-bookings/",
+            json={"slack_user_id": self._clean_slack_id(slack_user_id)},
+            timeout=10.0,
+            transport_retries=1,
+            retry_backoff_seconds=0.25,
+            circuit_breaker=True,
+        )
+        response.raise_for_status()
+        return response.json().get("bookings", [])
+
+    async def cancel_meeting_room_booking(
+        self,
+        slack_user_id: str,
+        booking_id: str,
+    ) -> dict:
+        """Cancel and refund one booking owned by the requesting member."""
+        response = await self._request(
+            "POST",
+            f"{self._points_base}/meeting-rooms/cancel/",
+            json={
+                "slack_user_id": self._clean_slack_id(slack_user_id),
+                "booking_id": booking_id,
+            },
+            timeout=15.0,
+            transport_retries=1,
+            retry_backoff_seconds=0.5,
+            circuit_breaker=True,
+        )
+        response.raise_for_status()
+        return response.json()
+
     async def get_luma_attendee_report(
         self,
         slack_user_id: str,

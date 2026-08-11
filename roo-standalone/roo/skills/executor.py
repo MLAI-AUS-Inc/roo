@@ -95,6 +95,16 @@ from ..coworking_booking_intents import (
     get_coworking_intent_store,
     is_retryable_coworking_exception,
 )
+from ..meeting_room_booking import (
+    MeetingRoomInputError,
+    backend_error_message as meeting_room_backend_error_message,
+    booking_preview,
+    cancellation_selection,
+    format_interval as format_meeting_room_interval,
+    parse_backend_timestamp,
+    resolve_interval as resolve_meeting_room_interval,
+    resolve_local_date as resolve_meeting_room_date,
+)
 
 
 POINTS_SUPER_ADMIN_SLACK_ID = "U05QPB483K9"
@@ -242,6 +252,13 @@ class SkillExecutor:
                 )
             elif skill.name == "committee-candidate-emails":
                 result = await self._execute_committee_candidate_emails(
+                    text=text,
+                    params=params,
+                    user_id=user_id,
+                    channel_id=channel_id,
+                )
+            elif skill.name == "meeting-room-booking":
+                result = await self._execute_meeting_room_booking(
                     text=text,
                     params=params,
                     user_id=user_id,
@@ -432,6 +449,258 @@ class SkillExecutor:
             "blocks": response["blocks"],
             "data": result_data,
         }
+
+
+    def _deliver_meeting_room_response(
+        self,
+        *,
+        user_id: str,
+        channel_id: Optional[str],
+        message: str,
+        blocks: Optional[list] = None,
+        action: Optional[str] = None,
+    ) -> dict:
+        data = {"action": action, "delivery": "direct_message"}
+        if not channel_id or str(channel_id).startswith("D"):
+            return {"message": message, "blocks": blocks, "data": data}
+        try:
+            dm_response = send_dm(user_id, message, blocks=blocks) if blocks else send_dm(user_id, message)
+        except Exception:
+            dm_response = None
+        if not dm_response or not dm_response.get("ok"):
+            return {
+                "message": (
+                    "I could not open a private Slack DM. DM Roo `meeting room` "
+                    "and try again there."
+                ),
+                "data": {**data, "delivery_failed": True},
+            }
+        return {
+            "message": "I've sent the Meeting Room details to you privately.",
+            "data": data,
+        }
+
+    @staticmethod
+    def _meeting_room_date_is_present(text: str, params: dict) -> bool:
+        if params.get("date") or params.get("starts_at"):
+            return True
+        lowered = str(text or "").lower()
+        return bool(
+            re.search(r"\b(?:today|tomorrow|next\s+)?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b", lowered)
+            or re.search(r"\b\d{4}-\d{2}-\d{2}\b", lowered)
+            or re.search(r"\b(?:today|tomorrow)\b", lowered)
+        )
+
+    @staticmethod
+    def _meeting_room_time_is_present(text: str, params: dict) -> bool:
+        if any(params.get(key) for key in ("starts_at", "start_time")):
+            return True
+        return bool(re.search(r"\b(?:at|from)\s+\d", str(text or "").lower()))
+
+    @staticmethod
+    def _format_meeting_room_availability(result: dict) -> str:
+        room = result.get("room") or {}
+        room_name = str(room.get("name") or "Meeting Room")
+        requested = result.get("requested_interval")
+        if requested:
+            starts_at = parse_backend_timestamp(requested.get("starts_at"))
+            ends_at = parse_backend_timestamp(requested.get("ends_at"))
+            if result.get("available"):
+                cost = int(result.get("points_cost") or 0)
+                return (
+                    f"The *{room_name}* is available {format_meeting_room_interval(starts_at, ends_at)} "
+                    f"(Melbourne time). It costs {cost} Roo Point{'s' if cost != 1 else ''}."
+                )
+            return (
+                f"The *{room_name}* is not available {format_meeting_room_interval(starts_at, ends_at)} "
+                "(Melbourne time)."
+            )
+
+        busy = result.get("busy_intervals") or []
+        if not busy:
+            return f"The *{room_name}* has no bookings or blocks on that date."
+        lines = [f"The *{room_name}* is unavailable at these times (Melbourne time):"]
+        for interval in busy:
+            starts_at = parse_backend_timestamp(interval.get("starts_at"))
+            ends_at = parse_backend_timestamp(interval.get("ends_at"))
+            lines.append(f"- {format_meeting_room_interval(starts_at, ends_at)}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _format_meeting_room_bookings(bookings: list[dict]) -> str:
+        if not bookings:
+            return "You do not have any upcoming Meeting Room bookings."
+        lines = ["Your upcoming Meeting Room bookings:"]
+        for booking in bookings:
+            starts_at = parse_backend_timestamp(booking.get("starts_at"))
+            ends_at = parse_backend_timestamp(booking.get("ends_at"))
+            room_name = str((booking.get("room") or {}).get("name") or "Meeting Room")
+            lines.append(
+                f"- *{room_name}:* {format_meeting_room_interval(starts_at, ends_at)} "
+                f"({booking.get('points_cost', 0)} Roo Points)"
+            )
+        return "\n".join(lines)
+
+    async def _execute_meeting_room_booking(
+        self,
+        *,
+        text: str,
+        params: dict,
+        user_id: str,
+        channel_id: Optional[str],
+    ) -> dict:
+        settings = get_settings()
+        action = str(params.get("action") or "").strip()
+        if not settings.MEETING_ROOM_BOOKING_ENABLED:
+            return {
+                "message": "Meeting-room booking is not enabled right now.",
+                "data": {"action": action, "feature_disabled": True},
+            }
+        if not settings.MLAI_BACKEND_URL or not settings.ROO_API_KEY:
+            return {
+                "message": "Meeting-room booking is not configured right now.",
+                "data": {"action": action, "configuration_error": True},
+            }
+
+        mentioned_users = set(re.findall(r"<@([A-Z0-9]+)>", str(text or "")))
+        if any(mentioned_user != user_id for mentioned_user in mentioned_users):
+            return self._deliver_meeting_room_response(
+                user_id=user_id,
+                channel_id=channel_id,
+                message="Meeting Room bookings are self-service. I cannot book for another person.",
+                action=action,
+            )
+
+        client = MLAIBackendClient(
+            base_url=settings.MLAI_BACKEND_URL,
+            api_key=settings.ROO_API_KEY,
+            internal_api_key=settings.ROO_API_KEY,
+        )
+        try:
+            if action == "check_room_availability":
+                if not self._meeting_room_date_is_present(text, params):
+                    raise MeetingRoomInputError(
+                        "missing_date",
+                        "What date should I check? Try `tomorrow` or `2026-08-14`.",
+                    )
+                if self._meeting_room_time_is_present(text, params):
+                    starts_at, ends_at = resolve_meeting_room_interval(text, params)
+                    availability = await client.check_meeting_room_availability(
+                        user_id,
+                        starts_at=starts_at.isoformat(),
+                        ends_at=ends_at.isoformat(),
+                    )
+                else:
+                    local_date = resolve_meeting_room_date(text, params)
+                    availability = await client.check_meeting_room_availability(
+                        user_id,
+                        date=local_date.isoformat(),
+                    )
+                message = self._format_meeting_room_availability(availability)
+                return self._deliver_meeting_room_response(
+                    user_id=user_id,
+                    channel_id=channel_id,
+                    message=message,
+                    action=action,
+                )
+
+            if action == "book_meeting_room":
+                starts_at, ends_at = resolve_meeting_room_interval(text, params)
+                availability = await client.check_meeting_room_availability(
+                    user_id,
+                    starts_at=starts_at.isoformat(),
+                    ends_at=ends_at.isoformat(),
+                )
+                if not availability.get("available"):
+                    message = self._format_meeting_room_availability(availability)
+                    return self._deliver_meeting_room_response(
+                        user_id=user_id,
+                        channel_id=channel_id,
+                        message=f"{message} No booking was created.",
+                        action=action,
+                    )
+                preview = booking_preview(
+                    availability,
+                    owner_slack_user_id=user_id,
+                    starts_at=starts_at,
+                    ends_at=ends_at,
+                )
+                return self._deliver_meeting_room_response(
+                    user_id=user_id,
+                    channel_id=channel_id,
+                    message=preview["message"],
+                    blocks=preview["blocks"],
+                    action=action,
+                )
+
+            if action == "list_my_room_bookings":
+                bookings = await client.get_my_meeting_room_bookings(user_id)
+                return self._deliver_meeting_room_response(
+                    user_id=user_id,
+                    channel_id=channel_id,
+                    message=self._format_meeting_room_bookings(bookings),
+                    action=action,
+                )
+
+            if action == "cancel_meeting_room":
+                bookings = await client.get_my_meeting_room_bookings(user_id)
+                booking_id = str(params.get("booking_id") or "").strip()
+                if booking_id:
+                    bookings = [row for row in bookings if str(row.get("id")) == booking_id]
+                elif self._meeting_room_date_is_present(text, params):
+                    local_date = resolve_meeting_room_date(text, params)
+                    bookings = [
+                        row
+                        for row in bookings
+                        if parse_backend_timestamp(row.get("starts_at")).date() == local_date
+                    ]
+                if not bookings:
+                    return self._deliver_meeting_room_response(
+                        user_id=user_id,
+                        channel_id=channel_id,
+                        message="I could not find an upcoming Meeting Room booking matching that request.",
+                        action=action,
+                    )
+                if len(bookings) > 40:
+                    return self._deliver_meeting_room_response(
+                        user_id=user_id,
+                        channel_id=channel_id,
+                        message=(
+                            "You have too many upcoming bookings to show safely in one Slack message. "
+                            "Tell me the cancellation date so I can narrow the list."
+                        ),
+                        action=action,
+                    )
+                selection = cancellation_selection(
+                    bookings,
+                    owner_slack_user_id=user_id,
+                )
+                return self._deliver_meeting_room_response(
+                    user_id=user_id,
+                    channel_id=channel_id,
+                    message=selection["message"],
+                    blocks=selection["blocks"],
+                    action=action,
+                )
+
+            return {
+                "message": "I could not determine which Meeting Room action to perform.",
+                "data": {"action": action},
+            }
+        except MeetingRoomInputError as exc:
+            return self._deliver_meeting_room_response(
+                user_id=user_id,
+                channel_id=channel_id,
+                message=exc.message,
+                action=action,
+            )
+        except (httpx.HTTPStatusError, MLAIBackendUnavailableError) as exc:
+            return self._deliver_meeting_room_response(
+                user_id=user_id,
+                channel_id=channel_id,
+                message=meeting_room_backend_error_message(exc),
+                action=action,
+            )
 
     async def _execute_admin_brain(
         self,

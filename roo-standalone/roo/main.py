@@ -108,6 +108,16 @@ from .admin_brain import (
     parse_feedback_value,
     parse_incorrect_feedback_submission,
 )
+from .meeting_room_booking import (
+    BOOK_ACTION_ID as MEETING_ROOM_BOOK_ACTION_ID,
+    CANCEL_ACTION_ID as MEETING_ROOM_CANCEL_ACTION_ID,
+    MeetingRoomInputError,
+    backend_error_message as meeting_room_backend_error_message,
+    confirmation_expired as meeting_room_confirmation_expired,
+    format_booking_result as format_meeting_room_booking_result,
+    format_cancellation_result as format_meeting_room_cancellation_result,
+    parse_action_value as parse_meeting_room_action_value,
+)
 
 # Pending intents for auto-continue after prerequisite steps complete.
 # Key: "{slack_user_id}:{domain}" → {"action": "write", "topic": "...", "channel_id": "...", "thread_ts": "..."}
@@ -4795,6 +4805,97 @@ async def _review_admin_action(
 
 
 
+async def _handle_meeting_room_action(
+    *,
+    settings: Settings,
+    action_id: str,
+    action_value: str,
+    actor_user_id: str,
+    channel_id: str,
+    message_ts: str,
+) -> None:
+    """Complete a verified meeting-room button action outside Slack's ack window."""
+    if not settings.MEETING_ROOM_BOOKING_ENABLED:
+        outcome = "Meeting-room booking is not enabled right now. Nothing was changed."
+    elif not str(channel_id or "").startswith("D"):
+        outcome = "Meeting Room actions must be completed in your private Roo DM. Nothing was changed."
+    else:
+        try:
+            value = parse_meeting_room_action_value(
+                action_value,
+                expected_action=action_id,
+            )
+            if value["owner_slack_user_id"] != actor_user_id:
+                outcome = "Only the member who requested this action can use it. Nothing was changed."
+            elif (
+                action_id == MEETING_ROOM_BOOK_ACTION_ID
+                and meeting_room_confirmation_expired(value)
+            ):
+                outcome = "That confirmation expired. Ask Roo to check the time again for a fresh button."
+            else:
+                from .clients.mlai_backend import MLAIBackendClient
+
+                client = MLAIBackendClient(
+                    base_url=settings.MLAI_BACKEND_URL,
+                    api_key=settings.ROO_API_KEY,
+                    internal_api_key=settings.ROO_API_KEY,
+                )
+                if action_id == MEETING_ROOM_BOOK_ACTION_ID:
+                    result = await client.book_meeting_room(
+                        actor_user_id,
+                        room_slug=value["room_slug"],
+                        starts_at=value["starts_at"],
+                        ends_at=value["ends_at"],
+                        client_request_id=value["client_request_id"],
+                        confirmation_expires_at=value["confirmation_expires_at"],
+                        slack_channel_id=channel_id or None,
+                    )
+                    outcome = format_meeting_room_booking_result(result)
+                    print(
+                        "MEETING_ROOM_BOOKING_CONFIRMED "
+                        f"booking_id={(result.get('booking') or {}).get('id')} "
+                        f"request_id={value['client_request_id']} "
+                        f"created={bool(result.get('created'))}"
+                    )
+                else:
+                    result = await client.cancel_meeting_room_booking(
+                        actor_user_id,
+                        value["booking_id"],
+                    )
+                    outcome = format_meeting_room_cancellation_result(result)
+                    print(
+                        "MEETING_ROOM_BOOKING_CANCELLED "
+                        f"booking_id={value['booking_id']} "
+                        f"cancelled={bool(result.get('cancelled'))}"
+                    )
+        except MeetingRoomInputError as exc:
+            outcome = exc.message
+        except Exception as exc:
+            outcome = meeting_room_backend_error_message(exc)
+            print(
+                "MEETING_ROOM_ACTION_FAILED "
+                f"action={action_id} reason={exc.__class__.__name__}"
+            )
+
+    blocks = [
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": outcome},
+        }
+    ]
+    try:
+        from .slack_client import get_slack_client
+
+        get_slack_client().chat_update(
+            channel=channel_id,
+            ts=message_ts,
+            text=outcome,
+            blocks=blocks,
+        )
+    except Exception:
+        post_message(channel=channel_id, text=outcome, blocks=blocks)
+
+
 @app.post("/slack/actions")
 async def slack_actions(
     request: Request,
@@ -5094,6 +5195,22 @@ async def slack_actions(
                 thread_ts=str(thread_ts or ""),
                 feedback=parse_feedback_value(actions[0].get("value")),
                 feedback_type=unified_feedback_type,
+            )
+        )
+        return JSONResponse(status_code=200, content={})
+
+    if action_id in {
+        MEETING_ROOM_BOOK_ACTION_ID,
+        MEETING_ROOM_CANCEL_ACTION_ID,
+    }:
+        asyncio.create_task(
+            _handle_meeting_room_action(
+                settings=settings,
+                action_id=str(action_id),
+                action_value=str(actions[0].get("value") or ""),
+                actor_user_id=str(user_id or ""),
+                channel_id=str(channel_id or ""),
+                message_ts=str(thread_ts or ""),
             )
         )
         return JSONResponse(status_code=200, content={})
