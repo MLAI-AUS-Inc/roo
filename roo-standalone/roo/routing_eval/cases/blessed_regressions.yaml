@@ -19,6 +19,10 @@
   text: "my points"
   expect: {skill: mlai-points, action: balance}
   tags: [blessed, fast-path]
+- id: fast-flex-my-points
+  text: "flex my points"
+  expect: {skill: mlai-points, action: flex_points}
+  tags: [blessed, fast-path]
 - id: fast-tasks
   text: "tasks"
   expect: {skill: mlai-points, action: list_tasks}

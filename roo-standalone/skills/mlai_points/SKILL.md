@@ -13,13 +13,12 @@ routing:
   examples:
     - {text: "how do I earn points?", action: list_tasks}
     - {text: "what's my balance", action: balance}
+    - {text: "flex my points", action: flex_points}
     - {text: "book me in for coworking tomorrow", action: book_coworking}
     - {text: "book me in", action: book_coworking}
     - {text: "claim task ROO-12", action: claim_task}
     - {text: "how busy was the coworking space in may?", action: coworking_report}
     - {text: "give 10 points to @member for organising the meetup", action: award_points}
-    - {text: "I need more points", action: topup_points}
-    - {text: "add roo points", action: topup_points}
   negative_examples:
     - {text: "add a task to linear to fix the login bug", instead: linear-meeting-actions}
     - {text: "book club is meeting thursday, can you remind the channel?", instead: respond_in_chat}
@@ -27,6 +26,8 @@ routing:
 actions:
   - name: balance
     description: Privately show the user their current points balance.
+  - name: flex_points
+    description: Confirm sharing the user's own lifetime-earned total publicly.
   - name: history
     description: Privately show the user their recent points transactions.
     params:
@@ -355,6 +356,11 @@ so fresh buttons can be created safely in that conversation.
 - Treat balances, lifetime totals, transaction history, affordability, and resulting
   balances as personal data. In a shared channel or thread, send those details to
   the verified requester by DM and use only a private ephemeral acknowledgement.
+- The only public lifetime-total flow is `flex_points`. It must be requested by the
+  member for themselves in the destination channel and confirmed through Roo's
+  private **Share publicly** button. Never treat a balance request as consent, never
+  accept a tagged target, and never share balance, purchase, spending, or history
+  fields. The eventual public post is top-level in the selected channel, not a thread.
 - In a Roo DM, return personal points details directly without opening another DM.
 - Public booking and award confirmations may state the action and points charged or
   awarded, but must not include anyone's remaining or resulting balance.

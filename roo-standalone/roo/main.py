@@ -50,6 +50,14 @@ from .points_request_approval import (
     get_remembered_points_request_summary,
     remember_points_request_summary,
 )
+from .points_flex import (
+    POINTS_FLEX_ACTION_ID,
+    PointsFlexTokenError,
+    format_points_flex_public_message,
+    get_points_flex_store,
+    parse_lifetime_earned,
+    verify_points_flex_confirmation,
+)
 from .slack_client import (
     get_bot_user_id,
     get_message,
@@ -707,6 +715,182 @@ def _content_factory_action_denied_response(text: str) -> JSONResponse:
             "text": text,
         },
     )
+
+
+def _points_flex_action_response(
+    text: str,
+    *,
+    replace_original: bool = True,
+) -> JSONResponse:
+    """Replace the private confirmation card with a private status message."""
+
+    return JSONResponse(
+        status_code=200,
+        content={
+            "response_type": "ephemeral",
+            "replace_original": replace_original,
+            "text": text,
+        },
+    )
+
+
+async def _handle_points_flex_confirmation_action(
+    *,
+    settings: Settings,
+    action_value: str,
+    verified_user_id: Optional[str],
+    verified_channel_id: Optional[str],
+) -> JSONResponse:
+    """Revalidate consent and publish one lifetime-earned total at most once."""
+
+    try:
+        confirmation = verify_points_flex_confirmation(
+            action_value,
+            signing_secret=settings.SLACK_SIGNING_SECRET,
+        )
+    except PointsFlexTokenError as exc:
+        if exc.code == "expired_token":
+            return _points_flex_action_response(
+                "That sharing confirmation has expired. Run `@Roo flex my points` again."
+            )
+        return _points_flex_action_response(
+            "I couldn't verify that sharing confirmation. Run `@Roo flex my points` again."
+        )
+
+    if str(verified_user_id or "") != confirmation.slack_user_id:
+        return _points_flex_action_response(
+            "Only the member who requested this flex can confirm it.",
+            replace_original=False,
+        )
+    if str(verified_channel_id or "") != confirmation.channel_id:
+        return _points_flex_action_response(
+            "This confirmation only works in the channel where it was requested.",
+            replace_original=False,
+        )
+
+    store = get_points_flex_store(settings.SLACK_RECEIPTS_DB_PATH)
+    owner = f"roo-flex-{uuid4()}"
+    try:
+        claim = store.claim(confirmation, owner=owner)
+    except Exception as exc:
+        print(
+            "Points flex confirmation state failed "
+            f"exc_type={exc.__class__.__name__}"
+        )
+        return _points_flex_action_response(
+            "I couldn't safely confirm that share, so nothing was posted. Try again in a moment.",
+            replace_original=False,
+        )
+
+    claim_state = claim.get("state")
+    if claim_state == "shared":
+        return _points_flex_action_response("Your Roo Points flex was already shared.")
+    if claim_state == "processing":
+        return _points_flex_action_response(
+            "Your Roo Points flex is already being shared.",
+            replace_original=False,
+        )
+    if claim_state == "expired":
+        return _points_flex_action_response(
+            "That sharing confirmation has expired. Run `@Roo flex my points` again."
+        )
+    if claim_state != "claimed":
+        return _points_flex_action_response(
+            "I couldn't verify that sharing confirmation, so nothing was posted."
+        )
+
+    from .clients.mlai_backend import MLAIBackendClient
+
+    try:
+        client = MLAIBackendClient(
+            base_url=settings.MLAI_BACKEND_URL,
+            api_key=settings.ROO_API_KEY or settings.MLAI_API_KEY,
+            internal_api_key=(
+                settings.INTERNAL_API_KEY
+                or settings.ROO_API_KEY
+                or settings.MLAI_API_KEY
+            ),
+        )
+        balance_data = await client.get_balance(confirmation.slack_user_id)
+        lifetime_earned = parse_lifetime_earned(balance_data)
+    except Exception as exc:
+        print(
+            "Points flex total refresh failed "
+            f"exc_type={exc.__class__.__name__}"
+        )
+        try:
+            store.release(
+                confirmation.request_id,
+                owner=owner,
+                error_code="backend_unavailable",
+            )
+        except Exception as release_exc:
+            print(
+                "Points flex claim release failed "
+                f"exc_type={release_exc.__class__.__name__}"
+            )
+        return _points_flex_action_response(
+            "I couldn't refresh your contribution total, so nothing was posted. Try the button again in a moment.",
+            replace_original=False,
+        )
+
+    public_message = format_points_flex_public_message(
+        slack_user_id=confirmation.slack_user_id,
+        lifetime_earned=lifetime_earned,
+    )
+    try:
+        post_response = post_message(
+            channel=confirmation.channel_id,
+            text=public_message,
+            client_msg_id=confirmation.request_id,
+        )
+        post_succeeded = bool(
+            post_response
+            and (
+                post_response.get("ok")
+                or post_response.get("error") == "duplicate_message"
+            )
+        )
+    except Exception as exc:
+        print(
+            "Points flex public post failed "
+            f"exc_type={exc.__class__.__name__}"
+        )
+        post_response = None
+        post_succeeded = False
+
+    if not post_succeeded:
+        try:
+            store.release(
+                confirmation.request_id,
+                owner=owner,
+                error_code="slack_post_failed",
+            )
+        except Exception as release_exc:
+            print(
+                "Points flex claim release failed "
+                f"exc_type={release_exc.__class__.__name__}"
+            )
+        return _points_flex_action_response(
+            "I couldn't post your Roo Points flex, so nothing was shared. Try the button again.",
+            replace_original=False,
+        )
+
+    try:
+        store.mark_shared(
+            confirmation.request_id,
+            owner=owner,
+            message_ts=str((post_response or {}).get("ts") or "") or None,
+        )
+    except Exception as exc:
+        # The deterministic Slack client_msg_id still protects a retry from
+        # creating another message if state persistence fails after posting.
+        print(
+            "Points flex shared-state persistence failed "
+            f"exc_type={exc.__class__.__name__}"
+        )
+
+    return _points_flex_action_response("Shared your lifetime-earned Roo Points publicly.")
 
 
 @dataclass(frozen=True)
@@ -4719,6 +4903,14 @@ async def slack_actions(
     thread_ts = message.get("thread_ts") or message.get("ts")
     
     print(f"🖱️ Action: {action_id} from {user_id}")
+
+    if action_id == POINTS_FLEX_ACTION_ID:
+        return await _handle_points_flex_confirmation_action(
+            settings=settings,
+            action_value=str(actions[0].get("value") or ""),
+            verified_user_id=user_id,
+            verified_channel_id=channel_id,
+        )
 
     if unified_admin and action_id == ADMIN_BRAIN_INCORRECT_ACTION:
         _open_admin_brain_correction_modal(
