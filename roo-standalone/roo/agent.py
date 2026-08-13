@@ -818,11 +818,15 @@ class RooAgent:
         """
         text_lower = text.lower().strip()
 
-        # 1. Balance Check: "points", "balance", "my points"
+        # 1. Explicit opt-in public contribution total.
+        if re.match(r'^(?:flex my points|flex points|points flex)$', text_lower):
+            return "flex_points"
+
+        # 2. Balance Check: "points", "balance", "my points"
         if re.match(r'^(?:points|balance|my points)$', text_lower):
             return "balance"
 
-        # 2. Earn/Tasks shortcuts
+        # 3. Earn/Tasks shortcuts
         if re.match(
             r'^(?:points\s+earn|earn\s+points|ways\s+to\s+earn|'
             r'tasks(?:\s+(?:all|mine|review|open))?|'
@@ -831,15 +835,15 @@ class RooAgent:
         ):
             return "list_tasks"
 
-        # 3. Rewards: "points rewards", "rewards"
+        # 4. Rewards: "points rewards", "rewards"
         if re.match(r'^(?:points\s+rewards|rewards)$', text_lower):
             return "list_rewards"
 
-        # 4. Coworking Book Today: "coworking book today"
+        # 5. Coworking Book Today: "coworking book today"
         if re.match(r'^coworking\s+book\s+today$', text_lower):
             return "book_coworking"
 
-        # 5. Coworking Cancel: "coworking cancel" (assumes today/upcoming)
+        # 6. Coworking Cancel: "coworking cancel" (assumes today/upcoming)
         if re.match(r'^coworking\s+cancel$', text_lower):
             return "cancel_coworking"
 
@@ -860,6 +864,14 @@ class RooAgent:
         action = self._match_fast_path(text)
         if action is None:
             return None
+
+        if action == "flex_points":
+            return await self._execute_fast_points(
+                user_id,
+                "flex_points",
+                channel_id=channel_id,
+                thread_ts=thread_ts,
+            )
 
         if action == "balance":
             return await self._execute_fast_points(
@@ -926,7 +938,19 @@ class RooAgent:
                 internal_api_key=settings.INTERNAL_API_KEY or settings.ROO_API_KEY or settings.MLAI_API_KEY,
             )
             
-            if action == "balance":
+            if action == "flex_points":
+                msg = await self.skill_executor._handle_points_action(
+                    client=client,
+                    action="flex_points",
+                    params={},
+                    text="flex my points",
+                    user_id=user_id,
+                    channel_id=kwargs.get("channel_id"),
+                    thread_ts=kwargs.get("thread_ts"),
+                    skill=skill,
+                )
+
+            elif action == "balance":
                 msg = await self.skill_executor._handle_points_action(
                     client=client,
                     action="balance",

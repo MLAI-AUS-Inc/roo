@@ -111,6 +111,14 @@
   text: "how many points do I have right now?"
   expect: {skill: mlai-points, action: balance}
   tags: [paraphrase]
+- id: para-points-flex-earned
+  text: "share my earned Roo Points publicly"
+  expect: {skill: mlai-points, action: flex_points}
+  tags: [paraphrase, points-flex]
+- id: para-points-flex-contributions
+  text: "let me flex my Roo contribution total in this channel"
+  expect: {skill: mlai-points, action: flex_points}
+  tags: [paraphrase, points-flex]
 - id: para-points-spend-on
   text: "what can I spend my roo points on?"
   expect: {skill: mlai-points}

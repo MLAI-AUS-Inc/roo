@@ -65,6 +65,11 @@ from ..points_request_approval import (
     build_points_request_record,
     remember_points_request_summary,
 )
+from ..points_flex import (
+    build_points_flex_preview_blocks,
+    issue_points_flex_confirmation,
+    parse_lifetime_earned,
+)
 from ..slack_client import (
     get_channel_id,
     get_channel_name,
@@ -11937,6 +11942,111 @@ Chunk {index} source: {label}
                 action="balance",
                 private_ack="I've sent your Roo Points summary privately.",
             )
+
+        elif action == "flex_points":
+            if not channel_id or str(channel_id).startswith("D"):
+                return (
+                    "Run `@Roo flex my points` in the shared channel where you "
+                    "want Roo to post your lifetime-earned contribution total."
+                )
+
+            if not str(channel_id).startswith(("C", "G")):
+                return {
+                    "message": "",
+                    "suppress_post": True,
+                    "data": {
+                        "action": "flex_points",
+                        "preview_delivered": False,
+                        "invalid_channel": True,
+                    },
+                }
+
+            from ..slack_client import get_bot_user_id
+
+            try:
+                bot_user_id = get_bot_user_id()
+            except Exception:
+                bot_user_id = None
+            target_mentions = [
+                mentioned_user_id
+                for mentioned_user_id in re.findall(r"<@([A-Z0-9]+)>", text)
+                if mentioned_user_id != bot_user_id
+            ]
+            if target_mentions:
+                delivered = self._post_private_points_ack(
+                    channel_id=channel_id,
+                    requester_user_id=user_id,
+                    thread_ts=thread_ts,
+                    text=(
+                        "You can only flex your own lifetime-earned Roo Points. "
+                        "Use `@Roo flex my points` without tagging another member."
+                    ),
+                    action="flex_points",
+                )
+                return {
+                    "message": "",
+                    "suppress_post": True,
+                    "data": {
+                        "action": "flex_points",
+                        "preview_delivered": False,
+                        "target_rejected": True,
+                        "ephemeral_delivered": delivered,
+                    },
+                }
+
+            data = await client.get_balance(user_id)
+            lifetime_earned = parse_lifetime_earned(data)
+            settings = get_settings()
+            token, confirmation = issue_points_flex_confirmation(
+                signing_secret=settings.SLACK_SIGNING_SECRET,
+                slack_user_id=user_id,
+                channel_id=channel_id,
+            )
+            preview_text = (
+                "Confirm whether to share your lifetime-earned Roo Points "
+                "publicly in this channel."
+            )
+            try:
+                response = post_ephemeral(
+                    channel=channel_id,
+                    user=user_id,
+                    text=preview_text,
+                    thread_ts=thread_ts,
+                    blocks=build_points_flex_preview_blocks(
+                        lifetime_earned=lifetime_earned,
+                        token=token,
+                    ),
+                )
+                preview_delivered = bool(response and response.get("ok"))
+            except Exception as exc:
+                print(
+                    "Points flex preview delivery failed "
+                    f"exc_type={exc.__class__.__name__}"
+                )
+                preview_delivered = False
+
+            if not preview_delivered:
+                try:
+                    send_dm(
+                        user_id,
+                        "I couldn't show the public sharing confirmation in that "
+                        "channel. Try `@Roo flex my points` there again in a moment.",
+                    )
+                except Exception as exc:
+                    print(
+                        "Points flex preview fallback failed "
+                        f"exc_type={exc.__class__.__name__}"
+                    )
+
+            return {
+                "message": "",
+                "suppress_post": True,
+                "data": {
+                    "action": "flex_points",
+                    "preview_delivered": preview_delivered,
+                    "confirmation_request_id": confirmation.request_id,
+                },
+            }
         
         elif action == "history":
             limit = params.get("limit", 10)
@@ -11982,7 +12092,6 @@ Chunk {index} source: {label}
                 return "What are you requesting the points for? Try `request 5 points for helping at the event`."
 
             from ..slack_client import get_bot_user_id
-            import re
 
             try:
                 bot_id = get_bot_user_id()
@@ -12164,7 +12273,6 @@ Chunk {index} source: {label}
             
             if not submission_text:
                 # Extract text after the task ID
-                import re
                 match = re.search(r'(?:task\s+)?(?:ROO-\d+|#?\d+)\s+(.+)', text, re.IGNORECASE)
                 if match:
                     submission_text = match.group(1)
@@ -12368,7 +12476,6 @@ Chunk {index} source: {label}
                     booking_date = (today + timedelta(days=1)).isoformat()
             
             if not booking_date and not booking_id:
-                import re
                 match = re.search(r'(\d{4}-\d{2}-\d{2})', text)
                 if match:
                     booking_date = match.group(1)
@@ -12403,7 +12510,6 @@ Chunk {index} source: {label}
             quantity = params.get("quantity", 1)
             
             if not reward_code:
-                import re
                 match = re.search(r'request\s+(\w+)', text, re.IGNORECASE)
                 if match:
                     reward_code = match.group(1).upper()
@@ -12762,7 +12868,6 @@ Chunk {index} source: {label}
             
             # Get Roo's bot ID to filter it from target users
             # Extract ALL user mentions from the text (excluding Roo)
-            import re
             all_mentions = re.findall(r'<@([A-Z0-9]+)>', text)
             target_slack_ids = [uid for uid in all_mentions if uid != bot_id]
             
