@@ -66,8 +66,11 @@ from ..points_request_approval import (
     remember_points_request_summary,
 )
 from ..points_flex import (
+    build_points_flex_delete_blocks,
     build_points_flex_preview_blocks,
+    get_points_flex_store,
     issue_points_flex_confirmation,
+    issue_points_flex_deletion,
     parse_lifetime_earned,
 )
 from ..slack_client import (
@@ -11943,6 +11946,145 @@ Chunk {index} source: {label}
                 private_ack="I've sent your Roo Points summary privately.",
             )
 
+        elif action == "delete_flex":
+            if not channel_id or str(channel_id).startswith("D"):
+                return (
+                    "Run `@Roo delete my flex` in the shared channel where the "
+                    "flex was posted. Roo will show the choices only to you."
+                )
+
+            if not str(channel_id).startswith(("C", "G")):
+                return {
+                    "message": "",
+                    "suppress_post": True,
+                    "data": {
+                        "action": "delete_flex",
+                        "preview_delivered": False,
+                        "invalid_channel": True,
+                    },
+                }
+
+            from ..slack_client import get_bot_user_id
+
+            try:
+                bot_user_id = get_bot_user_id()
+            except Exception:
+                bot_user_id = None
+            target_mentions = [
+                mentioned_user_id
+                for mentioned_user_id in re.findall(r"<@([A-Z0-9]+)>", text)
+                if mentioned_user_id != bot_user_id
+            ]
+            if target_mentions:
+                delivered = self._post_private_points_ack(
+                    channel_id=channel_id,
+                    requester_user_id=user_id,
+                    thread_ts=thread_ts,
+                    text=(
+                        "You can only delete your own Roo Points flex. "
+                        "Use `@Roo delete my flex` without tagging another member."
+                    ),
+                    action="delete_flex",
+                )
+                return {
+                    "message": "",
+                    "suppress_post": True,
+                    "data": {
+                        "action": "delete_flex",
+                        "preview_delivered": False,
+                        "target_rejected": True,
+                        "ephemeral_delivered": delivered,
+                    },
+                }
+
+            settings = get_settings()
+            store = get_points_flex_store(settings.SLACK_RECEIPTS_DB_PATH)
+            try:
+                records = store.list_shared(
+                    slack_user_id=user_id,
+                    channel_id=channel_id,
+                )
+            except Exception as exc:
+                print(
+                    "Points flex delete lookup failed "
+                    f"exc_type={exc.__class__.__name__}"
+                )
+                records = []
+
+            if not records:
+                delivered = self._post_private_points_ack(
+                    channel_id=channel_id,
+                    requester_user_id=user_id,
+                    thread_ts=thread_ts,
+                    text="I couldn't find an active Roo Points flex from you in this channel.",
+                    action="delete_flex",
+                )
+                return {
+                    "message": "",
+                    "suppress_post": True,
+                    "data": {
+                        "action": "delete_flex",
+                        "preview_delivered": delivered,
+                        "flex_count": 0,
+                    },
+                }
+
+            tokens = {
+                str(record["request_id"]): issue_points_flex_deletion(
+                    signing_secret=settings.SLACK_SIGNING_SECRET,
+                    request_id=str(record["request_id"]),
+                    slack_user_id=user_id,
+                    channel_id=channel_id,
+                )
+                for record in records
+            }
+            preview_text = (
+                "Confirm which Roo Points flex to delete."
+                if len(records) > 1
+                else "Confirm deletion of your Roo Points flex."
+            )
+            try:
+                response = post_ephemeral(
+                    channel=channel_id,
+                    user=user_id,
+                    text=preview_text,
+                    thread_ts=thread_ts,
+                    blocks=build_points_flex_delete_blocks(
+                        records=records,
+                        tokens=tokens,
+                    ),
+                )
+                preview_delivered = bool(response and response.get("ok"))
+            except Exception as exc:
+                print(
+                    "Points flex delete preview failed "
+                    f"exc_type={exc.__class__.__name__}"
+                )
+                preview_delivered = False
+
+            if not preview_delivered:
+                try:
+                    send_dm(
+                        user_id,
+                        "I couldn't show the flex deletion controls in that channel. "
+                        "Try `@Roo delete my flex` there again in a moment.",
+                    )
+                except Exception as exc:
+                    print(
+                        "Points flex delete fallback failed "
+                        f"exc_type={exc.__class__.__name__}"
+                    )
+
+            return {
+                "message": "",
+                "suppress_post": True,
+                "data": {
+                    "action": "delete_flex",
+                    "preview_delivered": preview_delivered,
+                    "flex_count": len(records),
+                },
+            }
+
         elif action == "flex_points":
             if not channel_id or str(channel_id).startswith("D"):
                 return (
@@ -11958,6 +12100,27 @@ Chunk {index} source: {label}
                         "action": "flex_points",
                         "preview_delivered": False,
                         "invalid_channel": True,
+                    },
+                }
+
+            if not thread_ts:
+                delivered = self._post_private_points_ack(
+                    channel_id=channel_id,
+                    requester_user_id=user_id,
+                    thread_ts=None,
+                    text=(
+                        "I couldn't identify the request thread, so nothing was shared. "
+                        "Run `@Roo flex my points` again."
+                    ),
+                    action="flex_points",
+                )
+                return {
+                    "message": "",
+                    "suppress_post": True,
+                    "data": {
+                        "action": "flex_points",
+                        "preview_delivered": delivered,
+                        "missing_thread": True,
                     },
                 }
 
@@ -12001,10 +12164,11 @@ Chunk {index} source: {label}
                 signing_secret=settings.SLACK_SIGNING_SECRET,
                 slack_user_id=user_id,
                 channel_id=channel_id,
+                thread_ts=thread_ts,
             )
             preview_text = (
                 "Confirm whether to share your lifetime-earned Roo Points "
-                "publicly in this channel."
+                "in this thread."
             )
             try:
                 response = post_ephemeral(
@@ -12029,8 +12193,8 @@ Chunk {index} source: {label}
                 try:
                     send_dm(
                         user_id,
-                        "I couldn't show the public sharing confirmation in that "
-                        "channel. Try `@Roo flex my points` there again in a moment.",
+                        "I couldn't show the sharing confirmation in that "
+                        "thread. Try `@Roo flex my points` there again in a moment.",
                     )
                 except Exception as exc:
                     print(

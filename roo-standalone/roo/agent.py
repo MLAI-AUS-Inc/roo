@@ -818,7 +818,13 @@ class RooAgent:
         """
         text_lower = text.lower().strip()
 
-        # 1. Explicit opt-in public contribution total.
+        # 1. Explicit opt-in contribution total and owner-only deletion.
+        if re.match(
+            r'^(?:delete my flex|remove my (?:points )?flex|delete my latest flex)$',
+            text_lower,
+        ):
+            return "delete_flex"
+
         if re.match(r'^(?:flex my points|flex points|points flex)$', text_lower):
             return "flex_points"
 
@@ -865,10 +871,10 @@ class RooAgent:
         if action is None:
             return None
 
-        if action == "flex_points":
+        if action in {"flex_points", "delete_flex"}:
             return await self._execute_fast_points(
                 user_id,
-                "flex_points",
+                action,
                 channel_id=channel_id,
                 thread_ts=thread_ts,
             )
@@ -938,12 +944,16 @@ class RooAgent:
                 internal_api_key=settings.INTERNAL_API_KEY or settings.ROO_API_KEY or settings.MLAI_API_KEY,
             )
             
-            if action == "flex_points":
+            if action in {"flex_points", "delete_flex"}:
                 msg = await self.skill_executor._handle_points_action(
                     client=client,
-                    action="flex_points",
+                    action=action,
                     params={},
-                    text="flex my points",
+                    text=(
+                        "flex my points"
+                        if action == "flex_points"
+                        else "delete my flex"
+                    ),
                     user_id=user_id,
                     channel_id=kwargs.get("channel_id"),
                     thread_ts=kwargs.get("thread_ts"),

@@ -27,7 +27,9 @@ actions:
   - name: balance
     description: Privately show the user their current points balance.
   - name: flex_points
-    description: Confirm sharing the user's own lifetime-earned total publicly.
+    description: Share the user's own lifetime-earned total in the request thread.
+  - name: delete_flex
+    description: Delete the user's flex in this channel.
   - name: history
     description: Privately show the user their recent points transactions.
     params:
@@ -141,6 +143,7 @@ This skill enables Roo to interact with the MLAI Points System via API, allowing
 
 ### Member Actions
 - Check points balance and history
+- Flex a lifetime-earned total in the request thread and delete your own flex later
 - Request points for yourself in Slack for admin approval
 - View task queues and claim open tasks
 - Submit completed work for approval
@@ -357,10 +360,13 @@ so fresh buttons can be created safely in that conversation.
   balances as personal data. In a shared channel or thread, send those details to
   the verified requester by DM and use only a private ephemeral acknowledgement.
 - The only public lifetime-total flow is `flex_points`. It must be requested by the
-  member for themselves in the destination channel and confirmed through Roo's
-  private **Share publicly** button. Never treat a balance request as consent, never
-  accept a tagged target, and never share balance, purchase, spending, or history
-  fields. The eventual public post is top-level in the selected channel, not a thread.
+  member for themselves and confirmed through Roo's private **Share in thread**
+  button. Never treat a balance request as consent, never accept a tagged target,
+  and never share balance, purchase, spending, or history fields. Post the flex only
+  in the request thread.
+- For `delete_flex`, privately show only the verified member's stored flexes from the
+  current channel. Delete only the exact stored Roo message selected through a signed,
+  expiring button. Never accept another member or a model-provided message target.
 - In a Roo DM, return personal points details directly without opening another DM.
 - Public booking and award confirmations may state the action and points charged or
   awarded, but must not include anyone's remaining or resulting balance.
