@@ -1756,7 +1756,9 @@ async def test_content_factory_blocks_when_user_has_insufficient_points(monkeypa
     )
 
     assert "Creating an article costs 4 Roo points" in result
-    assert "currently have 3" in result
+    assert "currently have 3" not in result
+    assert "balance is below that amount" in result
+    assert "DM Roo `points`" in result
     assert FakeContentFactoryClient.last_instance.trigger_calls == []
     assert FakeContentFactoryClient.last_instance.balance_checks == ["U999FREE"]
 

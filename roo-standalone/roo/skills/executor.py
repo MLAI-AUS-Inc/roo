@@ -68,6 +68,7 @@ from ..points_request_approval import (
 from ..slack_client import (
     get_channel_id,
     get_channel_name,
+    post_ephemeral,
     post_message,
     send_dm,
     upload_file,
@@ -7273,8 +7274,8 @@ Chunk {index} source: {label}
         balance = int(balance_data.get("balance") or 0)
         if balance < cost_points:
             return (
-                f"Creating an article costs {cost_points} Roo points, and you currently have "
-                f"{balance}. Earn a few more Roo points first, then ask me again."
+                f"Creating an article costs {cost_points} Roo points, and your balance is below "
+                "that amount. DM Roo `points` to view your balance privately."
             )
 
         return None
@@ -9831,7 +9832,9 @@ Chunk {index} source: {label}
             if e.response.status_code == 403:
                 return "Sorry mate, you're not authorized to do that. Only Points Admins can perform that action. 🔒"
             elif e.response.status_code == 409:
-                error_detail = self._extract_http_error_detail(e)
+                error_detail = self._redact_points_balance_error(
+                    self._extract_http_error_detail(e)
+                )
                 return error_detail or (
                     "That task changed while you were editing it. Refresh it and try again."
                 )
@@ -9848,29 +9851,40 @@ Chunk {index} source: {label}
                 # Handle bad requests (e.g. insufficient funds)
                 try:
                     error_detail = self._extract_http_error_detail(e)
-                    
-                    # If it's a balance issue, fetch current balance to be helpful
-                    if "balance" in error_detail.lower() or "insufficient" in error_detail.lower():
+                    safe_detail = self._redact_points_balance_error(error_detail)
+
+                    if self._is_points_balance_error(error_detail):
                         try:
                             balance_data = await client.get_balance(user_id)
                             current_balance = balance_data.get("balance", 0)
-                            return f"🛑 Computer says no: {error_detail}\n\nYour current balance is **{current_balance} points**."
+                            return self._deliver_personal_points_message(
+                                recipient_user_id=user_id,
+                                requester_user_id=user_id,
+                                channel_id=channel_id,
+                                thread_ts=thread_ts,
+                                private_message=(
+                                    f"🛑 Computer says no: {safe_detail}\n\n"
+                                    f"Your current balance is **{current_balance} points**."
+                                ),
+                                public_message=f"🛑 Computer says no: {safe_detail}",
+                                action=action or "points_error",
+                            )
                         except Exception:
-                            pass
-                            
-                    return f"🛑 {error_detail}"
+                            return f"🛑 Computer says no: {safe_detail}"
+
+                    return f"🛑 {safe_detail}"
                 except Exception:
                     return f"Ran into a snag with that request (400 Bad Request)."
             elif e.response.status_code >= 500:
                 return self._points_backend_unavailable_message(action)
             else:
-                error_detail = self._extract_http_error_detail(e)
-                return f"Ran into a snag: {error_detail or str(e)}"
+                error_detail = self._redact_points_balance_error(
+                    self._extract_http_error_detail(e)
+                )
+                return f"Ran into a snag: {error_detail or 'The points request was rejected.'}"
         except Exception as e:
-            print(f"Points skill error: {e}")
-            import traceback
-            traceback.print_exc()
-            return f"Had some trouble with the points system: {str(e)}"
+            print(f"Points skill error: exc_type={e.__class__.__name__}")
+            return "Had some trouble with the points system. Try again shortly."
 
 
     def _resolve_topup_pack_id(self, text: str, params: dict) -> tuple[Optional[str], Optional[int]]:
@@ -10523,6 +10537,136 @@ Chunk {index} source: {label}
             f"🛒 **Lifetime Purchased:** {purchased} points\n\n"
             f"Nice work! Check out `{tasks_command}` to earn more 🦘"
         )
+
+    @staticmethod
+    def _is_points_balance_error(error_detail: str) -> bool:
+        detail = str(error_detail or "").lower()
+        return (
+            "balance" in detail
+            or ("insufficient" in detail and ("point" in detail or "fund" in detail))
+            or ("not enough" in detail and "point" in detail)
+            or bool(
+                re.search(
+                    r"\b(?:has|have|available|remaining|current)\b[^\n]*"
+                    r"\d+\s*(?:roo\s+)?points?\b",
+                    detail,
+                )
+            )
+            or bool(re.search(r"\d+\s*<\s*\d+", detail))
+        )
+
+    @classmethod
+    def _redact_points_balance_error(cls, error_detail: str) -> str:
+        detail = str(error_detail or "").strip()
+        if cls._is_points_balance_error(detail) and re.search(r"\d", detail):
+            return "There are not enough Roo Points for this action."
+        return detail
+
+    def _deliver_personal_points_message(
+        self,
+        *,
+        recipient_user_id: str,
+        requester_user_id: str,
+        channel_id: Optional[str],
+        thread_ts: Optional[str],
+        private_message: str,
+        action: str,
+        public_message: Optional[str] = None,
+        private_ack: str = "I've sent your Roo Points details privately.",
+    ) -> dict:
+        """Deliver personal points data without a shared-channel fallback."""
+        result_data = {
+            "action": action,
+            "delivery": "direct_message",
+            "private_points": True,
+        }
+        requester_dm = bool(
+            channel_id
+            and str(channel_id).startswith("D")
+            and recipient_user_id == requester_user_id
+        )
+        if requester_dm:
+            return {
+                "message": private_message,
+                "data": {**result_data, "delivery": "current_direct_message"},
+            }
+
+        try:
+            response = send_dm(recipient_user_id, private_message)
+            dm_delivered = bool(response and response.get("ok"))
+        except Exception as exc:
+            print(
+                "⚠️ Private Roo Points delivery failed "
+                f"action={action} exc_type={exc.__class__.__name__}"
+            )
+            dm_delivered = False
+        result_data["dm_delivered"] = dm_delivered
+
+        if public_message is not None:
+            if not dm_delivered and recipient_user_id == requester_user_id:
+                self._post_private_points_ack(
+                    channel_id=channel_id,
+                    requester_user_id=requester_user_id,
+                    thread_ts=thread_ts,
+                    text=(
+                        "I couldn't send your private points details. "
+                        "DM Roo `points` to view them safely."
+                    ),
+                    action=action,
+                )
+            return {
+                "message": public_message,
+                "data": result_data,
+            }
+
+        acknowledgement = (
+            private_ack
+            if dm_delivered
+            else "I couldn't send you a DM. DM Roo `points` to view your points privately."
+        )
+        result_data["ephemeral_delivered"] = self._post_private_points_ack(
+            channel_id=channel_id,
+            requester_user_id=requester_user_id,
+            thread_ts=thread_ts,
+            text=acknowledgement,
+            action=action,
+        )
+        if not dm_delivered:
+            result_data["delivery_failed"] = True
+
+        # Personal data must never fall back to a shared Slack response, even
+        # when both the DM and private acknowledgement fail.
+        return {
+            "message": "",
+            "suppress_post": True,
+            "data": result_data,
+        }
+
+    @staticmethod
+    def _post_private_points_ack(
+        *,
+        channel_id: Optional[str],
+        requester_user_id: str,
+        thread_ts: Optional[str],
+        text: str,
+        action: str,
+    ) -> bool:
+        if not channel_id or str(channel_id).startswith("D") or not requester_user_id:
+            return False
+        try:
+            response = post_ephemeral(
+                channel=channel_id,
+                user=requester_user_id,
+                text=text,
+                thread_ts=thread_ts,
+            )
+            return bool(response and response.get("ok"))
+        except Exception as exc:
+            print(
+                "⚠️ Private Roo Points acknowledgement failed "
+                f"action={action} exc_type={exc.__class__.__name__}"
+            )
+            return False
 
     async def _get_points_balance_summary_for_rewards(self, client, user_id: str) -> Optional[dict]:
         try:
@@ -11403,10 +11547,15 @@ Chunk {index} source: {label}
         new_balance: Optional[int],
         admin_checkin: bool,
         discount_applied: bool = False,
+        include_balance: bool = True,
     ) -> str:
         point_word = "point" if cost == 1 else "points"
         if admin_checkin:
-            balance_line = f"\nTheir balance: {new_balance} pts" if new_balance is not None else ""
+            balance_line = (
+                f"\nTheir balance: {new_balance} pts"
+                if include_balance and new_balance is not None
+                else ""
+            )
             return (
                 f"You beauty! 🎉\n\n"
                 f"Checked <@{target_user_id}> in for **{booking_date}** at the coworking space.\n"
@@ -11414,7 +11563,7 @@ Chunk {index} source: {label}
             )
 
         balance_line = ""
-        if new_balance is not None:
+        if include_balance and new_balance is not None:
             balance_line = f" (Balance remaining: {new_balance} points)"
 
         message = (
@@ -11443,16 +11592,10 @@ Chunk {index} source: {label}
         target_user_id: str,
         exc: httpx.HTTPStatusError,
     ) -> str:
-        error_detail = self._extract_http_error_detail(exc) or "Bad request"
-        balance_line = ""
-        if "balance" in error_detail.lower() or "insufficient" in error_detail.lower():
-            try:
-                balance_data = await client.get_balance(target_user_id)
-                current_balance = balance_data.get("balance", 0)
-                balance_line = f"\n\nTheir current balance is **{current_balance} points**."
-            except Exception:
-                pass
-        return f"🛑 I couldn't check <@{target_user_id}> in: {error_detail}{balance_line}"
+        error_detail = self._redact_points_balance_error(
+            self._extract_http_error_detail(exc) or "Bad request"
+        )
+        return f"🛑 I couldn't check <@{target_user_id}> in: {error_detail}"
 
     def _format_admin_coworking_batch_success(
         self,
@@ -11499,7 +11642,9 @@ Chunk {index} source: {label}
         booking_date: str,
         exc: httpx.HTTPStatusError,
     ) -> str:
-        error_detail = self._extract_http_error_detail(exc) or "The booking request was rejected."
+        error_detail = self._redact_points_balance_error(
+            self._extract_http_error_detail(exc) or "The booking request was rejected."
+        )
         per_target_errors: list[dict] = []
         try:
             payload = exc.response.json()
@@ -11517,7 +11662,14 @@ Chunk {index} source: {label}
         for item in per_target_errors[:10]:
             slack_user_id = str(item.get("slack_user_id") or "").strip()
             target_label = f"<@{slack_user_id}>" if slack_user_id else "Target"
-            reason = str(item.get("error") or item.get("detail") or item.get("message") or "Rejected").strip()
+            reason = self._redact_points_balance_error(
+                str(
+                    item.get("error")
+                    or item.get("detail")
+                    or item.get("message")
+                    or "Rejected"
+                ).strip()
+            )
             lines.append(f"• {target_label}: {reason}")
         return "\n".join(lines)
 
@@ -11529,7 +11681,7 @@ Chunk {index} source: {label}
         target_user_ids: list[str],
         booking_date: str,
         channel_id: Optional[str],
-    ) -> str:
+    ) -> Any:
         try:
             result = await client.book_coworking_many(
                 admin_slack_user_id=admin_user_id,
@@ -11643,13 +11795,31 @@ Chunk {index} source: {label}
         except MLAIBackendUnavailableError:
             pass
 
-        return self._format_coworking_booking_success(
+        private_message = self._format_coworking_booking_success(
             booking_date=booking_date,
             target_user_id=target_user_id,
             cost=cost,
             new_balance=new_balance,
+            admin_checkin=False,
+            discount_applied=discount_applied,
+        )
+        public_message = self._format_coworking_booking_success(
+            booking_date=booking_date,
+            target_user_id=target_user_id,
+            cost=cost,
+            new_balance=None,
             admin_checkin=admin_checkin,
             discount_applied=discount_applied,
+            include_balance=False,
+        )
+        return self._deliver_personal_points_message(
+            recipient_user_id=target_user_id,
+            requester_user_id=requested_by_user_id,
+            channel_id=channel_id,
+            thread_ts=thread_ts,
+            private_message=private_message,
+            public_message=public_message,
+            action="book_coworking",
         )
 
     async def _handle_points_action(
@@ -11757,23 +11927,40 @@ Chunk {index} source: {label}
 
         if action == "balance":
             data = await client.get_balance(user_id)
-            return self._format_points_balance_summary(data, tasks_command="tasks")
+            message = self._format_points_balance_summary(data, tasks_command="tasks")
+            return self._deliver_personal_points_message(
+                recipient_user_id=user_id,
+                requester_user_id=user_id,
+                channel_id=channel_id,
+                thread_ts=thread_ts,
+                private_message=message,
+                action="balance",
+                private_ack="I've sent your Roo Points summary privately.",
+            )
         
         elif action == "history":
             limit = params.get("limit", 10)
             entries = await client.get_history(user_id, limit)
             
             if not entries:
-                return "No transactions yet! Start earning points by claiming some tasks 💪"
-            
-            lines = ["📜 **Your Recent Transactions:**\n"]
-            for entry in entries[:10]:
-                delta = entry.get("delta", 0)
-                emoji = "➕" if delta > 0 else "➖"
-                desc = entry.get("description", "")[:50]
-                lines.append(f"{emoji} {delta:+d} pts - {desc}")
-            
-            return "\n".join(lines)
+                message = "No transactions yet! Start earning points by claiming some tasks 💪"
+            else:
+                lines = ["📜 **Your Recent Transactions:**\n"]
+                for entry in entries[:10]:
+                    delta = entry.get("delta", 0)
+                    emoji = "➕" if delta > 0 else "➖"
+                    desc = entry.get("description", "")[:50]
+                    lines.append(f"{emoji} {delta:+d} pts - {desc}")
+                message = "\n".join(lines)
+            return self._deliver_personal_points_message(
+                recipient_user_id=user_id,
+                requester_user_id=user_id,
+                channel_id=channel_id,
+                thread_ts=thread_ts,
+                private_message=message,
+                action="history",
+                private_ack="I've sent your Roo Points history privately.",
+            )
         
         elif action == "request_points":
             if not channel_id:
@@ -12200,7 +12387,16 @@ Chunk {index} source: {label}
         elif action == "list_rewards":
             rewards = await client.list_rewards(user_id)
             balance_summary = await self._get_points_balance_summary_for_rewards(client, user_id)
-            return self._format_rewards_catalog(rewards, balance_summary=balance_summary)
+            message = self._format_rewards_catalog(rewards, balance_summary=balance_summary)
+            return self._deliver_personal_points_message(
+                recipient_user_id=user_id,
+                requester_user_id=user_id,
+                channel_id=channel_id,
+                thread_ts=thread_ts,
+                private_message=message,
+                action="list_rewards",
+                private_ack="I've sent your personalised Roo Rewards list privately.",
+            )
         
         elif action == "request_reward":
             reward_code = params.get("reward_code", "").upper()
@@ -12684,10 +12880,33 @@ Chunk {index} source: {label}
                         print(f"⚠️ User linking failed (continuing to award): {e}")
 
                     result = await client.award_points(user_id, target_id, int(points), reason)
-                    new_balance = result.get("new_balance", 0)
-                    results.append({"user": target_id, "new_balance": new_balance})
+                    new_balance = result.get("new_balance")
+                    results.append({"user": target_id})
+                    balance_line = (
+                        f"\nYour new balance is {new_balance} points."
+                        if new_balance is not None
+                        else ""
+                    )
+                    try:
+                        send_dm(
+                            target_id,
+                            (
+                                f"You received {int(points)} Roo Points.\n"
+                                f"Reason: {reason}{balance_line}"
+                            ),
+                        )
+                    except Exception as exc:
+                        print(
+                            "⚠️ Award recipient DM failed "
+                            f"exc_type={exc.__class__.__name__}"
+                        )
                 except Exception as e:
-                    errors.append({"user": target_id, "error": str(e)})
+                    errors.append(
+                        {
+                            "user": target_id,
+                            "error": self._redact_points_balance_error(str(e)),
+                        }
+                    )
             
             # Build response
             emoji = "🎉" if points > 0 else "📉"
@@ -12695,11 +12914,11 @@ Chunk {index} source: {label}
             
             if len(results) == 1 and not errors:
                 r = results[0]
-                return f"{emoji} {verb} {abs(points)} points to <@{r['user']}>.\n\nReason: {reason}\nTheir new balance: {r['new_balance']} pts"
+                return f"{emoji} {verb} {abs(points)} points to <@{r['user']}>.\n\nReason: {reason}"
             
             lines = [f"{emoji} {verb} {abs(points)} points each!\n\nReason: {reason}\n"]
             for r in results:
-                lines.append(f"✅ <@{r['user']}>: now has {r['new_balance']} pts")
+                lines.append(f"✅ <@{r['user']}>: points awarded")
             for e in errors:
                 lines.append(f"❌ <@{e['user']}>: {e['error']}")
             

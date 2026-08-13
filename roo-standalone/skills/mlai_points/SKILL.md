@@ -26,9 +26,9 @@ routing:
     - {text: "how many people came to our last event?", instead: luma-events}
 actions:
   - name: balance
-    description: Show the user's current points balance.
+    description: Privately show the user their current points balance.
   - name: history
-    description: Show recent points transactions.
+    description: Privately show the user their recent points transactions.
     params:
       days: {type: integer, description: "How many days back (default 7)."}
       limit: {type: integer, description: "Max entries (default 10)."}
@@ -352,6 +352,14 @@ so fresh buttons can be created safely in that conversation.
 - Be encouraging about earning points
 - Keep responses concise but informative
 - Use formatting (bold, lists) for clarity
+- Treat balances, lifetime totals, transaction history, affordability, and resulting
+  balances as personal data. In a shared channel or thread, send those details to
+  the verified requester by DM and use only a private ephemeral acknowledgement.
+- In a Roo DM, return personal points details directly without opening another DM.
+- Public booking and award confirmations may state the action and points charged or
+  awarded, but must not include anyone's remaining or resulting balance.
+- If private delivery fails, never fall back to posting personal points data publicly;
+  privately tell the requester to DM Roo `points` instead.
 
 ## Example Responses
 

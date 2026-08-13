@@ -742,11 +742,7 @@ def _build_notification_text(awards: list[dict[str, Any]]) -> str:
     lines = [heading]
     for award in awards:
         user_id = award.get("slack_user_id")
-        new_balance = award.get("new_balance")
-        if new_balance is None:
-            lines.append(f":white_check_mark: <@{user_id}>: awarded 2 pts")
-        else:
-            lines.append(f":white_check_mark: <@{user_id}>: now has {new_balance} pts")
+        lines.append(f":white_check_mark: <@{user_id}>: awarded 2 pts")
     return "\n".join(lines)
 
 

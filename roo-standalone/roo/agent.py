@@ -862,7 +862,12 @@ class RooAgent:
             return None
 
         if action == "balance":
-            return await self._execute_fast_points(user_id, "balance")
+            return await self._execute_fast_points(
+                user_id,
+                "balance",
+                channel_id=channel_id,
+                thread_ts=thread_ts,
+            )
 
         if action == "list_tasks":
             return await self._execute_fast_points(
@@ -874,7 +879,12 @@ class RooAgent:
             )
 
         if action == "list_rewards":
-            return await self._execute_fast_points(user_id, "list_rewards")
+            return await self._execute_fast_points(
+                user_id,
+                "list_rewards",
+                channel_id=channel_id,
+                thread_ts=thread_ts,
+            )
 
         if action == "book_coworking":
             today = self._get_today().isoformat()
@@ -916,16 +926,16 @@ class RooAgent:
                 internal_api_key=settings.INTERNAL_API_KEY or settings.ROO_API_KEY or settings.MLAI_API_KEY,
             )
             
-            # Re-use the executor's logic for response formatting to DRY
-            # We need to instantiate the executor just to access the helper method
-            # Note: This relies on _handle_points_action being available/public-ish
-            # Since it's protected, we might duplicate simple formatting here for speed/isolation
-            
             if action == "balance":
-                data = await client.get_balance(user_id)
-                msg = self.skill_executor._format_points_balance_summary(
-                    data,
-                    tasks_command="@Roo tasks",
+                msg = await self.skill_executor._handle_points_action(
+                    client=client,
+                    action="balance",
+                    params={},
+                    text="points",
+                    user_id=user_id,
+                    channel_id=kwargs.get("channel_id"),
+                    thread_ts=kwargs.get("thread_ts"),
+                    skill=skill,
                 )
                 
             elif action == "list_tasks":
@@ -941,14 +951,15 @@ class RooAgent:
                 )
             
             elif action == "list_rewards":
-                rewards = await client.list_rewards(user_id)
-                balance_summary = await self.skill_executor._get_points_balance_summary_for_rewards(
-                    client,
-                    user_id,
-                )
-                msg = self.skill_executor._format_rewards_catalog(
-                    rewards,
-                    balance_summary=balance_summary,
+                msg = await self.skill_executor._handle_points_action(
+                    client=client,
+                    action="list_rewards",
+                    params={},
+                    text="rewards",
+                    user_id=user_id,
+                    channel_id=kwargs.get("channel_id"),
+                    thread_ts=kwargs.get("thread_ts"),
+                    skill=skill,
                 )
             
             elif action == "book_coworking":
@@ -973,20 +984,30 @@ class RooAgent:
             else:
                 msg = "Unknown fast action."
 
+            if isinstance(msg, dict):
+                data = dict(msg.get("data") or {})
+                data.setdefault("action", action)
+                return {
+                    "message": msg.get("message", ""),
+                    "skill_used": "mlai-points (fast)",
+                    "data": data,
+                    "blocks": msg.get("blocks"),
+                    "suppress_post": bool(msg.get("suppress_post", False)),
+                }
             return {
                 "message": msg,
                 "skill_used": "mlai-points (fast)",
-                "data": {"action": action}
+                "data": {"action": action},
             }
             
         except Exception as e:
-            print(f"❌ Fast path error: {e}")
+            print(f"❌ Fast path error: exc_type={e.__class__.__name__}")
             # Fallback to normal flow if fast path fails? Or just return error?
             # Return None to let LLM try? No, if we matched regex, we should probably fail gracefully here.
             return {
                 "message": "Sorry mate, having trouble connecting to the points system right now. Try again in a tic!",
                 "skill_used": "mlai-points (fast-error)",
-                "data": {"error": str(e)}
+                "data": {"error": "points_backend_unavailable"},
             }
 
     def _clean_mention(self, text: str) -> str:

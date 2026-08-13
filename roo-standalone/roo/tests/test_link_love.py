@@ -592,8 +592,8 @@ async def test_batched_notification_groups_awarded_users_in_root_thread(tmp_path
             "thread_ts": "111.000",
             "text": (
                 ":tada: Awarded 2 points each for link-love.\n"
-                ":white_check_mark: <@UONE>: now has 12 pts\n"
-                ":white_check_mark: <@UTWO>: now has 18 pts"
+                ":white_check_mark: <@UONE>: awarded 2 pts\n"
+                ":white_check_mark: <@UTWO>: awarded 2 pts"
             ),
         }
     ]

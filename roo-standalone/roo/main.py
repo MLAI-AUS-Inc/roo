@@ -2548,15 +2548,36 @@ async def _handle_reaction_added(event: dict):
         points = result.get("points_awarded", request_record.get("points", 0))
         reason = request_record.get("reason", "No reason provided")
         new_balance = result.get("new_balance")
-        balance_line = f"\nNew balance: {new_balance} pts" if new_balance is not None else ""
         thread_ts = request_record.get("slack_thread_ts") or message_ts
+
+        if requester:
+            balance_line = (
+                f"\nYour new balance is {new_balance} points."
+                if new_balance is not None
+                else ""
+            )
+            try:
+                dm_response = send_dm(
+                    requester,
+                    (
+                        f"✅ Your points request was approved. You received {points} points.\n"
+                        f"Reason: {reason}{balance_line}"
+                    ),
+                )
+                if not dm_response or not dm_response.get("ok"):
+                    print("⚠️ Points approval recipient DM was not delivered")
+            except Exception as exc:
+                print(
+                    "⚠️ Points approval recipient DM failed "
+                    f"exc_type={exc.__class__.__name__}"
+                )
 
         post_message(
             channel=channel_id,
             text=(
                 f"✅ Points request approved by <@{reactor_user_id}>.\n\n"
                 f"<@{requester}> received {points} points.\n"
-                f"Reason: {reason}{balance_line}"
+                f"Reason: {reason}"
             ),
             thread_ts=thread_ts,
         )

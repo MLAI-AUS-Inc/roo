@@ -178,4 +178,5 @@ async def test_backend_batch_failure_formats_no_bookings_created_response():
 
     assert "No bookings were created" in result
     assert "One or more users have insufficient Roo Points" in result
-    assert "<@U2>: Insufficient balance: 4 < 8 required" in result
+    assert "<@U2>: There are not enough Roo Points for this action" in result
+    assert "4 < 8" not in result

@@ -134,7 +134,7 @@ def test_invalid_post_notice_explains_internal_validation_and_retry() -> None:
     assert "create a new top-level post" in notice
 
 
-def test_insufficient_points_notice_shows_price_balance_and_discount() -> None:
+def test_insufficient_points_notice_shows_price_and_discount_without_balance() -> None:
     notice = module._rejection_notice(
         {
             "poster_slack_id": "UPOSTER1",
@@ -150,7 +150,8 @@ def test_insufficient_points_notice_shows_price_balance_and_discount() -> None:
     )
 
     assert "costs 4 Roo points" in notice
-    assert "currently have 3" in notice
+    assert "currently have 3" not in notice
+    assert "new balance" not in notice.lower()
     assert "50% Australian-startup monthly-update discount" in notice
     assert "engaging with other founders' posts" in notice
     assert "DMing me `topup`" in notice
@@ -454,7 +455,8 @@ async def test_still_insufficient_recheck_keeps_post_removed_and_explains_next_s
 
     assert result["status"] == "still_insufficient"
     assert store.get("CBOOST123", "1800000000.123456")["status"] == "deleted"
-    assert "currently have 6" in posted[-1]["text"]
+    assert "currently have 6" not in posted[-1]["text"]
+    assert "needs 8 Roo points" in posted[-1]["text"]
     assert "react ✅ again" in posted[-1]["text"]
 
 
