@@ -29,7 +29,7 @@ actions:
   - name: flex_points
     description: Share the user's own lifetime-earned total in the request thread.
   - name: delete_flex
-    description: Delete the user's flex in this channel.
+    description: Privately delete the user's flex.
   - name: history
     description: Privately show the user their recent points transactions.
     params:
@@ -364,9 +364,10 @@ so fresh buttons can be created safely in that conversation.
   button. Never treat a balance request as consent, never accept a tagged target,
   and never share balance, purchase, spending, or history fields. Post the flex only
   in the request thread.
-- For `delete_flex`, privately show only the verified member's stored flexes from the
-  current channel. Delete only the exact stored Roo message selected through a signed,
-  expiring button. Never accept another member or a model-provided message target.
+- For `delete_flex`, a shared-channel request privately shows that member's flexes
+  from the current channel; a Roo DM privately shows their flexes across channels.
+  Delete only the exact stored Roo message selected through a signed, expiring
+  button. Never accept another member or a model-provided message target.
 - In a Roo DM, return personal points details directly without opening another DM.
 - Public booking and award confirmations may state the action and points charged or
   awarded, but must not include anyone's remaining or resulting balance.

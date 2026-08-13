@@ -26,6 +26,7 @@ _SIGNING_CONTEXT = b"roo-points-flex-v1"
 _DELETE_SIGNING_CONTEXT = b"roo-points-flex-delete-v1"
 _SLACK_USER_ID = re.compile(r"^[UW][A-Z0-9]+$")
 _SLACK_CHANNEL_ID = re.compile(r"^[CG][A-Z0-9]+$")
+_SLACK_ACTION_CHANNEL_ID = re.compile(r"^[CDG][A-Z0-9]+$")
 _SLACK_MESSAGE_TS = re.compile(r"^\d{1,16}\.\d{1,16}$")
 
 
@@ -54,6 +55,7 @@ class PointsFlexDeletion:
     channel_id: str
     issued_at: int
     expires_at: int
+    interaction_channel_id: str
 
 
 def _urlsafe_encode(value: bytes) -> str:
@@ -203,6 +205,7 @@ def issue_points_flex_deletion(
     request_id: str,
     slack_user_id: str,
     channel_id: str,
+    interaction_channel_id: Optional[str] = None,
     now: Optional[float] = None,
     ttl_seconds: int = POINTS_FLEX_CONFIRMATION_TTL_SECONDS,
 ) -> str:
@@ -218,17 +221,23 @@ def issue_points_flex_deletion(
         raise PointsFlexTokenError("invalid_user")
     if not _SLACK_CHANNEL_ID.fullmatch(cleaned_channel_id):
         raise PointsFlexTokenError("invalid_channel")
+    cleaned_interaction_channel_id = str(
+        interaction_channel_id or cleaned_channel_id
+    ).strip()
+    if not _SLACK_ACTION_CHANNEL_ID.fullmatch(cleaned_interaction_channel_id):
+        raise PointsFlexTokenError("invalid_channel")
     if not 1 <= int(ttl_seconds) <= POINTS_FLEX_CONFIRMATION_TTL_SECONDS:
         raise PointsFlexTokenError("invalid_expiry")
 
     issued_at = int(time.time() if now is None else now)
     payload = {
+        "a": cleaned_interaction_channel_id,
         "c": cleaned_channel_id,
         "exp": issued_at + int(ttl_seconds),
         "iat": issued_at,
         "rid": cleaned_request_id,
         "u": cleaned_user_id,
-        "v": 1,
+        "v": 2,
     }
     encoded_payload = _urlsafe_encode(
         json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
@@ -267,24 +276,35 @@ def verify_points_flex_deletion(
 
     try:
         payload = json.loads(_urlsafe_decode(encoded_payload).decode("utf-8"))
-        if set(payload) != {"c", "exp", "iat", "rid", "u", "v"}:
+        version = int(payload["v"])
+        expected_fields = (
+            {"c", "exp", "iat", "rid", "u", "v"}
+            if version == 1
+            else {"a", "c", "exp", "iat", "rid", "u", "v"}
+        )
+        if set(payload) != expected_fields:
             raise ValueError("unexpected token fields")
+        channel_id = str(payload["c"])
         deletion = PointsFlexDeletion(
             request_id=str(UUID(str(payload["rid"]))),
             slack_user_id=str(payload["u"]),
-            channel_id=str(payload["c"]),
+            channel_id=channel_id,
             issued_at=int(payload["iat"]),
             expires_at=int(payload["exp"]),
+            interaction_channel_id=(
+                channel_id if version == 1 else str(payload["a"])
+            ),
         )
-        version = int(payload["v"])
     except (KeyError, TypeError, ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise PointsFlexTokenError("invalid_token") from exc
 
-    if version != 1:
+    if version not in {1, 2}:
         raise PointsFlexTokenError("invalid_token")
     if not _SLACK_USER_ID.fullmatch(deletion.slack_user_id):
         raise PointsFlexTokenError("invalid_token")
     if not _SLACK_CHANNEL_ID.fullmatch(deletion.channel_id):
+        raise PointsFlexTokenError("invalid_token")
+    if not _SLACK_ACTION_CHANNEL_ID.fullmatch(deletion.interaction_channel_id):
         raise PointsFlexTokenError("invalid_token")
     if not 1 <= deletion.expires_at - deletion.issued_at <= POINTS_FLEX_CONFIRMATION_TTL_SECONDS:
         raise PointsFlexTokenError("invalid_token")
@@ -365,6 +385,7 @@ def build_points_flex_delete_blocks(
     *,
     records: list[dict[str, Any]],
     tokens: dict[str, str],
+    include_channel: bool = False,
 ) -> list[dict[str, Any]]:
     """Build a private, exact-record delete confirmation or selector."""
 
@@ -389,13 +410,18 @@ def build_points_flex_delete_blocks(
             if shared_at
             else "your flex post"
         )
-        thread_note = " in a thread" if record.get("thread_ts") else ""
+        location_note = (
+            f" in <#{record['channel_id']}>"
+            + (" (thread)" if record.get("thread_ts") else "")
+            if include_channel
+            else (" in a thread" if record.get("thread_ts") else "")
+        )
         blocks.append(
             {
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": f"Flex shared {when}{thread_note}",
+                    "text": f"Flex shared {when}{location_note}",
                 },
                 "accessory": {
                     "type": "button",
@@ -422,7 +448,12 @@ def build_points_flex_delete_blocks(
             "elements": [
                 {
                     "type": "mrkdwn",
-                    "text": "Only your flex messages in this channel are shown. Delete buttons expire in 10 minutes.",
+                    "text": (
+                        "Only your flex messages are shown. "
+                        if include_channel
+                        else "Only your flex messages in this channel are shown. "
+                    )
+                    + "Delete buttons expire in 10 minutes.",
                 }
             ],
         }
@@ -706,6 +737,30 @@ class PointsFlexShareStore:
                 LIMIT ?
                 """,
                 (str(slack_user_id), str(channel_id), bounded_limit),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_shared_for_user(
+        self,
+        *,
+        slack_user_id: str,
+        limit: int = 10,
+    ) -> list[dict[str, Any]]:
+        """List one member's deletable flexes across shared channels."""
+
+        self._initialise()
+        bounded_limit = min(max(int(limit), 1), 10)
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM points_flex_shares
+                WHERE slack_user_id = ?
+                  AND status = 'shared' AND message_ts IS NOT NULL
+                  AND message_ts != ''
+                ORDER BY shared_at DESC, created_at DESC
+                LIMIT ?
+                """,
+                (str(slack_user_id), bounded_limit),
             ).fetchall()
         return [dict(row) for row in rows]
 

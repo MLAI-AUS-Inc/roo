@@ -735,6 +735,7 @@ def test_delete_token_is_exact_record_bound_and_contains_no_message_timestamp():
         request_id=confirmation.request_id,
         slack_user_id="UVERIFIED",
         channel_id="CPOINTS",
+        interaction_channel_id="DPRIVATE",
         now=1_010,
     )
 
@@ -748,7 +749,10 @@ def test_delete_token_is_exact_record_bound_and_contains_no_message_timestamp():
     assert deletion.request_id == confirmation.request_id
     assert deletion.slack_user_id == "UVERIFIED"
     assert deletion.channel_id == "CPOINTS"
-    assert set(payload) == {"c", "exp", "iat", "rid", "u", "v"}
+    assert deletion.interaction_channel_id == "DPRIVATE"
+    assert set(payload) == {"a", "c", "exp", "iat", "rid", "u", "v"}
+    assert payload["a"] == "DPRIVATE"
+    assert payload["v"] == 2
     assert "ts" not in payload
     assert "message_ts" not in payload
 
@@ -776,6 +780,38 @@ def test_delete_token_rejects_share_token_tampering_and_expiry():
             signing_secret=SIGNING_SECRET,
             now=1_610,
         )
+
+
+def test_v1_channel_delete_token_remains_valid_during_rollout():
+    payload = {
+        "c": "CPOINTS",
+        "exp": 1_600,
+        "iat": 1_000,
+        "rid": "03ab2fb5-3b6a-4708-85cf-f214abb999f0",
+        "u": "UVERIFIED",
+        "v": 1,
+    }
+    encoded = flex_module._urlsafe_encode(
+        json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    )
+    signature = flex_module.hmac.new(
+        flex_module._signing_key(
+            SIGNING_SECRET,
+            context=flex_module._DELETE_SIGNING_CONTEXT,
+        ),
+        encoded.encode("ascii"),
+        flex_module.hashlib.sha256,
+    ).digest()
+    token = f"{encoded}.{flex_module._urlsafe_encode(signature)}"
+
+    deletion = verify_points_flex_deletion(
+        token,
+        signing_secret=SIGNING_SECRET,
+        now=1_001,
+    )
+
+    assert deletion.channel_id == "CPOINTS"
+    assert deletion.interaction_channel_id == "CPOINTS"
 
 
 def test_live_flex_database_schema_is_upgraded_without_losing_shared_rows(tmp_path):
@@ -829,6 +865,12 @@ def test_delete_lookup_is_owner_and_channel_scoped_and_newest_first(tmp_path):
     assert [record["request_id"] for record in records] == [
         newer["request_id"],
         older["request_id"],
+    ]
+    across_channels = store.list_shared_for_user(slack_user_id="UVERIFIED")
+    assert [record["message_ts"] for record in across_channels] == [
+        "500.001",
+        "300.001",
+        "200.001",
     ]
 
 
@@ -1004,7 +1046,31 @@ async def test_delete_request_rejects_tagged_target_before_lookup(monkeypatch, t
 
 
 @pytest.mark.asyncio
-async def test_delete_in_dm_requires_original_shared_channel():
+async def test_delete_in_dm_lists_owned_flexes_across_channels(monkeypatch, tmp_path):
+    settings = _settings(tmp_path)
+    store = flex_module.get_points_flex_store(settings.SLACK_RECEIPTS_DB_PATH)
+    first = _seed_shared_flex(store, channel="CPOINTS", message_ts="200.001")
+    second = _seed_shared_flex(
+        store,
+        channel="COTHER",
+        message_ts="300.001",
+        now=time.time() + 5,
+    )
+    _seed_shared_flex(
+        store,
+        user="UOTHER",
+        channel="CSECRET",
+        message_ts="400.001",
+        now=time.time() + 10,
+    )
+    monkeypatch.setattr(executor_module, "get_settings", lambda: settings)
+    monkeypatch.setattr("roo.slack_client.get_bot_user_id", lambda: "UROO")
+    monkeypatch.setattr(
+        executor_module,
+        "post_ephemeral",
+        lambda **kwargs: pytest.fail("DM controls should use the normal private response"),
+    )
+
     result = await SkillExecutor()._handle_points_action(
         client=FlexBalanceClient(),
         action="delete_flex",
@@ -1016,8 +1082,46 @@ async def test_delete_in_dm_requires_original_shared_channel():
         skill=SimpleNamespace(name="mlai-points"),
     )
 
-    assert "shared channel" in result
-    assert "only to you" in result
+    assert result["data"]["flex_count"] == 2
+    assert result["data"]["preview_ready"] is True
+    assert "Confirm which" in result["message"]
+    selector_blocks = [block for block in result["blocks"] if "accessory" in block]
+    assert len(selector_blocks) == 2
+    selector_text = "\n".join(block["text"]["text"] for block in selector_blocks)
+    assert "<#CPOINTS>" in selector_text
+    assert "<#COTHER>" in selector_text
+    assert "CSECRET" not in selector_text
+    deletions = [
+        verify_points_flex_deletion(
+            block["accessory"]["value"],
+            signing_secret=SIGNING_SECRET,
+        )
+        for block in selector_blocks
+    ]
+    assert {item.request_id for item in deletions} == {
+        first["request_id"],
+        second["request_id"],
+    }
+    assert all(item.interaction_channel_id == "DPRIVATE" for item in deletions)
+
+
+@pytest.mark.asyncio
+async def test_delete_in_dm_with_no_flexes_replies_privately(monkeypatch, tmp_path):
+    monkeypatch.setattr(executor_module, "get_settings", lambda: _settings(tmp_path))
+    monkeypatch.setattr("roo.slack_client.get_bot_user_id", lambda: "UROO")
+
+    result = await SkillExecutor()._handle_points_action(
+        client=FlexBalanceClient(),
+        action="delete_flex",
+        params={},
+        text="delete my flex",
+        user_id="UVERIFIED",
+        channel_id="DPRIVATE",
+        thread_ts="111.222",
+        skill=SimpleNamespace(name="mlai-points"),
+    )
+
+    assert result == "I couldn't find any active Roo Points flexes from you."
 
 
 @pytest.mark.asyncio
@@ -1063,7 +1167,7 @@ async def test_delete_action_uses_only_stored_target_and_is_idempotent(monkeypat
     ("actor", "channel", "message_fragment"),
     [
         ("UATTACKER", "CPOINTS", "Only the member"),
-        ("UVERIFIED", "COTHER", "only works in the channel"),
+        ("UVERIFIED", "COTHER", "only works in the conversation"),
     ],
 )
 async def test_delete_action_rejects_actor_and_channel_mismatch(
@@ -1096,6 +1200,68 @@ async def test_delete_action_rejects_actor_and_channel_mismatch(
     )
 
     assert message_fragment in _response_body(response)["text"]
+    assert store.get(record["request_id"])["status"] == "shared"
+
+
+@pytest.mark.asyncio
+async def test_delete_action_from_dm_deletes_stored_shared_channel_message(
+    monkeypatch,
+    tmp_path,
+):
+    settings = _settings(tmp_path)
+    store = flex_module.get_points_flex_store(settings.SLACK_RECEIPTS_DB_PATH)
+    record = _seed_shared_flex(store, channel="CPOINTS", message_ts="222.333")
+    token = issue_points_flex_deletion(
+        signing_secret=SIGNING_SECRET,
+        request_id=record["request_id"],
+        slack_user_id="UVERIFIED",
+        channel_id="CPOINTS",
+        interaction_channel_id="DPRIVATE",
+    )
+    deletes = []
+    monkeypatch.setattr(
+        main_module,
+        "delete_message",
+        lambda **kwargs: deletes.append(kwargs) or {"ok": True},
+    )
+
+    response = await main_module._handle_points_flex_delete_action(
+        settings=settings,
+        action_value=token,
+        verified_user_id="UVERIFIED",
+        verified_channel_id="DPRIVATE",
+    )
+
+    assert deletes == [{"channel": "CPOINTS", "message_ts": "222.333"}]
+    assert _response_body(response)["text"] == "Deleted your Roo Points flex."
+
+
+@pytest.mark.asyncio
+async def test_delete_action_from_different_dm_is_rejected(monkeypatch, tmp_path):
+    settings = _settings(tmp_path)
+    store = flex_module.get_points_flex_store(settings.SLACK_RECEIPTS_DB_PATH)
+    record = _seed_shared_flex(store)
+    token = issue_points_flex_deletion(
+        signing_secret=SIGNING_SECRET,
+        request_id=record["request_id"],
+        slack_user_id="UVERIFIED",
+        channel_id="CPOINTS",
+        interaction_channel_id="DPRIVATE",
+    )
+    monkeypatch.setattr(
+        main_module,
+        "delete_message",
+        lambda **kwargs: pytest.fail("no Slack deletion expected"),
+    )
+
+    response = await main_module._handle_points_flex_delete_action(
+        settings=settings,
+        action_value=token,
+        verified_user_id="UVERIFIED",
+        verified_channel_id="DOTHER",
+    )
+
+    assert "only works in the conversation" in _response_body(response)["text"]
     assert store.get(record["request_id"])["status"] == "shared"
 
 

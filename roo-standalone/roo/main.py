@@ -942,9 +942,9 @@ async def _handle_points_flex_delete_action(
             "Only the member who shared this flex can delete it.",
             replace_original=False,
         )
-    if str(verified_channel_id or "") != deletion.channel_id:
+    if str(verified_channel_id or "") != deletion.interaction_channel_id:
         return _points_flex_action_response(
-            "This delete button only works in the channel where the flex was shared.",
+            "This delete button only works in the conversation where it was requested.",
             replace_original=False,
         )
 

@@ -11947,13 +11947,8 @@ Chunk {index} source: {label}
             )
 
         elif action == "delete_flex":
-            if not channel_id or str(channel_id).startswith("D"):
-                return (
-                    "Run `@Roo delete my flex` in the shared channel where the "
-                    "flex was posted. Roo will show the choices only to you."
-                )
-
-            if not str(channel_id).startswith(("C", "G")):
+            is_dm = bool(channel_id and str(channel_id).startswith("D"))
+            if not channel_id or not str(channel_id).startswith(("C", "D", "G")):
                 return {
                     "message": "",
                     "suppress_post": True,
@@ -11976,14 +11971,17 @@ Chunk {index} source: {label}
                 if mentioned_user_id != bot_user_id
             ]
             if target_mentions:
+                target_rejected_text = (
+                    "You can only delete your own Roo Points flex. "
+                    "Use `delete my flex` without tagging another member."
+                )
+                if is_dm:
+                    return target_rejected_text
                 delivered = self._post_private_points_ack(
                     channel_id=channel_id,
                     requester_user_id=user_id,
                     thread_ts=thread_ts,
-                    text=(
-                        "You can only delete your own Roo Points flex. "
-                        "Use `@Roo delete my flex` without tagging another member."
-                    ),
+                    text=target_rejected_text,
                     action="delete_flex",
                 )
                 return {
@@ -11999,10 +11997,15 @@ Chunk {index} source: {label}
 
             settings = get_settings()
             store = get_points_flex_store(settings.SLACK_RECEIPTS_DB_PATH)
+            lookup_failed = False
             try:
-                records = store.list_shared(
-                    slack_user_id=user_id,
-                    channel_id=channel_id,
+                records = (
+                    store.list_shared_for_user(slack_user_id=user_id)
+                    if is_dm
+                    else store.list_shared(
+                        slack_user_id=user_id,
+                        channel_id=channel_id,
+                    )
                 )
             except Exception as exc:
                 print(
@@ -12010,13 +12013,25 @@ Chunk {index} source: {label}
                     f"exc_type={exc.__class__.__name__}"
                 )
                 records = []
+                lookup_failed = True
 
             if not records:
+                empty_text = (
+                    "I couldn't safely look up your Roo Points flexes. Try again in a moment."
+                    if lookup_failed
+                    else (
+                        "I couldn't find any active Roo Points flexes from you."
+                        if is_dm
+                        else "I couldn't find an active Roo Points flex from you in this channel."
+                    )
+                )
+                if is_dm:
+                    return empty_text
                 delivered = self._post_private_points_ack(
                     channel_id=channel_id,
                     requester_user_id=user_id,
                     thread_ts=thread_ts,
-                    text="I couldn't find an active Roo Points flex from you in this channel.",
+                    text=empty_text,
                     action="delete_flex",
                 )
                 return {
@@ -12034,7 +12049,8 @@ Chunk {index} source: {label}
                     signing_secret=settings.SLACK_SIGNING_SECRET,
                     request_id=str(record["request_id"]),
                     slack_user_id=user_id,
-                    channel_id=channel_id,
+                    channel_id=str(record["channel_id"]),
+                    interaction_channel_id=channel_id,
                 )
                 for record in records
             }
@@ -12043,16 +12059,28 @@ Chunk {index} source: {label}
                 if len(records) > 1
                 else "Confirm deletion of your Roo Points flex."
             )
+            preview_blocks = build_points_flex_delete_blocks(
+                records=records,
+                tokens=tokens,
+                include_channel=is_dm,
+            )
+            if is_dm:
+                return {
+                    "message": preview_text,
+                    "blocks": preview_blocks,
+                    "data": {
+                        "action": "delete_flex",
+                        "preview_ready": True,
+                        "flex_count": len(records),
+                    },
+                }
             try:
                 response = post_ephemeral(
                     channel=channel_id,
                     user=user_id,
                     text=preview_text,
                     thread_ts=thread_ts,
-                    blocks=build_points_flex_delete_blocks(
-                        records=records,
-                        tokens=tokens,
-                    ),
+                    blocks=preview_blocks,
                 )
                 preview_delivered = bool(response and response.get("ok"))
             except Exception as exc:
