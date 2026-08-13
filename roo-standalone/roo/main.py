@@ -52,13 +52,16 @@ from .points_request_approval import (
 )
 from .points_flex import (
     POINTS_FLEX_ACTION_ID,
+    POINTS_FLEX_DELETE_ACTION_ID,
     PointsFlexTokenError,
     format_points_flex_public_message,
     get_points_flex_store,
     parse_lifetime_earned,
     verify_points_flex_confirmation,
+    verify_points_flex_deletion,
 )
 from .slack_client import (
+    delete_message,
     get_bot_user_id,
     get_message,
     get_recent_channel_messages,
@@ -842,6 +845,7 @@ async def _handle_points_flex_confirmation_action(
         post_response = post_message(
             channel=confirmation.channel_id,
             text=public_message,
+            thread_ts=confirmation.thread_ts,
             client_msg_id=confirmation.request_id,
         )
         post_succeeded = bool(
@@ -890,7 +894,145 @@ async def _handle_points_flex_confirmation_action(
             f"exc_type={exc.__class__.__name__}"
         )
 
-    return _points_flex_action_response("Shared your lifetime-earned Roo Points publicly.")
+    return _points_flex_action_response("Shared your lifetime-earned Roo Points in this thread.")
+
+
+def _points_flex_slack_error_code(
+    response: Any = None,
+    exc: Optional[Exception] = None,
+) -> str:
+    """Extract only Slack's bounded machine error code."""
+
+    candidates = [response, getattr(exc, "response", None)]
+    for candidate in candidates:
+        try:
+            code = str(candidate.get("error") or "").strip()
+        except Exception:
+            continue
+        if re.fullmatch(r"[a-z0-9_]{1,64}", code):
+            return code
+    return "slack_delete_failed"
+
+
+async def _handle_points_flex_delete_action(
+    *,
+    settings: Settings,
+    action_value: str,
+    verified_user_id: Optional[str],
+    verified_channel_id: Optional[str],
+) -> JSONResponse:
+    """Delete exactly one stored flex owned by the verified Slack actor."""
+
+    try:
+        deletion = verify_points_flex_deletion(
+            action_value,
+            signing_secret=settings.SLACK_SIGNING_SECRET,
+        )
+    except PointsFlexTokenError as exc:
+        if exc.code == "expired_token":
+            return _points_flex_action_response(
+                "That delete button has expired. Run `@Roo delete my flex` again."
+            )
+        return _points_flex_action_response(
+            "I couldn't verify that delete request. Run `@Roo delete my flex` again."
+        )
+
+    if str(verified_user_id or "") != deletion.slack_user_id:
+        return _points_flex_action_response(
+            "Only the member who shared this flex can delete it.",
+            replace_original=False,
+        )
+    if str(verified_channel_id or "") != deletion.interaction_channel_id:
+        return _points_flex_action_response(
+            "This delete button only works in the conversation where it was requested.",
+            replace_original=False,
+        )
+
+    store = get_points_flex_store(settings.SLACK_RECEIPTS_DB_PATH)
+    owner = f"roo-flex-delete-{uuid4()}"
+    try:
+        claim = store.claim_delete(deletion, owner=owner)
+    except Exception as exc:
+        print(
+            "Points flex delete state failed "
+            f"exc_type={exc.__class__.__name__}"
+        )
+        return _points_flex_action_response(
+            "I couldn't safely delete that flex. Nothing was changed; try again in a moment.",
+            replace_original=False,
+        )
+
+    state = claim.get("state")
+    if state == "deleted":
+        return _points_flex_action_response("That Roo Points flex was already deleted.")
+    if state == "deleting":
+        return _points_flex_action_response(
+            "That Roo Points flex is already being deleted.",
+            replace_original=False,
+        )
+    if state in {"not_found", "unavailable"}:
+        return _points_flex_action_response(
+            "I couldn't find that active Roo Points flex. It may already be gone."
+        )
+    if state != "claimed":
+        return _points_flex_action_response(
+            "I couldn't safely verify that flex, so nothing was deleted."
+        )
+
+    record = claim.get("record") or {}
+    # The Slack target comes only from the ownership-checked store record. It
+    # is intentionally absent from the signed button value.
+    stored_message_ts = str(record.get("message_ts") or "").strip()
+    slack_response = None
+    slack_exc = None
+    try:
+        slack_response = delete_message(
+            channel=deletion.channel_id,
+            message_ts=stored_message_ts,
+        )
+        deleted = bool(slack_response and slack_response.get("ok"))
+    except Exception as exc:
+        slack_exc = exc
+        deleted = False
+    error_code = _points_flex_slack_error_code(slack_response, slack_exc)
+    already_missing = error_code == "message_not_found"
+
+    if deleted or already_missing:
+        try:
+            store.mark_deleted(deletion.request_id, owner=owner)
+        except Exception as exc:
+            # A stale delete lease can safely retry: Slack returns
+            # message_not_found, which finalises the same record.
+            print(
+                "Points flex deleted-state persistence failed "
+                f"exc_type={exc.__class__.__name__}"
+            )
+            return _points_flex_action_response(
+                "The flex is gone from Slack, but I couldn't finish recording it. "
+                "You can safely try the same delete button again.",
+                replace_original=False,
+            )
+        if already_missing:
+            return _points_flex_action_response(
+                "That Roo Points flex was already gone, so I marked it deleted."
+            )
+        return _points_flex_action_response("Deleted your Roo Points flex.")
+
+    try:
+        store.release_delete(
+            deletion.request_id,
+            owner=owner,
+            error_code=error_code,
+        )
+    except Exception as exc:
+        print(
+            "Points flex delete release failed "
+            f"exc_type={exc.__class__.__name__}"
+        )
+    return _points_flex_action_response(
+        "I couldn't delete that flex from Slack. Nothing else was changed; try the button again.",
+        replace_original=False,
+    )
 
 
 @dataclass(frozen=True)
@@ -4906,6 +5048,14 @@ async def slack_actions(
 
     if action_id == POINTS_FLEX_ACTION_ID:
         return await _handle_points_flex_confirmation_action(
+            settings=settings,
+            action_value=str(actions[0].get("value") or ""),
+            verified_user_id=user_id,
+            verified_channel_id=channel_id,
+        )
+
+    if action_id == POINTS_FLEX_DELETE_ACTION_ID:
+        return await _handle_points_flex_delete_action(
             settings=settings,
             action_value=str(actions[0].get("value") or ""),
             verified_user_id=user_id,

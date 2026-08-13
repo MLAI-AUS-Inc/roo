@@ -121,6 +121,25 @@ def post_ephemeral(
         raise
 
 
+def delete_message(channel: str, message_ts: str) -> Dict[str, Any]:
+    """Delete a message previously posted by Roo's bot token."""
+
+    client = get_slack_client()
+    try:
+        response = client.chat_delete(channel=channel, ts=message_ts)
+        if response.get("ok"):
+            print("✅ Roo message deleted")
+        else:
+            print(
+                "❌ Failed to delete Roo message: "
+                f"error={response.get('error', 'unknown')}"
+            )
+        return response
+    except Exception as exc:
+        print(f"❌ Slack delete error: error_type={exc.__class__.__name__}")
+        raise
+
+
 def upload_file(
     channel: str,
     content: str,

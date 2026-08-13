@@ -119,6 +119,10 @@
   text: "let me flex my Roo contribution total in this channel"
   expect: {skill: mlai-points, action: flex_points}
   tags: [paraphrase, points-flex]
+- id: para-points-delete-flex
+  text: "remove my latest Roo Points flex from this channel"
+  expect: {skill: mlai-points, action: delete_flex}
+  tags: [paraphrase, points-flex]
 - id: para-points-spend-on
   text: "what can I spend my roo points on?"
   expect: {skill: mlai-points}
