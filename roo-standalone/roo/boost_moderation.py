@@ -871,11 +871,9 @@ def _rejection_from_code(code: str, payload: dict[str, Any]) -> tuple[str, str] 
 
 def _approval_notice(admission: dict[str, Any]) -> str:
     charged = int(admission.get("charged_points") or 0)
-    balance = admission.get("new_balance")
     discount = bool(admission.get("discount_applied"))
     discount_text = " Your Australian startup monthly-update discount was applied." if discount else ""
-    balance_text = f" New balance: {balance}." if balance is not None else ""
-    return f":white_check_mark: Approved — {charged} Roo points deducted.{discount_text}{balance_text}"
+    return f":white_check_mark: Approved — {charged} Roo points deducted.{discount_text}"
 
 
 def _backend_result(admission: dict[str, Any]) -> dict[str, Any]:
@@ -890,11 +888,8 @@ def _rejection_notice(admission: dict[str, Any]) -> str:
     if status == "rejected_insufficient_points":
         result = _backend_result(admission)
         required = result.get("charged_points")
-        available = result.get("new_balance", result.get("balance_before"))
-        if required is not None and available is not None:
-            balance_detail = (
-                f"This boost costs {required} Roo points, and you currently have {available}. "
-            )
+        if required is not None:
+            balance_detail = f"This boost costs {required} Roo points. "
         else:
             balance_detail = "Your Roo points balance is below the price of this boost. "
         discount_detail = (
@@ -1244,9 +1239,8 @@ async def handle_boost_recheck_reaction(
         updated = store.mark_recheck_insufficient(int(claimed["id"]), result)
         backend_result = _backend_result(updated)
         required = backend_result.get("charged_points")
-        available = backend_result.get("new_balance", backend_result.get("balance_before"))
-        if required is not None and available is not None:
-            detail = f"You currently have {available}; this boost needs {required} Roo points. "
+        if required is not None:
+            detail = f"This boost needs {required} Roo points. "
         else:
             detail = "Your balance is still below this boost's Roo points price. "
         _post_recheck_feedback(

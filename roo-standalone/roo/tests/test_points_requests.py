@@ -589,11 +589,12 @@ async def test_balance_summary_includes_lifetime_purchased():
         params={},
         text="points",
         user_id="U123",
-        channel_id="C123",
+        channel_id="D123",
         thread_ts="111.222",
         skill=SimpleNamespace(name="mlai-points"),
     )
 
+    result = result["message"]
     assert "Current Balance:** 15 points" in result
     assert "Lifetime Earned:** 42 points" in result
     assert "Lifetime Spent:** 27 points" in result
@@ -644,11 +645,12 @@ async def test_list_rewards_response_includes_catalog_context():
         params={},
         text="rewards",
         user_id="U123",
-        channel_id="C123",
+        channel_id="D123",
         thread_ts="111.222",
         skill=SimpleNamespace(name="mlai-points"),
     )
 
+    result = result["message"]
     assert client.list_rewards_user_id == "U123"
     assert client.balance_user_id == "U123"
     assert "Your balance: **12 points**" in result
@@ -692,11 +694,12 @@ async def test_list_rewards_still_renders_when_balance_lookup_fails():
         params={},
         text="rewards",
         user_id="U123",
-        channel_id="C123",
+        channel_id="D123",
         thread_ts="111.222",
         skill=SimpleNamespace(name="mlai-points"),
     )
 
+    result = result["message"]
     assert client.balance_user_id == "U123"
     assert "Your balance: **10 points**" in result
     assert "Free Community Event Ticket" in result
@@ -1682,7 +1685,7 @@ async def test_reaction_approval_posts_confirmation(monkeypatch):
     monkeypatch.setattr(
         main_module,
         "send_dm",
-        lambda user_id, text, **kwargs: direct_messages.append((user_id, text)),
+        lambda user_id, text, **kwargs: direct_messages.append((user_id, text)) or {"ok": True},
     )
 
     await main_module._handle_reaction_added(
@@ -1698,7 +1701,14 @@ async def test_reaction_approval_posts_confirmation(monkeypatch):
     assert posted_messages[0]["thread_ts"] == "111.222"
     assert "approved by <@UADMIN>" in posted_messages[0]["text"]
     assert "<@UREQUESTER> received 5 points" in posted_messages[0]["text"]
-    assert direct_messages == []
+    assert "17" not in posted_messages[0]["text"]
+    assert direct_messages == [
+        (
+            "UREQUESTER",
+            "✅ Your points request was approved. You received 5 points.\n"
+            "Reason: helping at the event\nYour new balance is 17 points.",
+        )
+    ]
 
 
 @pytest.mark.asyncio
@@ -1804,7 +1814,7 @@ async def test_reaction_approval_uses_cached_summary_mapping_when_backend_lookup
     monkeypatch.setattr(
         main_module,
         "send_dm",
-        lambda user_id, text, **kwargs: direct_messages.append((user_id, text)),
+        lambda user_id, text, **kwargs: direct_messages.append((user_id, text)) or {"ok": True},
     )
 
     await main_module._handle_reaction_added(
@@ -1819,8 +1829,11 @@ async def test_reaction_approval_uses_cached_summary_mapping_when_backend_lookup
     assert LookupMissApprovalClient.last_instance.approve_args == (9, "UADMIN")
     assert posted_messages[0]["thread_ts"] == "111.222"
     assert "<@UREQUESTER> received 5 points" in posted_messages[0]["text"]
+    assert "17" not in posted_messages[0]["text"]
     assert approval_module.get_remembered_points_request_summary("C123", "222.333") is None
-    assert direct_messages == []
+    assert direct_messages
+    assert direct_messages[0][0] == "UREQUESTER"
+    assert "Your new balance is 17 points" in direct_messages[0][1]
 
 
 @pytest.mark.asyncio
@@ -1864,7 +1877,7 @@ async def test_reaction_approval_uses_message_metadata_for_heavy_check_mark(monk
     monkeypatch.setattr(
         main_module,
         "send_dm",
-        lambda user_id, text, **kwargs: direct_messages.append((user_id, text)),
+        lambda user_id, text, **kwargs: direct_messages.append((user_id, text)) or {"ok": True},
     )
 
     await main_module._handle_reaction_added(
@@ -1879,7 +1892,10 @@ async def test_reaction_approval_uses_message_metadata_for_heavy_check_mark(monk
     assert LookupMissApprovalClient.last_instance.approve_args == (12, "UADMIN")
     assert posted_messages[0]["thread_ts"] == "111.222"
     assert "<@UREQUESTER> received 5 points" in posted_messages[0]["text"]
-    assert direct_messages == []
+    assert "17" not in posted_messages[0]["text"]
+    assert direct_messages
+    assert direct_messages[0][0] == "UREQUESTER"
+    assert "Your new balance is 17 points" in direct_messages[0][1]
 
 
 @pytest.mark.asyncio
@@ -2619,6 +2635,7 @@ async def test_book_coworking_still_succeeds_when_balance_refresh_times_out(tmp_
     executor = SkillExecutor()
     monkeypatch.setattr("roo.utils.get_current_date", lambda: __import__("datetime").date(2026, 4, 9))
     monkeypatch.setattr(executor_module, "get_coworking_intent_store", lambda: store)
+    monkeypatch.setattr(executor_module, "send_dm", lambda *args, **kwargs: {"ok": True})
 
     try:
         result = await executor._handle_points_action(
@@ -2634,8 +2651,8 @@ async def test_book_coworking_still_succeeds_when_balance_refresh_times_out(tmp_
     finally:
         monkeypatch.undo()
 
-    assert "Booked you in for **2026-04-09**" in result
-    assert "Balance remaining" not in result
+    assert "Booked you in for **2026-04-09**" in result["message"]
+    assert "Balance remaining" not in result["message"]
 
 
 @pytest.mark.asyncio
@@ -2659,6 +2676,7 @@ async def test_book_coworking_defaults_missing_date_to_today(tmp_path, monkeypat
     executor = SkillExecutor()
     monkeypatch.setattr("roo.utils.get_current_date", lambda: date(2026, 5, 4))
     monkeypatch.setattr(executor_module, "get_coworking_intent_store", lambda: store)
+    monkeypatch.setattr(executor_module, "send_dm", lambda *args, **kwargs: {"ok": True})
 
     result = await executor._handle_points_action(
         client=client,
@@ -2672,7 +2690,7 @@ async def test_book_coworking_defaults_missing_date_to_today(tmp_path, monkeypat
     )
 
     intent = store.get_by_key("coworking:U123:2026-05-04")
-    assert "Booked you in for **2026-05-04**" in result
+    assert "Booked you in for **2026-05-04**" in result["message"]
     assert client.book_args == ("U123", "2026-05-04", "C123")
     assert client.balance_args == "U123"
     assert intent["requested_by_slack_id"] == "U123"
@@ -2718,6 +2736,12 @@ async def test_admin_checkin_books_target_for_today(tmp_path, monkeypatch):
     monkeypatch.setattr("roo.utils.get_current_date", lambda: date(2026, 5, 4))
     monkeypatch.setattr(executor_module, "get_coworking_intent_store", lambda: store)
     monkeypatch.setattr(slack_client_module, "get_bot_user_id", lambda: "UROO")
+    direct_messages = []
+    monkeypatch.setattr(
+        executor_module,
+        "send_dm",
+        lambda user_id, text, **kwargs: direct_messages.append((user_id, text)) or {"ok": True},
+    )
 
     result = await executor._handle_points_action(
         client=client,
@@ -2731,8 +2755,10 @@ async def test_admin_checkin_books_target_for_today(tmp_path, monkeypatch):
     )
 
     intent = store.get_by_key("coworking:UTARGET:2026-05-04")
-    assert "Checked <@UTARGET> in for **2026-05-04**" in result
-    assert "Their balance: 13 pts" in result
+    assert "Checked <@UTARGET> in for **2026-05-04**" in result["message"]
+    assert "Their balance" not in result["message"]
+    assert direct_messages[0][0] == "UTARGET"
+    assert "Balance remaining: 13 points" in direct_messages[0][1]
     assert client.book_args == ("UTARGET", "2026-05-04", "C123")
     assert client.balance_args == "UTARGET"
     assert intent["requested_by_slack_id"] == "UADMIN"
@@ -2746,6 +2772,7 @@ async def test_admin_checkin_book_mention_phrase_books_target_for_today(tmp_path
     monkeypatch.setattr("roo.utils.get_current_date", lambda: date(2026, 5, 4))
     monkeypatch.setattr(executor_module, "get_coworking_intent_store", lambda: store)
     monkeypatch.setattr(slack_client_module, "get_bot_user_id", lambda: "UROO")
+    monkeypatch.setattr(executor_module, "send_dm", lambda *args, **kwargs: {"ok": True})
 
     action = executor._resolve_routed_points_action(
         {"action": "book_coworking", "target_users": ["<@UTARGET>"]},
@@ -2764,7 +2791,8 @@ async def test_admin_checkin_book_mention_phrase_books_target_for_today(tmp_path
 
     intent = store.get_by_key("coworking:UTARGET:2026-05-04")
     assert action == "admin_checkin_coworking"
-    assert "Checked <@UTARGET> in for **2026-05-04**" in result
+    assert "Checked <@UTARGET> in for **2026-05-04**" in result["message"]
+    assert "balance" not in result["message"].lower()
     assert client.book_args == ("UTARGET", "2026-05-04", "C123")
     assert client.balance_args == "UTARGET"
     assert intent["requested_by_slack_id"] == "UADMIN"
@@ -2777,6 +2805,7 @@ async def test_admin_checkin_honors_explicit_date(tmp_path, monkeypatch):
     executor = SkillExecutor()
     monkeypatch.setattr(executor_module, "get_coworking_intent_store", lambda: store)
     monkeypatch.setattr(slack_client_module, "get_bot_user_id", lambda: "UROO")
+    monkeypatch.setattr(executor_module, "send_dm", lambda *args, **kwargs: {"ok": True})
 
     result = await executor._handle_points_action(
         client=client,
@@ -2789,7 +2818,8 @@ async def test_admin_checkin_honors_explicit_date(tmp_path, monkeypatch):
         skill=SimpleNamespace(name="mlai-points"),
     )
 
-    assert "Checked <@UTARGET> in for **2026-06-01**" in result
+    assert "Checked <@UTARGET> in for **2026-06-01**" in result["message"]
+    assert "balance" not in result["message"].lower()
     assert client.book_args == ("UTARGET", "2026-06-01", "C123")
 
 
@@ -2857,6 +2887,7 @@ async def test_book_coworking_with_target_mention_refuses_self_booking(tmp_path,
     executor = SkillExecutor()
     monkeypatch.setattr("roo.utils.get_current_date", lambda: date(2026, 5, 4))
     monkeypatch.setattr(executor_module, "get_coworking_intent_store", lambda: store)
+    monkeypatch.setattr(executor_module, "send_dm", lambda *args, **kwargs: {"ok": True})
     monkeypatch.setattr(slack_client_module, "get_bot_user_id", lambda: "UROO")
 
     result = await executor._handle_points_action(
@@ -2906,8 +2937,10 @@ async def test_admin_checkin_insufficient_balance_message_names_target(tmp_path,
 
     intent = store.get_by_key("coworking:UTARGET:2026-05-04")
     assert "I couldn't check <@UTARGET> in" in result
-    assert "Their current balance is **0 points**" in result
+    assert "There are not enough Roo Points" in result
+    assert "0 points" not in result
     assert "UADMIN" not in result
+    assert client.balance_args is None
     assert intent["status"] == "blocked"
 
 
@@ -3519,6 +3552,7 @@ async def test_book_coworking_nudges_founder_when_charged_standard_price(tmp_pat
     executor = SkillExecutor()
     monkeypatch.setattr("roo.utils.get_current_date", lambda: date(2026, 5, 4))
     monkeypatch.setattr(executor_module, "get_coworking_intent_store", lambda: store)
+    monkeypatch.setattr(executor_module, "send_dm", lambda *args, **kwargs: {"ok": True})
 
     result = await executor._handle_points_action(
         client=FakeCoworkingClient(),
@@ -3531,10 +3565,11 @@ async def test_book_coworking_nudges_founder_when_charged_standard_price(tmp_pat
         skill=SimpleNamespace(name="mlai-points"),
     )
 
-    assert "Booked you in for **2026-05-04**" in result
-    assert "Cost: 8 points" in result
-    assert "submit a monthly update" in result
-    assert "https://mlai.au/platform/login?app=founder-tools&next=/founder-tools" in result
+    assert "Booked you in for **2026-05-04**" in result["message"]
+    assert "Cost: 8 points" in result["message"]
+    assert "Balance remaining" not in result["message"]
+    assert "submit a monthly update" in result["message"]
+    assert "https://mlai.au/platform/login?app=founder-tools&next=/founder-tools" in result["message"]
 
 
 @pytest.mark.asyncio
@@ -3551,6 +3586,7 @@ async def test_book_coworking_omits_nudge_when_discount_applied(tmp_path, monkey
     executor = SkillExecutor()
     monkeypatch.setattr("roo.utils.get_current_date", lambda: date(2026, 5, 4))
     monkeypatch.setattr(executor_module, "get_coworking_intent_store", lambda: store)
+    monkeypatch.setattr(executor_module, "send_dm", lambda *args, **kwargs: {"ok": True})
 
     result = await executor._handle_points_action(
         client=FakeCoworkingClient(),
@@ -3563,7 +3599,8 @@ async def test_book_coworking_omits_nudge_when_discount_applied(tmp_path, monkey
         skill=SimpleNamespace(name="mlai-points"),
     )
 
-    assert "Booked you in for **2026-05-04**" in result
-    assert "Cost: 4 points" in result
-    assert "submit a monthly update" not in result
-    assert "founder-tools" not in result
+    assert "Booked you in for **2026-05-04**" in result["message"]
+    assert "Cost: 4 points" in result["message"]
+    assert "Balance remaining" not in result["message"]
+    assert "submit a monthly update" not in result["message"]
+    assert "founder-tools" not in result["message"]
