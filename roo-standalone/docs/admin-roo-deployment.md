@@ -15,11 +15,15 @@ processes preserve the security boundary:
 1. Slack signs a mention to the existing `/slack/events` endpoint.
 2. Roo routes the task by intent. Points and other existing tasks stay Public,
    including when the caller is a committee member.
-3. For an internal-memory intent, Public Roo first rejects public `C...`
-   channels locally, then calls the backend's content-free eligibility endpoint.
+3. For an internal-memory intent, Public Roo rejects any non-Slack context
+   locally, then calls the backend's content-free eligibility endpoint.
 4. The backend permits the route only when the verified caller has active
    identity, membership, capability, pilot actor/context approval, and an
-   active `PointsAdmin` record with exact role `committee`.
+   active `PointsAdmin` record with exact role `committee`. Under policy
+   `roo-unified-routing-v2` the approved-context set is the pilot manifest's
+   `allowed_slack_contexts`, which may include explicitly approved public
+   channels; an answer delivered to a `C...` channel is prefixed with a banner
+   warning that everyone in the channel can read it.
 5. Public Roo sends a short-lived, HMAC-signed, single-use envelope to the
    internal worker. It is bound to the Slack team, user, channel, thread,
    event, request kind, and payload.
