@@ -249,6 +249,45 @@ async def test_public_dm_failure_never_exposes_booking_details(monkeypatch):
     assert "available" not in result["message"].lower()
 
 
+def test_date_availability_makes_an_empty_day_explicitly_clear():
+    message = SkillExecutor._format_meeting_room_availability(
+        {
+            "room": {"name": "Meeting Room"},
+            "requested_interval": None,
+            "busy_intervals": [],
+        }
+    )
+
+    assert message == (
+        "The *Meeting Room* is available all day on that date "
+        "(Melbourne time)."
+    )
+
+
+def test_date_availability_lists_busy_intervals_and_marks_everything_else_free():
+    message = SkillExecutor._format_meeting_room_availability(
+        {
+            "room": {"name": "Meeting Room"},
+            "requested_interval": None,
+            "busy_intervals": [
+                {
+                    "starts_at": "2026-08-17T10:00:00+10:00",
+                    "ends_at": "2026-08-17T11:00:00+10:00",
+                },
+                {
+                    "starts_at": "2026-08-17T14:00:00+10:00",
+                    "ends_at": "2026-08-17T16:00:00+10:00",
+                },
+            ],
+        }
+    )
+
+    assert "unavailable at these times" in message
+    assert "10:00 AM to 11:00 AM" in message
+    assert "2:00 PM to 4:00 PM" in message
+    assert message.endswith("All other times that day are currently available.")
+
+
 @pytest.mark.asyncio
 async def test_cancel_request_filters_members_own_bookings_and_builds_buttons(monkeypatch):
     configured = _settings()
