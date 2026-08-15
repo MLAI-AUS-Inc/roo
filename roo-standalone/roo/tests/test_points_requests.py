@@ -2536,7 +2536,9 @@ async def test_backend_client_award_first_channel_post_uses_canonical_endpoint(m
     assert result == {"awarded": True, "new_balance": 4, "points_awarded": 4}
     assert len(recorder.calls) == 1
     assert recorder.calls[0]["method"] == "POST"
-    assert recorder.calls[0]["url"] == "https://backend.test/api/v1/activity/first-post-award/"
+    assert recorder.calls[0]["url"] == (
+        "https://backend.test/api/v1/points/activity/first-post-award/"
+    )
     assert recorder.calls[0]["json"] == {
         "slack_user_id": "UINTRO",
         "channel_id": "CSTART",

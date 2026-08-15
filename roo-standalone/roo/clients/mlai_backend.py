@@ -3348,7 +3348,7 @@ class MLAIBackendClient:
         channel_id: str,
     ) -> dict:
         """Award the one-time intro bonus for a user's first channel post."""
-        endpoint = "/api/v1/activity/first-post-award/"
+        endpoint = f"{self._points_base}/activity/first-post-award/"
         payload = {
             "slack_user_id": self._clean_slack_id(slack_user_id),
             "channel_id": channel_id,

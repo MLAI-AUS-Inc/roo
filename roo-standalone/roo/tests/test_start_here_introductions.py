@@ -328,3 +328,48 @@ async def test_retryable_award_failure_stays_queued_and_can_succeed(tmp_path, mo
     assert retried["status"] == "awarded"
     assert success_client.calls == [("UNEW", "CSTART")]
     assert len(notifications) == 1
+
+
+def test_requeues_only_failures_from_legacy_award_route(tmp_path, monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr(intro, "_now", lambda: clock[0])
+    store = make_store(tmp_path)
+
+    _, legacy = store.reserve(intro.normalize_intro_event(message_event()))
+    claimed = store.claim_classification(legacy["id"], owner="classifier")
+    classified = store.mark_classified(
+        claimed["id"],
+        intro.IntroClassification(True, False, 0.99, (), "valid", "{}"),
+        min_confidence=0.8,
+    )
+    claimed = store.claim_award(classified["id"], owner="award")
+    store.mark_blocked(
+        claimed["id"],
+        error=(
+            "HTTPStatusError: Client error '404 Not Found' for url "
+            "'https://api.mlai.au/api/v1/activity/first-post-award/'"
+        ),
+    )
+
+    other_event = intro.normalize_intro_event(
+        {**message_event(ts="222.000"), "user": "UOTHER"}
+    )
+    _, other = store.reserve(other_event)
+    claimed = store.claim_classification(other["id"], owner="classifier")
+    classified = store.mark_classified(
+        claimed["id"],
+        intro.IntroClassification(True, False, 0.99, (), "valid", "{}"),
+        min_confidence=0.8,
+    )
+    claimed = store.claim_award(classified["id"], owner="award")
+    store.mark_blocked(claimed["id"], error="HTTPStatusError: 403 Forbidden")
+
+    clock[0] = 2000.0
+    assert store.requeue_legacy_award_route_failures() == 1
+    assert store.requeue_legacy_award_route_failures() == 0
+
+    repaired = store.get_for_user("CSTART", "UNEW")
+    assert repaired["status"] == "pending_award"
+    assert repaired["next_attempt_at"] == 2000.0
+    assert repaired["last_error"] is None
+    assert store.get_for_user("CSTART", "UOTHER")["status"] == "blocked"

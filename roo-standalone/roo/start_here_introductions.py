@@ -701,6 +701,24 @@ class StartHereIntroductionStore:
                 ).fetchone()
             )
 
+    def requeue_legacy_award_route_failures(self) -> int:
+        """Retry awards blocked by Roo's formerly incorrect backend route."""
+        self._ensure_schema()
+        now = _now()
+        with self._lock, self._connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE start_here_introductions
+                SET status = 'pending_award', attempt_count = 0,
+                    next_attempt_at = ?, locked_until = NULL, locked_by = NULL,
+                    last_error = NULL, updated_at = ?
+                WHERE status = 'blocked'
+                  AND last_error LIKE '%/api/v1/activity/first-post-award/%'
+                """,
+                (now, now),
+            )
+            return int(cursor.rowcount)
+
     def due_notifications(self, *, limit: int = 50) -> list[dict[str, Any]]:
         self._ensure_schema()
         with self._connect() as conn:
@@ -960,6 +978,9 @@ async def start_here_intro_retry_loop(
     poll_seconds: Optional[float] = None,
 ) -> None:
     store = store or get_start_here_store()
+    requeued = store.requeue_legacy_award_route_failures()
+    if requeued:
+        print(f"🔄 start_here_requeued_legacy_route_failures count={requeued}")
     if poll_seconds is None:
         try:
             poll_seconds = float(
