@@ -3,14 +3,11 @@ name: mlai-points
 description: Manage MLAI points system - check balance, book coworking, claim tasks, redeem rewards
 routing:
   use_when: >
-    The user wants to check or spend THEIR Roo points, see point history, list/claim/
-    submit/manage claimable community tasks, book or cancel coworking days, browse or
-    request rewards, buy top-up packs, link their Roo Slack account to the Founder
-    Tools account used for Monthly Updates, request points, or administer the points
-    system (award/deduct points, promote admins, allowances).
+    Roo points balances/history, flexes, top-ups, requests, rewards, community tasks,
+    coworking, Slack-Founder Tools linking, and points administration.
   avoid_when: >
-    "Task"/"ticket"/"issue" in the context of Linear or meetings (linear-meeting-actions).
-    Event attendance numbers (luma-events). Booking rooms or non-coworking logistics.
+    Linear tasks or meetings (linear-meeting-actions), event attendance (luma-events),
+    meeting rooms, GitHub linking, and founder introductions.
   examples:
     - {text: "how do I earn points?", action: list_tasks}
     - {text: "what's my balance", action: balance}
@@ -20,19 +17,14 @@ routing:
     - {text: "claim task ROO-12", action: claim_task}
     - {text: "how busy was the coworking space in may?", action: coworking_report}
     - {text: "give 10 points to @member for organising the meetup", action: award_points}
-    - {text: "I need more points", action: topup_points}
-    - {text: "add roo points", action: topup_points}
     - {text: "link", action: link_founder_account}
-    - {text: "link my Founder Tools account", action: link_founder_account}
   negative_examples:
     - {text: "add a task to linear to fix the login bug", instead: linear-meeting-actions}
     - {text: "book club is meeting thursday, can you remind the channel?", instead: respond_in_chat}
     - {text: "how many people came to our last event?", instead: luma-events}
-    - {text: "link my GitHub account", instead: github-integration}
-    - {text: "connect me with a founder", instead: connect-users}
 actions:
   - name: link_founder_account
-    description: Privately link the current Slack user's Roo account to their authenticated Founder Tools account.
+    description: Link the user's Slack and Founder Tools accounts.
   - name: balance
     description: Privately show the user their current points balance.
   - name: flex_points
