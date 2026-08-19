@@ -2023,16 +2023,19 @@ async def _maybe_handle_manual_jobs_trigger(event: dict[str, Any]) -> bool:
     user_id = str(event.get("user") or "").strip()
     text = str(event.get("text") or "")
     channel_id = str(event.get("channel") or "").strip()
-    thread_ts = event.get("thread_ts") or event.get("ts")
-    if not user_id or not channel_id or not thread_ts or not _is_manual_jobs_trigger_request(text):
+    message_ts = event.get("thread_ts") or event.get("ts")
+    if not user_id or not channel_id or not message_ts or not _is_manual_jobs_trigger_request(text):
         return False
+
+    is_dm = event.get("channel_type") == "im" or channel_id.startswith("D")
+    response_thread_ts = None if is_dm else message_ts
 
     try:
         client = _make_mlai_backend_client()
         if not await client.is_admin(user_id):
             post_message(
                 channel=channel_id,
-                thread_ts=thread_ts,
+                thread_ts=response_thread_ts,
                 text="Sorry mate, only Points Admins can run the daily jobs scrape manually.",
             )
             return True
@@ -2040,7 +2043,7 @@ async def _maybe_handle_manual_jobs_trigger(event: dict[str, Any]) -> bool:
         print(f"⚠️ Manual jobs admin check failed for {user_id}: {exc}")
         post_message(
             channel=channel_id,
-            thread_ts=thread_ts,
+            thread_ts=response_thread_ts,
             text="I couldn't verify your admin access with the backend just now, so I didn't trigger the jobs run.",
         )
         return True
@@ -2052,7 +2055,7 @@ async def _maybe_handle_manual_jobs_trigger(event: dict[str, Any]) -> bool:
         print(f"⚠️ Manual jobs trigger failed for {user_id}: {exc}")
         post_message(
             channel=channel_id,
-            thread_ts=thread_ts,
+            thread_ts=response_thread_ts,
             text=f"I couldn't trigger the daily jobs run: {exc}",
         )
         return True
@@ -2070,7 +2073,11 @@ async def _maybe_handle_manual_jobs_trigger(event: dict[str, Any]) -> bool:
         lines.append("If matches are found, the backend will post the final jobs roundup separately when the run finishes.")
     else:
         lines.append("Slack posting is off for this run, so this message is only confirming the trigger.")
-    post_message(channel=channel_id, thread_ts=thread_ts, text="\n".join(lines))
+    post_message(
+        channel=channel_id,
+        thread_ts=response_thread_ts,
+        text="\n".join(lines),
+    )
     return True
 
 

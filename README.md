@@ -57,4 +57,5 @@ For Slack file parsing, the Roo Slack app must include the `files:read` bot scop
 For daily jobs, the recommended production setup is:
 - `mlai-backend` owns the 7am Melbourne scheduler and Slack posting
 - Roo keeps `JOBS_SCHEDULER_ENABLED=false`
-- Roo only needs `JOBS_API_URL` and `JOBS_TRIGGER_TOKEN` if you want it to trigger backend jobs manually in the future
+- Roo only needs `JOBS_API_URL` and `JOBS_TRIGGER_TOKEN` to trigger backend jobs manually
+- Active Points Admins, including committee members, can DM Roo `run the daily jobs scrape now`; Roo replies directly in the DM, while channel requests receive a threaded reply
