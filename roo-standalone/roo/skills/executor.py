@@ -14017,11 +14017,19 @@ Chunk {index} source: {label}
             f"See you there, legend!"
         )
 
-        if not discount_applied and not founder_tools_account_linked:
+        if not discount_applied:
             message += (
-                "\n\nAlready did your monthly update? Link your Founder Tools account "
-                "by typing `@Roo link`."
+                "\n\n💡 Startup founders may qualify for 4-point coworking after "
+                "submitting an eligible monthly update. Submit yours here: "
+                "https://mlai.au/platform/login?app=founder-tools&next=/founder-tools"
             )
+
+            if not founder_tools_account_linked:
+                message += (
+                    "\n\nAlready submitted using a different MLAI account? Type "
+                    "`@Roo link` to securely link your accounts for future eligible "
+                    "bookings."
+                )
 
         return message
 

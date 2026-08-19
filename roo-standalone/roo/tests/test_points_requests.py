@@ -3758,9 +3758,10 @@ async def test_book_coworking_nudges_founder_when_charged_standard_price(tmp_pat
     assert "Booked you in for **2026-05-04**" in result["message"]
     assert "Cost: 8 points" in result["message"]
     assert "Balance remaining" not in result["message"]
-    assert "Already did your monthly update?" in result["message"]
+    assert "may qualify for 4-point coworking" in result["message"]
+    assert "app=founder-tools&next=/founder-tools" in result["message"]
+    assert "\n\nAlready submitted using a different MLAI account?" in result["message"]
     assert "`@Roo link`" in result["message"]
-    assert "https://" not in result["message"]
 
 
 @pytest.mark.asyncio
@@ -3797,6 +3798,7 @@ async def test_book_coworking_omits_nudge_when_discount_applied(tmp_path, monkey
     assert "Booked you in for **2026-05-04**" in result["message"]
     assert "Cost: 4 points" in result["message"]
     assert "Balance remaining" not in result["message"]
+    assert "may qualify for 4-point coworking" not in result["message"]
     assert "@Roo link" not in result["message"]
 
 
@@ -3835,4 +3837,6 @@ async def test_book_coworking_omits_link_nudge_when_accounts_are_linked(
     )
 
     assert "Cost: 8 points" in result["message"]
+    assert "may qualify for 4-point coworking" in result["message"]
+    assert "app=founder-tools&next=/founder-tools" in result["message"]
     assert "@Roo link" not in result["message"]
