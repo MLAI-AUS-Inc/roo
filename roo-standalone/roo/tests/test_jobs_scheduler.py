@@ -7,8 +7,6 @@ import httpx
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-sys.modules.setdefault("frontmatter", SimpleNamespace(load=lambda *args, **kwargs: None))
-sys.modules.pop("roo.skills.executor", None)
 
 main_module = importlib.import_module("roo.main")
 
@@ -70,6 +68,7 @@ async def test_jobs_scheduler_trigger_uses_x_api_key(monkeypatch):
             JOBS_COLLECT_LIVE=True,
             JOBS_POST_TO_SLACK=True,
             JOBS_POST_TO_NOTION=False,
+            JOBS_SLACK_CHANNEL="C123",
             JOBS_MAX_PAGES=2,
             JOBS_PER_KEYWORD_LIMIT=7,
         ),
@@ -88,6 +87,7 @@ async def test_jobs_scheduler_trigger_uses_x_api_key(monkeypatch):
                 "post_to_notion": False,
                 "max_pages": 2,
                 "per_keyword_limit": 7,
+                "slack_channel": "C123",
             },
             "headers": {"X-API-Key": "jobs-trigger-secret"},
         }
@@ -116,6 +116,7 @@ async def test_handle_mention_manual_jobs_trigger_for_admin(monkeypatch):
             JOBS_API_URL="https://api.mlai.au/api/v1",
             JOBS_POST_TO_SLACK=True,
             JOBS_POST_TO_NOTION=False,
+            ROO_SURFACE="public",
         ),
     )
     monkeypatch.setattr(main_module, "post_message", lambda **kwargs: posts.append(kwargs))
@@ -139,6 +140,50 @@ async def test_handle_mention_manual_jobs_trigger_for_admin(monkeypatch):
     assert "This usually takes a few minutes." in posts[0]["text"]
     assert "final jobs roundup separately" in posts[0]["text"]
     assert "Open run status" not in posts[0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_handle_dm_manual_jobs_trigger_for_committee_posts_top_level(monkeypatch):
+    posts = []
+    backend_client = FakeAdminClient(is_admin=True)
+
+    async def fake_trigger():
+        return {
+            "run_id": "2026-08-20-committee",
+            "status": "queued",
+        }
+
+    monkeypatch.setattr(main_module, "_make_mlai_backend_client", lambda: backend_client)
+    monkeypatch.setattr(main_module, "_trigger_jobs_daily_run_request", fake_trigger)
+    monkeypatch.setattr(
+        main_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            JOBS_API_URL="https://api.mlai.au/api/v1",
+            JOBS_POST_TO_SLACK=True,
+            JOBS_POST_TO_NOTION=False,
+            ROO_SURFACE="public",
+        ),
+    )
+    monkeypatch.setattr(main_module, "post_message", lambda **kwargs: posts.append(kwargs))
+    monkeypatch.setattr(main_module, "get_agent", lambda: pytest.fail("agent should not be called"))
+
+    await main_module._handle_mention(
+        {
+            "user": "UCOMMITTEE",
+            "text": "run the daily jobs scrape now",
+            "channel": "D123",
+            "channel_type": "im",
+            "ts": "1755662400.000100",
+        }
+    )
+
+    assert backend_client.calls == ["UCOMMITTEE"]
+    assert len(posts) == 1
+    assert posts[0]["channel"] == "D123"
+    assert posts[0]["thread_ts"] is None
+    assert "Queued the daily jobs run." in posts[0]["text"]
+    assert "`2026-08-20-committee`" in posts[0]["text"]
 
 
 @pytest.mark.asyncio
