@@ -21,6 +21,7 @@ def _skill(name, *, exclusive=None, actions=None, routing=None):
         exclusive_channels=exclusive or [],
         routing=routing or {
             "use_when": f"use {name}",
+            "avoid_when": f"do not use {name}",
             "examples": [{"text": f"do {name} one"}, {"text": f"do {name} two"}, {"text": f"do {name} three"}],
             "negative_examples": [{"text": "not this", "instead": "respond_in_chat"}],
         },
@@ -103,10 +104,10 @@ def test_skill_tool_embeds_routing_block_and_action_enum():
         if tool["function"]["name"] == "mlai-points"
     )
     description = tool["function"]["description"]
-    assert "Use when:" in description
-    assert "Do NOT use when:" not in description or "avoid" in description.lower()
+    assert "Use:" in description
+    assert "Do NOT:" in description
     assert "Examples:" in description
-    assert "Counter-examples" in description
+    assert "Do NOT. Use:" in description
     properties = tool["function"]["parameters"]["properties"]
     assert properties["action"]["enum"] == ["balance", "book_coworking"]
     assert "date" in properties
