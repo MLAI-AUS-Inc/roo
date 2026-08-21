@@ -5,6 +5,7 @@ import json
 import os
 import sys
 import time
+from datetime import date
 from pathlib import Path
 from urllib.parse import urlencode
 
@@ -21,6 +22,9 @@ from roo.clients import mlai_backend as backend_module
 from roo.config import Settings, get_settings
 from roo.coworking_messages import OFFICE_MANAGER_VOLUNTEER_ACTION_ID
 from roo.slack_security import get_slack_receipt_store
+
+
+_UNSET = object()
 
 
 def _signature(secret: str, timestamp: int, body: bytes) -> str:
@@ -42,7 +46,7 @@ def _settings(tmp_path):
     )
 
 
-def _action_body(*, value=None):
+def _action_body(*, value=_UNSET):
     payload = {
         "type": "block_actions",
         "user": {"id": "UVERIFIED"},
@@ -52,7 +56,7 @@ def _action_body(*, value=None):
                 "action_id": OFFICE_MANAGER_VOLUNTEER_ACTION_ID,
                 "value": json.dumps(
                     value
-                    if value is not None
+                    if value is not _UNSET
                     else {
                         "date": "2026-08-03",
                         "slack_user_id": "UUNTRUSTED",
@@ -106,6 +110,7 @@ def test_signed_button_uses_payload_actor_and_deduplicates_delivery(
         "_claim_office_manager_from_action",
         fake_claim,
     )
+    monkeypatch.setattr(main_module, "get_current_date", lambda: date(2026, 8, 3))
     monkeypatch.setattr(main_module.asyncio, "create_task", capture_task)
     body = _action_body()
     headers = _signed_headers(configured, body)
@@ -133,12 +138,18 @@ def test_malformed_button_is_acknowledged_with_private_feedback(
     configured = _settings(tmp_path)
     main_module.app.dependency_overrides[get_settings] = lambda: configured
     client = TestClient(main_module.app)
+    scheduled = []
     feedback = []
+
+    async def capture_feedback(**kwargs):
+        feedback.append(kwargs)
+
     monkeypatch.setattr(
         main_module,
         "_send_office_manager_private_feedback",
-        lambda **kwargs: feedback.append(kwargs),
+        capture_feedback,
     )
+    monkeypatch.setattr(main_module.asyncio, "create_task", scheduled.append)
 
     body = _action_body(value={})
     response = client.post(
@@ -148,6 +159,8 @@ def test_malformed_button_is_acknowledged_with_private_feedback(
     )
 
     assert response.status_code == 200
+    assert len(scheduled) == 1
+    asyncio.run(scheduled[0])
     assert feedback == [
         {
             "channel_id": "CCOWORK",
@@ -160,6 +173,80 @@ def test_malformed_button_is_acknowledged_with_private_feedback(
     ]
 
 
+@pytest.mark.parametrize("value", (None, 123, "not-an-object", ["2026-08-03"]))
+def test_non_object_button_value_is_acknowledged_without_crashing(
+    tmp_path,
+    monkeypatch,
+    value,
+):
+    configured = _settings(tmp_path)
+    main_module.app.dependency_overrides[get_settings] = lambda: configured
+    client = TestClient(main_module.app)
+    scheduled = []
+    feedback = []
+
+    async def capture_feedback(**kwargs):
+        feedback.append(kwargs)
+
+    monkeypatch.setattr(
+        main_module,
+        "_send_office_manager_private_feedback",
+        capture_feedback,
+    )
+    monkeypatch.setattr(main_module.asyncio, "create_task", scheduled.append)
+
+    body = _action_body(value=value)
+    response = client.post(
+        "/slack/actions",
+        content=body,
+        headers=_signed_headers(configured, body),
+    )
+
+    assert response.status_code == 200
+    assert len(scheduled) == 1
+    asyncio.run(scheduled[0])
+    assert "no longer valid" in feedback[0]["text"]
+
+
+def test_stale_button_is_rejected_before_backend_claim(tmp_path, monkeypatch):
+    configured = _settings(tmp_path)
+    main_module.app.dependency_overrides[get_settings] = lambda: configured
+    client = TestClient(main_module.app)
+    scheduled = []
+    feedback = []
+
+    async def unexpected_claim(**kwargs):
+        pytest.fail(f"stale button reached backend claim: {kwargs}")
+
+    async def capture_feedback(**kwargs):
+        feedback.append(kwargs)
+
+    monkeypatch.setattr(
+        main_module,
+        "_claim_office_manager_from_action",
+        unexpected_claim,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_send_office_manager_private_feedback",
+        capture_feedback,
+    )
+    monkeypatch.setattr(main_module, "get_current_date", lambda: date(2026, 8, 3))
+    monkeypatch.setattr(main_module.asyncio, "create_task", scheduled.append)
+
+    body = _action_body(value={"date": "2026-08-02"})
+    response = client.post(
+        "/slack/actions",
+        content=body,
+        headers=_signed_headers(configured, body),
+    )
+
+    assert response.status_code == 200
+    assert len(scheduled) == 1
+    asyncio.run(scheduled[0])
+    assert "no longer valid" in feedback[0]["text"]
+
+
 @pytest.mark.asyncio
 async def test_claim_success_reports_zero_charge_and_refund_privately(monkeypatch):
     class FakeClient:
@@ -169,11 +256,15 @@ async def test_claim_success_reports_zero_charge_and_refund_privately(monkeypatc
             return {"status": "claimed", "points_refunded": 8}
 
     feedback = []
+
+    async def capture_feedback(**kwargs):
+        feedback.append(kwargs)
+
     monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeClient)
     monkeypatch.setattr(
         main_module,
         "_send_office_manager_private_feedback",
-        lambda **kwargs: feedback.append(kwargs),
+        capture_feedback,
     )
 
     await main_module._claim_office_manager_from_action(
@@ -185,6 +276,102 @@ async def test_claim_success_reports_zero_charge_and_refund_privately(monkeypatc
     assert len(feedback) == 1
     assert "without deducting Roo points" in feedback[0]["text"]
     assert "returned the 8 Roo points" in feedback[0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_already_claimed_by_member_is_the_only_idempotent_success(monkeypatch):
+    class FakeClient:
+        async def claim_office_manager_day(self, slack_user_id, booking_date):
+            return {"status": "already_claimed_by_you", "points_refunded": 0}
+
+    feedback = []
+
+    async def capture_feedback(**kwargs):
+        feedback.append(kwargs)
+
+    monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeClient)
+    monkeypatch.setattr(
+        main_module,
+        "_send_office_manager_private_feedback",
+        capture_feedback,
+    )
+
+    await main_module._claim_office_manager_from_action(
+        user_id="UVERIFIED",
+        channel_id="CCOWORK",
+        booking_date="2026-08-03",
+    )
+
+    assert "already today's Office Manager" in feedback[0]["text"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "result",
+    (
+        [],
+        {"status": "already_claimed", "assignee_slack_user_id": "UOTHER"},
+        {"status": "unexpected_success"},
+        {},
+    ),
+)
+async def test_unexpected_success_response_never_claims_member_is_winner(
+    monkeypatch,
+    result,
+):
+    class FakeClient:
+        async def claim_office_manager_day(self, slack_user_id, booking_date):
+            return result
+
+    feedback = []
+
+    async def capture_feedback(**kwargs):
+        feedback.append(kwargs)
+
+    monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeClient)
+    monkeypatch.setattr(
+        main_module,
+        "_send_office_manager_private_feedback",
+        capture_feedback,
+    )
+
+    await main_module._claim_office_manager_from_action(
+        user_id="UVERIFIED",
+        channel_id="CCOWORK",
+        booking_date="2026-08-03",
+    )
+
+    assert "unexpected response" in feedback[0]["text"]
+    assert "You are today's Office Manager" not in feedback[0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_invalid_refund_value_does_not_hide_successful_claim(monkeypatch):
+    class FakeClient:
+        async def claim_office_manager_day(self, slack_user_id, booking_date):
+            return {"status": "claimed", "points_refunded": "not-a-number"}
+
+    feedback = []
+
+    async def capture_feedback(**kwargs):
+        feedback.append(kwargs)
+
+    monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeClient)
+    monkeypatch.setattr(
+        main_module,
+        "_send_office_manager_private_feedback",
+        capture_feedback,
+    )
+
+    await main_module._claim_office_manager_from_action(
+        user_id="UVERIFIED",
+        channel_id="CCOWORK",
+        booking_date="2026-08-03",
+    )
+
+    assert "You are today's Office Manager" in feedback[0]["text"]
+    assert "could not confirm" not in feedback[0]["text"]
+    assert "returned the" not in feedback[0]["text"]
 
 
 @pytest.mark.asyncio
@@ -229,11 +416,15 @@ async def test_claim_rejections_are_private_and_specific(
             )
 
     feedback = []
+
+    async def capture_feedback(**kwargs):
+        feedback.append(kwargs)
+
     monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeClient)
     monkeypatch.setattr(
         main_module,
         "_send_office_manager_private_feedback",
-        lambda **kwargs: feedback.append(kwargs),
+        capture_feedback,
     )
 
     await main_module._claim_office_manager_from_action(
@@ -245,7 +436,8 @@ async def test_claim_rejections_are_private_and_specific(
     assert expected in feedback[0]["text"]
 
 
-def test_private_feedback_falls_back_to_dm(monkeypatch):
+@pytest.mark.asyncio
+async def test_private_feedback_falls_back_to_dm(monkeypatch):
     delivered = []
     monkeypatch.setattr(
         main_module,
@@ -261,7 +453,7 @@ def test_private_feedback_falls_back_to_dm(monkeypatch):
         ),
     )
 
-    main_module._send_office_manager_private_feedback(
+    await main_module._send_office_manager_private_feedback(
         channel_id="CCOWORK",
         user_id="UVERIFIED",
         text="Private result",
@@ -270,7 +462,8 @@ def test_private_feedback_falls_back_to_dm(monkeypatch):
     assert delivered == [("UVERIFIED", "Private result")]
 
 
-def test_private_feedback_falls_back_when_ephemeral_returns_failure(monkeypatch):
+@pytest.mark.asyncio
+async def test_private_feedback_falls_back_when_ephemeral_returns_failure(monkeypatch):
     delivered = []
     monkeypatch.setattr(
         main_module,
@@ -286,10 +479,37 @@ def test_private_feedback_falls_back_when_ephemeral_returns_failure(monkeypatch)
         ),
     )
 
-    main_module._send_office_manager_private_feedback(
+    await main_module._send_office_manager_private_feedback(
         channel_id="CCOWORK",
         user_id="UVERIFIED",
         text="Private result",
     )
 
     assert delivered == [("UVERIFIED", "Private result")]
+
+
+@pytest.mark.asyncio
+async def test_private_feedback_offloads_slack_calls_from_event_loop(monkeypatch):
+    offloaded = []
+
+    def fake_ephemeral(**kwargs):
+        return {"ok": False, "error": "not_in_channel"}
+
+    def fake_dm(user_id, text):
+        return {"ok": True}
+
+    async def capture_to_thread(function, *args, **kwargs):
+        offloaded.append(function)
+        return function(*args, **kwargs)
+
+    monkeypatch.setattr(main_module, "post_ephemeral", fake_ephemeral)
+    monkeypatch.setattr(main_module, "send_dm", fake_dm)
+    monkeypatch.setattr(main_module.asyncio, "to_thread", capture_to_thread)
+
+    await main_module._send_office_manager_private_feedback(
+        channel_id="CCOWORK",
+        user_id="UVERIFIED",
+        text="Private result",
+    )
+
+    assert offloaded == [fake_ephemeral, fake_dm]

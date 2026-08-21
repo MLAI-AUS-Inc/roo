@@ -92,6 +92,7 @@ from .slack_security import (
 )
 from .slack_action_tasks import drain as drain_slack_actions
 from .slack_action_tasks import start as start_slack_action
+from .utils import get_current_date
 from .backend_identity import (
     BackendActorContext,
     get_backend_actor_context,
@@ -4844,21 +4845,68 @@ def _office_manager_error_payload(exc: httpx.HTTPStatusError) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
-def _send_office_manager_private_feedback(
+def _office_manager_claim_success_message(result: Any) -> str:
+    if not isinstance(result, dict):
+        print("OFFICE_MANAGER_CLAIM_RESPONSE_INVALID reason=non_object")
+        return (
+            "Roo received an unexpected response while confirming your volunteer "
+            "request. Check Roo's latest Office Manager announcement before trying again."
+        )
+
+    claim_status = str(result.get("status") or "").strip()
+    if claim_status == "already_claimed_by_you":
+        return (
+            "You are already today's Office Manager. Roo has kept your "
+            "zero-point booking in place."
+        )
+    if claim_status != "claimed":
+        print(
+            "OFFICE_MANAGER_CLAIM_RESPONSE_INVALID "
+            f"reason=unexpected_status status={claim_status or 'missing'}"
+        )
+        return (
+            "Roo received an unexpected response while confirming your volunteer "
+            "request. Check Roo's latest Office Manager announcement before trying again."
+        )
+
+    try:
+        points_refunded = max(0, int(result.get("points_refunded") or 0))
+    except (TypeError, ValueError):
+        points_refunded = 0
+        print("OFFICE_MANAGER_CLAIM_RESPONSE_INVALID reason=invalid_points_refunded")
+
+    message = (
+        "You are today's Office Manager. Roo booked you in without "
+        "deducting Roo points. Check your DMs for the responsibilities."
+    )
+    if points_refunded:
+        message += (
+            f" Roo also returned the {points_refunded} Roo points "
+            "previously charged for today."
+        )
+    return message
+
+
+async def _send_office_manager_private_feedback(
     *,
     channel_id: str,
     user_id: str,
     text: str,
 ) -> None:
     try:
-        response = post_ephemeral(channel=channel_id, user=user_id, text=text)
+        response = await asyncio.to_thread(
+            post_ephemeral,
+            channel=channel_id,
+            user=user_id,
+            text=text,
+        )
         if response and response.get("ok"):
             return
     except Exception:
         pass
 
     try:
-        response = send_dm(user_id, text)
+        response = await asyncio.to_thread(send_dm, user_id, text)
         if response and response.get("ok"):
             return
         raise RuntimeError("dm_delivery_failed")
@@ -4882,22 +4930,6 @@ async def _claim_office_manager_from_action(
             user_id,
             booking_date,
         )
-        points_refunded = int(result.get("points_refunded") or 0)
-        if result.get("status") == "already_claimed_by_you":
-            message = (
-                "You are already today's Office Manager. Roo has kept your "
-                "zero-point booking in place."
-            )
-        else:
-            message = (
-                "You are today's Office Manager. Roo booked you in without "
-                "deducting Roo points. Check your DMs for the responsibilities."
-            )
-            if points_refunded:
-                message += (
-                    f" Roo also returned the {points_refunded} Roo points "
-                    "previously charged for today."
-                )
     except httpx.HTTPStatusError as exc:
         payload = _office_manager_error_payload(exc)
         code = str(payload.get("code") or "")
@@ -4928,8 +4960,10 @@ async def _claim_office_manager_from_action(
             "Roo could not confirm your volunteer request right now. "
             "Please try the button again in a moment."
         )
+    else:
+        message = _office_manager_claim_success_message(result)
 
-    _send_office_manager_private_feedback(
+    await _send_office_manager_private_feedback(
         channel_id=channel_id,
         user_id=user_id,
         text=message,
@@ -5476,11 +5510,10 @@ async def slack_actions(
         
     try:
         payload = json.loads(payload_json)
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, TypeError):
         return JSONResponse(status_code=400, content={"error": "Invalid JSON"})
     if not isinstance(payload, dict):
         return JSONResponse(status_code=400, content={"error": "Invalid payload"})
-
     settings = _request_settings(request)
     payload_type = str(payload.get("type") or "")
     user_id = payload.get("user", {}).get("id")
@@ -5563,16 +5596,31 @@ async def slack_actions(
                 )
             except json.JSONDecodeError:
                 action_value = {}
+            if not isinstance(action_value, dict):
+                action_value = {}
             booking_date = str(action_value.get("date") or "").strip()
-            if not user_id or not channel_id or not booking_date:
+            try:
+                is_current_booking_date = (
+                    date.fromisoformat(booking_date) == get_current_date()
+                )
+            except ValueError:
+                is_current_booking_date = False
+            if (
+                not user_id
+                or not channel_id
+                or not booking_date
+                or not is_current_booking_date
+            ):
                 if user_id and channel_id:
-                    _send_office_manager_private_feedback(
-                        channel_id=str(channel_id),
-                        user_id=str(user_id),
-                        text=(
-                            "This volunteer button is no longer valid. "
-                            "Please use Roo's latest Office Manager announcement."
-                        ),
+                    asyncio.create_task(
+                        _send_office_manager_private_feedback(
+                            channel_id=str(channel_id),
+                            user_id=str(user_id),
+                            text=(
+                                "This volunteer button is no longer valid. "
+                                "Please use Roo's latest Office Manager announcement."
+                            ),
+                        )
                     )
                 return JSONResponse(status_code=200, content={})
 
