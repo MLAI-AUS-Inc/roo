@@ -1674,19 +1674,6 @@ class MLAIBackendClient:
         self._raise_for_status_or_backend_unavailable(response)
         return response.json()
 
-    async def list_meeting_rooms(self) -> List[dict]:
-        """List active meeting rooms available through Roo."""
-        response = await self._request(
-            "GET",
-            f"{self._points_base}/meeting-rooms/rooms/",
-            timeout=10.0,
-            transport_retries=1,
-            retry_backoff_seconds=0.25,
-            circuit_breaker=True,
-        )
-        response.raise_for_status()
-        return response.json().get("rooms", [])
-
     async def check_meeting_room_availability(
         self,
         slack_user_id: str,

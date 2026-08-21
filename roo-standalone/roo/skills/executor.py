@@ -495,7 +495,13 @@ class SkillExecutor:
     def _meeting_room_time_is_present(text: str, params: dict) -> bool:
         if any(params.get(key) for key in ("starts_at", "start_time")):
             return True
-        return bool(re.search(r"\b(?:at|from)\s+\d", str(text or "").lower()))
+        return bool(
+            re.search(r"\b(?:at|from)\s+\d", str(text or "").lower())
+            or re.search(
+                r"\b\d{1,2}(?::\d{2})?\s*(?:am|pm)\b",
+                str(text or "").lower(),
+            )
+        )
 
     @staticmethod
     def _format_meeting_room_availability(result: dict) -> str:

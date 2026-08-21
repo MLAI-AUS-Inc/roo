@@ -147,7 +147,7 @@ def _parse_time_value(value: Any, field_label: str) -> Optional[time]:
             hour = 0
         if ampm == "pm":
             hour += 12
-    elif hour <= 12:
+    elif hour <= 12 and match.group("minute") is None and not raw.startswith("0"):
         raise MeetingRoomInputError(
             "ambiguous_time",
             f"Is the {field_label} AM or PM? Try `2pm` or `14:00`.",
@@ -192,8 +192,44 @@ def _natural_time_tokens(text: str) -> tuple[Optional[str], Optional[str]]:
     )
     if range_match:
         return range_match.group("start"), range_match.group("end")
+    explicit_token = r"(?:\d{1,2}:\d{2}|\d{1,2}\s*(?:am|pm))"
+    range_match = re.search(
+        rf"\b(?P<start>{explicit_token})\s*(?:to|until|-)\s*(?P<end>{explicit_token})\b",
+        normalized,
+    )
+    if range_match:
+        return range_match.group("start"), range_match.group("end")
     start_match = re.search(rf"\bat\s+(?P<start>{token})\b", normalized)
     return (start_match.group("start"), None) if start_match else (None, None)
+
+
+def _validate_resolved_interval(
+    starts_at: datetime,
+    ends_at: datetime,
+    *,
+    now: Optional[datetime],
+) -> tuple[datetime, datetime]:
+    current = (now or get_current_datetime()).astimezone(timezone.utc)
+    utc_start = _as_utc(starts_at)
+    utc_end = _as_utc(ends_at)
+    if utc_start <= current:
+        raise MeetingRoomInputError(
+            "invalid_time",
+            "Meeting Room bookings must start in the future.",
+        )
+    duration_seconds = (utc_end - utc_start).total_seconds()
+    if duration_seconds <= 0 or duration_seconds % 3600:
+        raise MeetingRoomInputError(
+            "invalid_time",
+            "Meeting Room bookings must last a whole number of hours.",
+        )
+    duration_hours = int(duration_seconds // 3600)
+    if duration_hours > 4:
+        raise MeetingRoomInputError(
+            "invalid_time",
+            "Meeting Room bookings can be at most four hours. Check the end time and try again.",
+        )
+    return starts_at, ends_at
 
 
 def resolve_interval(
@@ -209,12 +245,15 @@ def resolve_interval(
         if not exact_start:
             raise MeetingRoomInputError("missing_start_time", "What time should the booking start?")
         if exact_end:
-            return exact_start, exact_end
-        duration = params.get("duration_hours") or 1
+            return _validate_resolved_interval(exact_start, exact_end, now=now)
+        duration = params.get("duration_hours")
+        if duration is None:
+            duration = 1
         try:
-            return exact_start, _add_actual_hours(exact_start, int(duration))
+            ends_at = _add_actual_hours(exact_start, int(duration))
         except (TypeError, ValueError):
             raise MeetingRoomInputError("invalid_time", "The duration must be a whole number of hours.")
+        return _validate_resolved_interval(exact_start, ends_at, now=now)
 
     local_date = resolve_local_date(text, params, now=now)
     natural_start, natural_end = _natural_time_tokens(text)
@@ -239,13 +278,14 @@ def resolve_interval(
             r"\bfor\s+(\d+)\s*(?:whole\s+)?hours?\b",
             str(text or "").lower(),
         )
-        raw_duration = raw_duration or (duration_match.group(1) if duration_match else 1)
+        if raw_duration is None:
+            raw_duration = duration_match.group(1) if duration_match else 1
         try:
             duration = int(raw_duration)
         except (TypeError, ValueError):
             raise MeetingRoomInputError("invalid_time", "The duration must be a whole number of hours.")
         ends_at = _add_actual_hours(starts_at, duration)
-    return starts_at, ends_at
+    return _validate_resolved_interval(starts_at, ends_at, now=now)
 
 
 def _format_clock(value: datetime) -> str:
@@ -294,10 +334,17 @@ def build_booking_action_value(
 
 
 def build_cancel_action_value(*, owner_slack_user_id: str, booking_id: str) -> str:
+    try:
+        normalized_booking_id = str(UUID(str(booking_id)))
+    except (TypeError, ValueError, AttributeError):
+        raise MeetingRoomInputError(
+            "invalid_response",
+            "I could not read one of those bookings. Ask Roo to list your bookings again.",
+        )
     return json.dumps(
         {
             "owner_slack_user_id": owner_slack_user_id,
-            "booking_id": str(UUID(str(booking_id))),
+            "booking_id": normalized_booking_id,
         },
         separators=(",", ":"),
         sort_keys=True,
@@ -403,11 +450,20 @@ def booking_preview(
 def cancellation_selection(bookings: list[dict], *, owner_slack_user_id: str) -> dict:
     message = "Choose the Meeting Room booking to cancel. You will receive a full refund if it has not started."
     blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": message}}]
+    valid_booking_count = 0
     for booking in bookings:
         starts_at = parse_backend_timestamp(booking.get("starts_at"))
         ends_at = parse_backend_timestamp(booking.get("ends_at"))
         room_name = str((booking.get("room") or {}).get("name") or "Meeting Room")
         label = f"{starts_at.strftime('%a %-d %b')} {_format_clock(starts_at)}"
+        try:
+            action_value = build_cancel_action_value(
+                owner_slack_user_id=owner_slack_user_id,
+                booking_id=booking.get("id"),
+            )
+        except MeetingRoomInputError:
+            continue
+        valid_booking_count += 1
         blocks.append(
             {
                 "type": "section",
@@ -420,10 +476,7 @@ def cancellation_selection(bookings: list[dict], *, owner_slack_user_id: str) ->
                     "action_id": CANCEL_ACTION_ID,
                     "style": "danger",
                     "text": {"type": "plain_text", "text": f"Cancel {label}"[:75]},
-                    "value": build_cancel_action_value(
-                        owner_slack_user_id=owner_slack_user_id,
-                        booking_id=booking["id"],
-                    ),
+                    "value": action_value,
                     "confirm": {
                         "title": {"type": "plain_text", "text": "Cancel booking?"},
                         "text": {"type": "mrkdwn", "text": "The room will become available to other members."},
@@ -432,6 +485,11 @@ def cancellation_selection(bookings: list[dict], *, owner_slack_user_id: str) ->
                     },
                 },
             }
+        )
+    if not valid_booking_count:
+        raise MeetingRoomInputError(
+            "invalid_response",
+            "I could not read those bookings. Ask Roo to list your bookings again.",
         )
     return {"message": message, "blocks": blocks}
 
@@ -443,7 +501,11 @@ def format_booking_result(result: dict) -> str:
     room_name = str((booking.get("room") or {}).get("name") or "Meeting Room")
     points = int(result.get("points_cost", booking.get("points_cost", 0)) or 0)
     balance = result.get("remaining_balance")
-    replay = bool(result.get("already_booked"))
+    replay = (
+        not bool(result.get("created"))
+        if "created" in result
+        else bool(result.get("already_booked"))
+    )
     heading = "This booking was already confirmed." if replay else "Your booking is confirmed."
     balance_line = f"\n*Remaining balance:* {balance} Roo Points" if balance is not None else ""
     return (
@@ -467,7 +529,11 @@ def format_cancellation_result(result: dict) -> str:
     )
 
 
-def backend_error_message(exc: Exception) -> str:
+def backend_error_message(
+    exc: Exception,
+    *,
+    mutation_result_uncertain: bool = False,
+) -> str:
     code = ""
     detail = ""
     if isinstance(exc, httpx.HTTPStatusError):
@@ -492,6 +558,14 @@ def backend_error_message(exc: Exception) -> str:
     }
     if code in messages:
         return messages[code]
+    if mutation_result_uncertain and (
+        not isinstance(exc, httpx.HTTPStatusError)
+        or exc.response.status_code >= 500
+    ):
+        return (
+            "I could not confirm whether that Meeting Room change completed. "
+            "Ask Roo `show my meeting room bookings` before trying again."
+        )
     if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code >= 500:
         return "The meeting-room service is unavailable right now. Nothing was changed."
     return detail or "I could not complete that meeting-room request. Nothing was changed."

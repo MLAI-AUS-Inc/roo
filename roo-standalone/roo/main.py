@@ -4815,6 +4815,7 @@ async def _handle_meeting_room_action(
     message_ts: str,
 ) -> None:
     """Complete a verified meeting-room button action outside Slack's ack window."""
+    mutation_started = False
     if not settings.MEETING_ROOM_BOOKING_ENABLED:
         outcome = "Meeting-room booking is not enabled right now. Nothing was changed."
     elif not str(channel_id or "").startswith("D"):
@@ -4841,6 +4842,7 @@ async def _handle_meeting_room_action(
                     internal_api_key=settings.ROO_API_KEY,
                 )
                 if action_id == MEETING_ROOM_BOOK_ACTION_ID:
+                    mutation_started = True
                     result = await client.book_meeting_room(
                         actor_user_id,
                         room_slug=value["room_slug"],
@@ -4858,6 +4860,7 @@ async def _handle_meeting_room_action(
                         f"created={bool(result.get('created'))}"
                     )
                 else:
+                    mutation_started = True
                     result = await client.cancel_meeting_room_booking(
                         actor_user_id,
                         value["booking_id"],
@@ -4871,7 +4874,10 @@ async def _handle_meeting_room_action(
         except MeetingRoomInputError as exc:
             outcome = exc.message
         except Exception as exc:
-            outcome = meeting_room_backend_error_message(exc)
+            outcome = meeting_room_backend_error_message(
+                exc,
+                mutation_result_uncertain=mutation_started,
+            )
             print(
                 "MEETING_ROOM_ACTION_FAILED "
                 f"action={action_id} reason={exc.__class__.__name__}"
@@ -4892,8 +4898,16 @@ async def _handle_meeting_room_action(
             text=outcome,
             blocks=blocks,
         )
-    except Exception:
-        post_message(channel=channel_id, text=outcome, blocks=blocks)
+    except Exception as update_exc:
+        try:
+            post_message(channel=channel_id, text=outcome, blocks=blocks)
+        except Exception as post_exc:
+            print(
+                "MEETING_ROOM_ACTION_DELIVERY_FAILED "
+                f"action={action_id} "
+                f"update_reason={update_exc.__class__.__name__} "
+                f"fallback_reason={post_exc.__class__.__name__}"
+            )
 
 
 @app.post("/slack/actions")
@@ -5151,6 +5165,10 @@ async def slack_actions(
     # Interactive messages structure is slightly different for TS
     message = payload.get("message", {})
     thread_ts = message.get("thread_ts") or message.get("ts")
+    action_message_ts = (
+        (payload.get("container") or {}).get("message_ts")
+        or message.get("ts")
+    )
     
     print(f"🖱️ Action: {action_id} from {user_id}")
 
@@ -5210,7 +5228,7 @@ async def slack_actions(
                 action_value=str(actions[0].get("value") or ""),
                 actor_user_id=str(user_id or ""),
                 channel_id=str(channel_id or ""),
-                message_ts=str(thread_ts or ""),
+                message_ts=str(action_message_ts or ""),
             )
         )
         return JSONResponse(status_code=200, content={})

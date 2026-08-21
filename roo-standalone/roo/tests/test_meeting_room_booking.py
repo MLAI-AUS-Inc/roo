@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from roo import main as main_module
 from roo import meeting_room_booking as room_module
+from roo.clients.mlai_backend import MLAIBackendUnavailableError
 from roo.config import Settings, get_settings
 from roo.meeting_room_booking import (
     BOOK_ACTION_ID,
@@ -29,6 +30,7 @@ from roo.meeting_room_booking import (
     resolve_interval,
 )
 from roo.skills.executor import SkillExecutor
+from roo.skills.loader import load_skill_from_directory
 from roo.slack_security import get_slack_receipt_store
 
 
@@ -126,6 +128,60 @@ def test_interval_parser_handles_ranges_and_cross_midnight():
     assert ends_at == datetime(2026, 8, 13, 1, tzinfo=MELBOURNE)
 
 
+@pytest.mark.parametrize(
+    ("text", "params"),
+    (
+        ("book tomorrow 2pm-4pm", {}),
+        ("book tomorrow 2pm until 4pm", {}),
+        ("book tomorrow", {"start_time": "2pm", "end_time": "4pm"}),
+    ),
+)
+def test_interval_parser_preserves_explicit_end_times_without_from(text, params):
+    now = datetime(2026, 8, 11, 9, tzinfo=MELBOURNE)
+
+    starts_at, ends_at = resolve_interval(text, params, now=now)
+
+    assert starts_at == datetime(2026, 8, 12, 14, tzinfo=MELBOURNE)
+    assert ends_at == datetime(2026, 8, 12, 16, tzinfo=MELBOURNE)
+
+
+def test_skill_schema_exposes_end_time_for_availability_and_booking():
+    skill = load_skill_from_directory(
+        Path(__file__).resolve().parents[2] / "skills" / "meeting_room_booking"
+    )
+    actions = {action["name"]: action for action in skill.actions}
+
+    assert "end_time" in actions["check_room_availability"]["params"]
+    assert "end_time" in actions["book_meeting_room"]["params"]
+
+
+def test_interval_parser_accepts_unambiguous_24_hour_time():
+    starts_at, ends_at = resolve_interval(
+        "book tomorrow",
+        {"start_time": "09:00"},
+        now=datetime(2026, 8, 11, 8, tzinfo=MELBOURNE),
+    )
+
+    assert starts_at == datetime(2026, 8, 12, 9, tzinfo=MELBOURNE)
+    assert ends_at == datetime(2026, 8, 12, 10, tzinfo=MELBOURNE)
+
+
+def test_interval_parser_rejects_past_start_before_backend_call():
+    with pytest.raises(MeetingRoomInputError, match="start in the future"):
+        resolve_interval(
+            "book today at 2pm",
+            now=datetime(2026, 8, 11, 16, tzinfo=MELBOURNE),
+        )
+
+
+def test_interval_parser_rejects_probable_reversed_range_instead_of_rolling_23_hours():
+    with pytest.raises(MeetingRoomInputError, match="at most four hours"):
+        resolve_interval(
+            "book tomorrow from 2pm to 1pm",
+            now=datetime(2026, 8, 11, 9, tzinfo=MELBOURNE),
+        )
+
+
 def test_interval_parser_counts_actual_hours_across_daylight_saving():
     starts_at, ends_at = resolve_interval(
         "book the meeting room 2026-10-04 at 1am",
@@ -181,6 +237,65 @@ def test_booking_action_payload_is_bound_to_owner_and_expires_in_ten_minutes():
 
     assert parsed["owner_slack_user_id"] == "UOWNER"
     assert datetime.fromisoformat(parsed["confirmation_expires_at"]) == now + timedelta(minutes=10)
+
+
+def test_cancellation_selection_skips_malformed_booking_ids():
+    starts_at = datetime(2026, 8, 12, 14, tzinfo=MELBOURNE)
+    bookings = [
+        {
+            "id": "not-a-uuid",
+            "starts_at": starts_at.isoformat(),
+            "ends_at": (starts_at + timedelta(hours=1)).isoformat(),
+            "room": {"name": "Meeting Room"},
+        },
+        {
+            "id": "1409fd17-c84d-4774-af8a-7b847c16bd30",
+            "starts_at": starts_at.isoformat(),
+            "ends_at": (starts_at + timedelta(hours=1)).isoformat(),
+            "room": {"name": "Meeting Room"},
+        },
+    ]
+
+    selection = room_module.cancellation_selection(
+        bookings,
+        owner_slack_user_id="UOWNER",
+    )
+
+    assert len(selection["blocks"]) == 2
+    assert "1409fd17-c84d-4774-af8a-7b847c16bd30" in selection["blocks"][1]["accessory"]["value"]
+
+
+def test_cancellation_selection_reports_invalid_backend_rows():
+    starts_at = datetime(2026, 8, 12, 14, tzinfo=MELBOURNE)
+    with pytest.raises(MeetingRoomInputError, match="could not read"):
+        room_module.cancellation_selection(
+            [
+                {
+                    "id": None,
+                    "starts_at": starts_at.isoformat(),
+                    "ends_at": (starts_at + timedelta(hours=1)).isoformat(),
+                }
+            ],
+            owner_slack_user_id="UOWNER",
+        )
+
+
+def test_booking_result_uses_created_flag_for_idempotent_replays():
+    starts_at = datetime(2026, 8, 12, 14, tzinfo=MELBOURNE)
+
+    message = room_module.format_booking_result(
+        {
+            "created": False,
+            "points_cost": 2,
+            "booking": {
+                "starts_at": starts_at.isoformat(),
+                "ends_at": (starts_at + timedelta(hours=2)).isoformat(),
+                "room": {"name": "Meeting Room"},
+            },
+        }
+    )
+
+    assert message.startswith("This booking was already confirmed.")
 
 
 @pytest.mark.asyncio
@@ -504,6 +619,70 @@ async def test_action_handler_rejects_expired_confirmation_before_backend(monkey
     assert "expired" in updates[0]["text"]
 
 
+@pytest.mark.asyncio
+async def test_action_handler_does_not_claim_failed_booking_request_changed_nothing(monkeypatch):
+    configured = _settings()
+    starts_at = datetime.now(MELBOURNE).replace(minute=0, second=0, microsecond=0) + timedelta(days=1)
+    action_value = build_booking_action_value(
+        owner_slack_user_id="UOWNER",
+        room_slug="meeting-room",
+        starts_at=starts_at,
+        ends_at=starts_at + timedelta(hours=1),
+    )
+    updates = []
+
+    class UnavailableClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def book_meeting_room(self, slack_user_id, **kwargs):
+            raise MLAIBackendUnavailableError("connection dropped after request")
+
+    monkeypatch.setattr("roo.clients.mlai_backend.MLAIBackendClient", UnavailableClient)
+    monkeypatch.setattr(
+        "roo.slack_client.get_slack_client",
+        lambda: SimpleNamespace(chat_update=lambda **kwargs: updates.append(kwargs)),
+    )
+
+    await main_module._handle_meeting_room_action(
+        settings=configured,
+        action_id=BOOK_ACTION_ID,
+        action_value=action_value,
+        actor_user_id="UOWNER",
+        channel_id="DOWNER",
+        message_ts="123.456",
+    )
+
+    assert "could not confirm whether" in updates[0]["text"]
+    assert "show my meeting room bookings" in updates[0]["text"]
+    assert "Nothing was changed" not in updates[0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_action_handler_logs_when_update_and_fallback_delivery_both_fail(monkeypatch, capsys):
+    configured = _settings(MEETING_ROOM_BOOKING_ENABLED=False)
+
+    def fail_delivery(**kwargs):
+        raise RuntimeError("slack unavailable")
+
+    monkeypatch.setattr(
+        "roo.slack_client.get_slack_client",
+        lambda: SimpleNamespace(chat_update=fail_delivery),
+    )
+    monkeypatch.setattr(main_module, "post_message", fail_delivery)
+
+    await main_module._handle_meeting_room_action(
+        settings=configured,
+        action_id=BOOK_ACTION_ID,
+        action_value="",
+        actor_user_id="UOWNER",
+        channel_id="DOWNER",
+        message_ts="123.456",
+    )
+
+    assert "MEETING_ROOM_ACTION_DELIVERY_FAILED" in capsys.readouterr().out
+
+
 def _signature(secret, timestamp, body):
     digest = hmac.new(
         secret.encode(),
@@ -527,7 +706,8 @@ def test_duplicate_signed_button_delivery_schedules_only_one_action(tmp_path, mo
         "type": "block_actions",
         "user": {"id": "UOWNER"},
         "channel": {"id": "DOWNER"},
-        "message": {"ts": "123.456"},
+        "container": {"message_ts": "card.456"},
+        "message": {"ts": "fallback-card.456", "thread_ts": "member-parent.123"},
         "actions": [{"action_id": BOOK_ACTION_ID, "value": action_value}],
     }
     body = urlencode({"payload": json.dumps(payload)}).encode()
@@ -537,11 +717,11 @@ def test_duplicate_signed_button_delivery_schedules_only_one_action(tmp_path, mo
         "X-Slack-Signature": _signature(configured.SLACK_SIGNING_SECRET, timestamp, body),
         "Content-Type": "application/x-www-form-urlencoded",
     }
-    scheduled = []
+    scheduled_message_timestamps = []
 
     def fake_create_task(coro):
+        scheduled_message_timestamps.append(coro.cr_frame.f_locals["message_ts"])
         coro.close()
-        scheduled.append(coro)
 
     monkeypatch.setattr(main_module.asyncio, "create_task", fake_create_task)
     client = TestClient(main_module.app)
@@ -551,7 +731,7 @@ def test_duplicate_signed_button_delivery_schedules_only_one_action(tmp_path, mo
 
     assert first.status_code == 200
     assert second.status_code == 200
-    assert len(scheduled) == 1
+    assert scheduled_message_timestamps == ["card.456"]
 
 
 @pytest.mark.asyncio
@@ -572,7 +752,6 @@ async def test_backend_client_uses_canonical_meeting_room_endpoints(monkeypatch)
     )
     monkeypatch.setattr(client, "_request", fake_request)
 
-    await client.list_meeting_rooms()
     await client.check_meeting_room_availability("<@UOWNER>", date="2026-08-12")
     await client.book_meeting_room(
         "<@UOWNER>",
@@ -590,17 +769,16 @@ async def test_backend_client_uses_canonical_meeting_room_endpoints(monkeypatch)
     )
 
     assert [endpoint for _, endpoint, _ in captured] == [
-        "/api/v1/points/meeting-rooms/rooms/",
         "/api/v1/points/meeting-rooms/availability/",
         "/api/v1/points/meeting-rooms/book/",
         "/api/v1/points/meeting-rooms/my-bookings/",
         "/api/v1/points/meeting-rooms/cancel/",
     ]
+    assert captured[0][2]["json"]["slack_user_id"] == "UOWNER"
     assert captured[1][2]["json"]["slack_user_id"] == "UOWNER"
+    assert captured[1][2]["json"]["client_request_id"] == "1409fd17-c84d-4774-af8a-7b847c16bd30"
     assert captured[2][2]["json"]["slack_user_id"] == "UOWNER"
-    assert captured[2][2]["json"]["client_request_id"] == "1409fd17-c84d-4774-af8a-7b847c16bd30"
     assert captured[3][2]["json"]["slack_user_id"] == "UOWNER"
-    assert captured[4][2]["json"]["slack_user_id"] == "UOWNER"
 
 
 def test_feature_flag_is_disabled_by_default_and_fails_closed():

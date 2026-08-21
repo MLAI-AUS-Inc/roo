@@ -1,33 +1,35 @@
 ---
 name: meeting-room-booking
-description: Manage MLAI Meeting Room bookings
+description: Manage Meeting Room bookings
 routing:
   use_when: >
-    A member wants Meeting Room availability or bookings.
+    Meeting Room requests.
   avoid_when: >
-    Coworking (mlai-points), events, calendars, or booking for others.
+    Coworking, events, calendars, or booking others.
   examples:
-    - {text: "is the meeting room free tomorrow at 2pm?", action: check_room_availability}
-    - {text: "book the meeting room tomorrow from 2pm to 4pm", action: book_meeting_room}
-    - {text: "show my meeting room bookings", action: list_my_room_bookings}
+    - {text: "room free tomorrow 2pm?", action: check_room_availability}
+    - {text: "book room tomorrow 2pm-4pm", action: book_meeting_room}
+    - {text: "my room bookings", action: list_my_room_bookings}
   negative_examples:
-    - {text: "book me in for coworking tomorrow", instead: mlai-points}
+    - {text: "book coworking tomorrow", instead: mlai-points}
 actions:
   - name: check_room_availability
-    description: Check availability.
+    description: Check times.
     params:
       date: {type: string}
       start_time: {type: string}
+      end_time: {type: string}
   - name: book_meeting_room
-    description: Prepare booking confirmation.
+    description: Confirm booking.
     params:
       date: {type: string}
       start_time: {type: string}
+      end_time: {type: string}
       duration_hours: {type: integer}
   - name: list_my_room_bookings
-    description: List bookings.
+    description: List mine.
   - name: cancel_meeting_room
-    description: Select a booking to cancel.
+    description: Choose cancellation.
     params:
       date: {type: string}
 ---
