@@ -91,8 +91,9 @@ class OfficeManagerActionStore:
         slack_user_id: str,
         channel_id: str,
         booking_date: str,
-    ) -> dict[str, Any]:
-        """Persist a unique signed click before Roo acknowledges it to Slack."""
+        replay_existing: bool = True,
+    ) -> tuple[dict[str, Any], bool]:
+        """Persist a signed click and report whether it needs a worker."""
         self._ensure_schema()
         current_time = time.time()
         slack_user_id = str(slack_user_id).strip()
@@ -113,6 +114,7 @@ class OfficeManagerActionStore:
                     """,
                     (idempotency_key,),
                 ).fetchone()
+                should_process = existing is None
                 if existing is None:
                     connection.execute(
                         """
@@ -138,7 +140,7 @@ class OfficeManagerActionStore:
                             current_time,
                         ),
                     )
-                elif not (
+                elif replay_existing and not (
                     existing["status"] == "processing"
                     and existing["locked_until"] is not None
                     and float(existing["locked_until"]) > current_time
@@ -166,6 +168,7 @@ class OfficeManagerActionStore:
                             int(existing["id"]),
                         ),
                     )
+                    should_process = True
                 row = connection.execute(
                     """
                     SELECT * FROM office_manager_action_outbox
@@ -174,7 +177,7 @@ class OfficeManagerActionStore:
                     (idempotency_key,),
                 ).fetchone()
                 connection.commit()
-                return dict(row)
+                return dict(row), should_process
 
     def reserve(
         self,

@@ -5,6 +5,7 @@ import json
 import os
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 from pathlib import Path
 from urllib.parse import urlencode
@@ -27,7 +28,10 @@ from roo.coworking_messages import (
     OFFICE_MANAGER_VOLUNTEER_ACTION_ID,
 )
 from roo.skills.executor import SkillExecutor
-from roo.slack_security import get_slack_receipt_store
+from roo.slack_security import (
+    get_slack_receipt_store,
+    verify_and_claim_slack_request,
+)
 
 
 _UNSET = object()
@@ -146,6 +150,209 @@ def test_signed_button_uses_payload_actor_and_deduplicates_delivery(
         "booking_date": "2026-08-03",
     }
     assert action_store.get(1)["status"] == "completed"
+
+    completed_replay = client.post(
+        "/slack/actions",
+        content=body,
+        headers=headers,
+    )
+    assert completed_replay.status_code == 200
+    assert len(scheduled) == 1
+    assert action_store.get(1)["status"] == "completed"
+
+
+def test_persistence_failure_is_retried_after_generic_receipt_is_committed(
+    tmp_path,
+    monkeypatch,
+):
+    configured = _settings(tmp_path)
+    main_module.app.dependency_overrides[get_settings] = lambda: configured
+    client = TestClient(main_module.app)
+    scheduled = []
+    captured = []
+    action_store = action_module.get_office_manager_action_store(
+        configured.SLACK_RECEIPTS_DB_PATH
+    )
+    original_record_action = action_store.record_action
+    persistence_attempts = 0
+
+    def fail_first_persistence(**kwargs):
+        nonlocal persistence_attempts
+        persistence_attempts += 1
+        if persistence_attempts == 1:
+            raise OSError("synthetic outbox failure")
+        return original_record_action(**kwargs)
+
+    async def capture_claim(**kwargs):
+        captured.append(kwargs)
+
+    monkeypatch.setattr(action_store, "record_action", fail_first_persistence)
+    monkeypatch.setattr(
+        main_module,
+        "_claim_office_manager_from_action",
+        capture_claim,
+    )
+    monkeypatch.setattr(main_module, "get_current_date", lambda: date(2026, 8, 3))
+    monkeypatch.setattr(main_module, "start_slack_action", scheduled.append)
+    body = _action_body()
+    headers = _signed_headers(configured, body)
+
+    first = client.post("/slack/actions", content=body, headers=headers)
+    retry = client.post("/slack/actions", content=body, headers=headers)
+
+    assert first.status_code == 503
+    assert retry.status_code == 200
+    assert persistence_attempts == 2
+    assert len(scheduled) == 1
+    persisted = action_store.get(1)
+    assert persisted is not None
+    assert persisted["status"] == "pending"
+
+    asyncio.run(scheduled[0])
+    assert captured == [
+        {
+            "user_id": "UVERIFIED",
+            "channel_id": "CCOWORK",
+            "booking_date": "2026-08-03",
+        }
+    ]
+    assert action_store.get(int(persisted["id"]))["status"] == "completed"
+
+
+def test_commit_uncertain_retry_is_recovered_by_durable_worker(
+    tmp_path,
+    monkeypatch,
+):
+    configured = _settings(tmp_path)
+    main_module.app.dependency_overrides[get_settings] = lambda: configured
+    client = TestClient(main_module.app)
+    scheduled = []
+    processed = []
+    action_store = action_module.get_office_manager_action_store(
+        configured.SLACK_RECEIPTS_DB_PATH
+    )
+    original_record_action = action_store.record_action
+    persistence_attempts = 0
+
+    def lose_first_commit_result(**kwargs):
+        nonlocal persistence_attempts
+        persistence_attempts += 1
+        result = original_record_action(**kwargs)
+        if persistence_attempts == 1:
+            raise TimeoutError("synthetic response loss after commit")
+        return result
+
+    async def capture_processed(action):
+        processed.append(action["idempotency_key"])
+
+    monkeypatch.setattr(
+        action_store,
+        "record_action",
+        lose_first_commit_result,
+    )
+    monkeypatch.setattr(main_module, "get_current_date", lambda: date(2026, 8, 3))
+    monkeypatch.setattr(main_module, "start_slack_action", scheduled.append)
+    body = _action_body()
+    headers = _signed_headers(configured, body)
+
+    first = client.post("/slack/actions", content=body, headers=headers)
+    retry = client.post("/slack/actions", content=body, headers=headers)
+
+    assert first.status_code == 503
+    assert retry.status_code == 200
+    assert persistence_attempts == 2
+    assert scheduled == []
+    assert action_store.get(1)["status"] == "pending"
+
+    recovered = asyncio.run(
+        action_module.process_due_office_manager_actions(
+            store=action_store,
+            processor=capture_processed,
+        )
+    )
+
+    assert recovered == 1
+    assert processed == ["office_manager:UVERIFIED:2026-08-03"]
+    assert action_store.get(1)["status"] == "completed"
+
+
+def test_existing_generic_receipt_without_outbox_still_records_action(
+    tmp_path,
+    monkeypatch,
+):
+    configured = _settings(tmp_path)
+    main_module.app.dependency_overrides[get_settings] = lambda: configured
+    scheduled = []
+    monkeypatch.setattr(main_module, "get_current_date", lambda: date(2026, 8, 3))
+    monkeypatch.setattr(main_module, "start_slack_action", scheduled.append)
+    body = _action_body()
+    headers = _signed_headers(configured, body)
+
+    assert verify_and_claim_slack_request(
+        signing_secret=configured.SLACK_SIGNING_SECRET,
+        raw_body=body,
+        headers=headers,
+        receipt_db_path=configured.SLACK_RECEIPTS_DB_PATH,
+        max_age_seconds=configured.SLACK_REQUEST_MAX_AGE_SECONDS,
+        receipt_ttl_seconds=configured.SLACK_RECEIPT_TTL_SECONDS,
+    ) is False
+
+    response = TestClient(main_module.app).post(
+        "/slack/actions",
+        content=body,
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    assert len(scheduled) == 1
+    action_store = action_module.get_office_manager_action_store(
+        configured.SLACK_RECEIPTS_DB_PATH
+    )
+    persisted = action_store.get(1)
+    assert persisted is not None
+    assert persisted["status"] == "pending"
+    scheduled[0].close()
+
+
+def test_concurrent_exact_retries_schedule_one_durable_action(
+    tmp_path,
+    monkeypatch,
+):
+    configured = _settings(tmp_path)
+    main_module.app.dependency_overrides[get_settings] = lambda: configured
+    scheduled = []
+    monkeypatch.setattr(main_module, "get_current_date", lambda: date(2026, 8, 3))
+    monkeypatch.setattr(main_module, "start_slack_action", scheduled.append)
+    body = _action_body()
+    headers = _signed_headers(configured, body)
+
+    assert verify_and_claim_slack_request(
+        signing_secret=configured.SLACK_SIGNING_SECRET,
+        raw_body=body,
+        headers=headers,
+        receipt_db_path=configured.SLACK_RECEIPTS_DB_PATH,
+        max_age_seconds=configured.SLACK_REQUEST_MAX_AGE_SECONDS,
+        receipt_ttl_seconds=configured.SLACK_RECEIPT_TTL_SECONDS,
+    ) is False
+
+    def deliver_retry(_):
+        return TestClient(main_module.app).post(
+            "/slack/actions",
+            content=body,
+            headers=headers,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        responses = list(executor.map(deliver_retry, range(2)))
+
+    assert [response.status_code for response in responses] == [200, 200]
+    assert len(scheduled) == 1
+    action_store = action_module.get_office_manager_action_store(
+        configured.SLACK_RECEIPTS_DB_PATH
+    )
+    assert action_store.get(1)["status"] == "pending"
+    assert action_store.get(2) is None
+    scheduled[0].close()
 
 
 def test_admin_surface_ignores_office_manager_action(tmp_path, monkeypatch):
@@ -627,11 +834,12 @@ async def test_office_manager_action_task_is_retained_until_completion():
 async def test_pending_action_is_recovered_after_restart(tmp_path):
     database_path = tmp_path / "actions.db"
     original_store = action_module.OfficeManagerActionStore(database_path)
-    action = original_store.record_action(
+    action, should_process = original_store.record_action(
         slack_user_id="UVERIFIED",
         channel_id="CCOWORK",
         booking_date="2026-08-03",
     )
+    assert should_process is True
     recovered_store = action_module.OfficeManagerActionStore(database_path)
     processed = []
 
@@ -653,11 +861,12 @@ async def test_expired_processing_lease_is_recovered(tmp_path, monkeypatch):
     current_time = [1_000.0]
     monkeypatch.setattr(action_module.time, "time", lambda: current_time[0])
     store = action_module.OfficeManagerActionStore(tmp_path / "actions.db")
-    action = store.record_action(
+    action, should_process = store.record_action(
         slack_user_id="UVERIFIED",
         channel_id="CCOWORK",
         booking_date="2026-08-03",
     )
+    assert should_process is True
     assert store.reserve(action["id"], lease_seconds=60) is not None
 
     current_time[0] += 61
@@ -681,11 +890,12 @@ async def test_only_one_worker_can_reserve_an_action(tmp_path):
     database_path = tmp_path / "actions.db"
     first_store = action_module.OfficeManagerActionStore(database_path)
     second_store = action_module.OfficeManagerActionStore(database_path)
-    action = first_store.record_action(
+    action, should_process = first_store.record_action(
         slack_user_id="UVERIFIED",
         channel_id="CCOWORK",
         booking_date="2026-08-03",
     )
+    assert should_process is True
 
     reservations = await asyncio.gather(
         asyncio.to_thread(first_store.reserve, action["id"], owner="first"),
@@ -702,11 +912,12 @@ def test_expired_worker_cannot_overwrite_replacement_worker_state(
     current_time = [1_000.0]
     monkeypatch.setattr(action_module.time, "time", lambda: current_time[0])
     store = action_module.OfficeManagerActionStore(tmp_path / "actions.db")
-    action = store.record_action(
+    action, should_process = store.record_action(
         slack_user_id="UVERIFIED",
         channel_id="CCOWORK",
         booking_date="2026-08-03",
     )
+    assert should_process is True
     stale = store.reserve(action["id"], owner="stale", lease_seconds=1)
     current_time[0] += 2
     replacement = store.reserve(action["id"], owner="replacement")
@@ -727,11 +938,12 @@ def test_expired_worker_cannot_overwrite_replacement_worker_state(
 @pytest.mark.asyncio
 async def test_cancelled_action_returns_to_pending_for_recovery(tmp_path):
     store = action_module.OfficeManagerActionStore(tmp_path / "actions.db")
-    action = store.record_action(
+    action, should_process = store.record_action(
         slack_user_id="UVERIFIED",
         channel_id="CCOWORK",
         booking_date="2026-08-03",
     )
+    assert should_process is True
     started = asyncio.Event()
 
     async def processor(record):

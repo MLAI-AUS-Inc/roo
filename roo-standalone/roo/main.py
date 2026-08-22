@@ -5547,6 +5547,44 @@ async def slack_actions(
         return JSONResponse(status_code=400, content={"error": "Invalid JSON"})
     if not isinstance(payload, dict):
         return JSONResponse(status_code=400, content={"error": "Invalid payload"})
+    interactive_actions = payload.get("actions", [])
+    office_manager_action = (
+        interactive_actions[0]
+        if (
+            isinstance(interactive_actions, list)
+            and interactive_actions
+            and isinstance(interactive_actions[0], dict)
+            and str(interactive_actions[0].get("action_id") or "")
+            == OFFICE_MANAGER_VOLUNTEER_ACTION_ID
+        )
+        else None
+    )
+    early_interactive_action = (
+        interactive_actions[0]
+        if (
+            isinstance(interactive_actions, list)
+            and interactive_actions
+            and isinstance(interactive_actions[0], dict)
+        )
+        else {}
+    )
+    early_interactive_action_id = str(
+        early_interactive_action.get("action_id") or ""
+    )
+    is_meeting_room_action = early_interactive_action_id in {
+        MEETING_ROOM_BOOK_ACTION_ID,
+        MEETING_ROOM_CANCEL_ACTION_ID,
+        MEETING_ROOM_CHOOSE_ROOM_ACTION_ID,
+    }
+    is_duplicate_request = _is_duplicate_slack_request(request)
+    if (
+        is_duplicate_request
+        and office_manager_action is None
+        and not is_meeting_room_action
+    ):
+        print("↩️ Ignoring duplicate signed Slack action request")
+        return JSONResponse(status_code=200, content={})
+
     settings = _request_settings(request)
     payload_type = str(payload.get("type") or "")
     user_id = payload.get("user", {}).get("id")
@@ -5612,90 +5650,84 @@ async def slack_actions(
         )
         return JSONResponse(status_code=200, content={})
 
-    if _is_duplicate_slack_request(request):
+    if is_duplicate_request and office_manager_action is None:
         print("↩️ Ignoring duplicate signed Slack action request")
         return JSONResponse(status_code=200, content={})
 
-    interactive_actions = payload.get("actions", [])
-    if interactive_actions:
-        office_manager_action = interactive_actions[0]
+    if office_manager_action is not None:
+        if settings.ROO_SURFACE != "public":
+            print("Ignoring Office Manager action outside Public Roo")
+            return JSONResponse(status_code=200, content={})
+        try:
+            action_value = json.loads(
+                str(office_manager_action.get("value") or "{}")
+            )
+        except json.JSONDecodeError:
+            action_value = {}
+        if not isinstance(action_value, dict):
+            action_value = {}
+        booking_date = str(action_value.get("date") or "").strip()
+        try:
+            is_current_booking_date = (
+                date.fromisoformat(booking_date) == get_current_date()
+            )
+        except ValueError:
+            is_current_booking_date = False
         if (
-            str(office_manager_action.get("action_id") or "")
-            == OFFICE_MANAGER_VOLUNTEER_ACTION_ID
+            not user_id
+            or not channel_id
+            or not booking_date
+            or not is_current_booking_date
         ):
-            if settings.ROO_SURFACE != "public":
-                print("Ignoring Office Manager action outside Public Roo")
-                return JSONResponse(status_code=200, content={})
-            try:
-                action_value = json.loads(
-                    str(office_manager_action.get("value") or "{}")
-                )
-            except json.JSONDecodeError:
-                action_value = {}
-            if not isinstance(action_value, dict):
-                action_value = {}
-            booking_date = str(action_value.get("date") or "").strip()
-            try:
-                is_current_booking_date = (
-                    date.fromisoformat(booking_date) == get_current_date()
-                )
-            except ValueError:
-                is_current_booking_date = False
-            if (
-                not user_id
-                or not channel_id
-                or not booking_date
-                or not is_current_booking_date
-            ):
-                if user_id and channel_id:
-                    start_slack_action(
-                        _send_office_manager_private_feedback(
-                            channel_id=str(channel_id),
-                            user_id=str(user_id),
-                            text=(
-                                "This volunteer button is no longer valid. "
-                                "Please use Roo's latest Office Manager announcement."
-                            ),
-                        )
-                    )
-                return JSONResponse(status_code=200, content={})
-
-            try:
-                action_store = get_office_manager_action_store(
-                    settings.SLACK_RECEIPTS_DB_PATH
-                )
-                action_record = await asyncio.to_thread(
-                    action_store.record_action,
-                    slack_user_id=str(user_id),
-                    channel_id=str(channel_id),
-                    booking_date=booking_date,
-                )
-            except Exception as exc:
-                print(
-                    "OFFICE_MANAGER_ACTION_PERSIST_FAILED "
-                    f"error_type={exc.__class__.__name__}"
-                )
+            if user_id and channel_id:
                 start_slack_action(
                     _send_office_manager_private_feedback(
                         channel_id=str(channel_id),
                         user_id=str(user_id),
                         text=(
-                            "Roo could not safely record your volunteer click. "
-                            "Please use Roo's latest Office Manager announcement "
-                            "and try again."
+                            "This volunteer button is no longer valid. "
+                            "Please use Roo's latest Office Manager announcement."
                         ),
                     )
                 )
-                return JSONResponse(status_code=200, content={})
+            return JSONResponse(status_code=200, content={})
 
-            start_slack_action(
-                process_office_manager_action(
-                    int(action_record["id"]),
-                    store=action_store,
-                    processor=_process_office_manager_action_record,
-                )
+        try:
+            action_store = get_office_manager_action_store(
+                settings.SLACK_RECEIPTS_DB_PATH
+            )
+            action_record, should_process = await asyncio.to_thread(
+                action_store.record_action,
+                slack_user_id=str(user_id),
+                channel_id=str(channel_id),
+                booking_date=booking_date,
+                replay_existing=not is_duplicate_request,
+            )
+        except Exception as exc:
+            print(
+                "OFFICE_MANAGER_ACTION_PERSIST_FAILED "
+                f"error_type={exc.__class__.__name__}"
+            )
+            return JSONResponse(
+                status_code=503,
+                content={"error": "Office Manager action persistence failed"},
+            )
+
+        if not should_process:
+            print(
+                "Ignoring duplicate Office Manager action already present "
+                "in the durable outbox"
             )
             return JSONResponse(status_code=200, content={})
+
+        start_slack_action(
+            process_office_manager_action(
+                int(action_record["id"]),
+                store=action_store,
+                processor=_process_office_manager_action_record,
+            )
+        )
+        return JSONResponse(status_code=200, content={})
 
     if settings.ROO_SURFACE == "admin":
         if payload_type == "view_submission":
