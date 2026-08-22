@@ -3733,7 +3733,9 @@ async def test_book_coworking_nudges_founder_when_charged_standard_price(tmp_pat
             return {
                 "points_cost": 8,
                 "monthly_update_discount_applied": False,
-                "founder_tools_account_linked": False,
+                "founder_tools_account_linked": True,
+                "founder_tools_connection_type": "direct",
+                "founder_tools_explicitly_linked": False,
             }
 
         async def get_balance(self, slack_user_id):
@@ -3773,7 +3775,9 @@ async def test_book_coworking_omits_nudge_when_discount_applied(tmp_path, monkey
             return {
                 "points_cost": 4,
                 "monthly_update_discount_applied": True,
-                "founder_tools_account_linked": False,
+                "founder_tools_account_linked": True,
+                "founder_tools_connection_type": "direct",
+                "founder_tools_explicitly_linked": False,
             }
 
         async def get_balance(self, slack_user_id):
@@ -3815,6 +3819,8 @@ async def test_book_coworking_omits_link_nudge_when_accounts_are_linked(
                 "points_cost": 8,
                 "monthly_update_discount_applied": False,
                 "founder_tools_account_linked": True,
+                "founder_tools_connection_type": "explicit",
+                "founder_tools_explicitly_linked": True,
             }
 
         async def get_balance(self, slack_user_id):

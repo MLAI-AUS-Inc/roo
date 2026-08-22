@@ -13991,7 +13991,7 @@ Chunk {index} source: {label}
         admin_checkin: bool,
         discount_applied: bool = False,
         include_balance: bool = True,
-        founder_tools_account_linked: bool = False,
+        founder_tools_explicitly_linked: bool = False,
     ) -> str:
         point_word = "point" if cost == 1 else "points"
         if admin_checkin:
@@ -14024,7 +14024,7 @@ Chunk {index} source: {label}
                 "https://mlai.au/platform/login?app=founder-tools&next=/founder-tools"
             )
 
-            if not founder_tools_account_linked:
+            if not founder_tools_explicitly_linked:
                 message += (
                     "\n\nAlready submitted using a different MLAI account? Type "
                     "`@Roo link` to securely link your accounts for future eligible "
@@ -14314,8 +14314,8 @@ Chunk {index} source: {label}
         # The backend is the single source of truth for whether the
         # monthly-update discount applied; we only render the nudge off this.
         discount_applied = bool(result.get("monthly_update_discount_applied", False))
-        founder_tools_account_linked = bool(
-            result.get("founder_tools_account_linked", False)
+        founder_tools_explicitly_linked = bool(
+            result.get("founder_tools_explicitly_linked", False)
         )
         from roo.clients.mlai_backend import MLAIBackendUnavailableError
 
@@ -14333,7 +14333,7 @@ Chunk {index} source: {label}
             new_balance=new_balance,
             admin_checkin=False,
             discount_applied=discount_applied,
-            founder_tools_account_linked=founder_tools_account_linked,
+            founder_tools_explicitly_linked=founder_tools_explicitly_linked,
         )
         public_message = self._format_coworking_booking_success(
             booking_date=booking_date,
@@ -14343,7 +14343,7 @@ Chunk {index} source: {label}
             admin_checkin=admin_checkin,
             discount_applied=discount_applied,
             include_balance=False,
-            founder_tools_account_linked=founder_tools_account_linked,
+            founder_tools_explicitly_linked=founder_tools_explicitly_linked,
         )
         return self._deliver_personal_points_message(
             recipient_user_id=target_user_id,
