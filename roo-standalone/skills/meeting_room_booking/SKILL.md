@@ -10,7 +10,7 @@ routing:
     - {text: "room free tomorrow 2pm?", action: check_room_availability}
     - {text: "book room tomorrow 2pm-4pm", action: book_meeting_room}
     - {text: "book <@U123> into the room tomorrow for 1.5 hours", action: book_meeting_room}
-    - {text: "my room bookings", action: list_my_room_bookings}
+    - {text: "cancel my room booking tomorrow", action: cancel_meeting_room}
   negative_examples:
     - {text: "book coworking tomorrow", instead: mlai-points}
 actions:

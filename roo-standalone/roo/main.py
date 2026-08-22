@@ -141,6 +141,7 @@ CONTENT_FACTORY_WATCHDOG_STOP_STATUSES = {
     "denied",
     "cancelled",
 }
+_meeting_room_action_tasks: set[asyncio.Task[Any]] = set()
 
 
 def _is_duplicate_slack_request(request: Request) -> bool:
@@ -4912,6 +4913,14 @@ async def _handle_meeting_room_action(
             )
 
 
+def _start_meeting_room_action(coro: Any) -> asyncio.Task[Any]:
+    """Keep a strong reference to a Slack action task until it finishes."""
+    task = asyncio.create_task(coro)
+    _meeting_room_action_tasks.add(task)
+    task.add_done_callback(_meeting_room_action_tasks.discard)
+    return task
+
+
 @app.post("/slack/actions")
 async def slack_actions(
     request: Request,
@@ -5223,7 +5232,7 @@ async def slack_actions(
         MEETING_ROOM_BOOK_ACTION_ID,
         MEETING_ROOM_CANCEL_ACTION_ID,
     }:
-        asyncio.create_task(
+        _start_meeting_room_action(
             _handle_meeting_room_action(
                 settings=settings,
                 action_id=str(action_id),

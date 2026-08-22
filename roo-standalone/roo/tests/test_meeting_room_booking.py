@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import hmac
 import importlib
@@ -102,9 +103,11 @@ def _settings(**overrides):
 @pytest.fixture(autouse=True)
 def reset_test_state():
     FakeMeetingRoomClient.instances.clear()
+    main_module._meeting_room_action_tasks.clear()
     get_slack_receipt_store.cache_clear()
     main_module.app.dependency_overrides.clear()
     yield
+    main_module._meeting_room_action_tasks.clear()
     get_slack_receipt_store.cache_clear()
     main_module.app.dependency_overrides.clear()
 
@@ -516,6 +519,30 @@ async def test_cancel_request_filters_members_own_bookings_and_builds_buttons(mo
 
 
 @pytest.mark.asyncio
+async def test_cancel_request_with_too_many_matches_requires_a_date(monkeypatch):
+    configured = _settings()
+
+    class Client(FakeMeetingRoomClient):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.bookings = [{} for _ in range(41)]
+
+    _patch_executor(monkeypatch, configured, Client)
+
+    result = await SkillExecutor()._execute_meeting_room_booking(
+        text="cancel a meeting room booking",
+        params={"action": "cancel_meeting_room"},
+        user_id="UOWNER",
+        channel_id="DOWNER",
+    )
+
+    assert "too many upcoming bookings" in result["message"]
+    assert "cancellation date" in result["message"]
+    assert result["blocks"] is None
+    assert Client.instances[0].calls == [("list", "UOWNER", {})]
+
+
+@pytest.mark.asyncio
 async def test_points_admin_tagged_booking_previews_target_charge(monkeypatch):
     configured = _settings()
     _patch_executor(monkeypatch, configured)
@@ -851,11 +878,15 @@ def test_duplicate_signed_button_delivery_schedules_only_one_action(tmp_path, mo
     }
     scheduled_message_timestamps = []
 
-    def fake_create_task(coro):
+    def fake_start_meeting_room_action(coro):
         scheduled_message_timestamps.append(coro.cr_frame.f_locals["message_ts"])
         coro.close()
 
-    monkeypatch.setattr(main_module.asyncio, "create_task", fake_create_task)
+    monkeypatch.setattr(
+        main_module,
+        "_start_meeting_room_action",
+        fake_start_meeting_room_action,
+    )
     client = TestClient(main_module.app)
 
     first = client.post("/slack/actions", content=body, headers=headers)
@@ -864,6 +895,27 @@ def test_duplicate_signed_button_delivery_schedules_only_one_action(tmp_path, mo
     assert first.status_code == 200
     assert second.status_code == 200
     assert scheduled_message_timestamps == ["card.456"]
+
+
+@pytest.mark.asyncio
+async def test_meeting_room_action_task_is_retained_until_completion():
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def action():
+        started.set()
+        await release.wait()
+
+    task = main_module._start_meeting_room_action(action())
+    await started.wait()
+
+    assert task in main_module._meeting_room_action_tasks
+
+    release.set()
+    await task
+    await asyncio.sleep(0)
+
+    assert task not in main_module._meeting_room_action_tasks
 
 
 @pytest.mark.asyncio
