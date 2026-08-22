@@ -20,6 +20,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from roo import main as main_module
 from roo import meeting_room_booking as room_module
+from roo import meeting_room_actions as action_module
+from roo import slack_action_tasks
 from roo.agent import RooAgent
 from roo.clients.mlai_backend import MLAIBackendUnavailableError
 from roo.config import Settings, get_settings
@@ -120,11 +122,13 @@ def _admin_booking_response(starts_at, *, created=True):
 @pytest.fixture(autouse=True)
 def reset_test_state():
     FakeMeetingRoomClient.instances.clear()
-    main_module._meeting_room_action_tasks.clear()
+    slack_action_tasks._tasks.clear()
+    action_module.get_meeting_room_action_store.cache_clear()
     get_slack_receipt_store.cache_clear()
     main_module.app.dependency_overrides.clear()
     yield
-    main_module._meeting_room_action_tasks.clear()
+    slack_action_tasks._tasks.clear()
+    action_module.get_meeting_room_action_store.cache_clear()
     get_slack_receipt_store.cache_clear()
     main_module.app.dependency_overrides.clear()
 
@@ -148,6 +152,10 @@ def test_interval_parser_uses_melbourne_time_and_one_hour_default():
         (
             "<@UROO> connect me with someone like <@UTARGET|Other Member>",
             "connect me with someone like <@UTARGET>",
+        ),
+        (
+            "<@UROO|Roo> book <@UTARGET|Other Member> tomorrow at 2pm",
+            "book <@UTARGET> tomorrow at 2pm",
         ),
     ),
 )
@@ -450,6 +458,25 @@ async def test_direct_message_booking_preview_defaults_to_one_hour(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_bare_24_hour_availability_request_checks_exact_interval(monkeypatch):
+    configured = _settings()
+    _patch_executor(monkeypatch, configured)
+
+    result = await SkillExecutor()._execute_meeting_room_booking(
+        text="is the meeting room free tomorrow 14:00?",
+        params={"action": "check_room_availability"},
+        user_id="UOWNER",
+        channel_id="DOWNER",
+    )
+
+    call = FakeMeetingRoomClient.instances[0].calls[0]
+    assert call[0] == "availability"
+    assert datetime.fromisoformat(call[2]["starts_at"]).hour == 14
+    assert datetime.fromisoformat(call[2]["ends_at"]).hour == 15
+    assert "is available" in result["message"]
+
+
+@pytest.mark.asyncio
 async def test_public_dm_failure_never_exposes_booking_details(monkeypatch):
     configured = _settings()
     _patch_executor(monkeypatch, configured)
@@ -633,6 +660,47 @@ async def test_non_admin_tagged_booking_reports_backend_denial_privately(monkeyp
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    (
+        ("unlinked_user", "tagged member does not have a linked MLAI account"),
+        ("inactive_user", "tagged member's MLAI account is inactive"),
+        ("insufficient_balance", "tagged member does not have enough Roo Points"),
+    ),
+)
+async def test_admin_target_errors_identify_the_tagged_member(
+    monkeypatch,
+    code,
+    expected,
+):
+    configured = _settings()
+
+    class RejectedClient(FakeMeetingRoomClient):
+        async def check_meeting_room_availability(self, slack_user_id, **kwargs):
+            request = httpx.Request(
+                "POST",
+                "https://backend.test/meeting-rooms/availability/",
+            )
+            response = httpx.Response(
+                409,
+                request=request,
+                json={"code": code, "error": "backend detail"},
+            )
+            response.raise_for_status()
+
+    _patch_executor(monkeypatch, configured, RejectedClient)
+    result = await SkillExecutor()._execute_meeting_room_booking(
+        text="book the meeting room for <@UOTHER> tomorrow at 2pm",
+        params={"action": "book_meeting_room"},
+        user_id="UADMIN",
+        channel_id="DADMIN",
+    )
+
+    assert expected in result["message"]
+    assert "your linked MLAI account" not in result["message"]
+
+
+@pytest.mark.asyncio
 async def test_admin_booking_rejects_multiple_tagged_members_before_backend(monkeypatch):
     configured = _settings()
     _patch_executor(monkeypatch, configured)
@@ -653,7 +721,7 @@ async def test_admin_booking_rejects_multiple_tagged_members_before_backend(monk
     ("dm_response", "expected_admin_text"),
     (
         ({"ok": True}, "I notified <@UTARGET> privately"),
-        (None, "I could not notify the booked member privately"),
+        (None, "member notification is still pending"),
     ),
 )
 async def test_action_handler_uses_verified_admin_actor_and_notifies_target(
@@ -688,11 +756,15 @@ async def test_action_handler_uses_verified_admin_actor_and_notifies_target(
     monkeypatch.setattr(
         main_module,
         "send_dm",
-        lambda user_id, message: target_dms.append((user_id, message)) or dm_response,
+        lambda user_id, message, **kwargs: (
+            target_dms.append((user_id, message, kwargs)) or dm_response
+        ),
     )
     monkeypatch.setattr(
         "roo.slack_client.get_slack_client",
-        lambda: SimpleNamespace(chat_update=lambda **kwargs: updates.append(kwargs)),
+        lambda: SimpleNamespace(
+            chat_update=lambda **kwargs: updates.append(kwargs) or {"ok": True}
+        ),
     )
 
     await main_module._handle_meeting_room_action(
@@ -715,10 +787,11 @@ async def test_action_handler_uses_verified_admin_actor_and_notifies_target(
     assert "Charged to your account:* 2 Roo Points" in target_dms[0][1]
     assert "show my meeting room bookings" in target_dms[0][1]
     assert "Remaining balance" not in target_dms[0][1]
+    assert target_dms[0][2]["client_msg_id"] == expected_request_id
 
 
 @pytest.mark.asyncio
-async def test_replayed_admin_booking_does_not_notify_target_again(monkeypatch):
+async def test_replayed_admin_booking_recovers_target_notification_idempotently(monkeypatch):
     configured = _settings()
     starts_at = (
         datetime.now(MELBOURNE).replace(minute=0, second=0, microsecond=0)
@@ -740,16 +813,20 @@ async def test_replayed_admin_booking_does_not_notify_target_again(monkeypatch):
         async def book_meeting_room(self, slack_user_id, **kwargs):
             return _admin_booking_response(starts_at, created=False)
 
+    expected_request_id = json.loads(action_value)["client_request_id"]
     updates = []
+    target_dms = []
     monkeypatch.setattr("roo.clients.mlai_backend.MLAIBackendClient", Client)
     monkeypatch.setattr(
         main_module,
         "send_dm",
-        lambda *args, **kwargs: pytest.fail("a replay must not notify the target again"),
+        lambda *args, **kwargs: target_dms.append((args, kwargs)) or {"ok": True},
     )
     monkeypatch.setattr(
         "roo.slack_client.get_slack_client",
-        lambda: SimpleNamespace(chat_update=lambda **kwargs: updates.append(kwargs)),
+        lambda: SimpleNamespace(
+            chat_update=lambda **kwargs: updates.append(kwargs) or {"ok": True}
+        ),
     )
 
     await main_module._handle_meeting_room_action(
@@ -762,7 +839,9 @@ async def test_replayed_admin_booking_does_not_notify_target_again(monkeypatch):
     )
 
     assert "was already confirmed" in updates[0]["text"]
-    assert "notified" not in updates[0]["text"]
+    assert "notified" in updates[0]["text"]
+    assert target_dms[0][0][0] == "UTARGET"
+    assert target_dms[0][1]["client_msg_id"] == expected_request_id
 
 
 @pytest.mark.asyncio
@@ -945,7 +1024,7 @@ def _signature(secret, timestamp, body):
     return f"v0={digest}"
 
 
-def test_duplicate_signed_button_delivery_schedules_only_one_action(tmp_path, monkeypatch):
+def test_duplicate_signed_button_delivery_processes_one_durable_action(tmp_path, monkeypatch):
     configured = _settings(SLACK_RECEIPTS_DB_PATH=str(tmp_path / "receipts.db"))
     main_module.app.dependency_overrides[get_settings] = lambda: configured
     starts_at = datetime.now(MELBOURNE).replace(minute=0, second=0, microsecond=0) + timedelta(days=1)
@@ -971,17 +1050,18 @@ def test_duplicate_signed_button_delivery_schedules_only_one_action(tmp_path, mo
         "X-Slack-Signature": _signature(configured.SLACK_SIGNING_SECRET, timestamp, body),
         "Content-Type": "application/x-www-form-urlencoded",
     }
-    scheduled_message_timestamps = []
+    scheduled = []
+    processed = []
 
-    def fake_start_meeting_room_action(coro):
-        scheduled_message_timestamps.append(coro.cr_frame.f_locals["message_ts"])
-        coro.close()
+    async def fake_processor(record):
+        processed.append(record["message_ts"])
 
     monkeypatch.setattr(
         main_module,
-        "_start_meeting_room_action",
-        fake_start_meeting_room_action,
+        "_process_meeting_room_action_record",
+        fake_processor,
     )
+    monkeypatch.setattr(main_module, "start_slack_action", scheduled.append)
     client = TestClient(main_module.app)
 
     first = client.post("/slack/actions", content=body, headers=headers)
@@ -989,7 +1069,17 @@ def test_duplicate_signed_button_delivery_schedules_only_one_action(tmp_path, mo
 
     assert first.status_code == 200
     assert second.status_code == 200
-    assert scheduled_message_timestamps == ["card.456"]
+    assert len(scheduled) == 2
+
+    async def process_scheduled():
+        await asyncio.gather(*scheduled)
+
+    asyncio.run(process_scheduled())
+    assert processed == ["card.456"]
+    store = action_module.get_meeting_room_action_store(
+        configured.SLACK_RECEIPTS_DB_PATH
+    )
+    assert store.get(1)["status"] == "completed"
 
 
 @pytest.mark.asyncio
@@ -1001,16 +1091,16 @@ async def test_meeting_room_action_task_is_retained_until_completion():
         started.set()
         await release.wait()
 
-    task = main_module._start_meeting_room_action(action())
+    task = slack_action_tasks.start(action())
     await started.wait()
 
-    assert task in main_module._meeting_room_action_tasks
+    assert task in slack_action_tasks._tasks
 
     release.set()
     await task
     await asyncio.sleep(0)
 
-    assert task not in main_module._meeting_room_action_tasks
+    assert task not in slack_action_tasks._tasks
 
 
 @pytest.mark.asyncio

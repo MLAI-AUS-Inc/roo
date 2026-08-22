@@ -662,6 +662,7 @@ def backend_error_message(
     exc: Exception,
     *,
     mutation_result_uncertain: bool = False,
+    target_slack_user_id: Optional[str] = None,
 ) -> str:
     code = ""
     detail = ""
@@ -672,13 +673,30 @@ def backend_error_message(
             detail = str(payload.get("error") or payload.get("detail") or "")
         except (ValueError, AttributeError):
             pass
+    targeted = bool(str(target_slack_user_id or "").strip())
     messages = {
         "booking_conflict": "That time was booked by someone else before you confirmed. No points were deducted.",
         "room_blocked": "The Meeting Room is unavailable during that time. No points were deducted.",
-        "daily_limit": "That booking would take you over the four-hour daily limit. No points were deducted.",
-        "insufficient_balance": "You do not have enough Roo Points for that booking. No booking was created.",
-        "unlinked_user": "I could not find your linked MLAI account. DM Roo `link`, then try again.",
-        "inactive_user": "Your MLAI member account is inactive, so I cannot book the room.",
+        "daily_limit": (
+            "That booking would take the tagged member over their four-hour daily limit. No points were deducted."
+            if targeted
+            else "That booking would take you over the four-hour daily limit. No points were deducted."
+        ),
+        "insufficient_balance": (
+            "The tagged member does not have enough Roo Points for that booking. No booking was created."
+            if targeted
+            else "You do not have enough Roo Points for that booking. No booking was created."
+        ),
+        "unlinked_user": (
+            "The tagged member does not have a linked MLAI account. Ask them to DM Roo `link`, then try again."
+            if targeted
+            else "I could not find your linked MLAI account. DM Roo `link`, then try again."
+        ),
+        "inactive_user": (
+            "The tagged member's MLAI account is inactive, so I cannot book the room for them."
+            if targeted
+            else "Your MLAI member account is inactive, so I cannot book the room."
+        ),
         "expired_confirmation": "That confirmation expired. Ask Roo to check the time again for a fresh button.",
         "inactive_room": "The Meeting Room is not accepting bookings right now.",
         "feature_disabled": "Meeting-room booking is not enabled right now.",
@@ -693,6 +711,12 @@ def backend_error_message(
         not isinstance(exc, httpx.HTTPStatusError)
         or exc.response.status_code >= 500
     ):
+        if targeted:
+            return (
+                "I could not confirm whether that Meeting Room booking completed. "
+                "Ask the tagged member to DM Roo `show my meeting room bookings` "
+                "before trying again."
+            )
         return (
             "I could not confirm whether that Meeting Room change completed. "
             "Ask Roo `show my meeting room bookings` before trying again."

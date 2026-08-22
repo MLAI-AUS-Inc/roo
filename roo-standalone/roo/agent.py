@@ -1052,18 +1052,17 @@ class RooAgent:
         """
         import re
         from .slack_client import get_bot_user_id
+
+        # Normalize labelled Slack mentions before removing Roo's own ID.
+        cleaned = re.sub(r'<@([A-Z0-9]+)\|[^>]+>', r'<@\1>', text)
         
         try:
             bot_id = get_bot_user_id()
             # Only remove Roo's specific mention, preserve all others
-            cleaned = re.sub(rf'<@{bot_id}>', '', text)
+            cleaned = re.sub(rf'<@{re.escape(bot_id)}>', '', cleaned)
         except Exception:
             # Fallback: remove first mention if we can't get bot ID
             cleaned = re.sub(r'<@[A-Z0-9]+>', '', text, count=1)
-
-        # Slack may include a display label in mentions. Preserve the stable
-        # user ID before generic Slack markup normalization removes it.
-        cleaned = re.sub(r'<@([A-Z0-9]+)\|[^>]+>', r'<@\1>', cleaned)
         cleaned = normalize_slack_text(cleaned)
         # Remove extra whitespace
         cleaned = ' '.join(cleaned.split())

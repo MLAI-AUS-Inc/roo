@@ -497,6 +497,7 @@ class SkillExecutor:
             return True
         return bool(
             re.search(r"\b(?:at|from)\s+\d", str(text or "").lower())
+            or re.search(r"\b(?:[01]?\d|2[0-3]):[0-5]\d\b", str(text or "").lower())
             or re.search(
                 r"\b\d{1,2}(?::\d{2})?\s*(?:am|pm)\b",
                 str(text or "").lower(),
@@ -729,7 +730,10 @@ class SkillExecutor:
             return self._deliver_meeting_room_response(
                 user_id=user_id,
                 channel_id=channel_id,
-                message=meeting_room_backend_error_message(exc),
+                message=meeting_room_backend_error_message(
+                    exc,
+                    target_slack_user_id=target_slack_user_id,
+                ),
                 action=action,
             )
 
