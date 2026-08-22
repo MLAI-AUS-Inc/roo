@@ -157,11 +157,20 @@ class FakeTopupButtonsClient:
 
 
 class FakeBalanceClient:
-    def __init__(self, response):
+    def __init__(self, response, admin_allowance=None, allowance_error=None):
         self.response = response
+        self.admin_allowance = admin_allowance or {"error": "Not a points admin"}
+        self.allowance_error = allowance_error
+        self.allowance_user_id = None
 
     async def get_balance(self, slack_user_id):
         return self.response
+
+    async def get_admin_allowance(self, slack_user_id):
+        self.allowance_user_id = slack_user_id
+        if self.allowance_error:
+            raise self.allowance_error
+        return self.admin_allowance
 
 
 class FakeRewardsClient:
@@ -573,18 +582,19 @@ async def test_request_points_rejected_in_dm():
 
 
 @pytest.mark.asyncio
-async def test_balance_summary_includes_lifetime_purchased():
+async def test_non_admin_balance_summary_includes_lifetime_purchased_without_allowance():
     executor = SkillExecutor()
+    client = FakeBalanceClient(
+        {
+            "balance": 15,
+            "lifetime_earned": 42,
+            "lifetime_spent": 27,
+            "lifetime_purchased": 10,
+        }
+    )
 
     result = await executor._handle_points_action(
-        client=FakeBalanceClient(
-            {
-                "balance": 15,
-                "lifetime_earned": 42,
-                "lifetime_spent": 27,
-                "lifetime_purchased": 10,
-            }
-        ),
+        client=client,
         action="balance",
         params={},
         text="points",
@@ -599,6 +609,62 @@ async def test_balance_summary_includes_lifetime_purchased():
     assert "Lifetime Earned:** 42 points" in result
     assert "Lifetime Spent:** 27 points" in result
     assert "Lifetime Purchased:** 10 points" in result
+    assert "Admin Giveaway Allowance" not in result
+    assert client.allowance_user_id == "U123"
+
+
+@pytest.mark.asyncio
+async def test_balance_summary_includes_allowance_for_confirmed_points_admin():
+    executor = SkillExecutor()
+    client = FakeBalanceClient(
+        {
+            "balance": 131,
+            "lifetime_earned": 247,
+            "lifetime_spent": 116,
+            "lifetime_purchased": 0,
+        },
+        admin_allowance={"allowance": 100, "used": 28, "remaining": 72},
+    )
+
+    result = await executor._handle_points_action(
+        client=client,
+        action="balance",
+        params={},
+        text="points",
+        user_id="UADMIN",
+        channel_id="D123",
+        thread_ts="111.222",
+        skill=SimpleNamespace(name="mlai-points"),
+    )
+
+    message = result["message"]
+    assert "Admin Giveaway Allowance:** 72 of 100 points remaining this week" in message
+    assert "28 used; resets Monday" in message
+    assert client.allowance_user_id == "UADMIN"
+
+
+@pytest.mark.asyncio
+async def test_balance_summary_omits_allowance_when_lookup_fails():
+    executor = SkillExecutor()
+    client = FakeBalanceClient(
+        {"balance": 15, "lifetime_earned": 42, "lifetime_spent": 27},
+        allowance_error=RuntimeError("backend unavailable"),
+    )
+
+    result = await executor._handle_points_action(
+        client=client,
+        action="balance",
+        params={},
+        text="points",
+        user_id="U123",
+        channel_id="D123",
+        thread_ts="111.222",
+        skill=SimpleNamespace(name="mlai-points"),
+    )
+
+    message = result["message"]
+    assert "Current Balance:** 15 points" in message
+    assert "Admin Giveaway Allowance" not in message
 
 
 @pytest.mark.asyncio

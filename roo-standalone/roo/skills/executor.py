@@ -10520,7 +10520,12 @@ Chunk {index} source: {label}
             and ("top-up" in detail or "topup" in detail or "purchase" in detail)
         )
 
-    def _format_points_balance_summary(self, data: dict, tasks_command: str = "tasks") -> str:
+    def _format_points_balance_summary(
+        self,
+        data: dict,
+        tasks_command: str = "tasks",
+        admin_allowance: Optional[dict] = None,
+    ) -> str:
         balance = data.get("balance", 0)
         earned = data.get("lifetime_earned", 0)
         spent = data.get("lifetime_spent", 0)
@@ -10537,14 +10542,49 @@ Chunk {index} source: {label}
                 purchased = data.get(key)
                 break
 
+        allowance_line = ""
+        if (
+            isinstance(admin_allowance, dict)
+            and not admin_allowance.get("error")
+            and {"allowance", "used", "remaining"}.issubset(admin_allowance)
+        ):
+            allowance_line = (
+                "🎁 **Admin Giveaway Allowance:** "
+                f"{admin_allowance['remaining']} of {admin_allowance['allowance']} points "
+                f"remaining this week ({admin_allowance['used']} used; resets Monday)\n"
+            )
+
         return (
             f"G'day mate! Here's your points summary:\n\n"
             f"💰 **Current Balance:** {balance} points\n"
+            f"{allowance_line}"
             f"📈 **Lifetime Earned:** {earned} points\n"
             f"📉 **Lifetime Spent:** {spent} points\n"
             f"🛒 **Lifetime Purchased:** {purchased} points\n\n"
             f"Nice work! Check out `{tasks_command}` to earn more 🦘"
         )
+
+    async def _get_points_admin_allowance_for_summary(
+        self,
+        client,
+        user_id: str,
+    ) -> Optional[dict]:
+        """Return allowance data only when the backend confirms a full Points Admin."""
+        get_admin_allowance = getattr(client, "get_admin_allowance", None)
+        if not callable(get_admin_allowance):
+            return None
+
+        try:
+            allowance = await get_admin_allowance(user_id)
+        except Exception as exc:
+            print(f"⚠️ Failed to fetch Points Admin allowance for balance summary: {exc!r}")
+            return None
+
+        if not isinstance(allowance, dict) or allowance.get("error"):
+            return None
+        if not {"allowance", "used", "remaining"}.issubset(allowance):
+            return None
+        return allowance
 
     @staticmethod
     def _is_points_balance_error(error_detail: str) -> bool:
@@ -11935,7 +11975,15 @@ Chunk {index} source: {label}
 
         if action == "balance":
             data = await client.get_balance(user_id)
-            message = self._format_points_balance_summary(data, tasks_command="tasks")
+            admin_allowance = await self._get_points_admin_allowance_for_summary(
+                client,
+                user_id,
+            )
+            message = self._format_points_balance_summary(
+                data,
+                tasks_command="tasks",
+                admin_allowance=admin_allowance,
+            )
             return self._deliver_personal_points_message(
                 recipient_user_id=user_id,
                 requester_user_id=user_id,

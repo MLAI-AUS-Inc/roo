@@ -381,6 +381,7 @@ so fresh buttons can be created safely in that conversation.
 G'day mate! Here's your points summary:
 
 💰 **Current Balance:** 15 points
+🎁 **Admin Giveaway Allowance:** 72 of 100 points remaining this week (28 used; resets Monday) _(Points Admins only)_
 📈 **Lifetime Earned:** 42 points
 📉 **Lifetime Spent:** 27 points
 🛒 **Lifetime Purchased:** 10 points
