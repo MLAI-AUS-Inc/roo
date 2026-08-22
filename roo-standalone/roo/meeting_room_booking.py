@@ -625,6 +625,25 @@ def format_booking_result(result: dict) -> str:
     )
 
 
+def format_admin_target_notification(
+    result: dict,
+    *,
+    admin_slack_user_id: str,
+) -> str:
+    """Describe an admin-created booking to the member whose points were charged."""
+    booking = result.get("booking") or {}
+    starts_at = parse_backend_timestamp(booking.get("starts_at"))
+    ends_at = parse_backend_timestamp(booking.get("ends_at"))
+    room_name = str((booking.get("room") or {}).get("name") or "Meeting Room")
+    points = int(result.get("points_cost", booking.get("points_cost", 0)) or 0)
+    return (
+        f"<@{admin_slack_user_id}> booked the *{room_name}* for you.\n"
+        f"*When:* {format_interval(starts_at, ends_at)} (Melbourne time)\n"
+        f"*Charged to your account:* {points} Roo Point{'s' if points != 1 else ''}\n\n"
+        "To view or cancel it, DM Roo `show my meeting room bookings`."
+    )
+
+
 def format_cancellation_result(result: dict) -> str:
     booking = result.get("booking") or {}
     starts_at = parse_backend_timestamp(booking.get("starts_at"))

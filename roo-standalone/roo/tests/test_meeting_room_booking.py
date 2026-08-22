@@ -100,6 +100,23 @@ def _settings(**overrides):
     return Settings(**values)
 
 
+def _admin_booking_response(starts_at, *, created=True):
+    return {
+        "created": created,
+        "points_cost": 2,
+        "remaining_balance": 8,
+        "admin_booking": True,
+        "booked_for_slack_user_id": "UTARGET",
+        "booking": {
+            "id": "99e4d8b2-d48c-4f51-a230-b8656c9a3127",
+            "starts_at": starts_at.isoformat(),
+            "ends_at": (starts_at + timedelta(hours=2)).isoformat(),
+            "points_cost": 2,
+            "room": {"name": "Meeting Room"},
+        },
+    }
+
+
 @pytest.fixture(autouse=True)
 def reset_test_state():
     FakeMeetingRoomClient.instances.clear()
@@ -170,6 +187,15 @@ def test_skill_schema_exposes_end_time_for_availability_and_booking():
     assert "end_time" in actions["check_room_availability"]["params"]
     assert "end_time" in actions["book_meeting_room"]["params"]
     assert actions["book_meeting_room"]["params"]["duration_hours"]["type"] == "number"
+    assert {
+        example["action"]
+        for example in skill.routing["examples"]
+    } == {
+        "check_room_availability",
+        "book_meeting_room",
+        "list_my_room_bookings",
+        "cancel_meeting_room",
+    }
 
 
 def test_interval_parser_accepts_unambiguous_24_hour_time():
@@ -612,7 +638,18 @@ async def test_admin_booking_rejects_multiple_tagged_members_before_backend(monk
 
 
 @pytest.mark.asyncio
-async def test_action_handler_uses_verified_admin_actor_target_and_stable_request_id(monkeypatch):
+@pytest.mark.parametrize(
+    ("dm_response", "expected_admin_text"),
+    (
+        ({"ok": True}, "I notified <@UTARGET> privately"),
+        (None, "I could not notify the booked member privately"),
+    ),
+)
+async def test_action_handler_uses_verified_admin_actor_and_notifies_target(
+    monkeypatch,
+    dm_response,
+    expected_admin_text,
+):
     configured = _settings()
     starts_at = datetime.now(MELBOURNE).replace(minute=0, second=0, microsecond=0) + timedelta(days=1)
     action_value = build_booking_action_value(
@@ -632,23 +669,16 @@ async def test_action_handler_uses_verified_admin_actor_target_and_stable_reques
 
         async def book_meeting_room(self, slack_user_id, **kwargs):
             calls.append((slack_user_id, kwargs))
-            return {
-                "created": True,
-                "points_cost": 2,
-                "remaining_balance": 8,
-                "admin_booking": True,
-                "booked_for_slack_user_id": "UTARGET",
-                "booking": {
-                    "id": "99e4d8b2-d48c-4f51-a230-b8656c9a3127",
-                    "starts_at": starts_at.isoformat(),
-                    "ends_at": (starts_at + timedelta(hours=2)).isoformat(),
-                    "points_cost": 2,
-                    "room": {"name": "Meeting Room"},
-                },
-            }
+            return _admin_booking_response(starts_at)
 
     updates = []
+    target_dms = []
     monkeypatch.setattr("roo.clients.mlai_backend.MLAIBackendClient", Client)
+    monkeypatch.setattr(
+        main_module,
+        "send_dm",
+        lambda user_id, message: target_dms.append((user_id, message)) or dm_response,
+    )
     monkeypatch.setattr(
         "roo.slack_client.get_slack_client",
         lambda: SimpleNamespace(chat_update=lambda **kwargs: updates.append(kwargs)),
@@ -668,6 +698,60 @@ async def test_action_handler_uses_verified_admin_actor_target_and_stable_reques
     assert calls[0][1]["expected_points_cost"] == 2
     assert calls[0][1]["target_slack_user_id"] == "UTARGET"
     assert "for <@UTARGET> is confirmed" in updates[0]["text"]
+    assert expected_admin_text in updates[0]["text"]
+    assert target_dms[0][0] == "UTARGET"
+    assert "<@UOWNER> booked the *Meeting Room* for you" in target_dms[0][1]
+    assert "Charged to your account:* 2 Roo Points" in target_dms[0][1]
+    assert "show my meeting room bookings" in target_dms[0][1]
+    assert "Remaining balance" not in target_dms[0][1]
+
+
+@pytest.mark.asyncio
+async def test_replayed_admin_booking_does_not_notify_target_again(monkeypatch):
+    configured = _settings()
+    starts_at = (
+        datetime.now(MELBOURNE).replace(minute=0, second=0, microsecond=0)
+        + timedelta(days=1)
+    )
+    action_value = build_booking_action_value(
+        owner_slack_user_id="UOWNER",
+        room_slug="meeting-room",
+        starts_at=starts_at,
+        ends_at=starts_at + timedelta(hours=2),
+        expected_points_cost=2,
+        target_slack_user_id="UTARGET",
+    )
+
+    class Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def book_meeting_room(self, slack_user_id, **kwargs):
+            return _admin_booking_response(starts_at, created=False)
+
+    updates = []
+    monkeypatch.setattr("roo.clients.mlai_backend.MLAIBackendClient", Client)
+    monkeypatch.setattr(
+        main_module,
+        "send_dm",
+        lambda *args, **kwargs: pytest.fail("a replay must not notify the target again"),
+    )
+    monkeypatch.setattr(
+        "roo.slack_client.get_slack_client",
+        lambda: SimpleNamespace(chat_update=lambda **kwargs: updates.append(kwargs)),
+    )
+
+    await main_module._handle_meeting_room_action(
+        settings=configured,
+        action_id=BOOK_ACTION_ID,
+        action_value=action_value,
+        actor_user_id="UOWNER",
+        channel_id="DOWNER",
+        message_ts="123.456",
+    )
+
+    assert "was already confirmed" in updates[0]["text"]
+    assert "notified" not in updates[0]["text"]
 
 
 @pytest.mark.asyncio

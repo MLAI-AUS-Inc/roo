@@ -114,6 +114,7 @@ from .meeting_room_booking import (
     MeetingRoomInputError,
     backend_error_message as meeting_room_backend_error_message,
     confirmation_expired as meeting_room_confirmation_expired,
+    format_admin_target_notification as format_meeting_room_admin_target_notification,
     format_booking_result as format_meeting_room_booking_result,
     format_cancellation_result as format_meeting_room_cancellation_result,
     parse_action_value as parse_meeting_room_action_value,
@@ -4856,6 +4857,43 @@ async def _handle_meeting_room_action(
                         target_slack_user_id=value.get("target_slack_user_id"),
                     )
                     outcome = format_meeting_room_booking_result(result)
+                    if result.get("created") and result.get("admin_booking"):
+                        target_slack_user_id = str(
+                            result.get("booked_for_slack_user_id") or ""
+                        ).strip()
+                        notification_delivered = False
+                        notification_error = "missing_target"
+                        if target_slack_user_id:
+                            try:
+                                notification = send_dm(
+                                    target_slack_user_id,
+                                    format_meeting_room_admin_target_notification(
+                                        result,
+                                        admin_slack_user_id=actor_user_id,
+                                    ),
+                                )
+                                notification_delivered = bool(
+                                    notification and notification.get("ok")
+                                )
+                                notification_error = (
+                                    "none" if notification_delivered else "delivery_rejected"
+                                )
+                            except Exception as exc:
+                                notification_error = exc.__class__.__name__
+                        if notification_delivered:
+                            outcome += (
+                                f"\n\nI notified <@{target_slack_user_id}> privately."
+                            )
+                        else:
+                            outcome += (
+                                "\n\nI could not notify the booked member privately. "
+                                "Please let them know about the booking and points charge."
+                            )
+                            print(
+                                "MEETING_ROOM_TARGET_NOTIFICATION_FAILED "
+                                f"booking_id={(result.get('booking') or {}).get('id')} "
+                                f"reason={notification_error}"
+                            )
                     print(
                         "MEETING_ROOM_BOOKING_CONFIRMED "
                         f"booking_id={(result.get('booking') or {}).get('id')} "
