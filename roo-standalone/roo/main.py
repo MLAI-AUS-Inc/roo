@@ -72,6 +72,11 @@ from .slack_client import (
 )
 from .coworking_messages import OFFICE_MANAGER_VOLUNTEER_ACTION_ID
 from .coworking_booking_intents import coworking_booking_retry_loop
+from .office_manager_actions import (
+    get_office_manager_action_store,
+    office_manager_action_retry_loop,
+    process_office_manager_action,
+)
 from .boost_moderation import (
     boost_post_retry_loop,
     handle_boost_recheck_reaction,
@@ -2188,6 +2193,7 @@ async def lifespan(app: FastAPI):
     link_love_task: Optional[asyncio.Task] = None
     start_here_intro_task: Optional[asyncio.Task] = None
     meeting_room_action_retry_task: Optional[asyncio.Task] = None
+    office_manager_action_retry_task: Optional[asyncio.Task] = None
     jobs_scheduler_task: Optional[asyncio.Task] = None
     print(f"🦘 Roo Standalone starting...")
     print(f"   Surface: {settings.ROO_SURFACE}")
@@ -2211,6 +2217,18 @@ async def lifespan(app: FastAPI):
                 )
             )
             app.state.meeting_room_action_retry_task = meeting_room_action_retry_task
+        office_manager_action_store = get_office_manager_action_store(
+            settings.SLACK_RECEIPTS_DB_PATH
+        )
+        office_manager_action_retry_task = asyncio.create_task(
+            office_manager_action_retry_loop(
+                store=office_manager_action_store,
+                processor=_process_office_manager_action_record,
+            )
+        )
+        app.state.office_manager_action_retry_task = (
+            office_manager_action_retry_task
+        )
         if settings.BOOST_LINK_LOVE_ENABLED:
             link_love_task = asyncio.create_task(link_love_retry_loop())
             app.state.link_love_task = link_love_task
@@ -2255,6 +2273,10 @@ async def lifespan(app: FastAPI):
             meeting_room_action_retry_task.cancel()
             with suppress(asyncio.CancelledError):
                 await meeting_room_action_retry_task
+        if office_manager_action_retry_task:
+            office_manager_action_retry_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await office_manager_action_retry_task
         await drain_slack_actions()
         if jobs_scheduler_task:
             jobs_scheduler_task.cancel()
@@ -4950,8 +4972,9 @@ async def _claim_office_manager_from_action(
             message = "Today's Office Manager volunteer request is no longer available."
         else:
             message = (
-                "Roo could not confirm your volunteer request. No Office "
-                "Manager booking was created for you."
+                "Roo could not confirm the result of your volunteer request. "
+                "Check Roo's latest Office Manager announcement before trying "
+                "the button again."
             )
     except Exception as exc:
         print(
@@ -4959,8 +4982,9 @@ async def _claim_office_manager_from_action(
             f"error_type={exc.__class__.__name__}"
         )
         message = (
-            "Roo could not confirm your volunteer request right now. "
-            "Please try the button again in a moment."
+            "Roo could not confirm the result of your volunteer request right "
+            "now. Check Roo's latest Office Manager announcement before trying "
+            "the button again."
         )
     else:
         message = _office_manager_claim_success_message(result)
@@ -5497,6 +5521,15 @@ async def _persist_and_start_meeting_room_action(
         )
     )
 
+
+async def _process_office_manager_action_record(action: dict[str, Any]) -> None:
+    await _claim_office_manager_from_action(
+        user_id=str(action["slack_user_id"]),
+        channel_id=str(action["channel_id"]),
+        booking_date=str(action["booking_date"]),
+    )
+
+
 @app.post("/slack/actions")
 async def slack_actions(
     request: Request,
@@ -5627,11 +5660,39 @@ async def slack_actions(
                     )
                 return JSONResponse(status_code=200, content={})
 
-            start_slack_action(
-                _claim_office_manager_from_action(
-                    user_id=str(user_id),
+            try:
+                action_store = get_office_manager_action_store(
+                    settings.SLACK_RECEIPTS_DB_PATH
+                )
+                action_record = await asyncio.to_thread(
+                    action_store.record_action,
+                    slack_user_id=str(user_id),
                     channel_id=str(channel_id),
                     booking_date=booking_date,
+                )
+            except Exception as exc:
+                print(
+                    "OFFICE_MANAGER_ACTION_PERSIST_FAILED "
+                    f"error_type={exc.__class__.__name__}"
+                )
+                start_slack_action(
+                    _send_office_manager_private_feedback(
+                        channel_id=str(channel_id),
+                        user_id=str(user_id),
+                        text=(
+                            "Roo could not safely record your volunteer click. "
+                            "Please use Roo's latest Office Manager announcement "
+                            "and try again."
+                        ),
+                    )
+                )
+                return JSONResponse(status_code=200, content={})
+
+            start_slack_action(
+                process_office_manager_action(
+                    int(action_record["id"]),
+                    store=action_store,
+                    processor=_process_office_manager_action_record,
                 )
             )
             return JSONResponse(status_code=200, content={})

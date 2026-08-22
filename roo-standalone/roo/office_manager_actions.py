@@ -1,0 +1,427 @@
+"""Durable processing for acknowledged Office Manager Slack actions."""
+
+from __future__ import annotations
+
+import asyncio
+import sqlite3
+import threading
+import time
+from functools import lru_cache
+from pathlib import Path
+from typing import Any, Awaitable, Callable, Optional
+from uuid import uuid4
+
+
+DEFAULT_PROCESSING_LEASE_SECONDS = 90.0
+DEFAULT_RETRY_POLL_SECONDS = 5.0
+
+OfficeManagerActionProcessor = Callable[[dict[str, Any]], Awaitable[None]]
+
+
+def build_office_manager_action_key(slack_user_id: str, booking_date: str) -> str:
+    """Return the backend-idempotent identity for one member and day."""
+    return (
+        f"office_manager:{str(slack_user_id).strip()}:"
+        f"{str(booking_date).strip()}"
+    )
+
+
+class OfficeManagerActionStore:
+    """SQLite outbox shared by Public Roo workers and process restarts."""
+
+    def __init__(self, database_path: str | Path):
+        self.database_path = Path(database_path)
+        self._lock = threading.RLock()
+        self._initialized = False
+
+    def _connect(self) -> sqlite3.Connection:
+        self.database_path.parent.mkdir(parents=True, exist_ok=True)
+        connection = sqlite3.connect(
+            str(self.database_path),
+            timeout=2,
+            isolation_level=None,
+        )
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute("PRAGMA busy_timeout=2000")
+        return connection
+
+    def _ensure_schema(self) -> None:
+        if self._initialized:
+            return
+        with self._lock:
+            if self._initialized:
+                return
+            with self._connect() as connection:
+                connection.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS office_manager_action_outbox (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        idempotency_key TEXT NOT NULL UNIQUE,
+                        slack_user_id TEXT NOT NULL,
+                        channel_id TEXT NOT NULL,
+                        booking_date TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        attempt_count INTEGER NOT NULL DEFAULT 0,
+                        next_attempt_at REAL NOT NULL,
+                        locked_until REAL,
+                        locked_by TEXT,
+                        last_error TEXT,
+                        created_at REAL NOT NULL,
+                        updated_at REAL NOT NULL,
+                        completed_at REAL
+                    )
+                    """
+                )
+                connection.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_office_manager_actions_due
+                    ON office_manager_action_outbox (status, next_attempt_at)
+                    """
+                )
+            self._initialized = True
+
+    @staticmethod
+    def _row(row: sqlite3.Row | None) -> Optional[dict[str, Any]]:
+        return dict(row) if row is not None else None
+
+    def record_action(
+        self,
+        *,
+        slack_user_id: str,
+        channel_id: str,
+        booking_date: str,
+    ) -> dict[str, Any]:
+        """Persist a unique signed click before Roo acknowledges it to Slack."""
+        self._ensure_schema()
+        current_time = time.time()
+        slack_user_id = str(slack_user_id).strip()
+        channel_id = str(channel_id).strip()
+        booking_date = str(booking_date).strip()
+        idempotency_key = build_office_manager_action_key(
+            slack_user_id,
+            booking_date,
+        )
+
+        with self._lock:
+            with self._connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                existing = connection.execute(
+                    """
+                    SELECT * FROM office_manager_action_outbox
+                    WHERE idempotency_key = ?
+                    """,
+                    (idempotency_key,),
+                ).fetchone()
+                if existing is None:
+                    connection.execute(
+                        """
+                        INSERT INTO office_manager_action_outbox (
+                            idempotency_key,
+                            slack_user_id,
+                            channel_id,
+                            booking_date,
+                            status,
+                            next_attempt_at,
+                            created_at,
+                            updated_at
+                        )
+                        VALUES (?, ?, ?, ?, 'pending', ?, ?, ?)
+                        """,
+                        (
+                            idempotency_key,
+                            slack_user_id,
+                            channel_id,
+                            booking_date,
+                            current_time,
+                            current_time,
+                            current_time,
+                        ),
+                    )
+                elif not (
+                    existing["status"] == "processing"
+                    and existing["locked_until"] is not None
+                    and float(existing["locked_until"]) > current_time
+                ):
+                    # A distinct signed click for the same member/day may safely
+                    # replay the backend's idempotent claim operation.
+                    connection.execute(
+                        """
+                        UPDATE office_manager_action_outbox
+                        SET
+                            channel_id = ?,
+                            status = 'pending',
+                            next_attempt_at = ?,
+                            locked_until = NULL,
+                            locked_by = NULL,
+                            last_error = NULL,
+                            completed_at = NULL,
+                            updated_at = ?
+                        WHERE id = ?
+                        """,
+                        (
+                            channel_id,
+                            current_time,
+                            current_time,
+                            int(existing["id"]),
+                        ),
+                    )
+                row = connection.execute(
+                    """
+                    SELECT * FROM office_manager_action_outbox
+                    WHERE idempotency_key = ?
+                    """,
+                    (idempotency_key,),
+                ).fetchone()
+                connection.commit()
+                return dict(row)
+
+    def reserve(
+        self,
+        action_id: int,
+        *,
+        owner: Optional[str] = None,
+        lease_seconds: float = DEFAULT_PROCESSING_LEASE_SECONDS,
+    ) -> Optional[dict[str, Any]]:
+        """Lease a pending action to one worker."""
+        self._ensure_schema()
+        current_time = time.time()
+        owner = owner or f"roo-office-manager-{uuid4().hex}"
+        locked_until = current_time + max(1.0, float(lease_seconds))
+        with self._lock:
+            with self._connect() as connection:
+                cursor = connection.execute(
+                    """
+                    UPDATE office_manager_action_outbox
+                    SET
+                        status = 'processing',
+                        attempt_count = attempt_count + 1,
+                        locked_until = ?,
+                        locked_by = ?,
+                        updated_at = ?
+                    WHERE id = ?
+                      AND (
+                        (status = 'pending' AND next_attempt_at <= ?)
+                        OR (
+                            status = 'processing'
+                            AND (locked_until IS NULL OR locked_until <= ?)
+                        )
+                      )
+                    """,
+                    (
+                        locked_until,
+                        owner,
+                        current_time,
+                        int(action_id),
+                        current_time,
+                        current_time,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    return None
+                return self._row(
+                    connection.execute(
+                        """
+                        SELECT * FROM office_manager_action_outbox WHERE id = ?
+                        """,
+                        (int(action_id),),
+                    ).fetchone()
+                )
+
+    def claim_due(
+        self,
+        *,
+        limit: int = 10,
+        owner: Optional[str] = None,
+        lease_seconds: float = DEFAULT_PROCESSING_LEASE_SECONDS,
+    ) -> list[dict[str, Any]]:
+        """Lease pending actions and processing actions whose worker disappeared."""
+        self._ensure_schema()
+        current_time = time.time()
+        owner = owner or f"roo-office-manager-retry-{uuid4().hex}"
+        with self._lock:
+            with self._connect() as connection:
+                rows = connection.execute(
+                    """
+                    SELECT id FROM office_manager_action_outbox
+                    WHERE
+                        (status = 'pending' AND next_attempt_at <= ?)
+                        OR (
+                            status = 'processing'
+                            AND (locked_until IS NULL OR locked_until <= ?)
+                        )
+                    ORDER BY next_attempt_at ASC, id ASC
+                    LIMIT ?
+                    """,
+                    (current_time, current_time, max(1, int(limit))),
+                ).fetchall()
+
+        claimed: list[dict[str, Any]] = []
+        for row in rows:
+            action = self.reserve(
+                int(row["id"]),
+                owner=owner,
+                lease_seconds=lease_seconds,
+            )
+            if action:
+                claimed.append(action)
+        return claimed
+
+    def mark_completed(self, action_id: int, *, owner: str) -> bool:
+        """Record that the backend result and private feedback were handled."""
+        self._ensure_schema()
+        current_time = time.time()
+        with self._lock:
+            with self._connect() as connection:
+                cursor = connection.execute(
+                    """
+                    UPDATE office_manager_action_outbox
+                    SET
+                        status = 'completed',
+                        locked_until = NULL,
+                        locked_by = NULL,
+                        last_error = NULL,
+                        completed_at = ?,
+                        updated_at = ?
+                    WHERE id = ? AND status = 'processing' AND locked_by = ?
+                    """,
+                    (current_time, current_time, int(action_id), str(owner)),
+                )
+                return cursor.rowcount == 1
+
+    def release(
+        self,
+        action_id: int,
+        *,
+        owner: str,
+        error: str,
+        delay_seconds: float = 0.0,
+    ) -> bool:
+        """Return interrupted work to the outbox for another worker."""
+        self._ensure_schema()
+        current_time = time.time()
+        with self._lock:
+            with self._connect() as connection:
+                cursor = connection.execute(
+                    """
+                    UPDATE office_manager_action_outbox
+                    SET
+                        status = 'pending',
+                        next_attempt_at = ?,
+                        locked_until = NULL,
+                        locked_by = NULL,
+                        last_error = ?,
+                        updated_at = ?
+                    WHERE id = ? AND status = 'processing' AND locked_by = ?
+                    """,
+                    (
+                        current_time + max(0.0, float(delay_seconds)),
+                        str(error)[:500],
+                        current_time,
+                        int(action_id),
+                        str(owner),
+                    ),
+                )
+                return cursor.rowcount == 1
+
+    def get(self, action_id: int) -> Optional[dict[str, Any]]:
+        self._ensure_schema()
+        with self._connect() as connection:
+            return self._row(
+                connection.execute(
+                    """
+                    SELECT * FROM office_manager_action_outbox WHERE id = ?
+                    """,
+                    (int(action_id),),
+                ).fetchone()
+            )
+
+
+@lru_cache(maxsize=8)
+def get_office_manager_action_store(database_path: str) -> OfficeManagerActionStore:
+    return OfficeManagerActionStore(database_path)
+
+
+async def _process_leased_action(
+    action: dict[str, Any],
+    *,
+    store: OfficeManagerActionStore,
+    processor: OfficeManagerActionProcessor,
+) -> None:
+    action_id = int(action["id"])
+    owner = str(action["locked_by"])
+    try:
+        await processor(action)
+    except asyncio.CancelledError:
+        await asyncio.to_thread(
+            store.release,
+            action_id,
+            owner=owner,
+            error="worker_cancelled",
+        )
+        raise
+    except Exception as exc:
+        await asyncio.to_thread(
+            store.release,
+            action_id,
+            owner=owner,
+            error=exc.__class__.__name__,
+            delay_seconds=DEFAULT_RETRY_POLL_SECONDS,
+        )
+        print(
+            "OFFICE_MANAGER_ACTION_RETRY "
+            f"action_id={action_id} error_type={exc.__class__.__name__}"
+        )
+        return
+    await asyncio.to_thread(store.mark_completed, action_id, owner=owner)
+
+
+async def process_office_manager_action(
+    action_id: int,
+    *,
+    store: OfficeManagerActionStore,
+    processor: OfficeManagerActionProcessor,
+) -> bool:
+    """Lease and process one newly persisted action."""
+    action = await asyncio.to_thread(store.reserve, action_id)
+    if not action:
+        return False
+    await _process_leased_action(action, store=store, processor=processor)
+    return True
+
+
+async def process_due_office_manager_actions(
+    *,
+    store: OfficeManagerActionStore,
+    processor: OfficeManagerActionProcessor,
+    limit: int = 10,
+) -> int:
+    """Recover actions left pending by a previous Roo process."""
+    actions = await asyncio.to_thread(store.claim_due, limit=limit)
+    for action in actions:
+        await _process_leased_action(action, store=store, processor=processor)
+    return len(actions)
+
+
+async def office_manager_action_retry_loop(
+    *,
+    store: OfficeManagerActionStore,
+    processor: OfficeManagerActionProcessor,
+    poll_seconds: float = DEFAULT_RETRY_POLL_SECONDS,
+) -> None:
+    """Continuously recover pending or abandoned Office Manager actions."""
+    poll_seconds = max(0.05, float(poll_seconds))
+    while True:
+        try:
+            await process_due_office_manager_actions(
+                store=store,
+                processor=processor,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            print(
+                "OFFICE_MANAGER_ACTION_WORKER_FAILED "
+                f"error_type={exc.__class__.__name__}"
+            )
+        await asyncio.sleep(poll_seconds)
