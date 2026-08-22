@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 from datetime import date, datetime, time, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 from typing import Any, Optional
 from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
@@ -16,6 +17,8 @@ MELBOURNE_TZ = ZoneInfo("Australia/Melbourne")
 BOOK_ACTION_ID = "meeting_room_confirm_booking"
 CANCEL_ACTION_ID = "meeting_room_cancel_booking"
 CONFIRMATION_TTL = timedelta(minutes=10)
+MIN_BOOKING_HALF_HOURS = 2
+MAX_BOOKING_HALF_HOURS = 4
 WEEKDAYS = {
     "monday": 0,
     "tuesday": 1,
@@ -135,10 +138,10 @@ def _parse_time_value(value: Any, field_label: str) -> Optional[time]:
     hour = int(match.group("hour"))
     minute = int(match.group("minute") or 0)
     ampm = match.group("ampm")
-    if minute != 0:
+    if minute not in (0, 30):
         raise MeetingRoomInputError(
             "invalid_time",
-            "Meeting-room bookings must start and end on the hour.",
+            "Meeting Room bookings must start and end on the hour or half-hour.",
         )
     if ampm:
         if not 1 <= hour <= 12:
@@ -154,7 +157,7 @@ def _parse_time_value(value: Any, field_label: str) -> Optional[time]:
         )
     if not 0 <= hour <= 23:
         raise MeetingRoomInputError("invalid_time", f"The {field_label} is not valid.")
-    return time(hour=hour)
+    return time(hour=hour, minute=minute)
 
 
 def _local_datetime(local_date: date, local_time: time) -> datetime:
@@ -179,8 +182,62 @@ def _as_utc(value: datetime) -> datetime:
     return value.astimezone(timezone.utc)
 
 
-def _add_actual_hours(value: datetime, hours: int) -> datetime:
-    return (_as_utc(value) + timedelta(hours=hours)).astimezone(MELBOURNE_TZ)
+def _add_actual_half_hours(value: datetime, half_hours: int) -> datetime:
+    return (_as_utc(value) + timedelta(minutes=30 * half_hours)).astimezone(
+        MELBOURNE_TZ
+    )
+
+
+def _duration_half_hours(value: Any) -> int:
+    if isinstance(value, bool):
+        raise MeetingRoomInputError(
+            "invalid_time",
+            "The duration must be between 1 and 2 hours in 30-minute increments.",
+        )
+    try:
+        duration = Decimal(str(value).strip())
+    except (InvalidOperation, ValueError):
+        raise MeetingRoomInputError(
+            "invalid_time",
+            "The duration must be between 1 and 2 hours in 30-minute increments.",
+        )
+    half_hours = duration * 2
+    if half_hours != half_hours.to_integral_value():
+        raise MeetingRoomInputError(
+            "invalid_time",
+            "The duration must use 30-minute increments, such as 1 or 1.5 hours.",
+        )
+    result = int(half_hours)
+    if result < MIN_BOOKING_HALF_HOURS or result > MAX_BOOKING_HALF_HOURS:
+        raise MeetingRoomInputError(
+            "invalid_time",
+            "Meeting Room bookings must be between 1 and 2 hours.",
+        )
+    return result
+
+
+def _natural_duration(text: str) -> Optional[str]:
+    normalized = str(text or "").lower()
+    if re.search(
+        r"\bfor\s+(?:(?:an?|one)\s+hour\s+and\s+a\s+half|one\s+and\s+a\s+half\s+hours?)\b",
+        normalized,
+    ):
+        return "1.5"
+    if re.search(r"\bfor\s+(?:an?|one)\s+hours?\b", normalized):
+        return "1"
+    hours_match = re.search(
+        r"\bfor\s+(?P<hours>\d+(?:\.\d+)?)\s*(?:hours?|hrs?)\b",
+        normalized,
+    )
+    if hours_match:
+        return hours_match.group("hours")
+    minutes_match = re.search(
+        r"\bfor\s+(?P<minutes>\d+)\s*(?:minutes?|mins?)\b",
+        normalized,
+    )
+    if minutes_match:
+        return str(Decimal(minutes_match.group("minutes")) / Decimal(60))
+    return None
 
 
 def _natural_time_tokens(text: str) -> tuple[Optional[str], Optional[str]]:
@@ -192,7 +249,7 @@ def _natural_time_tokens(text: str) -> tuple[Optional[str], Optional[str]]:
     )
     if range_match:
         return range_match.group("start"), range_match.group("end")
-    explicit_token = r"(?:\d{1,2}:\d{2}|\d{1,2}\s*(?:am|pm))"
+    explicit_token = r"(?:\d{1,2}:\d{2}\s*(?:am|pm)?|\d{1,2}\s*(?:am|pm))"
     range_match = re.search(
         rf"\b(?P<start>{explicit_token})\s*(?:to|until|-)\s*(?P<end>{explicit_token})\b",
         normalized,
@@ -200,7 +257,10 @@ def _natural_time_tokens(text: str) -> tuple[Optional[str], Optional[str]]:
     if range_match:
         return range_match.group("start"), range_match.group("end")
     start_match = re.search(rf"\bat\s+(?P<start>{token})\b", normalized)
-    return (start_match.group("start"), None) if start_match else (None, None)
+    if start_match:
+        return start_match.group("start"), None
+    bare_times = re.findall(rf"\b({explicit_token})\b", normalized)
+    return (bare_times[0], None) if len(bare_times) == 1 else (None, None)
 
 
 def _validate_resolved_interval(
@@ -218,16 +278,27 @@ def _validate_resolved_interval(
             "Meeting Room bookings must start in the future.",
         )
     duration_seconds = (utc_end - utc_start).total_seconds()
-    if duration_seconds <= 0 or duration_seconds % 3600:
+    for value in (starts_at.astimezone(MELBOURNE_TZ), ends_at.astimezone(MELBOURNE_TZ)):
+        if value.minute not in (0, 30) or value.second or value.microsecond:
+            raise MeetingRoomInputError(
+                "invalid_time",
+                "Meeting Room bookings must start and end on the hour or half-hour.",
+            )
+    if duration_seconds <= 0 or duration_seconds % 1800:
         raise MeetingRoomInputError(
             "invalid_time",
-            "Meeting Room bookings must last a whole number of hours.",
+            "Meeting Room bookings must use 30-minute increments.",
         )
-    duration_hours = int(duration_seconds // 3600)
-    if duration_hours > 4:
+    duration_half_hours = int(duration_seconds // 1800)
+    if duration_half_hours < MIN_BOOKING_HALF_HOURS:
         raise MeetingRoomInputError(
             "invalid_time",
-            "Meeting Room bookings can be at most four hours. Check the end time and try again.",
+            "Meeting Room bookings must be at least one hour.",
+        )
+    if duration_half_hours > MAX_BOOKING_HALF_HOURS:
+        raise MeetingRoomInputError(
+            "invalid_time",
+            "Meeting Room bookings can be at most two hours. Check the end time and try again.",
         )
     return starts_at, ends_at
 
@@ -246,13 +317,11 @@ def resolve_interval(
             raise MeetingRoomInputError("missing_start_time", "What time should the booking start?")
         if exact_end:
             return _validate_resolved_interval(exact_start, exact_end, now=now)
-        duration = params.get("duration_hours")
-        if duration is None:
-            duration = 1
-        try:
-            ends_at = _add_actual_hours(exact_start, int(duration))
-        except (TypeError, ValueError):
-            raise MeetingRoomInputError("invalid_time", "The duration must be a whole number of hours.")
+        duration = params.get("duration_hours", 1)
+        ends_at = _add_actual_half_hours(
+            exact_start,
+            _duration_half_hours(duration),
+        )
         return _validate_resolved_interval(exact_start, ends_at, now=now)
 
     local_date = resolve_local_date(text, params, now=now)
@@ -274,17 +343,12 @@ def resolve_interval(
             ends_at = _local_datetime(local_date + timedelta(days=1), end_time)
     else:
         raw_duration = params.get("duration_hours")
-        duration_match = re.search(
-            r"\bfor\s+(\d+)\s*(?:whole\s+)?hours?\b",
-            str(text or "").lower(),
-        )
         if raw_duration is None:
-            raw_duration = duration_match.group(1) if duration_match else 1
-        try:
-            duration = int(raw_duration)
-        except (TypeError, ValueError):
-            raise MeetingRoomInputError("invalid_time", "The duration must be a whole number of hours.")
-        ends_at = _add_actual_hours(starts_at, duration)
+            raw_duration = _natural_duration(text) or 1
+        ends_at = _add_actual_half_hours(
+            starts_at,
+            _duration_half_hours(raw_duration),
+        )
     return _validate_resolved_interval(starts_at, ends_at, now=now)
 
 
@@ -319,6 +383,8 @@ def build_booking_action_value(
     room_slug: str,
     starts_at: datetime,
     ends_at: datetime,
+    expected_points_cost: int,
+    target_slack_user_id: Optional[str] = None,
     now: Optional[datetime] = None,
 ) -> str:
     issued_at = (now or get_current_datetime()).astimezone(timezone.utc)
@@ -327,9 +393,12 @@ def build_booking_action_value(
         "room_slug": room_slug,
         "starts_at": starts_at.isoformat(),
         "ends_at": ends_at.isoformat(),
+        "expected_points_cost": expected_points_cost,
         "client_request_id": str(uuid4()),
         "confirmation_expires_at": (issued_at + CONFIRMATION_TTL).isoformat(),
     }
+    if target_slack_user_id and target_slack_user_id != owner_slack_user_id:
+        payload["target_slack_user_id"] = target_slack_user_id
     return json.dumps(payload, separators=(",", ":"), sort_keys=True)
 
 
@@ -366,6 +435,7 @@ def parse_action_value(raw_value: Any, *, expected_action: str) -> dict:
             "ends_at",
             "client_request_id",
             "confirmation_expires_at",
+            "expected_points_cost",
         )
         if any(not payload.get(field) for field in required):
             raise MeetingRoomInputError("invalid_action", "This booking action is incomplete. Ask Roo to start again.")
@@ -376,6 +446,20 @@ def parse_action_value(raw_value: Any, *, expected_action: str) -> dict:
         parse_backend_timestamp(payload["starts_at"])
         parse_backend_timestamp(payload["ends_at"])
         parse_backend_timestamp(payload["confirmation_expires_at"])
+        try:
+            expected_cost = Decimal(str(payload["expected_points_cost"]))
+            if (
+                not expected_cost.is_finite()
+                or expected_cost != expected_cost.to_integral_value()
+                or expected_cost < 0
+            ):
+                raise ValueError
+        except (InvalidOperation, TypeError, ValueError):
+            raise MeetingRoomInputError("invalid_action", "This booking action is not valid. Ask Roo to start again.")
+        payload["expected_points_cost"] = int(expected_cost)
+        target_slack_user_id = str(payload.get("target_slack_user_id") or "").strip()
+        if target_slack_user_id and not re.fullmatch(r"[A-Z0-9]+", target_slack_user_id):
+            raise MeetingRoomInputError("invalid_action", "This booking action is not valid. Ask Roo to start again.")
     elif expected_action == CANCEL_ACTION_ID:
         try:
             UUID(str(payload.get("booking_id") or ""))
@@ -398,24 +482,37 @@ def booking_preview(
     owner_slack_user_id: str,
     starts_at: datetime,
     ends_at: datetime,
+    target_slack_user_id: Optional[str] = None,
 ) -> dict:
     room = availability.get("room") or {}
     room_name = str(room.get("name") or "Meeting Room")
     room_slug = str(room.get("slug") or "meeting-room")
     cost = int(availability.get("points_cost") or 0)
-    duration = int((_as_utc(ends_at) - _as_utc(starts_at)).total_seconds() // 3600)
+    duration_half_hours = int(
+        (_as_utc(ends_at) - _as_utc(starts_at)).total_seconds() // 1800
+    )
+    duration = duration_half_hours / 2
+    duration_text = str(int(duration)) if duration.is_integer() else str(duration)
+    target_line = ""
+    heading = f"Confirm your *{room_name}* booking."
+    if target_slack_user_id and target_slack_user_id != owner_slack_user_id:
+        heading = f"Confirm a *{room_name}* booking for <@{target_slack_user_id}>."
+        target_line = " Their Roo Points account will be charged."
     message = (
-        f"Confirm your *{room_name}* booking.\n"
+        f"{heading}\n"
         f"*When:* {format_interval(starts_at, ends_at)} (Melbourne time)\n"
-        f"*Duration:* {duration} hour{'s' if duration != 1 else ''}\n"
+        f"*Duration:* {duration_text} hour{'s' if duration != 1 else ''}\n"
         f"*Cost:* {cost} Roo Point{'s' if cost != 1 else ''}\n\n"
-        "The room is not reserved until you confirm. This button expires in 10 minutes."
+        f"The room is not reserved until you confirm.{target_line} "
+        "This button expires in 10 minutes."
     )
     value = build_booking_action_value(
         owner_slack_user_id=owner_slack_user_id,
         room_slug=room_slug,
         starts_at=starts_at,
         ends_at=ends_at,
+        expected_points_cost=cost,
+        target_slack_user_id=target_slack_user_id,
     )
     return {
         "message": message,
@@ -506,8 +603,21 @@ def format_booking_result(result: dict) -> str:
         if "created" in result
         else bool(result.get("already_booked"))
     )
-    heading = "This booking was already confirmed." if replay else "Your booking is confirmed."
-    balance_line = f"\n*Remaining balance:* {balance} Roo Points" if balance is not None else ""
+    target_slack_user_id = str(result.get("booked_for_slack_user_id") or "").strip()
+    admin_booking = bool(result.get("admin_booking"))
+    if admin_booking and target_slack_user_id:
+        heading = (
+            f"The booking for <@{target_slack_user_id}> was already confirmed."
+            if replay
+            else f"The booking for <@{target_slack_user_id}> is confirmed."
+        )
+    else:
+        heading = "This booking was already confirmed." if replay else "Your booking is confirmed."
+    balance_line = (
+        f"\n*Remaining balance:* {balance} Roo Points"
+        if balance is not None and not admin_booking
+        else ""
+    )
     return (
         f"{heading}\n*Room:* {room_name}\n"
         f"*When:* {format_interval(starts_at, ends_at)} (Melbourne time)\n"
@@ -555,6 +665,8 @@ def backend_error_message(
         "feature_disabled": "Meeting-room booking is not enabled right now.",
         "booking_started": "That booking has already started and can no longer be cancelled.",
         "not_booking_owner": "You can only cancel your own Meeting Room bookings.",
+        "admin_required": "Only full Roo Points Admins can book the Meeting Room for another member.",
+        "price_changed": "The booking price changed after the preview. Ask Roo to check the time again before confirming.",
     }
     if code in messages:
         return messages[code]

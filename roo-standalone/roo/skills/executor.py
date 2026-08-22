@@ -476,7 +476,7 @@ class SkillExecutor:
                 "data": {**data, "delivery_failed": True},
             }
         return {
-            "message": "I've sent the Meeting Room details to you privately.",
+            "message": "I've sent you a private reply about the Meeting Room.",
             "data": data,
         }
 
@@ -525,7 +525,7 @@ class SkillExecutor:
         busy = result.get("busy_intervals") or []
         if not busy:
             return (
-                f"The *{room_name}* is available all day on that date "
+                f"The *{room_name}* has no bookings currently shown for that date "
                 "(Melbourne time)."
             )
         lines = [f"The *{room_name}* is unavailable at these times (Melbourne time):"]
@@ -572,12 +572,29 @@ class SkillExecutor:
                 "data": {"action": action, "configuration_error": True},
             }
 
-        mentioned_users = set(re.findall(r"<@([A-Z0-9]+)>", str(text or "")))
-        if any(mentioned_user != user_id for mentioned_user in mentioned_users):
+        mentioned_users = []
+        for mentioned_user in re.findall(
+            r"<@([A-Z0-9]+)(?:\|[^>]+)?>",
+            str(text or ""),
+        ):
+            if mentioned_user != user_id and mentioned_user not in mentioned_users:
+                mentioned_users.append(mentioned_user)
+        if len(mentioned_users) > 1:
             return self._deliver_meeting_room_response(
                 user_id=user_id,
                 channel_id=channel_id,
-                message="Meeting Room bookings are self-service. I cannot book for another person.",
+                message="Tag exactly one member when booking the Meeting Room for someone else.",
+                action=action,
+            )
+        target_slack_user_id = mentioned_users[0] if mentioned_users else None
+        if target_slack_user_id and action not in (
+            "check_room_availability",
+            "book_meeting_room",
+        ):
+            return self._deliver_meeting_room_response(
+                user_id=user_id,
+                channel_id=channel_id,
+                message="Booking for another member supports availability checks and new bookings only.",
                 action=action,
             )
 
@@ -599,12 +616,14 @@ class SkillExecutor:
                         user_id,
                         starts_at=starts_at.isoformat(),
                         ends_at=ends_at.isoformat(),
+                        target_slack_user_id=target_slack_user_id,
                     )
                 else:
                     local_date = resolve_meeting_room_date(text, params)
                     availability = await client.check_meeting_room_availability(
                         user_id,
                         date=local_date.isoformat(),
+                        target_slack_user_id=target_slack_user_id,
                     )
                 message = self._format_meeting_room_availability(availability)
                 return self._deliver_meeting_room_response(
@@ -620,6 +639,7 @@ class SkillExecutor:
                     user_id,
                     starts_at=starts_at.isoformat(),
                     ends_at=ends_at.isoformat(),
+                    target_slack_user_id=target_slack_user_id,
                 )
                 if not availability.get("available"):
                     message = self._format_meeting_room_availability(availability)
@@ -634,6 +654,7 @@ class SkillExecutor:
                     owner_slack_user_id=user_id,
                     starts_at=starts_at,
                     ends_at=ends_at,
+                    target_slack_user_id=target_slack_user_id,
                 )
                 return self._deliver_meeting_room_response(
                     user_id=user_id,

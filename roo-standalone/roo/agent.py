@@ -1060,7 +1060,10 @@ class RooAgent:
         except Exception:
             # Fallback: remove first mention if we can't get bot ID
             cleaned = re.sub(r'<@[A-Z0-9]+>', '', text, count=1)
-        
+
+        # Slack may include a display label in mentions. Preserve the stable
+        # user ID before generic Slack markup normalization removes it.
+        cleaned = re.sub(r'<@([A-Z0-9]+)\|[^>]+>', r'<@\1>', cleaned)
         cleaned = normalize_slack_text(cleaned)
         # Remove extra whitespace
         cleaned = ' '.join(cleaned.split())

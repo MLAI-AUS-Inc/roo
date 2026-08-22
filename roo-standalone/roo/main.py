@@ -4850,7 +4850,9 @@ async def _handle_meeting_room_action(
                         ends_at=value["ends_at"],
                         client_request_id=value["client_request_id"],
                         confirmation_expires_at=value["confirmation_expires_at"],
+                        expected_points_cost=int(value["expected_points_cost"]),
                         slack_channel_id=channel_id or None,
+                        target_slack_user_id=value.get("target_slack_user_id"),
                     )
                     outcome = format_meeting_room_booking_result(result)
                     print(

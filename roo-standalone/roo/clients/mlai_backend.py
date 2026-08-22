@@ -1682,6 +1682,7 @@ class MLAIBackendClient:
         date: Optional[str] = None,
         starts_at: Optional[str] = None,
         ends_at: Optional[str] = None,
+        target_slack_user_id: Optional[str] = None,
     ) -> dict:
         """Check one room date or exact interval without exposing booker identity."""
         payload = {
@@ -1694,6 +1695,10 @@ class MLAIBackendClient:
             payload["starts_at"] = starts_at
         if ends_at:
             payload["ends_at"] = ends_at
+        if target_slack_user_id:
+            payload["target_slack_user_id"] = self._clean_slack_id(
+                target_slack_user_id
+            )
         response = await self._request(
             "POST",
             f"{self._points_base}/meeting-rooms/availability/",
@@ -1715,9 +1720,11 @@ class MLAIBackendClient:
         ends_at: str,
         client_request_id: str,
         confirmation_expires_at: str,
+        expected_points_cost: int,
         slack_channel_id: Optional[str] = None,
+        target_slack_user_id: Optional[str] = None,
     ) -> dict:
-        """Confirm and charge one self-service meeting-room booking."""
+        """Confirm one self or authorized Points Admin meeting-room booking."""
         payload = {
             "slack_user_id": self._clean_slack_id(slack_user_id),
             "room_slug": room_slug,
@@ -1725,9 +1732,14 @@ class MLAIBackendClient:
             "ends_at": ends_at,
             "client_request_id": client_request_id,
             "confirmation_expires_at": confirmation_expires_at,
+            "expected_points_cost": expected_points_cost,
         }
         if slack_channel_id:
             payload["slack_channel_id"] = slack_channel_id
+        if target_slack_user_id:
+            payload["target_slack_user_id"] = self._clean_slack_id(
+                target_slack_user_id
+            )
         response = await self._request(
             "POST",
             f"{self._points_base}/meeting-rooms/book/",
