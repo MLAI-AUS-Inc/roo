@@ -133,6 +133,29 @@ async def test_pending_action_is_recovered_after_restart(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_retry_batch_leases_each_action_only_when_processing(tmp_path):
+    store = action_module.MeetingRoomActionStore(tmp_path / "actions.db")
+    first = _record(store)
+    second = _record(store)
+    second_states = []
+
+    async def processor(record):
+        if record["id"] == first["id"]:
+            second_states.append(store.get(second["id"])["status"])
+
+    count = await action_module.process_due_meeting_room_actions(
+        store=store,
+        processor=processor,
+        limit=2,
+    )
+
+    assert count == 2
+    assert second_states == ["pending"]
+    assert store.get(first["id"])["status"] == "completed"
+    assert store.get(second["id"])["status"] == "completed"
+
+
+@pytest.mark.asyncio
 async def test_only_one_worker_can_process_duplicate_action(tmp_path):
     database_path = tmp_path / "actions.db"
     first_store = action_module.MeetingRoomActionStore(database_path)
@@ -309,6 +332,67 @@ async def test_backend_commit_response_loss_recovers_target_notification(
     )
 
     assert backend_calls == [request_id, request_id]
+    assert store.get(action["id"])["status"] == "completed"
+    assert target_dms[0][0][0] == "UTARGET"
+    assert target_dms[0][1]["client_msg_id"] == request_id
+    assert "was already confirmed" in updates[-1]["text"]
+
+
+@pytest.mark.asyncio
+async def test_expired_queued_replay_recovers_committed_admin_booking(
+    tmp_path,
+    monkeypatch,
+):
+    configured = _settings(tmp_path)
+    starts_at = (
+        datetime.now(MELBOURNE).replace(minute=0, second=0, microsecond=0)
+        + timedelta(days=1)
+    )
+    action_value = build_booking_action_value(
+        owner_slack_user_id="UOWNER",
+        room_slug="meeting-room",
+        starts_at=starts_at,
+        ends_at=starts_at + timedelta(hours=2),
+        expected_points_cost=2,
+        target_slack_user_id="UTARGET",
+        now=datetime.now(ZoneInfo("UTC")) - timedelta(minutes=11),
+    )
+    request_id = json.loads(action_value)["client_request_id"]
+    store = action_module.MeetingRoomActionStore(configured.SLACK_RECEIPTS_DB_PATH)
+    action = _record(store, action_value)
+    backend_calls = []
+    target_dms = []
+    updates = []
+
+    class Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def book_meeting_room(self, slack_user_id, **kwargs):
+            backend_calls.append(kwargs["client_request_id"])
+            return _admin_booking_response(action_value, created=False)
+
+    monkeypatch.setattr("roo.clients.mlai_backend.MLAIBackendClient", Client)
+    monkeypatch.setattr(main_module, "get_settings", lambda: configured)
+    monkeypatch.setattr(
+        main_module,
+        "send_dm",
+        lambda *args, **kwargs: target_dms.append((args, kwargs)) or {"ok": True},
+    )
+    monkeypatch.setattr(
+        "roo.slack_client.get_slack_client",
+        lambda: SimpleNamespace(
+            chat_update=lambda **kwargs: updates.append(kwargs) or {"ok": True}
+        ),
+    )
+
+    await action_module.process_meeting_room_action(
+        action["id"],
+        store=store,
+        processor=main_module._process_meeting_room_action_record,
+    )
+
+    assert backend_calls == [request_id]
     assert store.get(action["id"])["status"] == "completed"
     assert target_dms[0][0][0] == "UTARGET"
     assert target_dms[0][1]["client_msg_id"] == request_id
@@ -497,3 +581,42 @@ async def test_shutdown_drain_waits_for_retained_action():
     release.set()
     await drain
     assert task.done()
+
+
+@pytest.mark.asyncio
+async def test_disabled_feature_does_not_persist_or_consume_queued_action(
+    tmp_path,
+    monkeypatch,
+):
+    configured = _settings(tmp_path, MEETING_ROOM_BOOKING_ENABLED=False)
+    queued_store = action_module.MeetingRoomActionStore(
+        configured.SLACK_RECEIPTS_DB_PATH
+    )
+    queued_action = _record(queued_store)
+    scheduled = []
+    handled = []
+
+    async def handle(**kwargs):
+        handled.append(kwargs)
+
+    monkeypatch.setattr(
+        main_module,
+        "get_meeting_room_action_store",
+        lambda path: pytest.fail("disabled actions must not touch the durable queue"),
+    )
+    monkeypatch.setattr(main_module, "_handle_meeting_room_action", handle)
+    monkeypatch.setattr(main_module, "start_slack_action", scheduled.append)
+
+    await main_module._persist_and_start_meeting_room_action(
+        settings=configured,
+        action_id=BOOK_ACTION_ID,
+        action_value=_booking_action_value(),
+        actor_user_id="UOWNER",
+        channel_id="DOWNER",
+        message_ts="123.456",
+    )
+
+    assert len(scheduled) == 1
+    await scheduled[0]
+    assert handled[0]["settings"] is configured
+    assert queued_store.get(queued_action["id"])["status"] == "pending"

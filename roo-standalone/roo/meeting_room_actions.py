@@ -455,10 +455,14 @@ async def process_due_meeting_room_actions(
     processor: MeetingRoomActionProcessor,
     limit: int = 10,
 ) -> int:
-    actions = await asyncio.to_thread(store.claim_due, limit=limit)
-    for action in actions:
-        await _process_leased_action(action, store=store, processor=processor)
-    return len(actions)
+    processed = 0
+    for _ in range(max(1, int(limit))):
+        actions = await asyncio.to_thread(store.claim_due, limit=1)
+        if not actions:
+            break
+        await _process_leased_action(actions[0], store=store, processor=processor)
+        processed += 1
+    return processed
 
 
 async def meeting_room_action_retry_loop(

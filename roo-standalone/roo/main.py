@@ -2188,16 +2188,17 @@ async def lifespan(app: FastAPI):
     if settings.ROO_SURFACE == "public":
         coworking_retry_task = asyncio.create_task(coworking_booking_retry_loop())
         app.state.coworking_retry_task = coworking_retry_task
-        meeting_room_action_store = get_meeting_room_action_store(
-            settings.SLACK_RECEIPTS_DB_PATH
-        )
-        meeting_room_action_retry_task = asyncio.create_task(
-            meeting_room_action_retry_loop(
-                store=meeting_room_action_store,
-                processor=_process_meeting_room_action_record,
+        if settings.MEETING_ROOM_BOOKING_ENABLED:
+            meeting_room_action_store = get_meeting_room_action_store(
+                settings.SLACK_RECEIPTS_DB_PATH
             )
-        )
-        app.state.meeting_room_action_retry_task = meeting_room_action_retry_task
+            meeting_room_action_retry_task = asyncio.create_task(
+                meeting_room_action_retry_loop(
+                    store=meeting_room_action_store,
+                    processor=_process_meeting_room_action_record,
+                )
+            )
+            app.state.meeting_room_action_retry_task = meeting_room_action_retry_task
         if settings.BOOST_LINK_LOVE_ENABLED:
             link_love_task = asyncio.create_task(link_love_retry_loop())
             app.state.link_love_task = link_love_task
@@ -4923,8 +4924,12 @@ async def _handle_meeting_room_action(
             )
             if value["owner_slack_user_id"] != actor_user_id:
                 outcome = "Only the member who requested this action can use it. Nothing was changed."
+            # Persisted actions may be recovering a committed mutation whose
+            # response was lost. The backend checks the idempotency key before
+            # expiry, so durable processing must let it determine the result.
             elif (
                 action_id == MEETING_ROOM_BOOK_ACTION_ID
+                and not retry_failures
                 and meeting_room_confirmation_expired(value)
             ):
                 outcome = "That confirmation expired. Ask Roo to check the time again for a fresh button."
@@ -5118,6 +5123,21 @@ async def _persist_and_start_meeting_room_action(
     channel_id: str,
     message_ts: str,
 ) -> None:
+    if not settings.MEETING_ROOM_BOOKING_ENABLED:
+        # Leave previously queued uncertain mutations untouched while the
+        # feature is disabled. They can resume after the flag is re-enabled,
+        # while old buttons still receive a clear non-mutating response.
+        start_slack_action(
+            _handle_meeting_room_action(
+                settings=settings,
+                action_id=action_id,
+                action_value=action_value,
+                actor_user_id=actor_user_id,
+                channel_id=channel_id,
+                message_ts=message_ts,
+            )
+        )
+        return
     store = get_meeting_room_action_store(settings.SLACK_RECEIPTS_DB_PATH)
     try:
         action = await asyncio.to_thread(

@@ -2,6 +2,10 @@
   text: "is the meeting room free tomorrow at 2pm?"
   expect: {skill: meeting-room-booking, action: check_room_availability}
   tags: [meeting-room]
+- id: meeting-room-calendar-day-view
+  text: "show the meeting room calendar tomorrow"
+  expect: {skill: meeting-room-booking, action: check_room_availability}
+  tags: [meeting-room, availability]
 - id: meeting-room-book-range
   text: "book the meeting room tomorrow from 2pm to 4pm"
   expect: {skill: meeting-room-booking, action: book_meeting_room}

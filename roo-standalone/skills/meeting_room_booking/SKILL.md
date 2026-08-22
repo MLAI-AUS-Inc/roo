@@ -5,9 +5,9 @@ routing:
   use_when: >
     Meeting Room requests.
   avoid_when: >
-    Coworking, events, calendars, attendees, or unauthorized bookings.
+    Coworking, events, Google/Outlook sync, attendees, or unauthorized bookings.
   examples:
-    - {text: "room free tomorrow 2pm?", action: check_room_availability}
+    - {text: "room calendar tomorrow?", action: check_room_availability}
     - {text: "book room tomorrow 2pm-4pm", action: book_meeting_room}
     - {text: "book <@U123> room tomorrow for 1.5h", action: book_meeting_room}
     - {text: "my room bookings", action: list_my_room_bookings}

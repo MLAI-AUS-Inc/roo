@@ -206,6 +206,13 @@ def test_skill_schema_exposes_end_time_for_availability_and_booking():
     assert "end_time" in actions["check_room_availability"]["params"]
     assert "end_time" in actions["book_meeting_room"]["params"]
     assert actions["book_meeting_room"]["params"]["duration_hours"]["type"] == "number"
+    assert "Google/Outlook sync" in skill.routing["avoid_when"]
+    assert "events, calendars" not in skill.routing["avoid_when"]
+    assert any(
+        example["text"] == "room calendar tomorrow?"
+        and example["action"] == "check_room_availability"
+        for example in skill.routing["examples"]
+    )
     assert {
         example["action"]
         for example in skill.routing["examples"]
