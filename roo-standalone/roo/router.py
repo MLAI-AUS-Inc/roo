@@ -93,14 +93,14 @@ def _tool_description(skill: Skill) -> str:
             action = example.get("action")
             suffix = f" -> {action}" if action else ""
             lines.append(f'- "{example["text"]}"{suffix}')
-        parts.append("Examples:\n" + "\n".join(lines))
+        parts.append("Actions:\n" + "\n".join(lines))
     negatives = routing.get("negative_examples") or []
     if negatives:
         lines = [
             f'- "{example["text"]}" -> {example.get("instead", RESPOND_IN_CHAT)}'
             for example in negatives
         ]
-        parts.append("Do NOT. Use:\n" + "\n".join(lines))
+        parts.append("Other tools:\n" + "\n".join(lines))
     return "\n".join(parts)
 
 

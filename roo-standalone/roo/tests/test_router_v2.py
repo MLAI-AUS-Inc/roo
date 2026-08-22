@@ -31,6 +31,18 @@ def _skill(name, *, exclusive=None, actions=None, routing=None):
 
 POINTS = _skill(
     "mlai-points",
+    routing={
+        "use_when": "manage Roo Points",
+        "avoid_when": "another skill owns the request",
+        "examples": [
+            {"text": "show my points", "action": "balance"},
+            {"text": "book coworking", "action": "book_coworking"},
+            {"text": "check my balance", "action": "balance"},
+        ],
+        "negative_examples": [
+            {"text": "not this", "instead": "respond_in_chat"}
+        ],
+    },
     actions=[
         {"name": "balance", "description": "Show balance."},
         {"name": "book_coworking", "description": "Book a day.", "params": {"date": {"type": "string"}}},
@@ -106,8 +118,11 @@ def test_skill_tool_embeds_routing_block_and_action_enum():
     description = tool["function"]["description"]
     assert "Use:" in description
     assert "Do NOT:" in description
-    assert "Examples:" in description
-    assert "Do NOT. Use:" in description
+    assert "Actions:" in description
+    assert '- "show my points" -> balance' in description
+    assert "Other tools:" in description
+    assert '- "not this" -> respond_in_chat' in description
+    assert "Do NOT. Use:" not in description
     properties = tool["function"]["parameters"]["properties"]
     assert properties["action"]["enum"] == ["balance", "book_coworking"]
     assert "date" in properties
