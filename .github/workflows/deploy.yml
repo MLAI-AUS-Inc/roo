@@ -45,6 +45,7 @@ jobs:
           python -m pytest \
             roo/tests/test_surface_security.py \
             roo/tests/test_slack_security.py \
+            roo/tests/test_office_manager_actions.py \
             roo/tests/test_backend_identity.py \
             roo/tests/test_mlai_backend_client.py \
             roo/tests/test_jobs_scheduler.py \

@@ -159,6 +159,9 @@ CONTENT_FACTORY_WATCHDOG_STOP_STATUSES = {
     "denied",
     "cancelled",
 }
+_office_manager_action_tasks: set[asyncio.Task[Any]] = set()
+
+
 def _is_duplicate_slack_request(request: Request) -> bool:
     state = getattr(request, "state", None)
     return bool(getattr(state, "slack_duplicate", False))
@@ -4970,6 +4973,14 @@ async def _claim_office_manager_from_action(
     )
 
 
+def _start_office_manager_action(coro: Any) -> asyncio.Task[Any]:
+    """Keep a strong reference to a Slack action task until it finishes."""
+    task = asyncio.create_task(coro)
+    _office_manager_action_tasks.add(task)
+    task.add_done_callback(_office_manager_action_tasks.discard)
+    return task
+
+
 
 def _slack_delivery_succeeded(response: Any) -> bool:
     return bool(response and response.get("ok"))
@@ -5590,6 +5601,9 @@ async def slack_actions(
             str(office_manager_action.get("action_id") or "")
             == OFFICE_MANAGER_VOLUNTEER_ACTION_ID
         ):
+            if settings.ROO_SURFACE != "public":
+                print("Ignoring Office Manager action outside Public Roo")
+                return JSONResponse(status_code=200, content={})
             try:
                 action_value = json.loads(
                     str(office_manager_action.get("value") or "{}")
@@ -5612,7 +5626,7 @@ async def slack_actions(
                 or not is_current_booking_date
             ):
                 if user_id and channel_id:
-                    asyncio.create_task(
+                    _start_office_manager_action(
                         _send_office_manager_private_feedback(
                             channel_id=str(channel_id),
                             user_id=str(user_id),
@@ -5624,7 +5638,7 @@ async def slack_actions(
                     )
                 return JSONResponse(status_code=200, content={})
 
-            asyncio.create_task(
+            _start_office_manager_action(
                 _claim_office_manager_from_action(
                     user_id=str(user_id),
                     channel_id=str(channel_id),

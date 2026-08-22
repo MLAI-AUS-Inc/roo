@@ -36,21 +36,22 @@ def _signature(secret: str, timestamp: int, body: bytes) -> str:
     return f"v0={digest}"
 
 
-def _settings(tmp_path):
+def _settings(tmp_path, **overrides):
     return Settings(
         _env_file=None,
         SLACK_BOT_TOKEN="xoxb-synthetic",
         SLACK_SIGNING_SECRET="synthetic-signing-secret",
         SLACK_RECEIPTS_DB_PATH=str(tmp_path / "slack-receipts.db"),
         OPENAI_API_KEY="synthetic-openai-key",
+        **overrides,
     )
 
 
-def _action_body(*, value=_UNSET):
+def _action_body(*, value=_UNSET, channel_id="CCOWORK"):
     payload = {
         "type": "block_actions",
         "user": {"id": "UVERIFIED"},
-        "channel": {"id": "CCOWORK"},
+        "channel": {"id": channel_id},
         "actions": [
             {
                 "action_id": OFFICE_MANAGER_VOLUNTEER_ACTION_ID,
@@ -83,8 +84,10 @@ def _signed_headers(settings, body):
 
 @pytest.fixture(autouse=True)
 def clear_app_state():
+    main_module._office_manager_action_tasks.clear()
     get_slack_receipt_store.cache_clear()
     yield
+    main_module._office_manager_action_tasks.clear()
     get_slack_receipt_store.cache_clear()
     main_module.app.dependency_overrides.clear()
 
@@ -111,7 +114,7 @@ def test_signed_button_uses_payload_actor_and_deduplicates_delivery(
         fake_claim,
     )
     monkeypatch.setattr(main_module, "get_current_date", lambda: date(2026, 8, 3))
-    monkeypatch.setattr(main_module.asyncio, "create_task", capture_task)
+    monkeypatch.setattr(main_module, "_start_office_manager_action", capture_task)
     body = _action_body()
     headers = _signed_headers(configured, body)
 
@@ -129,6 +132,34 @@ def test_signed_button_uses_payload_actor_and_deduplicates_delivery(
         "channel_id": "CCOWORK",
         "booking_date": "2026-08-03",
     }
+
+
+def test_admin_surface_ignores_office_manager_action(tmp_path, monkeypatch):
+    configured = _settings(
+        tmp_path,
+        ROO_SURFACE="admin",
+        ROO_ALLOWED_CHANNEL_IDS="GADMIN",
+    )
+    main_module.app.dependency_overrides[get_settings] = lambda: configured
+
+    def unexpected_action(coro):
+        coro.close()
+        pytest.fail("Admin Roo must not process Office Manager actions")
+
+    monkeypatch.setattr(
+        main_module,
+        "_start_office_manager_action",
+        unexpected_action,
+    )
+    body = _action_body(channel_id="GADMIN")
+    response = TestClient(main_module.app).post(
+        "/slack/actions",
+        content=body,
+        headers=_signed_headers(configured, body),
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {}
 
 
 def test_malformed_button_is_acknowledged_with_private_feedback(
@@ -149,7 +180,7 @@ def test_malformed_button_is_acknowledged_with_private_feedback(
         "_send_office_manager_private_feedback",
         capture_feedback,
     )
-    monkeypatch.setattr(main_module.asyncio, "create_task", scheduled.append)
+    monkeypatch.setattr(main_module, "_start_office_manager_action", scheduled.append)
 
     body = _action_body(value={})
     response = client.post(
@@ -193,7 +224,7 @@ def test_non_object_button_value_is_acknowledged_without_crashing(
         "_send_office_manager_private_feedback",
         capture_feedback,
     )
-    monkeypatch.setattr(main_module.asyncio, "create_task", scheduled.append)
+    monkeypatch.setattr(main_module, "_start_office_manager_action", scheduled.append)
 
     body = _action_body(value=value)
     response = client.post(
@@ -232,7 +263,7 @@ def test_stale_button_is_rejected_before_backend_claim(tmp_path, monkeypatch):
         capture_feedback,
     )
     monkeypatch.setattr(main_module, "get_current_date", lambda: date(2026, 8, 3))
-    monkeypatch.setattr(main_module.asyncio, "create_task", scheduled.append)
+    monkeypatch.setattr(main_module, "_start_office_manager_action", scheduled.append)
 
     body = _action_body(value={"date": "2026-08-02"})
     response = client.post(
@@ -513,3 +544,24 @@ async def test_private_feedback_offloads_slack_calls_from_event_loop(monkeypatch
     )
 
     assert offloaded == [fake_ephemeral, fake_dm]
+
+
+@pytest.mark.asyncio
+async def test_office_manager_action_task_is_retained_until_completion():
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def action():
+        started.set()
+        await release.wait()
+
+    task = main_module._start_office_manager_action(action())
+    await started.wait()
+
+    assert task in main_module._office_manager_action_tasks
+
+    release.set()
+    await task
+    await asyncio.sleep(0)
+
+    assert task not in main_module._office_manager_action_tasks
