@@ -159,7 +159,6 @@ CONTENT_FACTORY_WATCHDOG_STOP_STATUSES = {
     "denied",
     "cancelled",
 }
-_office_manager_action_tasks: set[asyncio.Task[Any]] = set()
 
 
 def _is_duplicate_slack_request(request: Request) -> bool:
@@ -4973,15 +4972,6 @@ async def _claim_office_manager_from_action(
     )
 
 
-def _start_office_manager_action(coro: Any) -> asyncio.Task[Any]:
-    """Keep a strong reference to a Slack action task until it finishes."""
-    task = asyncio.create_task(coro)
-    _office_manager_action_tasks.add(task)
-    task.add_done_callback(_office_manager_action_tasks.discard)
-    return task
-
-
-
 def _slack_delivery_succeeded(response: Any) -> bool:
     return bool(response and response.get("ok"))
 
@@ -5507,7 +5497,6 @@ async def _persist_and_start_meeting_room_action(
         )
     )
 
-
 @app.post("/slack/actions")
 async def slack_actions(
     request: Request,
@@ -5626,7 +5615,7 @@ async def slack_actions(
                 or not is_current_booking_date
             ):
                 if user_id and channel_id:
-                    _start_office_manager_action(
+                    start_slack_action(
                         _send_office_manager_private_feedback(
                             channel_id=str(channel_id),
                             user_id=str(user_id),
@@ -5638,7 +5627,7 @@ async def slack_actions(
                     )
                 return JSONResponse(status_code=200, content={})
 
-            _start_office_manager_action(
+            start_slack_action(
                 _claim_office_manager_from_action(
                     user_id=str(user_id),
                     channel_id=str(channel_id),

@@ -18,6 +18,7 @@ os.environ.setdefault("SLACK_BOT_TOKEN", "xoxb-synthetic")
 os.environ.setdefault("SLACK_SIGNING_SECRET", "synthetic-signing-secret")
 
 from roo import main as main_module
+from roo import slack_action_tasks
 from roo.clients import mlai_backend as backend_module
 from roo.config import Settings, get_settings
 from roo.coworking_messages import OFFICE_MANAGER_VOLUNTEER_ACTION_ID
@@ -84,10 +85,10 @@ def _signed_headers(settings, body):
 
 @pytest.fixture(autouse=True)
 def clear_app_state():
-    main_module._office_manager_action_tasks.clear()
+    slack_action_tasks._tasks.clear()
     get_slack_receipt_store.cache_clear()
     yield
-    main_module._office_manager_action_tasks.clear()
+    slack_action_tasks._tasks.clear()
     get_slack_receipt_store.cache_clear()
     main_module.app.dependency_overrides.clear()
 
@@ -114,7 +115,7 @@ def test_signed_button_uses_payload_actor_and_deduplicates_delivery(
         fake_claim,
     )
     monkeypatch.setattr(main_module, "get_current_date", lambda: date(2026, 8, 3))
-    monkeypatch.setattr(main_module, "_start_office_manager_action", capture_task)
+    monkeypatch.setattr(main_module, "start_slack_action", capture_task)
     body = _action_body()
     headers = _signed_headers(configured, body)
 
@@ -148,7 +149,7 @@ def test_admin_surface_ignores_office_manager_action(tmp_path, monkeypatch):
 
     monkeypatch.setattr(
         main_module,
-        "_start_office_manager_action",
+        "start_slack_action",
         unexpected_action,
     )
     body = _action_body(channel_id="GADMIN")
@@ -180,7 +181,7 @@ def test_malformed_button_is_acknowledged_with_private_feedback(
         "_send_office_manager_private_feedback",
         capture_feedback,
     )
-    monkeypatch.setattr(main_module, "_start_office_manager_action", scheduled.append)
+    monkeypatch.setattr(main_module, "start_slack_action", scheduled.append)
 
     body = _action_body(value={})
     response = client.post(
@@ -224,7 +225,7 @@ def test_non_object_button_value_is_acknowledged_without_crashing(
         "_send_office_manager_private_feedback",
         capture_feedback,
     )
-    monkeypatch.setattr(main_module, "_start_office_manager_action", scheduled.append)
+    monkeypatch.setattr(main_module, "start_slack_action", scheduled.append)
 
     body = _action_body(value=value)
     response = client.post(
@@ -263,7 +264,7 @@ def test_stale_button_is_rejected_before_backend_claim(tmp_path, monkeypatch):
         capture_feedback,
     )
     monkeypatch.setattr(main_module, "get_current_date", lambda: date(2026, 8, 3))
-    monkeypatch.setattr(main_module, "_start_office_manager_action", scheduled.append)
+    monkeypatch.setattr(main_module, "start_slack_action", scheduled.append)
 
     body = _action_body(value={"date": "2026-08-02"})
     response = client.post(
@@ -555,13 +556,13 @@ async def test_office_manager_action_task_is_retained_until_completion():
         started.set()
         await release.wait()
 
-    task = main_module._start_office_manager_action(action())
+    task = slack_action_tasks.start(action())
     await started.wait()
 
-    assert task in main_module._office_manager_action_tasks
+    assert task in slack_action_tasks._tasks
 
     release.set()
     await task
     await asyncio.sleep(0)
 
-    assert task not in main_module._office_manager_action_tasks
+    assert task not in slack_action_tasks._tasks

@@ -21,7 +21,6 @@ def _finalize(task: asyncio.Task[Any]) -> None:
             f"error_type={error.__class__.__name__}"
         )
 
-
 def start(coro: Any) -> asyncio.Task[Any]:
     """Keep a strong reference to an action task until it finishes."""
     task = asyncio.create_task(coro)
