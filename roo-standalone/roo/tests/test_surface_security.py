@@ -42,6 +42,29 @@ def test_public_surface_preserves_reviewed_public_skills_and_has_no_private_skil
     )
 
 
+def test_founder_tools_link_origins_are_validated_by_environment():
+    configured = settings(FOUNDER_TOOLS_LINK_ORIGINS="https://mlai.au")
+    assert configured.founder_tools_link_origins == frozenset({"https://mlai.au"})
+
+    local = settings(
+        FOUNDER_TOOLS_LINK_ORIGINS="http://localhost:3000",
+        ROO_ENVIRONMENT="development",
+    )
+    assert local.founder_tools_link_origins == frozenset({"http://localhost:3000"})
+
+    with pytest.raises(ValidationError, match="localhost origins"):
+        settings(
+            FOUNDER_TOOLS_LINK_ORIGINS="http://localhost:3000",
+            ROO_ENVIRONMENT="production",
+        )
+
+    with pytest.raises(ValidationError, match="must use HTTPS"):
+        settings(FOUNDER_TOOLS_LINK_ORIGINS="http://mlai.au")
+
+    with pytest.raises(ValidationError, match="invalid origin"):
+        settings(FOUNDER_TOOLS_LINK_ORIGINS="https://mlai.au/path")
+
+
 def test_victor_ai_skill_is_disabled_by_default_and_uses_channel_name_only():
     configured = settings()
     assert "victor-ai-applications" not in configured.enabled_skill_names

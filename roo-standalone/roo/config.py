@@ -162,6 +162,7 @@ class Settings(BaseSettings):
     ROO_POINTS_TOPUP_BUTTONS_ENABLED: bool = False
     ROO_POINTS_STRIPE_CHECKOUT_HOSTS: str = "checkout.stripe.com"
     MEETING_ROOM_BOOKING_ENABLED: bool = False
+    FOUNDER_TOOLS_LINK_ORIGINS: str = "https://mlai.au"
     BOOST_LINK_LOVE_ENABLED: bool = True
     BOOST_LINK_LOVE_CHANNEL_NAME: str = "boost-my-startup"
     BOOST_LINK_LOVE_CHANNEL_ID: str = ""
@@ -269,6 +270,10 @@ class Settings(BaseSettings):
         )
 
     @property
+    def founder_tools_link_origins(self) -> frozenset[str]:
+        return self._split_configured_values(self.FOUNDER_TOOLS_LINK_ORIGINS)
+
+    @property
     def victor_ai_slack_channel_name(self) -> str:
         return str(self.VICTOR_AI_SLACK_CHANNEL_NAME or "").strip().lstrip("#").lower()
 
@@ -349,6 +354,47 @@ class Settings(BaseSettings):
             raise ValueError(
                 "ROO_POINTS_STRIPE_CHECKOUT_HOSTS is required when top-up buttons are enabled"
             )
+        if not self.founder_tools_link_origins:
+            raise ValueError("FOUNDER_TOOLS_LINK_ORIGINS must contain an allowed origin")
+        for configured_origin in self.founder_tools_link_origins:
+            try:
+                parsed_origin = urlparse(configured_origin)
+                origin_port = parsed_origin.port
+            except ValueError as exc:
+                raise ValueError(
+                    "FOUNDER_TOOLS_LINK_ORIGINS contains an invalid origin"
+                ) from exc
+            hostname = str(parsed_origin.hostname or "")
+            normalized_hostname = hostname.lower()
+            is_localhost = normalized_hostname in {"localhost", "127.0.0.1", "::1"}
+            if (
+                not hostname
+                or hostname.endswith(".")
+                or parsed_origin.username
+                or parsed_origin.password
+                or parsed_origin.query
+                or parsed_origin.fragment
+                or parsed_origin.path not in {"", "/"}
+                or origin_port is None and parsed_origin.netloc.endswith(":")
+            ):
+                raise ValueError(
+                    "FOUNDER_TOOLS_LINK_ORIGINS contains an invalid origin"
+                )
+            try:
+                hostname.encode("ascii")
+            except UnicodeEncodeError as exc:
+                raise ValueError(
+                    "FOUNDER_TOOLS_LINK_ORIGINS must use ASCII hostnames"
+                ) from exc
+            if is_localhost:
+                if self.is_production or parsed_origin.scheme != "http":
+                    raise ValueError(
+                        "Founder Tools localhost origins are allowed only over HTTP outside production"
+                    )
+            elif parsed_origin.scheme != "https" or origin_port not in {None, 443}:
+                raise ValueError(
+                    "Founder Tools origins must use HTTPS on the default port"
+                )
         if self.VICTOR_AI_SKILL_ENABLED:
             if self.ROO_SURFACE != "public":
                 raise ValueError(

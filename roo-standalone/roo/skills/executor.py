@@ -12,9 +12,9 @@ import json
 import re
 import asyncio
 import calendar
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlsplit
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Optional, List
 from difflib import SequenceMatcher
 from uuid import uuid4
@@ -12414,25 +12414,109 @@ Chunk {index} source: {label}
         }
 
     @staticmethod
-    def _is_safe_founder_account_link_url(link_url: str) -> bool:
-        parsed = urlsplit(link_url)
+    def _url_origin_parts(raw_url: str) -> Optional[tuple[str, str, int]]:
         try:
+            parsed = urlsplit(raw_url)
             port = parsed.port
-        except ValueError:
+        except (TypeError, ValueError):
+            return None
+        hostname = str(parsed.hostname or "")
+        if (
+            not hostname
+            or hostname.endswith(".")
+            or parsed.username
+            or parsed.password
+            or parsed.path not in {"", "/"}
+            or parsed.query
+            or parsed.fragment
+            or "\\" in str(raw_url)
+        ):
+            return None
+        try:
+            hostname.encode("ascii")
+        except UnicodeEncodeError:
+            return None
+        scheme = parsed.scheme.lower()
+        if scheme == "https":
+            return scheme, hostname.lower(), port or 443
+        if scheme == "http":
+            return scheme, hostname.lower(), port or 80
+        return None
+
+    @classmethod
+    def _is_safe_founder_account_link_url(cls, link_url: str, *, settings: Any) -> bool:
+        if not link_url or "\\" in link_url or any(ord(char) < 32 for char in link_url):
             return False
-        if not parsed.hostname or parsed.username or parsed.password:
+        try:
+            parsed = urlsplit(link_url)
+            port = parsed.port
+            query = parse_qsl(
+                parsed.query,
+                keep_blank_values=True,
+                strict_parsing=True,
+            )
+        except (TypeError, ValueError):
             return False
-        if parsed.scheme == "https" and port in {None, 443}:
-            return True
+        hostname = str(parsed.hostname or "")
+        if (
+            not hostname
+            or hostname.endswith(".")
+            or parsed.username
+            or parsed.password
+            or parsed.path != "/founder-tools/link-roo"
+            or parsed.fragment
+            or len(query) != 1
+            or query[0][0] != "token"
+            or not query[0][1]
+            or not re.fullmatch(r"[A-Za-z0-9_-]{32,128}", query[0][1])
+        ):
+            return False
+        try:
+            hostname.encode("ascii")
+        except UnicodeEncodeError:
+            return False
+
+        scheme = parsed.scheme.lower()
+        effective_port = port or (443 if scheme == "https" else 80 if scheme == "http" else -1)
+        requested_origin = (scheme, hostname.lower(), effective_port)
+        allowed_origins = {
+            origin
+            for configured_origin in (
+                getattr(settings, "founder_tools_link_origins", frozenset()) or frozenset()
+            )
+            if (origin := cls._url_origin_parts(str(configured_origin))) is not None
+        }
+        if requested_origin not in allowed_origins:
+            return False
+
+        is_localhost = requested_origin[1] in {"localhost", "127.0.0.1", "::1"}
+        if is_localhost:
+            return not bool(getattr(settings, "is_production", False)) and scheme == "http"
         return (
-            parsed.scheme == "http"
-            and parsed.hostname.lower() in {"localhost", "127.0.0.1", "::1"}
+            scheme == "https"
+            and effective_port == 443
         )
+
+    @staticmethod
+    def _founder_account_link_expiry_timestamp(raw_expires_at: Any) -> Optional[int]:
+        try:
+            expires_at = datetime.fromisoformat(
+                str(raw_expires_at or "").strip().replace("Z", "+00:00")
+            )
+        except ValueError:
+            return None
+        if expires_at.tzinfo is None:
+            return None
+        expires_at = expires_at.astimezone(timezone.utc)
+        if expires_at <= datetime.now(timezone.utc):
+            return None
+        return int(expires_at.timestamp())
 
     def _founder_account_link_button_response(
         self,
         *,
         link_url: str,
+        expires_at_timestamp: int,
         user_id: str,
         channel_id: Optional[str],
     ) -> dict:
@@ -12470,7 +12554,8 @@ Chunk {index} source: {label}
                     {
                         "type": "mrkdwn",
                         "text": (
-                            "This private, one-time link expires in 30 minutes. "
+                            "This private, one-time Founder Tools link expires "
+                            f"<!date^{expires_at_timestamp}^{{date_short_pretty}} at {{time}}|at its stated expiry time>. "
                             "Only continue if you requested it."
                         ),
                     }
@@ -12487,7 +12572,8 @@ Chunk {index} source: {label}
                 return {
                     "message": (
                         f"I couldn't open a private Slack DM for <@{user_id}>. "
-                        "Please DM Roo `link` and I'll create a fresh account-link button there."
+                        "Please DM Roo `link` and I'll create a fresh Founder Tools "
+                        "account-link button there."
                     ),
                     "data": {
                         **response_data,
@@ -12497,7 +12583,8 @@ Chunk {index} source: {label}
                 }
             return {
                 "message": (
-                    f"I sent <@{user_id}> a private account-link button. Check your DMs."
+                    f"I sent <@{user_id}> a private Founder Tools account-link button. "
+                    "Check your DMs."
                 ),
                 "data": response_data,
                 "suppress_post": False,
@@ -13991,7 +14078,7 @@ Chunk {index} source: {label}
         admin_checkin: bool,
         discount_applied: bool = False,
         include_balance: bool = True,
-        founder_tools_explicitly_linked: bool = False,
+        founder_tools_explicitly_linked: Optional[bool] = None,
     ) -> str:
         point_word = "point" if cost == 1 else "points"
         if admin_checkin:
@@ -14024,7 +14111,7 @@ Chunk {index} source: {label}
                 "https://mlai.au/platform/login?app=founder-tools&next=/founder-tools"
             )
 
-            if not founder_tools_explicitly_linked:
+            if founder_tools_explicitly_linked is False:
                 message += (
                     "\n\nAlready submitted using a different MLAI account? Type "
                     "`@Roo link` to securely link your accounts for future eligible "
@@ -14314,8 +14401,11 @@ Chunk {index} source: {label}
         # The backend is the single source of truth for whether the
         # monthly-update discount applied; we only render the nudge off this.
         discount_applied = bool(result.get("monthly_update_discount_applied", False))
-        founder_tools_explicitly_linked = bool(
-            result.get("founder_tools_explicitly_linked", False)
+        raw_explicit_link_state = result.get("founder_tools_explicitly_linked")
+        founder_tools_explicitly_linked = (
+            raw_explicit_link_state
+            if isinstance(raw_explicit_link_state, bool)
+            else None
         )
         from roo.clients.mlai_backend import MLAIBackendUnavailableError
 
@@ -14343,7 +14433,8 @@ Chunk {index} source: {label}
             admin_checkin=admin_checkin,
             discount_applied=discount_applied,
             include_balance=False,
-            founder_tools_explicitly_linked=founder_tools_explicitly_linked,
+            # Cross-account guidance belongs in the member's private DM.
+            founder_tools_explicitly_linked=None,
         )
         return self._deliver_personal_points_message(
             recipient_user_id=target_user_id,
@@ -14394,13 +14485,23 @@ Chunk {index} source: {label}
 
             if result.get("status") == "already_linked":
                 return (
-                    "Your Roo Slack account is already linked to a Founder Tools account."
+                    "Your Roo Slack account is already linked to a Founder Tools account. "
+                    "If that is the wrong account, contact the MLAI team for help; Roo "
+                    "cannot relink accounts yet."
                 )
 
             link_url = str(result.get("link_url") or "").strip()
+            expires_at_timestamp = self._founder_account_link_expiry_timestamp(
+                result.get("expires_at")
+            )
+            settings = get_settings()
             if (
                 result.get("status") != "link_required"
-                or not self._is_safe_founder_account_link_url(link_url)
+                or expires_at_timestamp is None
+                or not self._is_safe_founder_account_link_url(
+                    link_url,
+                    settings=settings,
+                )
             ):
                 return (
                     "I couldn't create a trusted Founder Tools account link right now. "
@@ -14409,6 +14510,7 @@ Chunk {index} source: {label}
 
             return self._founder_account_link_button_response(
                 link_url=link_url,
+                expires_at_timestamp=expires_at_timestamp,
                 user_id=user_id,
                 channel_id=channel_id,
             )

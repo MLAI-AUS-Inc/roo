@@ -47,6 +47,12 @@ jobs:
             roo/tests/test_slack_security.py \
             roo/tests/test_backend_identity.py \
             roo/tests/test_mlai_backend_client.py \
+            roo/tests/test_founder_account_link.py \
+            roo/tests/test_agent_routing.py \
+            roo/tests/test_points_requests.py::test_book_coworking_nudges_founder_when_charged_standard_price \
+            roo/tests/test_points_requests.py::test_book_coworking_suppresses_link_nudge_when_link_state_is_missing \
+            roo/tests/test_points_requests.py::test_book_coworking_omits_nudge_when_discount_applied \
+            roo/tests/test_points_requests.py::test_book_coworking_omits_link_nudge_when_accounts_are_linked \
             roo/tests/test_jobs_scheduler.py \
             roo/tests/test_private_points_delivery.py \
             roo/tests/test_points_flex.py \
@@ -221,6 +227,7 @@ jobs:
             upsert_env "ROO_POINTS_TOPUP_BUTTONS_ENABLED" "true"
             upsert_env "ROO_POINTS_STRIPE_CHECKOUT_HOSTS" "checkout.stripe.com"
             upsert_env "MEETING_ROOM_BOOKING_ENABLED" "$MEETING_ROOM_BOOKING_ENABLED"
+            upsert_env "FOUNDER_TOOLS_LINK_ORIGINS" "https://mlai.au"
             
             # Restart the app
             docker compose up -d --build --remove-orphans

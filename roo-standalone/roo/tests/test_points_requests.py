@@ -3742,9 +3742,16 @@ async def test_book_coworking_nudges_founder_when_charged_standard_price(tmp_pat
             return {"balance": 12}
 
     executor = SkillExecutor()
+    delivered = {}
     monkeypatch.setattr("roo.utils.get_current_date", lambda: date(2026, 5, 4))
     monkeypatch.setattr(executor_module, "get_coworking_intent_store", lambda: store)
-    monkeypatch.setattr(executor_module, "send_dm", lambda *args, **kwargs: {"ok": True})
+    monkeypatch.setattr(
+        executor_module,
+        "send_dm",
+        lambda user_id, text, **kwargs: (
+            delivered.update({"user_id": user_id, "text": text}) or {"ok": True}
+        ),
+    )
 
     result = await executor._handle_points_action(
         client=FakeCoworkingClient(),
@@ -3762,8 +3769,54 @@ async def test_book_coworking_nudges_founder_when_charged_standard_price(tmp_pat
     assert "Balance remaining" not in result["message"]
     assert "may qualify for 4-point coworking" in result["message"]
     assert "app=founder-tools&next=/founder-tools" in result["message"]
-    assert "\n\nAlready submitted using a different MLAI account?" in result["message"]
-    assert "`@Roo link`" in result["message"]
+    assert "@Roo link" not in result["message"]
+    assert "\n\nAlready submitted using a different MLAI account?" in delivered["text"]
+    assert "`@Roo link`" in delivered["text"]
+
+
+@pytest.mark.asyncio
+async def test_book_coworking_suppresses_link_nudge_when_link_state_is_missing(
+    tmp_path,
+    monkeypatch,
+):
+    store = coworking_module.CoworkingBookingIntentStore(tmp_path / "intents.db")
+    delivered = {}
+
+    class FakeCoworkingClient:
+        async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None):
+            return {
+                "points_cost": 8,
+                "monthly_update_discount_applied": False,
+            }
+
+        async def get_balance(self, slack_user_id):
+            return {"balance": 12}
+
+    executor = SkillExecutor()
+    monkeypatch.setattr("roo.utils.get_current_date", lambda: date(2026, 5, 4))
+    monkeypatch.setattr(executor_module, "get_coworking_intent_store", lambda: store)
+    monkeypatch.setattr(
+        executor_module,
+        "send_dm",
+        lambda user_id, text, **kwargs: (
+            delivered.update({"user_id": user_id, "text": text}) or {"ok": True}
+        ),
+    )
+
+    result = await executor._handle_points_action(
+        client=FakeCoworkingClient(),
+        action="book_coworking",
+        params={"date": "2026-05-04"},
+        text="book coworking today",
+        user_id="U123",
+        channel_id="C123",
+        thread_ts="111.222",
+        skill=SimpleNamespace(name="mlai-points"),
+    )
+
+    assert "may qualify for 4-point coworking" in result["message"]
+    assert "@Roo link" not in result["message"]
+    assert "@Roo link" not in delivered["text"]
 
 
 @pytest.mark.asyncio
