@@ -276,6 +276,33 @@ async def test_start_founder_account_link_uses_current_slack_identity(monkeypatc
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(201, json=[]),
+        httpx.Response(201, content=b"not-json"),
+    ],
+)
+async def test_start_founder_account_link_rejects_malformed_success_payloads(
+    monkeypatch,
+    response,
+):
+    async def fake_request(method, endpoint, **kwargs):
+        response.request = httpx.Request(method, f"https://backend.test{endpoint}")
+        return response
+
+    client = MLAIBackendClient(
+        base_url="https://backend.test",
+        api_key="roo-api-key",
+        internal_api_key="roo-api-key",
+    )
+    monkeypatch.setattr(client, "_request", fake_request)
+
+    with pytest.raises(MLAIBackendUnavailableError):
+        await client.start_founder_account_link("U123")
+
+
+@pytest.mark.asyncio
 async def test_get_data_catalog_uses_canonical_endpoint(monkeypatch):
     captured = {}
 

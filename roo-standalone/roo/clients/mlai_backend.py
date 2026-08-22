@@ -2325,7 +2325,17 @@ class MLAIBackendClient:
             circuit_breaker=True,
         )
         self._raise_for_status_or_backend_unavailable(response)
-        return response.json()
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise MLAIBackendUnavailableError(
+                "mlai-backend returned an invalid account-link response"
+            ) from exc
+        if not isinstance(payload, dict):
+            raise MLAIBackendUnavailableError(
+                "mlai-backend returned an invalid account-link response"
+            )
+        return payload
 
     async def get_github_auth_url(self, slack_user_id: str, domain: Optional[str] = None) -> dict:
         """Get the GitHub OAuth URL for a user from the backend."""

@@ -162,7 +162,7 @@ class Settings(BaseSettings):
     ROO_POINTS_TOPUP_BUTTONS_ENABLED: bool = False
     ROO_POINTS_STRIPE_CHECKOUT_HOSTS: str = "checkout.stripe.com"
     MEETING_ROOM_BOOKING_ENABLED: bool = False
-    FOUNDER_TOOLS_LINK_ORIGINS: str = "https://mlai.au"
+    FOUNDER_TOOLS_LINK_ORIGINS: str = ""
     BOOST_LINK_LOVE_ENABLED: bool = True
     BOOST_LINK_LOVE_CHANNEL_NAME: str = "boost-my-startup"
     BOOST_LINK_LOVE_CHANNEL_ID: str = ""
@@ -354,8 +354,14 @@ class Settings(BaseSettings):
             raise ValueError(
                 "ROO_POINTS_STRIPE_CHECKOUT_HOSTS is required when top-up buttons are enabled"
             )
-        if not self.founder_tools_link_origins:
-            raise ValueError("FOUNDER_TOOLS_LINK_ORIGINS must contain an allowed origin")
+        if (
+            self.ROO_SURFACE == "public"
+            and self.is_production
+            and not self.founder_tools_link_origins
+        ):
+            raise ValueError(
+                "FOUNDER_TOOLS_LINK_ORIGINS must contain an allowed origin in production"
+            )
         for configured_origin in self.founder_tools_link_origins:
             try:
                 parsed_origin = urlparse(configured_origin)

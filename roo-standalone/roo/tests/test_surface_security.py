@@ -64,6 +64,12 @@ def test_founder_tools_link_origins_are_validated_by_environment():
     with pytest.raises(ValidationError, match="invalid origin"):
         settings(FOUNDER_TOOLS_LINK_ORIGINS="https://mlai.au/path")
 
+    with pytest.raises(ValidationError, match="allowed origin in production"):
+        settings(
+            ROO_ENVIRONMENT="production",
+            FOUNDER_TOOLS_LINK_ORIGINS="",
+        )
+
 
 def test_victor_ai_skill_is_disabled_by_default_and_uses_channel_name_only():
     configured = settings()
@@ -179,6 +185,7 @@ def test_internal_admin_worker_has_no_slack_or_public_runtime_credentials():
         OPENAI_API_KEY=None,
         ROO_ENVIRONMENT="production",
         ROO_SURFACE="admin",
+        FOUNDER_TOOLS_LINK_ORIGINS="",
         ROO_ADMIN_INTERNAL_ONLY=True,
         ROO_ENABLED_SKILLS="admin-brain",
         ORG_BRAIN_ENABLED=True,

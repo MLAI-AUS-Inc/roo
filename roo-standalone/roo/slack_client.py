@@ -3,8 +3,10 @@ Slack Client Utilities
 
 Handles Slack API interactions including posting messages and user lookups.
 """
-from typing import Optional, Dict, Any
+import re
 from functools import lru_cache
+from typing import Optional, Dict, Any
+
 import httpx
 
 from .config import get_settings
@@ -549,7 +551,15 @@ def open_dm(user_id: str, *, raise_on_error: bool = False) -> Optional[str]:
     try:
         response = client.conversations_open(users=user_id)
         if response.get("ok"):
-            return response["channel"]["id"]
+            channel = response.get("channel")
+            channel_id = (
+                str(channel.get("id") or "").strip()
+                if isinstance(channel, dict)
+                else ""
+            )
+            if re.fullmatch(r"D[A-Z0-9]+", channel_id):
+                return channel_id
+            print("❌ Slack conversations.open returned a non-DM channel")
         return None
     except Exception as e:
         print(f"❌ Failed to open DM with {user_id}: {e}")

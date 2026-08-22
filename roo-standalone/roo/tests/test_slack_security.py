@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from roo import main as main_module
+from roo import slack_client as slack_client_module
 from roo.config import Settings, get_settings
 from roo.slack_security import (
     SlackRequestReceiptStore,
@@ -264,3 +265,59 @@ def test_internal_mention_endpoint_is_disabled_or_bearer_authenticated(tmp_path,
         headers={"Authorization": "Bearer internal-mention-key"},
     )
     assert admin_response.status_code == 404
+
+
+@pytest.mark.parametrize(
+    "channel_payload",
+    [
+        {"id": "CPUBLIC123"},
+        {"id": "GPRIVATE123"},
+        {"id": ""},
+        None,
+        "DFAKE123",
+    ],
+)
+def test_send_dm_never_posts_to_a_non_dm_channel(monkeypatch, channel_payload):
+    class FakeSlackClient:
+        def conversations_open(self, **kwargs):
+            return {"ok": True, "channel": channel_payload}
+
+    posted = []
+    monkeypatch.setattr(
+        slack_client_module,
+        "get_slack_client",
+        lambda: FakeSlackClient(),
+    )
+    monkeypatch.setattr(
+        slack_client_module,
+        "post_message",
+        lambda *args, **kwargs: posted.append((args, kwargs)),
+    )
+
+    result = slack_client_module.send_dm("U123", "private")
+
+    assert result is None
+    assert posted == []
+
+
+def test_send_dm_posts_only_after_validating_a_dm_channel(monkeypatch):
+    class FakeSlackClient:
+        def conversations_open(self, **kwargs):
+            return {"ok": True, "channel": {"id": "DPRIVATE123"}}
+
+    posted = []
+    monkeypatch.setattr(
+        slack_client_module,
+        "get_slack_client",
+        lambda: FakeSlackClient(),
+    )
+    monkeypatch.setattr(
+        slack_client_module,
+        "post_message",
+        lambda *args, **kwargs: posted.append((args, kwargs)) or {"ok": True},
+    )
+
+    result = slack_client_module.send_dm("U123", "private", blocks=[])
+
+    assert result == {"ok": True}
+    assert posted == [(('DPRIVATE123', 'private'), {"blocks": []})]

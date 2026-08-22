@@ -41,14 +41,16 @@ jobs:
           SLACK_BOT_TOKEN: test
           SLACK_SIGNING_SECRET: test
           OPENAI_API_KEY: test
+          FOUNDER_TOOLS_LINK_ORIGINS: https://mlai.au
         run: |
+          # Several legacy suites install import-time module stubs. Keep the
+          # surface boundary gate isolated so collection order cannot weaken it.
+          python -m pytest roo/tests/test_surface_security.py -q
           python -m pytest \
-            roo/tests/test_surface_security.py \
             roo/tests/test_slack_security.py \
             roo/tests/test_backend_identity.py \
             roo/tests/test_mlai_backend_client.py \
             roo/tests/test_founder_account_link.py \
-            roo/tests/test_agent_routing.py \
             roo/tests/test_points_requests.py::test_book_coworking_nudges_founder_when_charged_standard_price \
             roo/tests/test_points_requests.py::test_book_coworking_suppresses_link_nudge_when_link_state_is_missing \
             roo/tests/test_points_requests.py::test_book_coworking_omits_nudge_when_discount_applied \
@@ -82,6 +84,10 @@ jobs:
             roo/tests/test_victor_ai_applications.py \
             bridge/tests \
             -q
+          # This legacy module installs an executor stub at import time, so run
+          # it in a separate process to keep the security suite isolated.
+          python -m pytest roo/tests/test_agent_routing.py -q
+          python -m pytest roo/tests/test_routing_eval_gate.py -q
           python -m compileall -q roo bridge
 
       - name: Validate production Compose configuration

@@ -14,22 +14,35 @@ executor_module = importlib.import_module("roo.skills.executor")
 MLAIBackendUnavailableError = backend_module.MLAIBackendUnavailableError
 SkillExecutor = executor_module.SkillExecutor
 LINK_TOKEN = "A" * 43
+_DEFAULT_RESPONSE = object()
 
 
 def future_expiry() -> str:
     return (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat()
 
 
+@pytest.fixture(autouse=True)
+def trusted_founder_tools_origin(monkeypatch):
+    monkeypatch.setattr(
+        executor_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            founder_tools_link_origins={"https://mlai.au"},
+            is_production=False,
+        ),
+    )
+
+
 class FakeLinkClient:
-    def __init__(self, response=None, error=None):
-        self.response = response or {
+    def __init__(self, response=_DEFAULT_RESPONSE, error=None):
+        self.response = {
             "status": "link_required",
             "link_url": (
                 "https://mlai.au/founder-tools/link-roo?"
                 f"token={LINK_TOKEN}"
             ),
             "expires_at": future_expiry(),
-        }
+        } if response is _DEFAULT_RESPONSE else response
         self.error = error
         self.slack_user_ids = []
 
@@ -109,6 +122,41 @@ async def test_public_link_sends_private_button_and_posts_token_free_ack(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_missing_channel_context_never_returns_the_private_button(monkeypatch):
+    delivered = {}
+    client = FakeLinkClient()
+    monkeypatch.setattr(
+        executor_module,
+        "send_dm",
+        lambda user_id, text, **kwargs: (
+            delivered.update({"user_id": user_id, "text": text, **kwargs})
+            or {"ok": True}
+        ),
+    )
+
+    result = await execute_link(client, channel_id=None)
+
+    assert result["data"]["delivery"] == "direct_message"
+    assert "blocks" not in result
+    assert LINK_TOKEN not in result["message"]
+    assert delivered["blocks"][1]["elements"][0]["url"].endswith(
+        f"token={LINK_TOKEN}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_malformed_dm_response_fails_without_exposing_the_link(monkeypatch):
+    client = FakeLinkClient()
+    monkeypatch.setattr(executor_module, "send_dm", lambda *args, **kwargs: "ok")
+
+    result = await execute_link(client, channel_id="C123")
+
+    assert result["data"]["delivery_failed"] is True
+    assert LINK_TOKEN not in result["message"]
+    assert "https://" not in result["message"]
+
+
+@pytest.mark.asyncio
 async def test_public_link_dm_failure_never_exposes_url(monkeypatch):
     client = FakeLinkClient()
     monkeypatch.setattr(executor_module, "send_dm", lambda *args, **kwargs: None)
@@ -123,21 +171,73 @@ async def test_public_link_dm_failure_never_exposes_url(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_public_link_dm_exception_never_exposes_url(monkeypatch):
+    client = FakeLinkClient()
+
+    def fail_dm(*args, **kwargs):
+        raise RuntimeError("Slack transport failed")
+
+    monkeypatch.setattr(executor_module, "send_dm", fail_dm)
+
+    result = await execute_link(client, channel_id="C123")
+
+    assert result["data"]["delivery_failed"] is True
+    assert "DM Roo `link`" in result["message"]
+    assert LINK_TOKEN not in result["message"]
+    assert "https://" not in result["message"]
+
+
+@pytest.mark.asyncio
 async def test_already_linked_response_has_no_button(monkeypatch):
     client = FakeLinkClient(response={"status": "already_linked"})
+    delivered = {}
     monkeypatch.setattr(
         executor_module,
         "send_dm",
-        lambda *args, **kwargs: pytest.fail("Already-linked users need no DM"),
+        lambda user_id, text, **kwargs: (
+            delivered.update({"user_id": user_id, "text": text, **kwargs})
+            or {"ok": True}
+        ),
     )
 
     result = await execute_link(client, channel_id="C123")
 
-    assert result == (
+    assert result["message"] == (
+        "I sent <@U123> a private Founder Tools account-link status. Check your DMs."
+    )
+    assert delivered["user_id"] == "U123"
+    assert delivered["text"] == (
         "Your Roo Slack account is already linked to a Founder Tools account. "
         "If that is the wrong account, contact the MLAI team for help; Roo "
         "cannot relink accounts yet."
     )
+
+
+@pytest.mark.asyncio
+async def test_already_linked_response_is_direct_inside_roo_dm(monkeypatch):
+    client = FakeLinkClient(response={"status": "already_linked"})
+    monkeypatch.setattr(
+        executor_module,
+        "send_dm",
+        lambda *args, **kwargs: pytest.fail("An existing DM must use its current channel"),
+    )
+
+    result = await execute_link(client, channel_id="D123")
+
+    assert "already linked to a Founder Tools account" in result
+    assert "contact the MLAI team" in result
+
+
+@pytest.mark.asyncio
+async def test_already_linked_dm_failure_keeps_status_private(monkeypatch):
+    client = FakeLinkClient(response={"status": "already_linked"})
+    monkeypatch.setattr(executor_module, "send_dm", lambda *args, **kwargs: None)
+
+    result = await execute_link(client, channel_id="C123")
+
+    assert result["data"]["delivery_failed"] is True
+    assert "Please DM Roo `link`" in result["message"]
+    assert "already linked" not in result["message"]
 
 
 @pytest.mark.asyncio
@@ -264,3 +364,45 @@ async def test_unknown_slack_user_returns_registration_guidance():
     result = await execute_link(client)
 
     assert "points command first" in result
+
+
+@pytest.mark.asyncio
+async def test_generic_backend_404_is_not_misreported_as_unknown_user():
+    request = httpx.Request(
+        "POST",
+        "https://backend.test/api/v1/users/slack-founder-link/start/",
+    )
+    response = httpx.Response(404, request=request, json={"detail": "Not found."})
+    client = FakeLinkClient(
+        error=httpx.HTTPStatusError(
+            "not found",
+            request=request,
+            response=response,
+        )
+    )
+
+    result = await execute_link(client)
+
+    assert "points command first" not in result
+    assert "try `link` again shortly" in result
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("payload", [None, [], "link_required"])
+async def test_malformed_success_payload_is_rejected_without_delivery(
+    monkeypatch,
+    payload,
+):
+    client = FakeLinkClient(response=payload)
+    monkeypatch.setattr(
+        executor_module,
+        "send_dm",
+        lambda *args, **kwargs: pytest.fail("Malformed responses must not be delivered"),
+    )
+
+    result = await execute_link(client, channel_id="C123")
+
+    assert result == (
+        "I couldn't create a trusted Founder Tools account link right now. "
+        "Please try `link` again shortly."
+    )

@@ -12566,9 +12566,16 @@ Chunk {index} source: {label}
             "action": "link_founder_account",
             "delivery": "direct_message",
         }
-        if channel_id and not channel_id.startswith("D"):
-            dm_response = send_dm(user_id, message, blocks=blocks)
-            if not dm_response or not dm_response.get("ok"):
+        if not str(channel_id or "").startswith("D"):
+            try:
+                dm_response = send_dm(user_id, message, blocks=blocks)
+            except Exception as exc:
+                print(
+                    "Founder Tools account-link DM failed "
+                    f"exc_type={exc.__class__.__name__}"
+                )
+                dm_response = None
+            if not isinstance(dm_response, dict) or not dm_response.get("ok"):
                 return {
                     "message": (
                         f"I couldn't open a private Slack DM for <@{user_id}>. "
@@ -12593,6 +12600,49 @@ Chunk {index} source: {label}
             "message": message,
             "blocks": blocks,
             "data": response_data,
+        }
+
+    @staticmethod
+    def _founder_account_link_status_response(
+        *,
+        message: str,
+        user_id: str,
+        channel_id: Optional[str],
+    ) -> Any:
+        if str(channel_id or "").startswith("D"):
+            return message
+
+        try:
+            dm_response = send_dm(user_id, message)
+        except Exception as exc:
+            print(
+                "Founder Tools account-link status DM failed "
+                f"exc_type={exc.__class__.__name__}"
+            )
+            dm_response = None
+        if not isinstance(dm_response, dict) or not dm_response.get("ok"):
+            return {
+                "message": (
+                    f"I couldn't open a private Slack DM for <@{user_id}>. "
+                    "Please DM Roo `link` to check your Founder Tools account-link status."
+                ),
+                "data": {
+                    "action": "link_founder_account",
+                    "delivery": "direct_message",
+                    "delivery_failed": True,
+                },
+                "suppress_post": False,
+            }
+        return {
+            "message": (
+                f"I sent <@{user_id}> a private Founder Tools account-link status. "
+                "Check your DMs."
+            ),
+            "data": {
+                "action": "link_founder_account",
+                "delivery": "direct_message",
+            },
+            "suppress_post": False,
         }
 
     def _normalize_points_routing_text(self, text: str) -> str:
@@ -14473,7 +14523,14 @@ Chunk {index} source: {label}
                     "Please try `link` again shortly."
                 )
             except httpx.HTTPStatusError as exc:
-                if exc.response.status_code == 404:
+                try:
+                    error_code = str(exc.response.json().get("code") or "")
+                except (AttributeError, ValueError):
+                    error_code = ""
+                if (
+                    exc.response.status_code == 404
+                    and error_code == "slack_user_not_found"
+                ):
                     return (
                         "I couldn't find your Roo Points account yet. "
                         "Please try a points command first, then send `link` again."
@@ -14483,11 +14540,21 @@ Chunk {index} source: {label}
                     "Please try `link` again shortly."
                 )
 
-            if result.get("status") == "already_linked":
+            if not isinstance(result, dict):
                 return (
-                    "Your Roo Slack account is already linked to a Founder Tools account. "
-                    "If that is the wrong account, contact the MLAI team for help; Roo "
-                    "cannot relink accounts yet."
+                    "I couldn't create a trusted Founder Tools account link right now. "
+                    "Please try `link` again shortly."
+                )
+
+            if result.get("status") == "already_linked":
+                return self._founder_account_link_status_response(
+                    message=(
+                        "Your Roo Slack account is already linked to a Founder Tools account. "
+                        "If that is the wrong account, contact the MLAI team for help; Roo "
+                        "cannot relink accounts yet."
+                    ),
+                    user_id=user_id,
+                    channel_id=channel_id,
                 )
 
             link_url = str(result.get("link_url") or "").strip()
