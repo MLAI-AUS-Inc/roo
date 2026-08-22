@@ -138,15 +138,26 @@ def test_interval_parser_uses_melbourne_time_and_one_hour_default():
     assert ends_at == datetime(2026, 8, 12, 15, tzinfo=MELBOURNE)
 
 
-def test_agent_cleaning_preserves_labeled_target_mention(monkeypatch):
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    (
+        (
+            "<@UROO> book <@UTARGET|Other Member> tomorrow at 2pm",
+            "book <@UTARGET> tomorrow at 2pm",
+        ),
+        (
+            "<@UROO> connect me with someone like <@UTARGET|Other Member>",
+            "connect me with someone like <@UTARGET>",
+        ),
+    ),
+)
+def test_agent_cleaning_preserves_labeled_mentions(monkeypatch, text, expected):
     monkeypatch.setattr("roo.slack_client.get_bot_user_id", lambda: "UROO")
     agent = object.__new__(RooAgent)
 
-    cleaned = agent._clean_mention(
-        "<@UROO> book <@UTARGET|Other Member> tomorrow at 2pm"
-    )
+    cleaned = agent._clean_mention(text)
 
-    assert cleaned == "book <@UTARGET> tomorrow at 2pm"
+    assert cleaned == expected
 
 
 def test_interval_parser_handles_ranges_and_cross_midnight():
