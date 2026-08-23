@@ -16,6 +16,7 @@ from uuid import uuid4
 from .meeting_room_booking import (
     BOOK_ACTION_ID,
     CANCEL_ACTION_ID,
+    CHOOSE_ROOM_ACTION_ID,
     MeetingRoomInputError,
     parse_action_value,
 )
@@ -31,6 +32,7 @@ MAX_ACTION_AGE_SECONDS = 24 * 60 * 60
 @dataclass(frozen=True)
 class MeetingRoomActionResult:
     outcome: Optional[str] = None
+    blocks: Optional[list[dict[str, Any]]] = None
     needs_attention: bool = False
 
 
@@ -56,6 +58,8 @@ def _canonical_action(
     parsed = parse_action_value(action_value, expected_action=action_id)
     if action_id == BOOK_ACTION_ID:
         action_key = f"book:{parsed['client_request_id']}"
+    elif action_id == CHOOSE_ROOM_ACTION_ID:
+        action_key = f"choose:{parsed['selection_id']}"
     elif action_id == CANCEL_ACTION_ID:
         action_key = (
             f"cancel:{parsed['owner_slack_user_id']}:{parsed['booking_id']}"
@@ -88,8 +92,16 @@ class MeetingRoomActionStore:
             isolation_level=None,
         )
         connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA journal_mode=WAL")
         connection.execute("PRAGMA busy_timeout=2000")
+        for attempt in range(20):
+            try:
+                connection.execute("PRAGMA journal_mode=WAL")
+                break
+            except sqlite3.OperationalError as exc:
+                if "locked" not in str(exc).lower() or attempt == 19:
+                    connection.close()
+                    raise
+                time.sleep(0.05)
         return connection
 
     def _ensure_schema(self) -> None:
@@ -265,7 +277,11 @@ class MeetingRoomActionStore:
                 ):
                     connection.rollback()
                     raise MeetingRoomInputError(
-                        "invalid_action",
+                        (
+                            "room_already_selected"
+                            if action_id == CHOOSE_ROOM_ACTION_ID
+                            else "invalid_action"
+                        ),
                         "This action conflicts with an earlier request.",
                     )
                 lease_is_active = (

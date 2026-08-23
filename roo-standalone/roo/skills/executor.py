@@ -102,9 +102,12 @@ from ..meeting_room_booking import (
     cancellation_selection,
     format_interval as format_meeting_room_interval,
     parse_backend_timestamp,
+    room_selection_prompt,
+    room_slug_from_text,
     resolve_availability_interval as resolve_meeting_room_availability_interval,
     resolve_interval as resolve_meeting_room_interval,
     resolve_local_date as resolve_meeting_room_date,
+    supported_active_rooms,
 )
 
 
@@ -462,8 +465,16 @@ class SkillExecutor:
         action: Optional[str] = None,
     ) -> dict:
         data = {"action": action, "delivery": "direct_message"}
-        if not channel_id or str(channel_id).startswith("D"):
+        if channel_id and str(channel_id).startswith("D"):
             return {"message": message, "blocks": blocks, "data": data}
+        if not channel_id:
+            return {
+                "message": (
+                    "I could not verify a private Slack destination. "
+                    "DM Roo `meeting room` and try again there."
+                ),
+                "data": {**data, "delivery_failed": True},
+            }
         try:
             dm_response = send_dm(user_id, message, blocks=blocks) if blocks else send_dm(user_id, message)
         except Exception:
@@ -559,6 +570,18 @@ class SkillExecutor:
             )
         return "\n".join(lines)
 
+    @classmethod
+    def _format_meeting_room_availability_list(
+        cls,
+        results: list[dict],
+    ) -> str:
+        if not results:
+            return "No meeting rooms are accepting bookings right now."
+        return "\n\n".join(
+            cls._format_meeting_room_availability(result)
+            for result in results
+        )
+
     async def _execute_meeting_room_booking(
         self,
         *,
@@ -612,31 +635,59 @@ class SkillExecutor:
             internal_api_key=settings.ROO_API_KEY,
         )
         try:
+            requested_room_slug = room_slug_from_text(text)
             if action == "check_room_availability":
                 if not self._meeting_room_date_is_present(text, params):
                     raise MeetingRoomInputError(
                         "missing_date",
                         "What date should I check? Try `tomorrow` or `2026-08-14`.",
                     )
+                rooms = supported_active_rooms(await client.list_meeting_rooms())
+                selected_rooms = (
+                    [room for room in rooms if room["slug"] == requested_room_slug]
+                    if requested_room_slug
+                    else rooms
+                )
+                if not selected_rooms:
+                    requested_name = (
+                        "Small Meeting Room"
+                        if requested_room_slug == "small-meeting-room"
+                        else "Big Meeting Room"
+                    )
+                    raise MeetingRoomInputError(
+                        "inactive_room",
+                        f"The {requested_name} is not accepting bookings right now.",
+                    )
+                availability_results = []
                 if self._meeting_room_time_is_present(text, params):
                     starts_at, ends_at = resolve_meeting_room_availability_interval(
                         text,
                         params,
                     )
-                    availability = await client.check_meeting_room_availability(
-                        user_id,
-                        starts_at=starts_at.isoformat(),
-                        ends_at=ends_at.isoformat(),
-                        target_slack_user_id=target_slack_user_id,
-                    )
+                    for room in selected_rooms:
+                        availability_results.append(
+                            await client.check_meeting_room_availability(
+                                user_id,
+                                room_slug=room["slug"],
+                                starts_at=starts_at.isoformat(),
+                                ends_at=ends_at.isoformat(),
+                                target_slack_user_id=target_slack_user_id,
+                            )
+                        )
                 else:
                     local_date = resolve_meeting_room_date(text, params)
-                    availability = await client.check_meeting_room_availability(
-                        user_id,
-                        date=local_date.isoformat(),
-                        target_slack_user_id=target_slack_user_id,
-                    )
-                message = self._format_meeting_room_availability(availability)
+                    for room in selected_rooms:
+                        availability_results.append(
+                            await client.check_meeting_room_availability(
+                                user_id,
+                                room_slug=room["slug"],
+                                date=local_date.isoformat(),
+                                target_slack_user_id=target_slack_user_id,
+                            )
+                        )
+                message = self._format_meeting_room_availability_list(
+                    availability_results
+                )
                 return self._deliver_meeting_room_response(
                     user_id=user_id,
                     channel_id=channel_id,
@@ -646,8 +697,43 @@ class SkillExecutor:
 
             if action == "book_meeting_room":
                 starts_at, ends_at = resolve_meeting_room_interval(text, params)
+                rooms = supported_active_rooms(await client.list_meeting_rooms())
+                if requested_room_slug is None:
+                    selection = room_selection_prompt(
+                        rooms,
+                        owner_slack_user_id=user_id,
+                        starts_at=starts_at,
+                        ends_at=ends_at,
+                        target_slack_user_id=target_slack_user_id,
+                    )
+                    return self._deliver_meeting_room_response(
+                        user_id=user_id,
+                        channel_id=channel_id,
+                        message=selection["message"],
+                        blocks=selection["blocks"],
+                        action=action,
+                    )
+                selected_room = next(
+                    (
+                        room
+                        for room in rooms
+                        if room["slug"] == requested_room_slug
+                    ),
+                    None,
+                )
+                if selected_room is None:
+                    requested_name = (
+                        "Small Meeting Room"
+                        if requested_room_slug == "small-meeting-room"
+                        else "Big Meeting Room"
+                    )
+                    raise MeetingRoomInputError(
+                        "inactive_room",
+                        f"The {requested_name} is not accepting bookings right now.",
+                    )
                 availability = await client.check_meeting_room_availability(
                     user_id,
+                    room_slug=selected_room["slug"],
                     starts_at=starts_at.isoformat(),
                     ends_at=ends_at.isoformat(),
                     target_slack_user_id=target_slack_user_id,
@@ -665,6 +751,7 @@ class SkillExecutor:
                     owner_slack_user_id=user_id,
                     starts_at=starts_at,
                     ends_at=ends_at,
+                    expected_room_slug=selected_room["slug"],
                     target_slack_user_id=target_slack_user_id,
                 )
                 return self._deliver_meeting_room_response(
@@ -686,6 +773,13 @@ class SkillExecutor:
 
             if action == "cancel_meeting_room":
                 bookings = await client.get_my_meeting_room_bookings(user_id)
+                if requested_room_slug:
+                    bookings = [
+                        row
+                        for row in bookings
+                        if str((row.get("room") or {}).get("slug") or "")
+                        == requested_room_slug
+                    ]
                 booking_id = str(params.get("booking_id") or "").strip()
                 if booking_id:
                     bookings = [row for row in bookings if str(row.get("id")) == booking_id]
@@ -743,6 +837,7 @@ class SkillExecutor:
                 message=meeting_room_backend_error_message(
                     exc,
                     target_slack_user_id=target_slack_user_id,
+                    room_slug=requested_room_slug,
                 ),
                 action=action,
             )

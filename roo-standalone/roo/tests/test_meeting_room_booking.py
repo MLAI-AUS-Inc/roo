@@ -28,9 +28,11 @@ from roo.config import Settings, get_settings
 from roo.meeting_room_booking import (
     BOOK_ACTION_ID,
     CANCEL_ACTION_ID,
+    CHOOSE_ROOM_ACTION_ID,
     MeetingRoomInputError,
     build_booking_action_value,
     parse_action_value,
+    room_slug_from_text,
     resolve_interval,
 )
 from roo.skills.executor import SkillExecutor
@@ -59,6 +61,21 @@ class FakeMeetingRoomClient:
         self.bookings = []
         type(self).instances.append(self)
 
+    async def list_meeting_rooms(self):
+        self.calls.append(("rooms", None, {}))
+        return [
+            {
+                "id": "small-room-id",
+                "slug": "small-meeting-room",
+                "name": "Small Meeting Room",
+            },
+            {
+                "id": "big-room-id",
+                "slug": "big-meeting-room",
+                "name": "Big Meeting Room",
+            },
+        ]
+
     async def check_meeting_room_availability(self, slack_user_id, **kwargs):
         self.calls.append(("availability", slack_user_id, kwargs))
         if kwargs.get("starts_at"):
@@ -75,8 +92,14 @@ class FakeMeetingRoomClient:
             cost = None
             requested = None
             bookable = None
+        room_slug = kwargs["room_slug"]
+        room_name = (
+            "Small Meeting Room"
+            if room_slug == "small-meeting-room"
+            else "Big Meeting Room"
+        )
         return {
-            "room": {"id": "room-id", "slug": "meeting-room", "name": "Meeting Room"},
+            "room": {"id": f"{room_slug}-id", "slug": room_slug, "name": room_name},
             "available": True if requested else None,
             "bookable": bookable,
             "requested_interval": requested,
@@ -117,7 +140,10 @@ def _admin_booking_response(starts_at, *, created=True):
             "starts_at": starts_at.isoformat(),
             "ends_at": (starts_at + timedelta(hours=2)).isoformat(),
             "points_cost": 2,
-            "room": {"name": "Meeting Room"},
+            "room": {
+                "slug": "small-meeting-room",
+                "name": "Small Meeting Room",
+            },
         },
     }
 
@@ -143,6 +169,22 @@ def test_interval_parser_uses_melbourne_time_and_one_hour_default():
 
     assert starts_at == datetime(2026, 8, 12, 14, tzinfo=MELBOURNE)
     assert ends_at == datetime(2026, 8, 12, 15, tzinfo=MELBOURNE)
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    (
+        ("book the small room tomorrow", "small-meeting-room"),
+        ("book the small meeting room tomorrow", "small-meeting-room"),
+        ("book the big room tomorrow", "big-meeting-room"),
+        ("book the big meeting room tomorrow", "big-meeting-room"),
+        ("book the large room tomorrow", "big-meeting-room"),
+        ("book either meeting room tomorrow", None),
+        ("compare the small and big rooms tomorrow", None),
+    ),
+)
+def test_room_slug_is_derived_only_from_explicit_message_words(text, expected):
+    assert room_slug_from_text(text) == expected
 
 
 @pytest.mark.parametrize(
@@ -407,7 +449,7 @@ def test_booking_action_payload_is_bound_to_owner_and_expires_in_ten_minutes():
     starts_at = datetime(2026, 8, 12, 14, tzinfo=MELBOURNE)
     value = build_booking_action_value(
         owner_slack_user_id="UOWNER",
-        room_slug="meeting-room",
+        room_slug="small-meeting-room",
         starts_at=starts_at,
         ends_at=starts_at + timedelta(hours=2),
         expected_points_cost=2,
@@ -426,7 +468,7 @@ def test_booking_action_rejects_fractional_preview_cost():
     payload = json.loads(
         build_booking_action_value(
             owner_slack_user_id="UOWNER",
-            room_slug="meeting-room",
+            room_slug="small-meeting-room",
             starts_at=starts_at,
             ends_at=starts_at + timedelta(hours=1.5),
             expected_points_cost=2,
@@ -438,6 +480,19 @@ def test_booking_action_rejects_fractional_preview_cost():
         parse_action_value(
             json.dumps(payload),
             expected_action=BOOK_ACTION_ID,
+        )
+
+
+def test_booking_action_rejects_retired_generic_room():
+    starts_at = datetime(2026, 8, 12, 14, tzinfo=MELBOURNE)
+
+    with pytest.raises(MeetingRoomInputError, match="not supported"):
+        build_booking_action_value(
+            owner_slack_user_id="UOWNER",
+            room_slug="meeting-room",
+            starts_at=starts_at,
+            ends_at=starts_at + timedelta(hours=1),
+            expected_points_cost=1,
         )
 
 
@@ -500,8 +555,52 @@ def test_booking_result_uses_created_flag_for_idempotent_replays():
     assert message.startswith("This booking was already confirmed.")
 
 
+def test_cancellation_result_names_selected_room():
+    starts_at = datetime(2026, 8, 12, 14, tzinfo=MELBOURNE)
+    result = {
+        "cancelled": True,
+        "remaining_balance": 10,
+        "booking": {
+            "starts_at": starts_at.isoformat(),
+            "ends_at": (starts_at + timedelta(hours=1)).isoformat(),
+            "points_cost": 1,
+            "room": {
+                "slug": "big-meeting-room",
+                "name": "Big Meeting Room",
+            },
+        },
+    }
+
+    message = room_module.format_cancellation_result(result)
+
+    assert "*Big Meeting Room* booking" in message
+
+
+def test_cross_room_conflict_error_is_clear_and_names_selected_room():
+    request = httpx.Request("POST", "https://backend.test/meeting-rooms/book/")
+    response = httpx.Response(
+        409,
+        request=request,
+        json={"code": "user_booking_conflict"},
+    )
+    error = httpx.HTTPStatusError(
+        "conflict",
+        request=request,
+        response=response,
+    )
+
+    message = room_module.backend_error_message(
+        error,
+        room_slug="big-meeting-room",
+    )
+
+    assert "another meeting-room booking" in message
+    assert "Big Meeting Room" in message
+    assert "No points were deducted" in message
+
+
 @pytest.mark.asyncio
-async def test_public_booking_request_sends_private_confirmation_without_booking(monkeypatch):
+async def test_public_unspecified_booking_sends_private_room_choices(monkeypatch):
     configured = _settings()
     sent = []
     _patch_executor(monkeypatch, configured)
@@ -513,7 +612,10 @@ async def test_public_booking_request_sends_private_confirmation_without_booking
 
     result = await SkillExecutor()._execute_meeting_room_booking(
         text="book the meeting room tomorrow from 2pm to 4pm",
-        params={"action": "book_meeting_room"},
+        params={
+            "action": "book_meeting_room",
+            "room_slug": "big-meeting-room",
+        },
         user_id="UOWNER",
         channel_id="CPUBLIC",
     )
@@ -521,14 +623,37 @@ async def test_public_booking_request_sends_private_confirmation_without_booking
     assert result["message"] == "I've sent you a private reply about the Meeting Room."
     assert len(sent) == 1
     blocks = sent[0][2]["blocks"]
-    button = blocks[1]["elements"][0]
-    assert button["action_id"] == BOOK_ACTION_ID
-    assert parse_action_value(button["value"], expected_action=BOOK_ACTION_ID)["owner_slack_user_id"] == "UOWNER"
-    assert [call[0] for call in FakeMeetingRoomClient.instances[0].calls] == ["availability"]
+    buttons = blocks[1]["elements"]
+    assert [button["text"]["text"] for button in buttons] == [
+        "Small Meeting Room",
+        "Big Meeting Room",
+    ]
+    assert {button["action_id"] for button in buttons} == {CHOOSE_ROOM_ACTION_ID}
+    parsed = [
+        parse_action_value(button["value"], expected_action=CHOOSE_ROOM_ACTION_ID)
+        for button in buttons
+    ]
+    assert {row["owner_slack_user_id"] for row in parsed} == {"UOWNER"}
+    assert len({row["selection_id"] for row in parsed}) == 1
+    assert len({row["booking_client_request_id"] for row in parsed}) == 2
+    assert [call[0] for call in FakeMeetingRoomClient.instances[0].calls] == ["rooms"]
+
+
+def test_missing_channel_never_returns_private_meeting_room_details_inline():
+    result = SkillExecutor()._deliver_meeting_room_response(
+        user_id="UOWNER",
+        channel_id=None,
+        message="Private booking details: 2pm in the Big Meeting Room",
+        action="check_room_availability",
+    )
+
+    assert result["data"]["delivery_failed"] is True
+    assert "Private booking details" not in result["message"]
+    assert "DM Roo" in result["message"]
 
 
 @pytest.mark.asyncio
-async def test_direct_message_booking_preview_defaults_to_one_hour(monkeypatch):
+async def test_direct_message_unspecified_booking_choices_preserve_default_hour(monkeypatch):
     configured = _settings()
     _patch_executor(monkeypatch, configured)
 
@@ -539,8 +664,35 @@ async def test_direct_message_booking_preview_defaults_to_one_hour(monkeypatch):
         channel_id="DOWNER",
     )
 
-    assert "Duration:* 1 hour" in result["message"]
-    assert result["blocks"][1]["elements"][0]["action_id"] == BOOK_ACTION_ID
+    assert "2:00 PM to 3:00 PM" in result["message"]
+    assert result["blocks"][1]["elements"][0]["action_id"] == CHOOSE_ROOM_ACTION_ID
+
+
+@pytest.mark.asyncio
+async def test_large_room_message_selects_big_room_over_model_parameter(monkeypatch):
+    configured = _settings()
+    _patch_executor(monkeypatch, configured)
+
+    result = await SkillExecutor()._execute_meeting_room_booking(
+        text="book the large room tomorrow at 2pm",
+        params={
+            "action": "book_meeting_room",
+            "room": "small-meeting-room",
+        },
+        user_id="UOWNER",
+        channel_id="DOWNER",
+    )
+
+    calls = FakeMeetingRoomClient.instances[0].calls
+    assert [call[0] for call in calls] == ["rooms", "availability"]
+    assert calls[1][2]["room_slug"] == "big-meeting-room"
+    confirm = result["blocks"][1]["elements"][0]
+    parsed = parse_action_value(
+        confirm["value"],
+        expected_action=BOOK_ACTION_ID,
+    )
+    assert parsed["room_slug"] == "big-meeting-room"
+    assert "Big Meeting Room" in result["message"]
 
 
 @pytest.mark.asyncio
@@ -555,7 +707,9 @@ async def test_bare_24_hour_availability_request_checks_exact_interval(monkeypat
         channel_id="DOWNER",
     )
 
-    call = FakeMeetingRoomClient.instances[0].calls[0]
+    calls = FakeMeetingRoomClient.instances[0].calls
+    assert [call[0] for call in calls] == ["rooms", "availability", "availability"]
+    call = calls[1]
     assert call[0] == "availability"
     assert datetime.fromisoformat(call[2]["starts_at"]).hour == 14
     assert datetime.fromisoformat(call[2]["ends_at"]).hour == 15
@@ -574,7 +728,9 @@ async def test_long_availability_request_is_answered_without_booking_price(monke
         channel_id="DOWNER",
     )
 
-    call = FakeMeetingRoomClient.instances[0].calls[0]
+    calls = FakeMeetingRoomClient.instances[0].calls
+    assert [call[0] for call in calls] == ["rooms", "availability", "availability"]
+    call = calls[1]
     assert datetime.fromisoformat(call[2]["ends_at"]) - datetime.fromisoformat(
         call[2]["starts_at"]
     ) == timedelta(hours=4)
@@ -719,7 +875,7 @@ async def test_points_admin_tagged_booking_previews_target_charge(monkeypatch):
     _patch_executor(monkeypatch, configured)
 
     result = await SkillExecutor()._execute_meeting_room_booking(
-        text="book the meeting room for <@UOTHER|Other Member> tomorrow at 2pm for 1.5 hours",
+        text="book the small meeting room for <@UOTHER|Other Member> tomorrow at 2pm for 1.5 hours",
         params={"action": "book_meeting_room"},
         user_id="UADMIN",
         channel_id="DADMIN",
@@ -728,7 +884,7 @@ async def test_points_admin_tagged_booking_previews_target_charge(monkeypatch):
     assert "for <@UOTHER>" in result["message"]
     assert "1.5 hours" in result["message"]
     assert "Their Roo Points account will be charged" in result["message"]
-    availability_call = FakeMeetingRoomClient.instances[0].calls[0]
+    availability_call = FakeMeetingRoomClient.instances[0].calls[1]
     assert availability_call[1] == "UADMIN"
     assert availability_call[2]["target_slack_user_id"] == "UOTHER"
     button = result["blocks"][1]["elements"][0]
@@ -757,7 +913,7 @@ async def test_non_admin_tagged_booking_reports_backend_denial_privately(monkeyp
 
     _patch_executor(monkeypatch, configured, DeniedClient)
     result = await SkillExecutor()._execute_meeting_room_booking(
-        text="book the meeting room for <@UOTHER> tomorrow at 2pm",
+        text="book the small meeting room for <@UOTHER> tomorrow at 2pm",
         params={"action": "book_meeting_room"},
         user_id="UNONADMIN",
         channel_id="DNONADMIN",
@@ -797,7 +953,7 @@ async def test_admin_target_errors_identify_the_tagged_member(
 
     _patch_executor(monkeypatch, configured, RejectedClient)
     result = await SkillExecutor()._execute_meeting_room_booking(
-        text="book the meeting room for <@UOTHER> tomorrow at 2pm",
+        text="book the small meeting room for <@UOTHER> tomorrow at 2pm",
         params={"action": "book_meeting_room"},
         user_id="UADMIN",
         channel_id="DADMIN",
@@ -840,7 +996,7 @@ async def test_action_handler_uses_verified_admin_actor_and_notifies_target(
     starts_at = datetime.now(MELBOURNE).replace(minute=0, second=0, microsecond=0) + timedelta(days=1)
     action_value = build_booking_action_value(
         owner_slack_user_id="UOWNER",
-        room_slug="meeting-room",
+        room_slug="small-meeting-room",
         starts_at=starts_at,
         ends_at=starts_at + timedelta(hours=2),
         expected_points_cost=2,
@@ -890,7 +1046,7 @@ async def test_action_handler_uses_verified_admin_actor_and_notifies_target(
     assert "for <@UTARGET> is confirmed" in updates[0]["text"]
     assert expected_admin_text in updates[0]["text"]
     assert target_dms[0][0] == "UTARGET"
-    assert "<@UOWNER> booked the *Meeting Room* for you" in target_dms[0][1]
+    assert "<@UOWNER> booked the *Small Meeting Room* for you" in target_dms[0][1]
     assert "Charged to your account:* 2 Roo Points" in target_dms[0][1]
     assert "show my meeting room bookings" in target_dms[0][1]
     assert "Remaining balance" not in target_dms[0][1]
@@ -906,7 +1062,7 @@ async def test_replayed_admin_booking_recovers_target_notification_idempotently(
     )
     action_value = build_booking_action_value(
         owner_slack_user_id="UOWNER",
-        room_slug="meeting-room",
+        room_slug="small-meeting-room",
         starts_at=starts_at,
         ends_at=starts_at + timedelta(hours=2),
         expected_points_cost=2,
@@ -956,7 +1112,7 @@ async def test_action_handler_rejects_mismatched_actor_before_backend(monkeypatc
     starts_at = datetime.now(MELBOURNE).replace(minute=0, second=0, microsecond=0) + timedelta(days=1)
     action_value = build_booking_action_value(
         owner_slack_user_id="UOWNER",
-        room_slug="meeting-room",
+        room_slug="small-meeting-room",
         starts_at=starts_at,
         ends_at=starts_at + timedelta(hours=1),
         expected_points_cost=1,
@@ -991,7 +1147,7 @@ async def test_action_handler_rejects_public_channel_before_backend(monkeypatch)
     starts_at = datetime.now(MELBOURNE).replace(minute=0, second=0, microsecond=0) + timedelta(days=1)
     action_value = build_booking_action_value(
         owner_slack_user_id="UOWNER",
-        room_slug="meeting-room",
+        room_slug="small-meeting-room",
         starts_at=starts_at,
         ends_at=starts_at + timedelta(hours=1),
         expected_points_cost=1,
@@ -1026,7 +1182,7 @@ async def test_action_handler_rejects_expired_confirmation_before_backend(monkey
     starts_at = datetime.now(MELBOURNE).replace(minute=0, second=0, microsecond=0) + timedelta(days=1)
     action_value = build_booking_action_value(
         owner_slack_user_id="UOWNER",
-        room_slug="meeting-room",
+        room_slug="small-meeting-room",
         starts_at=starts_at,
         ends_at=starts_at + timedelta(hours=1),
         expected_points_cost=1,
@@ -1062,7 +1218,7 @@ async def test_action_handler_does_not_claim_failed_booking_request_changed_noth
     starts_at = datetime.now(MELBOURNE).replace(minute=0, second=0, microsecond=0) + timedelta(days=1)
     action_value = build_booking_action_value(
         owner_slack_user_id="UOWNER",
-        room_slug="meeting-room",
+        room_slug="small-meeting-room",
         starts_at=starts_at,
         ends_at=starts_at + timedelta(hours=1),
         expected_points_cost=1,
@@ -1136,7 +1292,7 @@ def test_duplicate_signed_button_delivery_processes_one_durable_action(tmp_path,
     starts_at = datetime.now(MELBOURNE).replace(minute=0, second=0, microsecond=0) + timedelta(days=1)
     action_value = build_booking_action_value(
         owner_slack_user_id="UOWNER",
-        room_slug="meeting-room",
+        room_slug="small-meeting-room",
         starts_at=starts_at,
         ends_at=starts_at + timedelta(hours=1),
         expected_points_cost=1,
@@ -1227,14 +1383,16 @@ async def test_backend_client_uses_canonical_meeting_room_endpoints(monkeypatch)
     )
     monkeypatch.setattr(client, "_request", fake_request)
 
+    await client.list_meeting_rooms()
     await client.check_meeting_room_availability(
         "<@UOWNER>",
+        room_slug="small-meeting-room",
         date="2026-08-12",
         target_slack_user_id="<@UTARGET>",
     )
     await client.book_meeting_room(
         "<@UOWNER>",
-        room_slug="meeting-room",
+        room_slug="big-meeting-room",
         starts_at="2026-08-12T14:00:00+10:00",
         ends_at="2026-08-12T16:00:00+10:00",
         client_request_id="1409fd17-c84d-4774-af8a-7b847c16bd30",
@@ -1250,19 +1408,22 @@ async def test_backend_client_uses_canonical_meeting_room_endpoints(monkeypatch)
     )
 
     assert [endpoint for _, endpoint, _ in captured] == [
+        "/api/v1/points/meeting-rooms/rooms/",
         "/api/v1/points/meeting-rooms/availability/",
         "/api/v1/points/meeting-rooms/book/",
         "/api/v1/points/meeting-rooms/my-bookings/",
         "/api/v1/points/meeting-rooms/cancel/",
     ]
-    assert captured[0][2]["json"]["slack_user_id"] == "UOWNER"
-    assert captured[0][2]["json"]["target_slack_user_id"] == "UTARGET"
     assert captured[1][2]["json"]["slack_user_id"] == "UOWNER"
-    assert captured[1][2]["json"]["client_request_id"] == "1409fd17-c84d-4774-af8a-7b847c16bd30"
-    assert captured[1][2]["json"]["expected_points_cost"] == 2
+    assert captured[1][2]["json"]["room_slug"] == "small-meeting-room"
     assert captured[1][2]["json"]["target_slack_user_id"] == "UTARGET"
     assert captured[2][2]["json"]["slack_user_id"] == "UOWNER"
+    assert captured[2][2]["json"]["room_slug"] == "big-meeting-room"
+    assert captured[2][2]["json"]["client_request_id"] == "1409fd17-c84d-4774-af8a-7b847c16bd30"
+    assert captured[2][2]["json"]["expected_points_cost"] == 2
+    assert captured[2][2]["json"]["target_slack_user_id"] == "UTARGET"
     assert captured[3][2]["json"]["slack_user_id"] == "UOWNER"
+    assert captured[4][2]["json"]["slack_user_id"] == "UOWNER"
 
 
 def test_feature_flag_is_disabled_by_default_and_fails_closed():

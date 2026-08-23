@@ -10,6 +10,18 @@
   text: "book the meeting room tomorrow from 2pm to 4pm"
   expect: {skill: meeting-room-booking, action: book_meeting_room}
   tags: [meeting-room]
+- id: meeting-room-book-small
+  text: "book the small meeting room tomorrow at 2pm"
+  expect: {skill: meeting-room-booking, action: book_meeting_room}
+  tags: [meeting-room, room-choice]
+- id: meeting-room-book-big
+  text: "book the big room tomorrow at 2:30pm for 90 minutes"
+  expect: {skill: meeting-room-booking, action: book_meeting_room}
+  tags: [meeting-room, room-choice]
+- id: meeting-room-book-large-alias
+  text: "book the large room tomorrow at 3pm"
+  expect: {skill: meeting-room-booking, action: book_meeting_room}
+  tags: [meeting-room, room-choice]
 - id: meeting-room-list-mine
   text: "show my meeting room bookings"
   expect: {skill: meeting-room-booking, action: list_my_room_bookings}

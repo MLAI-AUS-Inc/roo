@@ -24,7 +24,13 @@ from roo import meeting_room_actions as action_module
 from roo import slack_action_tasks
 from roo.clients.mlai_backend import MLAIBackendUnavailableError
 from roo.config import Settings, get_settings
-from roo.meeting_room_booking import BOOK_ACTION_ID, build_booking_action_value
+from roo.meeting_room_booking import (
+    BOOK_ACTION_ID,
+    CHOOSE_ROOM_ACTION_ID,
+    build_booking_action_value,
+    parse_action_value,
+    room_selection_prompt,
+)
 from roo.slack_security import get_slack_receipt_store
 
 
@@ -53,12 +59,30 @@ def _booking_action_value():
     )
     return build_booking_action_value(
         owner_slack_user_id="UOWNER",
-        room_slug="meeting-room",
+        room_slug="small-meeting-room",
         starts_at=starts_at,
         ends_at=starts_at + timedelta(hours=2),
         expected_points_cost=2,
         target_slack_user_id="UTARGET",
     )
+
+
+def _room_choice_values(*, now=None):
+    starts_at = (
+        datetime.now(MELBOURNE).replace(minute=0, second=0, microsecond=0)
+        + timedelta(days=1)
+    )
+    prompt = room_selection_prompt(
+        [
+            {"slug": "small-meeting-room", "name": "Small Meeting Room"},
+            {"slug": "big-meeting-room", "name": "Big Meeting Room"},
+        ],
+        owner_slack_user_id="UOWNER",
+        starts_at=starts_at,
+        ends_at=starts_at + timedelta(hours=1),
+        now=now,
+    )
+    return [button["value"] for button in prompt["blocks"][1]["elements"]]
 
 
 def _record(store, action_value=None):
@@ -85,7 +109,7 @@ def _admin_booking_response(action_value, *, created):
             "starts_at": payload["starts_at"],
             "ends_at": payload["ends_at"],
             "points_cost": 2,
-            "room": {"name": "Meeting Room"},
+            "room": {"name": "Small Meeting Room"},
         },
     }
 
@@ -248,6 +272,362 @@ def test_completed_action_is_not_reopened_by_another_click(tmp_path):
     assert replay["status"] == "completed"
     assert replay["final_outcome"] == "The booking is confirmed."
     assert store.reserve(action["id"]) is None
+
+
+def test_room_choice_is_first_choice_wins_and_duplicate_safe(tmp_path):
+    store = action_module.MeetingRoomActionStore(tmp_path / "actions.db")
+    small_value, big_value = _room_choice_values()
+
+    small = store.record_action(
+        action_id=CHOOSE_ROOM_ACTION_ID,
+        action_value=small_value,
+        actor_user_id="UOWNER",
+        channel_id="DOWNER",
+        message_ts="123.456",
+    )
+    duplicate = store.record_action(
+        action_id=CHOOSE_ROOM_ACTION_ID,
+        action_value=small_value,
+        actor_user_id="UOWNER",
+        channel_id="DOWNER",
+        message_ts="123.456",
+    )
+
+    with pytest.raises(ValueError, match="conflicts with an earlier request"):
+        store.record_action(
+            action_id=CHOOSE_ROOM_ACTION_ID,
+            action_value=big_value,
+            actor_user_id="UOWNER",
+            channel_id="DOWNER",
+            message_ts="123.456",
+        )
+    with pytest.raises(ValueError, match="Only the member"):
+        store.record_action(
+            action_id=CHOOSE_ROOM_ACTION_ID,
+            action_value=small_value,
+            actor_user_id="UATTACKER",
+            channel_id="DOWNER",
+            message_ts="123.456",
+        )
+
+    assert duplicate["id"] == small["id"]
+    assert store.reserve(small["id"], owner="worker") is not None
+    assert store.reserve(small["id"], owner="other") is None
+
+
+def test_concurrent_competing_room_choices_persist_exactly_one_winner(tmp_path):
+    database_path = tmp_path / "actions.db"
+    stores = [
+        action_module.MeetingRoomActionStore(database_path),
+        action_module.MeetingRoomActionStore(database_path),
+    ]
+    values = _room_choice_values()
+    barrier = threading.Barrier(2)
+
+    def choose(index):
+        barrier.wait()
+        try:
+            action = stores[index].record_action(
+                action_id=CHOOSE_ROOM_ACTION_ID,
+                action_value=values[index],
+                actor_user_id="UOWNER",
+                channel_id="DOWNER",
+                message_ts="123.456",
+            )
+            return ("selected", action["action_value"])
+        except action_module.MeetingRoomInputError as exc:
+            return (exc.code, None)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(choose, range(2)))
+
+    assert sorted(result[0] for result in results) == [
+        "room_already_selected",
+        "selected",
+    ]
+    with sqlite3.connect(database_path) as connection:
+        rows = connection.execute(
+            "SELECT action_value FROM meeting_room_action_outbox"
+        ).fetchall()
+    assert len(rows) == 1
+    assert rows[0][0] in {
+        json.dumps(
+            parse_action_value(value, expected_action=CHOOSE_ROOM_ACTION_ID),
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        for value in values
+    }
+
+
+@pytest.mark.asyncio
+async def test_competing_room_click_does_not_overwrite_first_choice(
+    tmp_path,
+    monkeypatch,
+):
+    configured = _settings(tmp_path)
+    store = action_module.MeetingRoomActionStore(
+        configured.SLACK_RECEIPTS_DB_PATH
+    )
+    small_value, big_value = _room_choice_values()
+    first = store.record_action(
+        action_id=CHOOSE_ROOM_ACTION_ID,
+        action_value=small_value,
+        actor_user_id="UOWNER",
+        channel_id="DOWNER",
+        message_ts="123.456",
+    )
+    monkeypatch.setattr(
+        main_module,
+        "get_meeting_room_action_store",
+        lambda path: store,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "start_slack_action",
+        lambda action: pytest.fail("competing choice must not schedule work"),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_deliver_meeting_room_action_outcome",
+        lambda **kwargs: pytest.fail(
+            "competing choice must not overwrite the first choice card"
+        ),
+    )
+
+    await main_module._persist_and_start_meeting_room_action(
+        settings=configured,
+        action_id=CHOOSE_ROOM_ACTION_ID,
+        action_value=big_value,
+        actor_user_id="UOWNER",
+        channel_id="DOWNER",
+        message_ts="123.456",
+    )
+
+    persisted = store.get(first["id"])
+    assert persisted["action_value"] == json.dumps(
+        parse_action_value(
+            small_value,
+            expected_action=CHOOSE_ROOM_ACTION_ID,
+        ),
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    assert persisted["status"] == "pending"
+
+
+@pytest.mark.asyncio
+async def test_completed_room_choice_retry_keeps_confirmation_card(
+    tmp_path,
+    monkeypatch,
+):
+    configured = _settings(tmp_path)
+    store = action_module.MeetingRoomActionStore(
+        configured.SLACK_RECEIPTS_DB_PATH
+    )
+    small_value, _ = _room_choice_values()
+    action = store.record_action(
+        action_id=CHOOSE_ROOM_ACTION_ID,
+        action_value=small_value,
+        actor_user_id="UOWNER",
+        channel_id="DOWNER",
+        message_ts="123.456",
+    )
+    reserved = store.reserve(action["id"], owner="worker")
+    assert reserved is not None
+    assert store.mark_completed(
+        action["id"],
+        owner="worker",
+        outcome="Confirm your Small Meeting Room booking.",
+    )
+    monkeypatch.setattr(
+        main_module,
+        "get_meeting_room_action_store",
+        lambda path: store,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "start_slack_action",
+        lambda action: pytest.fail(
+            "completed room choice retry must not replace the confirmation card"
+        ),
+    )
+
+    await main_module._persist_and_start_meeting_room_action(
+        settings=configured,
+        action_id=CHOOSE_ROOM_ACTION_ID,
+        action_value=small_value,
+        actor_user_id="UOWNER",
+        channel_id="DOWNER",
+        message_ts="123.456",
+    )
+
+    assert store.get(action["id"])["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_room_choice_rechecks_availability_and_uses_stable_booking_id(
+    tmp_path,
+    monkeypatch,
+):
+    configured = _settings(tmp_path)
+    store = action_module.MeetingRoomActionStore(configured.SLACK_RECEIPTS_DB_PATH)
+    small_value, _ = _room_choice_values()
+    choice = parse_action_value(
+        small_value,
+        expected_action=CHOOSE_ROOM_ACTION_ID,
+    )
+    action = store.record_action(
+        action_id=CHOOSE_ROOM_ACTION_ID,
+        action_value=small_value,
+        actor_user_id="UOWNER",
+        channel_id="DOWNER",
+        message_ts="123.456",
+    )
+    availability_calls = []
+    updates = []
+
+    class Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def check_meeting_room_availability(self, slack_user_id, **kwargs):
+            availability_calls.append((slack_user_id, kwargs))
+            return {
+                "room": {
+                    "slug": "small-meeting-room",
+                    "name": "Small Meeting Room",
+                },
+                "available": True,
+                "bookable": True,
+                "requested_interval": {
+                    "starts_at": kwargs["starts_at"],
+                    "ends_at": kwargs["ends_at"],
+                },
+                "points_cost": 1,
+                "remaining_daily_hours": {},
+                "busy_intervals": [],
+            }
+
+    monkeypatch.setattr("roo.clients.mlai_backend.MLAIBackendClient", Client)
+    monkeypatch.setattr(main_module, "get_settings", lambda: configured)
+    monkeypatch.setattr(
+        "roo.slack_client.get_slack_client",
+        lambda: SimpleNamespace(
+            chat_update=lambda **kwargs: updates.append(kwargs) or {"ok": True}
+        ),
+    )
+
+    await action_module.process_meeting_room_action(
+        action["id"],
+        store=store,
+        processor=main_module._process_meeting_room_action_record,
+    )
+
+    terminal = store.get(action["id"])
+    confirm_button = updates[0]["blocks"][1]["elements"][0]
+    confirmation = parse_action_value(
+        confirm_button["value"],
+        expected_action=BOOK_ACTION_ID,
+    )
+    assert terminal["status"] == "completed"
+    assert availability_calls[0][0] == "UOWNER"
+    assert availability_calls[0][1]["room_slug"] == "small-meeting-room"
+    assert confirm_button["action_id"] == BOOK_ACTION_ID
+    assert confirmation["room_slug"] == "small-meeting-room"
+    assert (
+        confirmation["client_request_id"]
+        == choice["booking_client_request_id"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_room_choice_rejects_mismatched_backend_room(
+    tmp_path,
+    monkeypatch,
+):
+    configured = _settings(tmp_path)
+    store = action_module.MeetingRoomActionStore(configured.SLACK_RECEIPTS_DB_PATH)
+    small_value, _ = _room_choice_values()
+    action = store.record_action(
+        action_id=CHOOSE_ROOM_ACTION_ID,
+        action_value=small_value,
+        actor_user_id="UOWNER",
+        channel_id="DOWNER",
+        message_ts="123.456",
+    )
+    updates = []
+
+    class Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def check_meeting_room_availability(self, slack_user_id, **kwargs):
+            return {
+                "room": {
+                    "slug": "big-meeting-room",
+                    "name": "Big Meeting Room",
+                },
+                "available": True,
+                "points_cost": 1,
+            }
+
+    monkeypatch.setattr("roo.clients.mlai_backend.MLAIBackendClient", Client)
+    monkeypatch.setattr(main_module, "get_settings", lambda: configured)
+    monkeypatch.setattr(
+        "roo.slack_client.get_slack_client",
+        lambda: SimpleNamespace(
+            chat_update=lambda **kwargs: updates.append(kwargs) or {"ok": True}
+        ),
+    )
+
+    await action_module.process_meeting_room_action(
+        action["id"],
+        store=store,
+        processor=main_module._process_meeting_room_action_record,
+    )
+
+    assert store.get(action["id"])["status"] == "completed"
+    assert "verify the selected meeting room" in updates[0]["text"]
+    assert [block["type"] for block in updates[0]["blocks"]] == ["section"]
+
+
+@pytest.mark.asyncio
+async def test_expired_room_choice_does_not_call_backend(tmp_path, monkeypatch):
+    configured = _settings(tmp_path)
+    store = action_module.MeetingRoomActionStore(configured.SLACK_RECEIPTS_DB_PATH)
+    expired_at = datetime.now(MELBOURNE) - timedelta(minutes=11)
+    small_value, _ = _room_choice_values(now=expired_at)
+    action = store.record_action(
+        action_id=CHOOSE_ROOM_ACTION_ID,
+        action_value=small_value,
+        actor_user_id="UOWNER",
+        channel_id="DOWNER",
+        message_ts="123.456",
+    )
+    updates = []
+
+    class Client:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("expired choice must not call the backend")
+
+    monkeypatch.setattr("roo.clients.mlai_backend.MLAIBackendClient", Client)
+    monkeypatch.setattr(main_module, "get_settings", lambda: configured)
+    monkeypatch.setattr(
+        "roo.slack_client.get_slack_client",
+        lambda: SimpleNamespace(
+            chat_update=lambda **kwargs: updates.append(kwargs) or {"ok": True}
+        ),
+    )
+
+    await action_module.process_meeting_room_action(
+        action["id"],
+        store=store,
+        processor=main_module._process_meeting_room_action_record,
+    )
+
+    assert store.get(action["id"])["status"] == "completed"
+    assert "expired" in updates[0]["text"].lower()
 
 
 def test_existing_outbox_schema_is_upgraded_without_losing_notification_state(
@@ -544,7 +924,7 @@ async def test_expired_queued_replay_recovers_committed_admin_booking(
     )
     action_value = build_booking_action_value(
         owner_slack_user_id="UOWNER",
-        room_slug="meeting-room",
+        room_slug="small-meeting-room",
         starts_at=starts_at,
         ends_at=starts_at + timedelta(hours=2),
         expected_points_cost=2,

@@ -16,11 +16,17 @@ from .utils import get_current_datetime
 MELBOURNE_TZ = ZoneInfo("Australia/Melbourne")
 BOOK_ACTION_ID = "meeting_room_confirm_booking"
 CANCEL_ACTION_ID = "meeting_room_cancel_booking"
+CHOOSE_ROOM_ACTION_ID = "meeting_room_choose_room"
 CONFIRMATION_TTL = timedelta(minutes=10)
 MIN_BOOKING_HALF_HOURS = 2
 MAX_BOOKING_HALF_HOURS = 4
 MIN_AVAILABILITY_HALF_HOURS = 1
 MAX_AVAILABILITY_HALF_HOURS = 48
+ROOM_CHOICES = (
+    ("small-meeting-room", "Small Meeting Room"),
+    ("big-meeting-room", "Big Meeting Room"),
+)
+ROOM_NAMES = dict(ROOM_CHOICES)
 WEEKDAYS = {
     "monday": 0,
     "tuesday": 1,
@@ -37,6 +43,34 @@ class MeetingRoomInputError(ValueError):
         super().__init__(message)
         self.code = code
         self.message = message
+
+
+def room_slug_from_text(text: str) -> Optional[str]:
+    normalized = str(text or "").lower()
+    small = bool(re.search(r"\bsmall(?:\s+meeting)?\s+room\b", normalized))
+    big = bool(
+        re.search(r"\b(?:big|large)(?:\s+meeting)?\s+room\b", normalized)
+    )
+    if small == big:
+        return None
+    return "small-meeting-room" if small else "big-meeting-room"
+
+
+def supported_active_rooms(rooms: list[dict]) -> list[dict]:
+    by_slug = {
+        str(room.get("slug") or "").strip(): room
+        for room in rooms
+        if isinstance(room, dict)
+    }
+    return [
+        {
+            "id": by_slug[slug].get("id"),
+            "slug": slug,
+            "name": ROOM_NAMES[slug],
+        }
+        for slug, _ in ROOM_CHOICES
+        if slug in by_slug
+    ]
 
 
 def _parse_iso_timestamp(value: Any) -> Optional[datetime]:
@@ -511,8 +545,14 @@ def build_booking_action_value(
     ends_at: datetime,
     expected_points_cost: int,
     target_slack_user_id: Optional[str] = None,
+    client_request_id: Optional[str] = None,
     now: Optional[datetime] = None,
 ) -> str:
+    if room_slug not in ROOM_NAMES:
+        raise MeetingRoomInputError(
+            "invalid_response",
+            "That meeting room is not supported. Ask Roo to start again.",
+        )
     issued_at = (now or get_current_datetime()).astimezone(timezone.utc)
     payload = {
         "owner_slack_user_id": owner_slack_user_id,
@@ -520,7 +560,7 @@ def build_booking_action_value(
         "starts_at": starts_at.isoformat(),
         "ends_at": ends_at.isoformat(),
         "expected_points_cost": expected_points_cost,
-        "client_request_id": str(uuid4()),
+        "client_request_id": str(client_request_id or uuid4()),
         "confirmation_expires_at": (issued_at + CONFIRMATION_TTL).isoformat(),
     }
     if target_slack_user_id and target_slack_user_id != owner_slack_user_id:
@@ -546,6 +586,31 @@ def build_cancel_action_value(*, owner_slack_user_id: str, booking_id: str) -> s
     )
 
 
+def build_room_choice_action_value(
+    *,
+    owner_slack_user_id: str,
+    selection_id: str,
+    room_slug: str,
+    starts_at: datetime,
+    ends_at: datetime,
+    booking_client_request_id: str,
+    selection_expires_at: datetime,
+    target_slack_user_id: Optional[str] = None,
+) -> str:
+    payload = {
+        "owner_slack_user_id": owner_slack_user_id,
+        "selection_id": selection_id,
+        "room_slug": room_slug,
+        "starts_at": starts_at.isoformat(),
+        "ends_at": ends_at.isoformat(),
+        "booking_client_request_id": booking_client_request_id,
+        "selection_expires_at": selection_expires_at.isoformat(),
+    }
+    if target_slack_user_id and target_slack_user_id != owner_slack_user_id:
+        payload["target_slack_user_id"] = target_slack_user_id
+    return json.dumps(payload, separators=(",", ":"), sort_keys=True)
+
+
 def parse_action_value(raw_value: Any, *, expected_action: str) -> dict:
     try:
         payload = json.loads(str(raw_value or ""))
@@ -565,6 +630,11 @@ def parse_action_value(raw_value: Any, *, expected_action: str) -> dict:
         )
         if any(not payload.get(field) for field in required):
             raise MeetingRoomInputError("invalid_action", "This booking action is incomplete. Ask Roo to start again.")
+        if payload["room_slug"] not in ROOM_NAMES:
+            raise MeetingRoomInputError(
+                "invalid_action",
+                "This booking action is not valid. Ask Roo to start again.",
+            )
         try:
             UUID(str(payload["client_request_id"]))
         except ValueError:
@@ -586,6 +656,42 @@ def parse_action_value(raw_value: Any, *, expected_action: str) -> dict:
         target_slack_user_id = str(payload.get("target_slack_user_id") or "").strip()
         if target_slack_user_id and not re.fullmatch(r"[A-Z0-9]+", target_slack_user_id):
             raise MeetingRoomInputError("invalid_action", "This booking action is not valid. Ask Roo to start again.")
+    elif expected_action == CHOOSE_ROOM_ACTION_ID:
+        required = (
+            "selection_id",
+            "room_slug",
+            "starts_at",
+            "ends_at",
+            "booking_client_request_id",
+            "selection_expires_at",
+        )
+        if any(not payload.get(field) for field in required):
+            raise MeetingRoomInputError(
+                "invalid_action",
+                "This room choice is incomplete. Ask Roo to start again.",
+            )
+        try:
+            UUID(str(payload["selection_id"]))
+            UUID(str(payload["booking_client_request_id"]))
+        except ValueError:
+            raise MeetingRoomInputError(
+                "invalid_action",
+                "This room choice is not valid. Ask Roo to start again.",
+            )
+        if payload["room_slug"] not in ROOM_NAMES:
+            raise MeetingRoomInputError(
+                "invalid_action",
+                "This room choice is not supported. Ask Roo to start again.",
+            )
+        parse_backend_timestamp(payload["starts_at"])
+        parse_backend_timestamp(payload["ends_at"])
+        parse_backend_timestamp(payload["selection_expires_at"])
+        target_slack_user_id = str(payload.get("target_slack_user_id") or "").strip()
+        if target_slack_user_id and not re.fullmatch(r"[A-Z0-9]+", target_slack_user_id):
+            raise MeetingRoomInputError(
+                "invalid_action",
+                "This room choice is not valid. Ask Roo to start again.",
+            )
     elif expected_action == CANCEL_ACTION_ID:
         try:
             UUID(str(payload.get("booking_id") or ""))
@@ -602,17 +708,96 @@ def confirmation_expired(payload: dict, *, now: Optional[datetime] = None) -> bo
     return expires_at.astimezone(timezone.utc) <= current
 
 
+def room_choice_expired(payload: dict, *, now: Optional[datetime] = None) -> bool:
+    expires_at = parse_backend_timestamp(payload.get("selection_expires_at"))
+    current = (now or get_current_datetime()).astimezone(timezone.utc)
+    return expires_at.astimezone(timezone.utc) <= current
+
+
+def room_selection_prompt(
+    rooms: list[dict],
+    *,
+    owner_slack_user_id: str,
+    starts_at: datetime,
+    ends_at: datetime,
+    target_slack_user_id: Optional[str] = None,
+    now: Optional[datetime] = None,
+) -> dict:
+    choices = supported_active_rooms(rooms)
+    if not choices:
+        raise MeetingRoomInputError(
+            "inactive_room",
+            "No meeting rooms are accepting bookings right now.",
+        )
+    issued_at = (now or get_current_datetime()).astimezone(timezone.utc)
+    selection_id = str(uuid4())
+    selection_expires_at = issued_at + CONFIRMATION_TTL
+    target_text = (
+        f" for <@{target_slack_user_id}>"
+        if target_slack_user_id and target_slack_user_id != owner_slack_user_id
+        else ""
+    )
+    message = (
+        f"Choose a meeting room{target_text}.\n"
+        f"*When:* {format_interval(starts_at, ends_at)} (Melbourne time)\n\n"
+        "No room is reserved until you choose a room and confirm the booking. "
+        "These choices expire in 10 minutes."
+    )
+    buttons = []
+    for room in choices:
+        buttons.append(
+            {
+                "type": "button",
+                "action_id": CHOOSE_ROOM_ACTION_ID,
+                "text": {"type": "plain_text", "text": room["name"]},
+                "value": build_room_choice_action_value(
+                    owner_slack_user_id=owner_slack_user_id,
+                    selection_id=selection_id,
+                    room_slug=room["slug"],
+                    starts_at=starts_at,
+                    ends_at=ends_at,
+                    booking_client_request_id=str(uuid4()),
+                    selection_expires_at=selection_expires_at,
+                    target_slack_user_id=target_slack_user_id,
+                ),
+            }
+        )
+    return {
+        "message": message,
+        "blocks": [
+            {"type": "section", "text": {"type": "mrkdwn", "text": message}},
+            {
+                "type": "actions",
+                "block_id": f"meeting_room_choice_{selection_id}",
+                "elements": buttons,
+            },
+        ],
+    }
+
+
 def booking_preview(
     availability: dict,
     *,
     owner_slack_user_id: str,
     starts_at: datetime,
     ends_at: datetime,
+    expected_room_slug: Optional[str] = None,
     target_slack_user_id: Optional[str] = None,
+    client_request_id: Optional[str] = None,
 ) -> dict:
     room = availability.get("room") or {}
     room_name = str(room.get("name") or "Meeting Room")
-    room_slug = str(room.get("slug") or "meeting-room")
+    room_slug = str(room.get("slug") or "")
+    if room_slug not in ROOM_NAMES:
+        raise MeetingRoomInputError(
+            "invalid_response",
+            "I could not verify that meeting room. Ask Roo to start again.",
+        )
+    if expected_room_slug and room_slug != expected_room_slug:
+        raise MeetingRoomInputError(
+            "invalid_response",
+            "I could not verify the selected meeting room. Ask Roo to start again.",
+        )
     cost = int(availability.get("points_cost") or 0)
     duration_half_hours = int(
         (_as_utc(ends_at) - _as_utc(starts_at)).total_seconds() // 1800
@@ -639,6 +824,7 @@ def booking_preview(
         ends_at=ends_at,
         expected_points_cost=cost,
         target_slack_user_id=target_slack_user_id,
+        client_request_id=client_request_id,
     )
     return {
         "message": message,
@@ -775,10 +961,14 @@ def format_cancellation_result(result: dict) -> str:
     starts_at = parse_backend_timestamp(booking.get("starts_at"))
     ends_at = parse_backend_timestamp(booking.get("ends_at"))
     points = int(booking.get("points_cost") or 0)
+    room_name = str((booking.get("room") or {}).get("name") or "Meeting Room")
     if result.get("already_cancelled"):
-        return "That Meeting Room booking was already cancelled. No duplicate refund was issued."
+        return (
+            f"That *{room_name}* booking was already cancelled. "
+            "No duplicate refund was issued."
+        )
     return (
-        f"Your Meeting Room booking for {format_interval(starts_at, ends_at)} has been cancelled.\n"
+        f"Your *{room_name}* booking for {format_interval(starts_at, ends_at)} has been cancelled.\n"
         f"*Refunded:* {points} Roo Point{'s' if points != 1 else ''}\n"
         f"*Balance:* {result.get('remaining_balance', 0)} Roo Points"
     )
@@ -789,6 +979,7 @@ def backend_error_message(
     *,
     mutation_result_uncertain: bool = False,
     target_slack_user_id: Optional[str] = None,
+    room_slug: Optional[str] = None,
 ) -> str:
     code = ""
     detail = ""
@@ -800,9 +991,15 @@ def backend_error_message(
         except (ValueError, AttributeError):
             pass
     targeted = bool(str(target_slack_user_id or "").strip())
+    room_name = ROOM_NAMES.get(str(room_slug or ""), "meeting room")
     messages = {
-        "booking_conflict": "That time was booked by someone else before you confirmed. No points were deducted.",
-        "room_blocked": "The Meeting Room is unavailable during that time. No points were deducted.",
+        "booking_conflict": f"The {room_name} was booked by someone else before you confirmed. No points were deducted.",
+        "user_booking_conflict": (
+            f"The tagged member already has another meeting-room booking that overlaps the {room_name} time. No points were deducted."
+            if targeted
+            else f"You already have another meeting-room booking that overlaps the {room_name} time. No points were deducted."
+        ),
+        "room_blocked": f"The {room_name} is unavailable during that time. No points were deducted.",
         "daily_limit": (
             "That booking would take the tagged member over their four-hour daily limit. No points were deducted."
             if targeted
@@ -824,7 +1021,7 @@ def backend_error_message(
             else "Your MLAI member account is inactive, so I cannot book the room."
         ),
         "expired_confirmation": "That confirmation expired. Ask Roo to check the time again for a fresh button.",
-        "inactive_room": "The Meeting Room is not accepting bookings right now.",
+        "inactive_room": f"The {room_name} is not accepting bookings right now.",
         "feature_disabled": "Meeting-room booking is not enabled right now.",
         "booking_started": "That booking has already started and can no longer be cancelled.",
         "not_booking_owner": "You can only cancel your own Meeting Room bookings.",

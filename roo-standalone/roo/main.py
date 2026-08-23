@@ -113,13 +113,17 @@ from .admin_brain import (
 from .meeting_room_booking import (
     BOOK_ACTION_ID as MEETING_ROOM_BOOK_ACTION_ID,
     CANCEL_ACTION_ID as MEETING_ROOM_CANCEL_ACTION_ID,
+    CHOOSE_ROOM_ACTION_ID as MEETING_ROOM_CHOOSE_ROOM_ACTION_ID,
     MeetingRoomInputError,
     backend_error_message as meeting_room_backend_error_message,
+    booking_preview as meeting_room_booking_preview,
     confirmation_expired as meeting_room_confirmation_expired,
     format_admin_target_notification as format_meeting_room_admin_target_notification,
     format_booking_result as format_meeting_room_booking_result,
     format_cancellation_result as format_meeting_room_cancellation_result,
     parse_action_value as parse_meeting_room_action_value,
+    parse_backend_timestamp as parse_meeting_room_backend_timestamp,
+    room_choice_expired as meeting_room_choice_expired,
 )
 from .meeting_room_actions import (
     MeetingRoomActionResult,
@@ -4872,12 +4876,10 @@ async def _deliver_meeting_room_action_outcome(
     channel_id: str,
     message_ts: str,
     outcome: str,
+    blocks: Optional[list[dict[str, Any]]] = None,
 ) -> bool:
-    blocks = [
-        {
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": outcome},
-        }
+    rendered_blocks = blocks or [
+        {"type": "section", "text": {"type": "mrkdwn", "text": outcome}}
     ]
     try:
         from .slack_client import get_slack_client
@@ -4887,7 +4889,7 @@ async def _deliver_meeting_room_action_outcome(
             channel=channel_id,
             ts=message_ts,
             text=outcome,
-            blocks=blocks,
+            blocks=rendered_blocks,
         )
         if _slack_delivery_succeeded(response):
             return True
@@ -4898,7 +4900,7 @@ async def _deliver_meeting_room_action_outcome(
             post_message,
             channel=channel_id,
             text=outcome,
-            blocks=blocks,
+            blocks=rendered_blocks,
         )
         return _slack_delivery_succeeded(response)
     except Exception:
@@ -4924,6 +4926,7 @@ async def _handle_meeting_room_action(
     mutation_started = False
     retry_error: Optional[Exception] = None
     needs_attention = False
+    outcome_blocks: Optional[list[dict[str, Any]]] = None
     value: dict[str, Any] = {}
     if not settings.MEETING_ROOM_BOOKING_ENABLED:
         outcome = "Meeting-room booking is not enabled right now. Nothing was changed."
@@ -4946,6 +4949,11 @@ async def _handle_meeting_room_action(
                 and meeting_room_confirmation_expired(value)
             ):
                 outcome = "That confirmation expired. Ask Roo to check the time again for a fresh button."
+            elif (
+                action_id == MEETING_ROOM_CHOOSE_ROOM_ACTION_ID
+                and meeting_room_choice_expired(value)
+            ):
+                outcome = "Those room choices expired. Ask Roo to start the booking again."
             else:
                 from .clients.mlai_backend import MLAIBackendClient
 
@@ -5084,6 +5092,43 @@ async def _handle_meeting_room_action(
                         f"request_id={value['client_request_id']} "
                         f"created={bool(result.get('created'))}"
                     )
+                elif action_id == MEETING_ROOM_CHOOSE_ROOM_ACTION_ID:
+                    starts_at = parse_meeting_room_backend_timestamp(
+                        value["starts_at"]
+                    )
+                    ends_at = parse_meeting_room_backend_timestamp(value["ends_at"])
+                    availability = await client.check_meeting_room_availability(
+                        actor_user_id,
+                        room_slug=value["room_slug"],
+                        starts_at=starts_at.isoformat(),
+                        ends_at=ends_at.isoformat(),
+                        target_slack_user_id=value.get("target_slack_user_id"),
+                    )
+                    room_name = str(
+                        (availability.get("room") or {}).get("name")
+                        or "Meeting Room"
+                    )
+                    if not availability.get("available"):
+                        outcome = (
+                            f"The *{room_name}* is no longer available for that time. "
+                            "No booking was created and no Roo Points were charged."
+                        )
+                    else:
+                        preview = meeting_room_booking_preview(
+                            availability,
+                            owner_slack_user_id=actor_user_id,
+                            starts_at=starts_at,
+                            ends_at=ends_at,
+                            expected_room_slug=value["room_slug"],
+                            target_slack_user_id=value.get(
+                                "target_slack_user_id"
+                            ),
+                            client_request_id=value[
+                                "booking_client_request_id"
+                            ],
+                        )
+                        outcome = preview["message"]
+                        outcome_blocks = preview["blocks"]
                 else:
                     mutation_started = True
                     result = await client.cancel_meeting_room_booking(
@@ -5122,6 +5167,7 @@ async def _handle_meeting_room_action(
                     target_slack_user_id=(
                         value.get("target_slack_user_id")
                     ),
+                    room_slug=value.get("room_slug"),
                 )
             print(
                 "MEETING_ROOM_ACTION_FAILED "
@@ -5132,6 +5178,7 @@ async def _handle_meeting_room_action(
         channel_id=channel_id,
         message_ts=message_ts,
         outcome=outcome,
+        blocks=outcome_blocks,
     )
     if not delivered:
         print(f"MEETING_ROOM_ACTION_DELIVERY_FAILED action={action_id}")
@@ -5145,6 +5192,7 @@ async def _handle_meeting_room_action(
         raise retry_error
     return MeetingRoomActionResult(
         outcome=outcome,
+        blocks=outcome_blocks,
         needs_attention=needs_attention,
     )
 
@@ -5224,25 +5272,30 @@ async def _persist_and_start_meeting_room_action(
             channel_id=channel_id,
             message_ts=message_ts,
         )
-    except MeetingRoomInputError:
+    except MeetingRoomInputError as exc:
+        if exc.code == "room_already_selected":
+            return
         start_slack_action(
-            _handle_meeting_room_action(
-                settings=settings,
-                action_id=action_id,
-                action_value=action_value,
-                actor_user_id=actor_user_id,
+            _deliver_meeting_room_action_outcome(
                 channel_id=channel_id,
                 message_ts=message_ts,
+                outcome=exc.message,
             )
         )
         return
     if action.get("status") in {"completed", "failed"}:
+        if (
+            action["status"] == "completed"
+            and action_id == MEETING_ROOM_CHOOSE_ROOM_ACTION_ID
+        ):
+            return
         if action["status"] == "completed":
-            prefix = (
-                "This booking confirmation was already processed. No additional Roo Points were charged."
-                if action_id == MEETING_ROOM_BOOK_ACTION_ID
-                else "This cancellation was already processed. No additional refund was issued."
-            )
+            if action_id == MEETING_ROOM_BOOK_ACTION_ID:
+                prefix = "This booking confirmation was already processed. No additional Roo Points were charged."
+            elif action_id == MEETING_ROOM_CHOOSE_ROOM_ACTION_ID:
+                prefix = "This room choice was already processed. No booking or Roo Points charge happened from this repeat click."
+            else:
+                prefix = "This cancellation was already processed. No additional refund was issued."
         else:
             prefix = "This action previously stopped and needs attention."
         stored_outcome = str(action.get("final_outcome") or "").strip()
@@ -5334,7 +5387,11 @@ async def slack_actions(
     if (
         getattr(settings, "ROO_SURFACE", "public") == "public"
         and early_action_id
-        in {MEETING_ROOM_BOOK_ACTION_ID, MEETING_ROOM_CANCEL_ACTION_ID}
+        in {
+            MEETING_ROOM_BOOK_ACTION_ID,
+            MEETING_ROOM_CANCEL_ACTION_ID,
+            MEETING_ROOM_CHOOSE_ROOM_ACTION_ID,
+        }
     ):
         await _persist_and_start_meeting_room_action(
             settings=settings,

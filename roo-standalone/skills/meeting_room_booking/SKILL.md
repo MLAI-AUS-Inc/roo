@@ -1,6 +1,6 @@
 ---
 name: meeting-room-booking
-description: Manage room bookings
+description: Book rooms
 routing:
   use_when: >
     Meeting Room requests.
@@ -9,7 +9,7 @@ routing:
   examples:
     - {text: "room calendar tomorrow?", action: check_room_availability}
     - {text: "book room tomorrow 2pm-4pm", action: book_meeting_room}
-    - {text: "book <@U123> room tomorrow for 1.5h", action: book_meeting_room}
+    - {text: "book <@U123> room tomorrow 1.5h", action: book_meeting_room}
     - {text: "my room bookings", action: list_my_room_bookings}
     - {text: "cancel room tomorrow", action: cancel_meeting_room}
   negative_examples:
@@ -18,12 +18,14 @@ actions:
   - name: check_room_availability
     description: Check times.
     params:
+      room: {type: string}
       date: {type: string}
       start_time: {type: string}
       end_time: {type: string}
   - name: book_meeting_room
     description: Book.
     params:
+      room: {type: string}
       date: {type: string}
       start_time: {type: string}
       end_time: {type: string}
@@ -33,17 +35,23 @@ actions:
   - name: cancel_meeting_room
     description: Cancel.
     params:
+      room: {type: string}
       date: {type: string}
 ---
 
 # Meeting Room Booking
 
-Use this skill only for the hourly MLAI Meeting Room. Coworking is a separate,
+Use this skill only for the hourly MLAI meeting rooms. Coworking is a separate,
 full-day booking flow in `mlai-points`.
 
 ## Rules
 
 - Treat every date and time as Australia/Melbourne.
+- The active choices are `Small Meeting Room` and `Big Meeting Room`. Treat
+  `large room` as the Big Meeting Room.
+- Derive an explicit room only from the member's message, never from a model-only
+  parameter. If availability does not name a room, show both. If a booking does
+  not name a room, privately ask with room-choice buttons.
 - Ask for a missing date or start time. Do not invent one.
 - If the member gives a start but no duration or end, use one hour.
 - Bookings last 1 to 2 hours and use 30-minute increments. Accept phrases such
@@ -61,6 +69,9 @@ full-day booking flow in `mlai-points`.
 ## Examples
 
 - `book the meeting room tomorrow at 2pm for an hour and a half`
+- `is either meeting room free tomorrow at 2pm?`
+- `book the small meeting room tomorrow at 2pm for an hour`
+- `book the large room tomorrow at 2:30pm for 90 minutes`
 - `book the meeting room tomorrow from 2:30pm to 4pm`
 - `book <@U123> into the meeting room tomorrow at 2pm for 90 minutes`
 - `cancel my meeting room booking tomorrow`
