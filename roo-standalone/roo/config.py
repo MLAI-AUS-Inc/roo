@@ -155,7 +155,6 @@ class Settings(BaseSettings):
     ROO_POINTS_TOPUP_ENABLED: bool = False
     ROO_POINTS_TOPUP_BUTTONS_ENABLED: bool = False
     ROO_POINTS_STRIPE_CHECKOUT_HOSTS: str = "checkout.stripe.com"
-    MEETING_ROOM_BOOKING_ENABLED: bool = False
     BOOST_LINK_LOVE_ENABLED: bool = True
     BOOST_LINK_LOVE_CHANNEL_NAME: str = "boost-my-startup"
     BOOST_LINK_LOVE_CHANNEL_ID: str = ""
@@ -229,12 +228,9 @@ class Settings(BaseSettings):
         if configured:
             return configured
         if self.ROO_SURFACE == "public":
-            enabled = set(self.PUBLIC_DEFAULT_SKILLS)
             if self.VICTOR_AI_SKILL_ENABLED:
-                enabled.add("victor-ai-applications")
-            if self.MEETING_ROOM_BOOKING_ENABLED:
-                enabled.add("meeting-room-booking")
-            return frozenset(enabled)
+                return self.PUBLIC_DEFAULT_SKILLS | {"victor-ai-applications"}
+            return self.PUBLIC_DEFAULT_SKILLS
         return frozenset()
 
     @property
@@ -431,29 +427,6 @@ class Settings(BaseSettings):
                 "victor-ai-applications cannot be enabled unless "
                 "VICTOR_AI_SKILL_ENABLED is true"
             )
-        if (
-            "meeting-room-booking" in enabled_skills
-            and not self.MEETING_ROOM_BOOKING_ENABLED
-        ):
-            raise ValueError(
-                "meeting-room-booking cannot be enabled unless "
-                "MEETING_ROOM_BOOKING_ENABLED is true"
-            )
-        if self.MEETING_ROOM_BOOKING_ENABLED:
-            if self.ROO_SURFACE != "public":
-                raise ValueError(
-                    "Meeting-room booking is available only on Public Roo"
-                )
-            if not str(self.MLAI_BACKEND_URL or "").strip():
-                raise ValueError(
-                    "MLAI_BACKEND_URL is required when "
-                    "MEETING_ROOM_BOOKING_ENABLED is true"
-                )
-            if not str(self.ROO_API_KEY or "").strip():
-                raise ValueError(
-                    "ROO_API_KEY is required when "
-                    "MEETING_ROOM_BOOKING_ENABLED is true"
-                )
 
         if self.ROO_SURFACE == "public":
             if (

@@ -458,7 +458,7 @@ def get_display_name(user_id: str) -> str:
     )
 
 
-def open_dm(user_id: str, *, raise_on_error: bool = False) -> Optional[str]:
+def open_dm(user_id: str) -> Optional[str]:
     """Open a DM channel with a user."""
     client = get_slack_client()
     
@@ -469,24 +469,14 @@ def open_dm(user_id: str, *, raise_on_error: bool = False) -> Optional[str]:
         return None
     except Exception as e:
         print(f"❌ Failed to open DM with {user_id}: {e}")
-        if raise_on_error:
-            raise
         return None
 
 
-def send_dm(
-    user_id: str,
-    text: str,
-    *,
-    raise_on_error: bool = False,
-    **kwargs,
-) -> Optional[Dict[str, Any]]:
+def send_dm(user_id: str, text: str, **kwargs) -> Optional[Dict[str, Any]]:
     """Send a direct message to a user."""
-    dm_channel = open_dm(user_id, raise_on_error=raise_on_error)
+    dm_channel = open_dm(user_id)
     if dm_channel:
         return post_message(dm_channel, text, **kwargs)
-    if raise_on_error:
-        raise RuntimeError("Slack did not return a direct-message channel")
     return None
 
 
