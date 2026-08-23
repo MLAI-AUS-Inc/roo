@@ -24,6 +24,7 @@ LinearInferenceStage = Literal[
     "contextual_issue",
     "project_update_summary",
     "project_update_compose",
+    "effort_sizing",
     "studio_effort",
 ]
 
@@ -47,6 +48,7 @@ _STAGE_MAX_OUTPUT_TOKENS: dict[LinearInferenceStage, int] = {
     "contextual_issue": 2_500,
     "project_update_summary": 1_800,
     "project_update_compose": 3_000,
+    "effort_sizing": 16_000,
     "studio_effort": 16_000,
 }
 _STUDIO_STRUCTURED_RECOVERY_MAX_OUTPUT_TOKENS = 24_000
@@ -56,6 +58,7 @@ _STAGE_BASE_EFFORT: dict[LinearInferenceStage, LinearReasoningEffort] = {
     "contextual_issue": "high",
     "project_update_summary": "medium",
     "project_update_compose": "high",
+    "effort_sizing": "high",
     "studio_effort": "high",
 }
 _STAGE_MAX_INITIAL_EFFORT: dict[LinearInferenceStage, LinearReasoningEffort] = {
@@ -64,6 +67,7 @@ _STAGE_MAX_INITIAL_EFFORT: dict[LinearInferenceStage, LinearReasoningEffort] = {
     "contextual_issue": "xhigh",
     "project_update_summary": "high",
     "project_update_compose": "xhigh",
+    "effort_sizing": "xhigh",
     "studio_effort": "xhigh",
 }
 
@@ -470,7 +474,7 @@ async def run_linear_structured_inference(
             if attempt == 1:
                 raise
             if (
-                signals.stage == "studio_effort"
+                signals.stage in {"effort_sizing", "studio_effort"}
                 and isinstance(exc, ToolCallParseError)
                 and str(exc) == "structured_response_missing"
             ):

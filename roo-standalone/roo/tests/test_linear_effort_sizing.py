@@ -18,6 +18,7 @@ from roo.linear_effort_sizing import (
     StudioEffortAssessmentBatch,
     _bounded_json,
     assess_studio_effort_batch,
+    is_project_issue,
     is_studio_project,
 )
 from roo.linear_meeting_sources import ParsedSource, SourceParseResult
@@ -46,6 +47,12 @@ def test_studio_trigger_is_exact_prefix():
     assert is_studio_project({"name": "[Studio] Founder Games"})
     assert not is_studio_project({"name": " [Studio] Founder Games"})
     assert not is_studio_project({"name": "[studio] Founder Games"})
+
+
+def test_project_issue_trigger_accepts_any_resolved_project():
+    assert is_project_issue({"id": "project-1", "name": "Aaron AI"})
+    assert is_project_issue({"id": "project-2", "name": "[Studio] Founder Games"})
+    assert not is_project_issue({"name": "No resolved ID"})
 
 
 def test_bounded_sizing_context_stays_valid_and_preserves_batch_and_sections():
@@ -490,6 +497,221 @@ async def test_failed_studio_batch_recovers_per_candidate_and_preserves_successe
         for result in shadow
         if result.get("error")
     ] == ["c2"]
+
+
+@pytest.mark.asyncio
+async def test_new_issue_sizing_runs_for_non_studio_project(monkeypatch):
+    executor = SkillExecutor()
+    project = {"id": "project-1", "name": "Aaron AI"}
+    team = {"id": "team-1", "key": "ENG"}
+
+    async def fake_assess(**kwargs):
+        candidate = kwargs["candidates"][0]
+        return {candidate["candidate_key"]: _assessment(candidate["candidate_key"])}
+
+    class FakeClient:
+        async def get_project_sizing_context(self, project_id):
+            return {
+                "project": project,
+                "projectUpdates": {"nodes": []},
+                "activeIssues": {"nodes": []},
+                "terminalReferences": {"nodes": []},
+                "sizingPrecedents": {"nodes": []},
+                "effortLabelRegistry": {
+                    "nodes": [
+                        {
+                            "id": "effort-small",
+                            "name": "Small (S)",
+                            "team": {"id": "team-1"},
+                        }
+                    ]
+                },
+            }
+
+        async def get_issue_receipt(self, _key):
+            return {"status": "not_found"}
+
+    monkeypatch.setattr(executor_module, "assess_studio_effort_batch", fake_assess)
+    prepared = {
+        "candidate_key": "c1",
+        "idempotency_key": "a" * 64,
+        "candidate": {
+            "title": "Send interview invite",
+            "description": "Send the prepared invitation.",
+            "work_status": "open",
+            "remaining_work": "Send the prepared invitation.",
+            "available_artifacts": [],
+            "dependencies": [],
+            "acceptance_criteria": ["Invitation sent"],
+        },
+        "owner_match": {"user": {"id": "user-1", "name": "Sam"}},
+        "project_match": {"project": project},
+        "team_match": {"team": team},
+        "source": {},
+        "decision": "create",
+        "display": {"title": "Send interview invite"},
+    }
+
+    await executor._size_linear_studio_prepared_candidates(
+        prepared_candidates=[prepared],
+        client=FakeClient(),
+        labels=[],
+        settings=SimpleNamespace(
+            LINEAR_TASK_SIZING_MODE="required",
+            LINEAR_TASK_SIZING_CONTEXT_MAX_CHARS=40_000,
+            LINEAR_TASK_SIZING_BATCH_SIZE=3,
+            LINEAR_TASK_SIZING_RUBRIC_VERSION="project-effort-v2",
+        ),
+        requester_slack_id="USAM",
+    )
+
+    assert prepared["effort_label_id"] == "effort-small"
+    assert prepared["effort_assessment"]["model"] == "gpt-5.6-sol"
+    assert prepared["effort_assessment"]["rubric_version"] == "project-effort-v2"
+
+
+@pytest.mark.asyncio
+async def test_project_backfill_builds_no_write_preview_with_full_context(monkeypatch):
+    executor = SkillExecutor()
+    project = {
+        "id": "project-1",
+        "name": "Aaron AI",
+        "slugId": "aaron-ai",
+        "members": {"nodes": [{"id": "linear-sam"}]},
+    }
+    labels = [
+        {
+            "id": f"label-{index}",
+            "name": name,
+            "team": {"id": "team-1"},
+        }
+        for index, name in enumerate(
+            (
+                "Extra Small (XS)",
+                "Small (S)",
+                "Medium (M)",
+                "Large (L)",
+                "Extra Large (XL)",
+            )
+        )
+    ]
+    created_payloads = []
+
+    class FakeClient:
+        async def list_active_projects(self):
+            return [project]
+
+        async def list_users(self):
+            return [
+                {
+                    "id": "linear-sam",
+                    "name": "Dr Sam",
+                    "email": "sam@example.com",
+                }
+            ]
+
+        async def list_issue_labels(self):
+            return labels
+
+        async def list_project_issues(self, project_id, max_issues):
+            return {
+                "project": project,
+                "snapshotAt": "2026-08-23T01:00:00Z",
+                "terminalStateTypes": ["completed", "canceled", "duplicate"],
+                "nodes": [
+                    {
+                        "id": "issue-open",
+                        "identifier": "ENG-1",
+                        "title": "Send interview invite",
+                        "description": "Use the prepared copy and recipient list.",
+                        "updatedAt": "2026-08-23T00:00:00Z",
+                        "state": {"type": "started"},
+                        "team": {"id": "team-1", "key": "ENG"},
+                        "labels": {
+                            "nodes": [{"id": "meeting", "name": "meeting-action"}]
+                        },
+                    },
+                    {
+                        "id": "issue-sized",
+                        "identifier": "ENG-2",
+                        "title": "Already sized",
+                        "updatedAt": "2026-08-22T00:00:00Z",
+                        "state": {"type": "unstarted"},
+                        "team": {"id": "team-1", "key": "ENG"},
+                        "labels": {
+                            "nodes": [
+                                {"id": "label-1", "name": "Small (S)"}
+                            ]
+                        },
+                    },
+                    {
+                        "id": "issue-done",
+                        "identifier": "ENG-3",
+                        "title": "Done",
+                        "updatedAt": "2026-08-21T00:00:00Z",
+                        "state": {"type": "completed"},
+                        "team": {"id": "team-1", "key": "ENG"},
+                        "labels": {"nodes": []},
+                    },
+                ],
+            }
+
+        async def list_project_updates(self, project_id):
+            return {
+                "nodes": [
+                    {"id": "update-1", "body": "Interview materials are ready."}
+                ],
+                "truncated": False,
+            }
+
+        async def get_project_sizing_context(self, project_id):
+            return {
+                "project": project,
+                "projectUpdates": {"nodes": []},
+                "activeIssues": {"nodes": []},
+                "terminalReferences": {"nodes": []},
+                "sizingPrecedents": {"nodes": []},
+            }
+
+        async def create_project_sizing_run(self, *, project_id, payload):
+            created_payloads.append(payload)
+            return {"id": "run-1"}
+
+    async def fake_resilient(**kwargs):
+        assert kwargs["project_context"]["projectUpdates"]["nodes"][0]["id"] == "update-1"
+        assert len(kwargs["project_context"]["activeIssues"]["nodes"]) == 2
+        return {"issue-open": _assessment("issue-open")}, {}
+
+    monkeypatch.setattr(
+        executor,
+        "_assess_linear_studio_candidates_resilient",
+        fake_resilient,
+    )
+    result = await executor._execute_linear_project_issue_sizing(
+        text="Size the unsized tasks in Linear project Aaron AI",
+        params={
+            "project_hint": "Aaron AI",
+            "requester_email": "sam@example.com",
+        },
+        user_id="USAM",
+        client=FakeClient(),
+        settings=SimpleNamespace(
+            LINEAR_TASK_SIZING_CONTEXT_MAX_CHARS=40_000,
+            LINEAR_TASK_SIZING_BATCH_SIZE=3,
+            LINEAR_TASK_SIZING_RUBRIC_VERSION="project-effort-v2",
+            LINEAR_PROJECT_SIZING_MAX_ISSUES=500,
+        ),
+    )
+
+    assert result["data"]["preview_count"] == 1
+    assert result["data"]["skipped_already_sized"] == 1
+    assert result["data"]["skipped_terminal"] == 1
+    assert result["blocks"][1]["elements"][0]["action_id"] == (
+        "linear_project_sizing_apply"
+    )
+    assert len(created_payloads) == 1
+    assert created_payloads[0]["items"][0]["issue_id"] == "issue-open"
+    assert created_payloads[0]["model"] == "gpt-5.6-sol"
 
 
 @pytest.mark.asyncio

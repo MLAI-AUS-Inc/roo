@@ -12,14 +12,14 @@ from .linear_inference import (
     run_linear_structured_inference,
 )
 
-STUDIO_PROJECT_PREFIX = "[Studio]"
-STUDIO_EFFORT_LABELS = (
+EFFORT_LABELS = (
     "Extra Small (XS)",
     "Small (S)",
     "Medium (M)",
     "Large (L)",
     "Extra Large (XL)",
 )
+STUDIO_PROJECT_PREFIX = "[Studio]"
 TERMINAL_WORK_STATUSES = {
     "completed",
     "complete",
@@ -72,7 +72,7 @@ def _one_sentence_rationale(value: str, *, prefix: str = "") -> str:
     return f"{text}."
 
 
-class StudioEffortAssessment(BaseModel):
+class EffortAssessment(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     candidate_key: str = Field(min_length=1, max_length=64)
@@ -127,13 +127,18 @@ class StudioEffortAssessment(BaseModel):
         return self
 
 
-class StudioEffortAssessmentBatch(BaseModel):
+class EffortAssessmentBatch(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    assessments: list[StudioEffortAssessment]
+    assessments: list[EffortAssessment]
+
+
+def is_project_issue(project: dict[str, Any] | None) -> bool:
+    return bool(str((project or {}).get("id") or "").strip())
 
 
 def is_studio_project(project: dict[str, Any] | None) -> bool:
+    """Deprecated exact-prefix helper retained for compatibility."""
     return str((project or {}).get("name") or "").startswith(STUDIO_PROJECT_PREFIX)
 
 
@@ -142,7 +147,7 @@ def is_terminal_candidate(candidate: dict[str, Any]) -> bool:
     return status in TERMINAL_WORK_STATUSES
 
 
-async def assess_studio_effort_batch(
+async def assess_effort_batch(
     *,
     candidates: list[dict[str, Any]],
     project_context: dict[str, Any],
@@ -151,12 +156,12 @@ async def assess_studio_effort_batch(
     batch_chunk_index: int = 1,
     batch_chunk_count: int = 1,
     recovery_depth: int = 0,
-) -> dict[str, StudioEffortAssessment]:
+) -> dict[str, EffortAssessment]:
     if not candidates:
         return {}
     candidate_keys = [str(item.get("candidate_key") or "") for item in candidates]
     if any(not key for key in candidate_keys) or len(candidate_keys) != len(set(candidate_keys)):
-        raise ValueError("Studio sizing candidate keys must be present and unique.")
+        raise ValueError("Effort sizing candidate keys must be present and unique.")
 
     evidence_refs = _collect_evidence_refs(candidates, project_context)
     prompt_payload = {
@@ -192,11 +197,11 @@ Rules:
 </untrusted_linear_and_slack_evidence>
 """.strip()
 
-    def validate_batch(batch: StudioEffortAssessmentBatch) -> None:
+    def validate_batch(batch: EffortAssessmentBatch) -> None:
         assessments = {item.candidate_key: item for item in batch.assessments}
         if set(assessments) != set(candidate_keys):
             raise LinearInferenceValidationError(
-                "Studio sizing response did not contain exactly one result per candidate."
+                "Effort sizing response did not contain exactly one result per candidate."
             )
         for assessment in assessments.values():
             seen_refs: set[str] = set()
@@ -245,9 +250,9 @@ Rules:
             },
             {"role": "user", "content": prompt},
         ],
-        response_format=StudioEffortAssessmentBatch,
+        response_format=EffortAssessmentBatch,
         signals=LinearReasoningSignals(
-            stage="studio_effort",
+            stage="effort_sizing",
             source_chars=len(serialized_context),
             source_count=source_count,
             batch_chunk_index=batch_chunk_index,
@@ -287,7 +292,7 @@ Rules:
 
 
 def assessment_metadata(
-    assessment: StudioEffortAssessment,
+    assessment: EffortAssessment,
     *,
     project: dict[str, Any],
     model: str,
@@ -300,6 +305,13 @@ def assessment_metadata(
         "model": model,
         "rubric_version": rubric_version,
     }
+
+
+# Compatibility aliases for callers/tests written before sizing became project-wide.
+STUDIO_EFFORT_LABELS = EFFORT_LABELS
+StudioEffortAssessment = EffortAssessment
+StudioEffortAssessmentBatch = EffortAssessmentBatch
+assess_studio_effort_batch = assess_effort_batch
 
 
 def _collect_evidence_refs(

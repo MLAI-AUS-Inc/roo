@@ -1,43 +1,48 @@
 ---
 name: linear-meeting-actions
-description: Create Linear issues or project updates from Slack context, meeting notes, and files with project and assignee resolution
+description: Create Linear tasks/updates from Slack or size tasks across a named Linear project
 requires_auth: true
 parameters:
-  - action: One of extract, create, approve, or reject. Defaults to create for transcript-to-Linear requests.
+  - action: One of extract, create, approve, reject, or size_project_issues. Defaults to create for transcript-to-Linear requests.
   - transcript: Pasted meeting transcript, notes, or summary text. If omitted, use the current Slack thread or bounded recent channel context and supported attached files.
   - project_hint: Optional Linear project name or slug mentioned by the user.
   - owner_hint: Optional Linear assignee name, email, or Slack mention.
   - team_hint: Optional Linear team name or key mentioned by the user.
   - confirm_create: Boolean flag used by Slack approval actions for uncertain items.
+  - mode: For size_project_issues, missing_only (default) or replace_existing.
 routing:
   use_when: >
-    The user wants Linear issues/tasks or project updates created from a direct
-    request, nearby Slack context, meeting notes, a thread, or attached files.
+    Create Linear tasks/updates from Slack context or files, or size/rescore a
+    named project's tasks.
   avoid_when: >
     MLAI points tasks (mlai-points), Linear how-to questions, or tasks without a
     Linear destination.
   examples:
     - {text: "add a task to linear to fix the login bug", action: create}
     - {text: "send this attached PDF to Linear as tasks", action: create}
-    - {text: "add this as a task for me in Linear", action: create}
+    - {text: "size all unsized tasks in Linear project Aaron AI", action: size_project_issues}
   negative_examples:
     - {text: "create a task called fix docs worth 5 points", instead: mlai-points}
-    - {text: "how do I write a good linear ticket?", instead: respond_in_chat}
 actions:
   - name: create
-    description: Extract candidate action items (from the message, thread, or files) and create Linear issues.
+    description: Create issues from the message, thread, or files.
     params:
       project_hint: {type: string, description: "Linear project name/slug if mentioned."}
       team_hint: {type: string, description: "Linear team name/key if mentioned."}
   - name: extract
-    description: Only extract/preview action items without creating issues yet.
+    description: Preview action items without creating them.
     params:
       project_hint: {type: string}
       team_hint: {type: string}
   - name: approve
-    description: Approve previously previewed uncertain items (usually a button follow-up).
+    description: Approve previewed uncertain items.
   - name: reject
-    description: Reject previously previewed uncertain items.
+    description: Reject previewed uncertain items.
+  - name: size_project_issues
+    description: Preview and confirm effort labels across one project.
+    params:
+      project_hint: {type: string, description: "Exact project name or slug."}
+      mode: {type: string, enum: [missing_only, replace_existing], description: "Skip or rescore existing sizes."}
 ---
 
 # Linear Meeting Actions Skill
@@ -60,17 +65,19 @@ This skill turns pasted Slack meeting transcripts, summaries, supported Slack fi
 - Use the exact `gpt-5.6-sol` model through the OpenAI Responses API for every Linear inference stage.
 - Select model reasoning effort from source length, source count, ambiguity, partial work, dependencies, artifacts, and conflicting context; never derive model effort from the XS/S/M/L/XL task label.
 - Recover a timed-out meeting-note chunk once at smaller scope while keeping the overall extraction bounded and creating no partial Linear issues.
-- For projects whose current Linear name starts exactly with `[Studio]`, estimate the remaining effort in bounded batches with the dedicated Studio rubric and apply exactly one compatible XS/S/M/L/XL label.
+- For every resolved project, estimate remaining effort in bounded batches and apply exactly one compatible XS/S/M/L/XL label to each new non-terminal issue.
+- Preview effort labels for every eligible active issue in one named project and apply them only after the requester confirms.
 - Ask for Slack approval when an action item is useful but not confident enough to create automatically.
 
 ## Parameters
 
-- **action**: One of `extract`, `create`, `approve`, or `reject`. Defaults to `create`.
+- **action**: One of `extract`, `create`, `approve`, `reject`, or `size_project_issues`. Defaults to `create`.
 - **transcript**: Pasted meeting transcript, notes, or summary text. If omitted, inspect the current Slack thread or bounded recent channel context and attached files.
 - **project_hint**: Optional Linear project name or slug.
 - **owner_hint**: Optional Linear assignee name, email, or Slack mention.
 - **team_hint**: Optional Linear team name or key.
 - **confirm_create**: Internal boolean used for Slack approval actions.
+- **mode**: For project backfills, use `missing_only` by default or `replace_existing` only when the requester explicitly asks to rescore existing labels.
 
 ## Workflow
 
@@ -90,17 +97,20 @@ This skill turns pasted Slack meeting transcripts, summaries, supported Slack fi
 8. Match projects by explicit project hint, exact name/slug, linked Slack channel, project description/content/update/recent issues, and true project membership as a tie-breaker.
 9. Resolve relative dates from the evidence message in the configured workspace timezone.
 10. Suppress candidates that are already completed, cancelled, or duplicates.
-11. For each resolved project whose current title starts exactly with `[Studio]`, read its bounded project updates, active work, terminal references, related issues, label registry, and labelled precedents. Estimate candidates in bounded groups of three with structured `gpt-5.6-sol` Responses API calls.
+11. For each resolved project, read its bounded project updates, active work, terminal references, related issues, label registry, and labelled precedents. Estimate candidates in bounded groups of three with structured `gpt-5.6-sol` Responses API calls.
 12. Estimate remaining work rather than original scope: XS is up to 15 minutes, S is up to 1 hour, M is up to 2 hours, L is up to 3 hours, and XL is up to 5 hours or has substantial uncertainty. Work over 5 hours is XL and should be split.
-13. Start direct cleanup at `low`, ordinary extraction and source summaries at `medium`, and contextual inference, project synthesis, and Studio sizing at `high`. Increase to `xhigh` when deterministic complexity signals warrant it.
+13. Start direct cleanup at `low`, ordinary extraction and source summaries at `medium`, and contextual inference, project synthesis, and effort sizing at `high`. Increase to `xhigh` when deterministic complexity signals warrant it.
 14. Treat each extracted source chunk as one inference source; track total batch chunks separately so a long PDF does not artificially increase every chunk's reasoning effort.
-15. Retry a structured parsing or workflow-contract failure at most once. For a missing Studio structured response, lower reasoning effort and increase the output allowance so the model can emit the full schema; for other validation failures, use the next reasoning level.
+15. Retry a structured parsing or workflow-contract failure at most once. For a missing effort-sizing structured response, lower reasoning effort and increase the output allowance so the model can emit the full schema; for other validation failures, use the next reasoning level.
 16. If meeting-action inference times out, retry only the failed chunk once at smaller paragraph/page-aligned scope with bounded concurrency. Finish extraction and deduplication before any issue write; if recovery or the total extraction deadline fails, create nothing and say so explicitly.
-17. Discard duplicate or unrecognized optional evidence references without rejecting an otherwise valid Studio assessment. Normalize its rationale to one sentence and, when duration-based, add the rubric's canonical time anchor if the model omitted one.
-18. If a Studio sizing batch still fails its required candidate or rubric fields, retry its candidates individually and preserve successful assessments. Add the exact effort label and normalized one-sentence rationale to the issue description and Slack preview. Never create an eligible Studio issue without exactly one valid effort label.
+17. Discard duplicate or unrecognized optional evidence references without rejecting an otherwise valid effort assessment. Normalize its rationale to one sentence and, when duration-based, add the rubric's canonical time anchor if the model omitted one.
+18. If an effort-sizing batch still fails its required candidate or rubric fields, retry its candidates individually and preserve successful assessments. Add the exact effort label and normalized one-sentence rationale to each new issue description and Slack preview. Never create an eligible project issue without exactly one valid effort label.
 19. Send an idempotency fingerprint and preserve a Slack permalink in the Linear issue.
 20. Present uncertain candidates in Slack with Approve and Reject buttons.
 21. Report created project updates, created issues, skipped duplicates, and unresolved items clearly.
+22. For `size_project_issues`, resolve exactly one active project, verify the requester maps to an authorized Linear user, page every issue and project update, and stop without writes if pagination, context, model output, or the five-label preflight is incomplete.
+23. Exclude completed, cancelled, and duplicate work. In `missing_only`, skip issues carrying exactly one valid size label but correct issues carrying multiple size labels. In `replace_existing`, rescore all active issues.
+24. Persist the complete preview in the backend. Apply only through requester-bound Slack confirmation; re-read each live issue, skip terminal races, reject stale project/team/content changes, preserve all unrelated labels, and make retries idempotent.
 
 ## Creation Rules
 
@@ -110,8 +120,9 @@ This skill turns pasted Slack meeting transcripts, summaries, supported Slack fi
 - Do not auto-create contextual discussion-thread issues; always request Slack approval first.
 - Project updates are created immediately only when affirmatively requested, not when the request says not to write one, and the project match is confident.
 - Apply the compatible `meeting-action` label if it already exists.
-- In Studio sizing `review` or `required` mode, apply exactly one of `Extra Small (XS)`, `Small (S)`, `Medium (M)`, `Large (L)`, or `Extra Large (XL)`. Fail closed if sizing context, structured output, or the compatible label is unavailable.
-- Studio sizing `shadow` mode captures estimates without mutating issue labels or descriptions; `review` sends every Studio candidate for approval; `required` may auto-create only a high-confidence, context-sufficient assessment.
+- In project sizing `review` or `required` mode, apply exactly one of `Extra Small (XS)`, `Small (S)`, `Medium (M)`, `Large (L)`, or `Extra Large (XL)`. Fail closed if sizing context, structured output, or the compatible label is unavailable.
+- Project sizing `shadow` mode captures estimates without mutating issue labels or descriptions; `review` sends every candidate for approval; `required` may auto-create only a high-confidence, context-sufficient assessment.
+- Never mutate existing issues during project sizing until the requester presses Apply. Preserve descriptions and every non-effort label.
 - Issue descriptions must include the context, evidence snippet, source message permalink/identifiers when available, and a note that Roo generated the issue from Slack context.
 
 ## Response Style

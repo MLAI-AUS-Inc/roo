@@ -42,9 +42,10 @@ from ..linear_meeting_sources import (
     source_text_chunks,
 )
 from ..linear_effort_sizing import (
+    EFFORT_LABELS,
     assessment_metadata,
     assess_studio_effort_batch,
-    is_studio_project,
+    is_project_issue,
     is_terminal_candidate,
 )
 from ..linear_inference import (
@@ -157,6 +158,18 @@ def get_pending_linear_meeting_action(pending_id: str) -> Optional[dict[str, Any
 
 def pop_pending_linear_meeting_action(pending_id: str) -> Optional[dict[str, Any]]:
     return LINEAR_MEETING_PENDING_ACTIONS.pop(pending_id, None)
+
+
+def _linear_task_sizing_setting(
+    settings: Any,
+    canonical_name: str,
+    legacy_name: str,
+    default: Any,
+) -> Any:
+    configured = getattr(settings, canonical_name, None)
+    if configured in (None, ""):
+        configured = getattr(settings, legacy_name, default)
+    return default if configured in (None, "") else configured
 
 
 class SkillExecutor:
@@ -2851,6 +2864,18 @@ Keep the response concise but informative."""
                 "requester_display_name": request_context.get("display_name"),
                 "requester_email": request_context.get("email"),
             }
+        action = str(params.get("action") or "create").strip().lower().replace("-", "_")
+        if action == "size_project_issues":
+            ClientClass = skill.get_client_class("LinearMeetingActionsClient")
+            if ClientClass is None:
+                return {"message": "Linear meeting actions are missing their Linear client implementation."}
+            return await self._execute_linear_project_issue_sizing(
+                text=text,
+                params=params,
+                user_id=user_id,
+                client=ClientClass(),
+                settings=settings,
+            )
         thread_reference_request = self._is_linear_thread_reference_request(text, params)
         if thread_reference_request and self._linear_request_assigns_to_requester(text):
             params["owner_hint"] = f"<@{user_id}>"
@@ -3203,13 +3228,19 @@ Keep the response concise but informative."""
             requester_slack_id=user_id,
         )
         sizing_mode = str(
-            getattr(settings, "LINEAR_STUDIO_SIZING_MODE", "off") or "off"
+            _linear_task_sizing_setting(
+                settings,
+                "LINEAR_TASK_SIZING_MODE",
+                "LINEAR_STUDIO_SIZING_MODE",
+                "off",
+            )
         ).strip().lower()
         if sizing_mode not in {"off", "shadow", "review", "required"}:
             sizing_mode = "off"
         sizing_auto_threshold = float(
-            getattr(
+            _linear_task_sizing_setting(
                 settings,
+                "LINEAR_TASK_SIZING_AUTO_CREATE_MIN_CONFIDENCE",
                 "LINEAR_STUDIO_SIZING_AUTO_CREATE_MIN_CONFIDENCE",
                 0.75,
             )
@@ -3222,7 +3253,7 @@ Keep the response concise but informative."""
             team = prepared["team_match"].get("team") or {}
             display = prepared["display"]
             decision = prepared["decision"]
-            studio_candidate = is_studio_project(project)
+            project_candidate = is_project_issue(project)
             replay_issue = prepared.get("receipt_replay_issue")
             if isinstance(replay_issue, dict):
                 created.append(
@@ -3232,14 +3263,14 @@ Keep the response concise but informative."""
                     }
                 )
                 continue
-            sizing_error = str(prepared.get("studio_sizing_error") or "")
-            if studio_candidate and sizing_mode in {"review", "required"}:
+            sizing_error = str(prepared.get("sizing_error") or "")
+            if project_candidate and sizing_mode in {"review", "required"}:
                 if sizing_error or not prepared.get("effort_assessment"):
                     skipped.append(
                         {
                             **display,
                             "reason": (
-                                "Studio effort sizing could not be completed; no unlabeled issue was created. "
+                                "Effort sizing could not be completed; no unlabeled issue was created. "
                                 + (sizing_error or "Rerun the request after the sizing context is available.")
                             )[:700],
                         }
@@ -3262,7 +3293,7 @@ Keep the response concise but informative."""
                 team_id=str(team.get("id") or ""),
             )
             label_ids = meeting_action_ids[:1]
-            if studio_candidate and sizing_mode in {"review", "required"}:
+            if project_candidate and sizing_mode in {"review", "required"}:
                 label_ids.append(str(prepared["effort_label_id"]))
             issue_input = self._build_linear_meeting_issue_input(
                 candidate=candidate,
@@ -3317,7 +3348,458 @@ Keep the response concise but informative."""
                 "created_count": len(created),
                 "review_count": len(review_needed),
                 "skipped_count": len(skipped),
-                "studio_sizing_shadow": sizing_shadow,
+                "effort_sizing_results": sizing_shadow,
+            },
+        }
+
+    async def _execute_linear_project_issue_sizing(
+        self,
+        *,
+        text: str,
+        params: dict[str, Any],
+        user_id: str,
+        client: Any,
+        settings: Any,
+    ) -> dict[str, Any]:
+        """Build a durable, no-write preview for sizing one complete project."""
+
+        project_hint = str(params.get("project_hint") or "").strip()
+        if not project_hint:
+            project_hint = str(
+                self._extract_linear_meeting_project_hint_from_text(text) or ""
+            ).strip()
+        if not project_hint:
+            return {
+                "message": (
+                    "Tell me the exact Linear project name or slug to size. "
+                    "For example: @Roo size the unsized tasks in Linear project Aaron AI."
+                )
+            }
+
+        try:
+            projects, users, labels = await asyncio.gather(
+                client.list_active_projects(),
+                client.list_users(),
+                client.list_issue_labels(),
+            )
+        except Exception as exc:
+            return {
+                "message": f"I couldn't read Linear context yet: {exc.__class__.__name__}: {exc}"
+            }
+
+        project_match = self._match_linear_meeting_project(
+            {"project_hint": project_hint},
+            projects,
+            None,
+            project_hint,
+        )
+        project = project_match.get("project")
+        if not isinstance(project, dict) or float(
+            project_match.get("confidence") or 0.0
+        ) < 0.95:
+            return {
+                "message": (
+                    f"I couldn't uniquely match {project_hint!r} to an active Linear project. "
+                    "Use its exact project name or slug; nothing was changed."
+                )
+            }
+        project_id = str(project.get("id") or "")
+
+        requester_hint = (
+            str(params.get("requester_email") or "").strip()
+            or str(params.get("requester_display_name") or "").strip()
+            or f"<@{user_id}>"
+        )
+        requester_match = self._match_linear_meeting_owner(requester_hint, users)
+        requester = requester_match.get("user")
+        if not isinstance(requester, dict) or float(
+            requester_match.get("confidence") or 0.0
+        ) < 0.9:
+            return {
+                "message": (
+                    "I couldn't map your Slack identity to a Linear user, so I couldn't "
+                    "verify project-sizing access. Nothing was changed."
+                )
+            }
+
+        max_issues = max(
+            1,
+            int(getattr(settings, "LINEAR_PROJECT_SIZING_MAX_ISSUES", 500) or 500),
+        )
+        try:
+            inventory, update_inventory, bounded_context = await asyncio.gather(
+                client.list_project_issues(project_id, max_issues=max_issues),
+                client.list_project_updates(project_id),
+                client.get_project_sizing_context(project_id),
+            )
+        except Exception as exc:
+            return {
+                "message": (
+                    f"I couldn't build a complete sizing snapshot for {project.get('name')!r}: "
+                    f"{exc.__class__.__name__}: {exc}. Nothing was changed."
+                )
+            }
+
+        live_project = inventory.get("project")
+        if not isinstance(live_project, dict) or str(
+            live_project.get("id") or ""
+        ) != project_id:
+            return {
+                "message": "Linear returned mismatched project inventory; nothing was changed."
+            }
+        if str(live_project.get("name") or "") != str(project.get("name") or ""):
+            return {
+                "message": "The Linear project changed while I prepared the preview; nothing was changed."
+            }
+
+        terminal_types = {
+            str(value).strip().lower()
+            for value in inventory.get("terminalStateTypes") or []
+            if str(value).strip()
+        } or {"completed", "canceled", "cancelled", "duplicate"}
+        mode = str(params.get("mode") or params.get("scope") or "").strip().lower()
+        normalized_request = self._normalize_match_text(text)
+        replace_requested = mode in {
+            "replace_existing",
+            "replace",
+            "rescore",
+            "resize",
+        } or any(
+            token in normalized_request
+            for token in ("replaceexisting", "rescore", "resize", "reestimate")
+        )
+        run_mode = "replace_existing" if replace_requested else "missing_only"
+
+        active_issues: list[dict[str, Any]] = []
+        skipped_terminal = 0
+        skipped_already_sized = 0
+        for issue in inventory.get("nodes") or []:
+            if not isinstance(issue, dict):
+                continue
+            state_type = str(((issue.get("state") or {}).get("type")) or "").lower()
+            if state_type in terminal_types:
+                skipped_terminal += 1
+                continue
+            issue_labels = self._linear_connection_nodes(issue.get("labels"))
+            effort_labels = [
+                label
+                for label in issue_labels
+                if str(label.get("name") or "") in EFFORT_LABELS
+            ]
+            if run_mode == "missing_only" and len(effort_labels) == 1:
+                skipped_already_sized += 1
+                continue
+            active_issues.append(issue)
+
+        if not active_issues:
+            return {
+                "message": (
+                    f"{live_project.get('name')!r} has no eligible active issues to size "
+                    f"({skipped_already_sized} already sized; {skipped_terminal} terminal). "
+                    "Nothing was changed."
+                )
+            }
+
+        team_ids = {
+            str(((issue.get("team") or {}).get("id")) or "")
+            for issue in active_issues
+        }
+        if "" in team_ids:
+            return {
+                "message": "At least one eligible issue has no Linear team; nothing was changed."
+            }
+        try:
+            for team_id in sorted(team_ids):
+                for effort_label in EFFORT_LABELS:
+                    compatible = self._linear_compatible_label_ids(
+                        labels,
+                        label_name=effort_label,
+                        team_id=team_id,
+                        exact_name=True,
+                    )
+                    if len(compatible) != 1:
+                        raise RuntimeError(
+                            f"Expected exactly one compatible label named {effort_label!r} "
+                            f"for team {team_id!r}; found {len(compatible)}."
+                        )
+        except Exception as exc:
+            return {
+                "message": f"Effort-label preflight failed: {exc} Nothing was changed."
+            }
+
+        return await self._finish_linear_project_issue_sizing_preview(
+            text=text,
+            params=params,
+            user_id=user_id,
+            client=client,
+            settings=settings,
+            requester=requester,
+            live_project=live_project,
+            inventory=inventory,
+            update_inventory=update_inventory,
+            bounded_context=bounded_context,
+            active_issues=active_issues,
+            run_mode=run_mode,
+            skipped_already_sized=skipped_already_sized,
+            skipped_terminal=skipped_terminal,
+        )
+
+    async def _finish_linear_project_issue_sizing_preview(
+        self,
+        *,
+        text: str,
+        params: dict[str, Any],
+        user_id: str,
+        client: Any,
+        settings: Any,
+        requester: dict[str, Any],
+        live_project: dict[str, Any],
+        inventory: dict[str, Any],
+        update_inventory: dict[str, Any],
+        bounded_context: dict[str, Any],
+        active_issues: list[dict[str, Any]],
+        run_mode: str,
+        skipped_already_sized: int,
+        skipped_terminal: int,
+    ) -> dict[str, Any]:
+        full_project_context = dict(bounded_context)
+        full_project_context["project"] = live_project
+        full_project_context["projectUpdates"] = {
+            "nodes": update_inventory.get("nodes") or [],
+            "returned": len(update_inventory.get("nodes") or []),
+            "truncated": bool(update_inventory.get("truncated")),
+        }
+        terminal_types = {
+            str(value).strip().lower()
+            for value in inventory.get("terminalStateTypes") or []
+            if str(value).strip()
+        } or {"completed", "canceled", "cancelled", "duplicate"}
+        context_active_issues = [
+            issue
+            for issue in inventory.get("nodes") or []
+            if isinstance(issue, dict)
+            and str(((issue.get("state") or {}).get("type")) or "").lower()
+            not in terminal_types
+        ]
+        full_project_context["activeIssues"] = {
+            "nodes": context_active_issues,
+            "returned": len(context_active_issues),
+            "truncated": bool(inventory.get("truncated")),
+        }
+
+        sizing_candidates: list[dict[str, Any]] = []
+        issues_by_id: dict[str, dict[str, Any]] = {}
+        for issue in active_issues:
+            issue_id = str(issue.get("id") or "")
+            issues_by_id[issue_id] = issue
+            description = str(issue.get("description") or "").strip()
+            sizing_candidates.append(
+                {
+                    "candidate_key": issue_id,
+                    "id": issue_id,
+                    "identifier": str(issue.get("identifier") or ""),
+                    "title": str(issue.get("title") or ""),
+                    "description": description,
+                    "work_status": "open",
+                    "completed_work": "",
+                    "remaining_work": description,
+                    "available_artifacts": [],
+                    "dependencies": [],
+                    "acceptance_criteria": [],
+                    "due_date": issue.get("dueDate"),
+                    "assignee": issue.get("assignee") or {},
+                    "team": issue.get("team") or {},
+                }
+            )
+
+        context_max_chars = int(
+            _linear_task_sizing_setting(
+                settings,
+                "LINEAR_TASK_SIZING_CONTEXT_MAX_CHARS",
+                "LINEAR_STUDIO_SIZING_CONTEXT_MAX_CHARS",
+                40000,
+            )
+        )
+        batch_size = int(
+            _linear_task_sizing_setting(
+                settings,
+                "LINEAR_TASK_SIZING_BATCH_SIZE",
+                "LINEAR_STUDIO_SIZING_BATCH_SIZE",
+                3,
+            )
+        )
+        assessments, errors = await self._assess_linear_studio_candidates_resilient(
+            candidates=sizing_candidates,
+            project_context=full_project_context,
+            context_max_chars=context_max_chars,
+            batch_size=batch_size,
+            safety_identifier=linear_safety_identifier(user_id),
+            max_concurrency=int(
+                getattr(
+                    settings,
+                    "LINEAR_PROJECT_SIZING_INFERENCE_CONCURRENCY",
+                    3,
+                )
+                or 3
+            ),
+        )
+        if errors or len(assessments) != len(sizing_candidates):
+            first_error = next(
+                iter(errors.values()),
+                "One or more assessments were missing.",
+            )
+            return {
+                "message": (
+                    f"I couldn't size all {len(sizing_candidates)} eligible issues reliably "
+                    f"({len(errors)} failed): {first_error} Nothing was changed."
+                ),
+                "data": {"sizing_errors": errors},
+            }
+
+        rubric_version = str(
+            _linear_task_sizing_setting(
+                settings,
+                "LINEAR_TASK_SIZING_RUBRIC_VERSION",
+                "LINEAR_STUDIO_SIZING_RUBRIC_VERSION",
+                "project-effort-v2",
+            )
+        )
+        proposals: list[dict[str, Any]] = []
+        for candidate in sizing_candidates:
+            issue_id = str(candidate["candidate_key"])
+            issue = issues_by_id[issue_id]
+            assessment = assessments[issue_id]
+            metadata = assessment_metadata(
+                assessment,
+                project=live_project,
+                model=LINEAR_SKILL_MODEL,
+                rubric_version=rubric_version,
+            )
+            proposals.append(
+                {
+                    "issue_id": issue_id,
+                    "identifier": issue.get("identifier"),
+                    "title": issue.get("title"),
+                    "team_id": str(((issue.get("team") or {}).get("id")) or ""),
+                    "expected_updated_at": issue.get("updatedAt"),
+                    "original_labels": self._linear_connection_nodes(
+                        issue.get("labels")
+                    ),
+                    "effort_label": assessment.effort_label,
+                    "rationale": assessment.rationale,
+                    "sizing_metadata": metadata,
+                }
+            )
+
+        fingerprint = hashlib.sha256(
+            json.dumps(
+                {
+                    "project": str(live_project.get("id") or ""),
+                    "requester": user_id,
+                    "mode": run_mode,
+                    "snapshot": inventory.get("snapshotAt"),
+                    "issues": [
+                        [item["issue_id"], item["expected_updated_at"]]
+                        for item in proposals
+                    ],
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        try:
+            run = await client.create_project_sizing_run(
+                project_id=str(live_project.get("id") or ""),
+                payload={
+                    "requested_by_slack_user_id": user_id,
+                    "requested_by_linear_user_id": str(requester.get("id") or ""),
+                    "project_name": str(live_project.get("name") or ""),
+                    "mode": run_mode,
+                    "model": LINEAR_SKILL_MODEL,
+                    "rubric_version": rubric_version,
+                    "source_snapshot_at": inventory.get("snapshotAt"),
+                    "project_context": {
+                        "projectUpdateCount": len(
+                            update_inventory.get("nodes") or []
+                        ),
+                        "issueCount": len(inventory.get("nodes") or []),
+                    },
+                    "idempotency_key": fingerprint,
+                    "items": proposals,
+                },
+            )
+        except Exception as exc:
+            return {
+                "message": (
+                    "I sized the issues but couldn't save a safe preview: "
+                    f"{exc.__class__.__name__}: {exc}. Nothing was changed."
+                )
+            }
+
+        run_id = str(run.get("id") or "")
+        preview_lines = [
+            (
+                f"Effort sizing preview for *{live_project.get('name')}*: "
+                f"{len(proposals)} issue(s)."
+            ),
+            (
+                f"Mode: {run_mode} · model: {LINEAR_SKILL_MODEL} · "
+                "no labels changed yet."
+            ),
+            "",
+        ]
+        for proposal in proposals[:15]:
+            identifier = proposal.get("identifier") or proposal["issue_id"]
+            preview_lines.append(
+                f"- *{identifier}* {proposal['title']} -> "
+                f"{proposal['effort_label']} — {proposal['rationale']}"
+            )
+        if len(proposals) > 15:
+            preview_lines.append(f"- ...and {len(proposals) - 15} more issue(s).")
+        preview_lines.append(
+            f"Skipped {skipped_already_sized} already sized and "
+            f"{skipped_terminal} terminal issue(s)."
+        )
+        message = "\n".join(preview_lines)
+        value = json.dumps({"run_id": run_id, "requested_by": user_id})
+        blocks = [
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": message[:3000]},
+            },
+            {
+                "type": "actions",
+                "block_id": f"linear_project_sizing_{run_id[:8]}",
+                "elements": [
+                    {
+                        "type": "button",
+                        "text": {
+                            "type": "plain_text",
+                            "text": "Apply size labels",
+                        },
+                        "style": "primary",
+                        "action_id": "linear_project_sizing_apply",
+                        "value": value,
+                    },
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "Cancel"},
+                        "style": "danger",
+                        "action_id": "linear_project_sizing_cancel",
+                        "value": value,
+                    },
+                ],
+            },
+        ]
+        return {
+            "message": message,
+            "blocks": blocks,
+            "data": {
+                "run_id": run_id,
+                "preview_count": len(proposals),
+                "skipped_already_sized": skipped_already_sized,
+                "skipped_terminal": skipped_terminal,
+                "mode": run_mode,
             },
         }
 
@@ -5201,6 +5683,7 @@ Chunk {index} source: {label}
         context_max_chars: int,
         batch_size: int,
         safety_identifier: str,
+        max_concurrency: int = 1,
     ) -> tuple[dict[str, Any], dict[str, str]]:
         """Size bounded batches and isolate a failed batch to single candidates."""
 
@@ -5211,45 +5694,64 @@ Chunk {index} source: {label}
             candidates[index : index + batch_size]
             for index in range(0, len(candidates), batch_size)
         ]
-        for chunk_index, chunk in enumerate(chunks, start=1):
-            try:
-                assessments.update(
-                    await assess_studio_effort_batch(
-                        candidates=chunk,
-                        project_context=project_context,
-                        context_max_chars=context_max_chars,
-                        safety_identifier=safety_identifier,
-                        batch_chunk_index=chunk_index,
-                        batch_chunk_count=len(chunks),
-                    )
-                )
-                continue
-            except Exception as batch_exc:
-                if len(chunk) == 1:
-                    candidate_key = str(chunk[0]["candidate_key"])
-                    errors[candidate_key] = (
-                        f"{batch_exc.__class__.__name__}: {batch_exc}"
-                    )
-                    continue
+        semaphore = asyncio.Semaphore(max(1, min(int(max_concurrency or 1), 4)))
 
-            for candidate in chunk:
-                candidate_key = str(candidate["candidate_key"])
+        async def assess_chunk(
+            chunk_index: int,
+            chunk: list[dict[str, Any]],
+        ) -> tuple[dict[str, Any], dict[str, str]]:
+            chunk_assessments: dict[str, Any] = {}
+            chunk_errors: dict[str, str] = {}
+            async with semaphore:
                 try:
-                    assessments.update(
+                    chunk_assessments.update(
                         await assess_studio_effort_batch(
-                            candidates=[candidate],
+                            candidates=chunk,
                             project_context=project_context,
                             context_max_chars=context_max_chars,
                             safety_identifier=safety_identifier,
                             batch_chunk_index=chunk_index,
                             batch_chunk_count=len(chunks),
-                            recovery_depth=1,
                         )
                     )
-                except Exception as candidate_exc:
-                    errors[candidate_key] = (
-                        f"{candidate_exc.__class__.__name__}: {candidate_exc}"
-                    )
+                    return chunk_assessments, chunk_errors
+                except Exception as batch_exc:
+                    if len(chunk) == 1:
+                        candidate_key = str(chunk[0]["candidate_key"])
+                        chunk_errors[candidate_key] = (
+                            f"{batch_exc.__class__.__name__}: {batch_exc}"
+                        )
+                        return chunk_assessments, chunk_errors
+
+                for candidate in chunk:
+                    candidate_key = str(candidate["candidate_key"])
+                    try:
+                        chunk_assessments.update(
+                            await assess_studio_effort_batch(
+                                candidates=[candidate],
+                                project_context=project_context,
+                                context_max_chars=context_max_chars,
+                                safety_identifier=safety_identifier,
+                                batch_chunk_index=chunk_index,
+                                batch_chunk_count=len(chunks),
+                                recovery_depth=1,
+                            )
+                        )
+                    except Exception as candidate_exc:
+                        chunk_errors[candidate_key] = (
+                            f"{candidate_exc.__class__.__name__}: {candidate_exc}"
+                        )
+                return chunk_assessments, chunk_errors
+
+        results = await asyncio.gather(
+            *[
+                assess_chunk(chunk_index, chunk)
+                for chunk_index, chunk in enumerate(chunks, start=1)
+            ]
+        )
+        for chunk_assessments, chunk_errors in results:
+            assessments.update(chunk_assessments)
+            errors.update(chunk_errors)
         return assessments, errors
 
     async def _size_linear_studio_prepared_candidates(
@@ -5262,20 +5764,25 @@ Chunk {index} source: {label}
         requester_slack_id: str,
     ) -> list[dict[str, Any]]:
         mode = str(
-            getattr(settings, "LINEAR_STUDIO_SIZING_MODE", "off") or "off"
+            _linear_task_sizing_setting(
+                settings,
+                "LINEAR_TASK_SIZING_MODE",
+                "LINEAR_STUDIO_SIZING_MODE",
+                "off",
+            )
         ).strip().lower()
         if mode not in {"off", "shadow", "review", "required"}:
             mode = "off"
         if mode == "off":
             return []
 
-        studio_candidates = [
+        project_candidates = [
             prepared
             for prepared in prepared_candidates
-            if is_studio_project(prepared["project_match"].get("project") or {})
+            if is_project_issue(prepared["project_match"].get("project") or {})
         ]
         receipt_reader = getattr(client, "get_issue_receipt", None)
-        if callable(receipt_reader) and studio_candidates:
+        if callable(receipt_reader) and project_candidates:
             async def read_receipt(prepared: dict[str, Any]) -> dict[str, Any]:
                 try:
                     return await receipt_reader(prepared["idempotency_key"])
@@ -5283,9 +5790,9 @@ Chunk {index} source: {label}
                     return {}
 
             receipts = await asyncio.gather(
-                *[read_receipt(prepared) for prepared in studio_candidates]
+                *[read_receipt(prepared) for prepared in project_candidates]
             )
-            for prepared, receipt in zip(studio_candidates, receipts):
+            for prepared, receipt in zip(project_candidates, receipts):
                 status = str(receipt.get("status") or "")
                 issue = receipt.get("issue")
                 if status == "completed" and isinstance(issue, dict):
@@ -5309,7 +5816,7 @@ Chunk {index} source: {label}
                     )
 
         groups: dict[str, list[dict[str, Any]]] = {}
-        for prepared in studio_candidates:
+        for prepared in project_candidates:
             project = prepared["project_match"].get("project") or {}
             project_id = str(project.get("id") or "")
             if project_id and not prepared.get("receipt_replay_issue"):
@@ -5323,11 +5830,9 @@ Chunk {index} source: {label}
                 if not isinstance(live_project, dict) or str(
                     live_project.get("id") or ""
                 ) != project_id:
-                    raise RuntimeError("Linear returned mismatched Studio project context.")
-                if not is_studio_project(live_project):
-                    raise RuntimeError(
-                        "The project name changed after matching; rerun the Slack command."
-                    )
+                    raise RuntimeError("Linear returned mismatched project sizing context.")
+                if not is_project_issue(live_project):
+                    raise RuntimeError("Linear returned project context without an ID.")
                 registry = project_context.get("effortLabelRegistry")
                 registry_labels = (
                     registry.get("nodes")
@@ -5345,6 +5850,7 @@ Chunk {index} source: {label}
                 )
                 if mode in {"review", "required"}:
                     for prepared in group:
+                        prepared["sizing_error"] = detail
                         prepared["studio_sizing_error"] = detail
                 continue
 
@@ -5385,12 +5891,12 @@ Chunk {index} source: {label}
                     }
                 )
             context_max_chars = int(
-                getattr(
+                _linear_task_sizing_setting(
                     settings,
+                    "LINEAR_TASK_SIZING_CONTEXT_MAX_CHARS",
                     "LINEAR_STUDIO_SIZING_CONTEXT_MAX_CHARS",
                     40000,
                 )
-                or 40000
             )
             assessments, sizing_errors = (
                 await self._assess_linear_studio_candidates_resilient(
@@ -5398,12 +5904,12 @@ Chunk {index} source: {label}
                     project_context=project_context,
                     context_max_chars=context_max_chars,
                     batch_size=int(
-                        getattr(
+                        _linear_task_sizing_setting(
                             settings,
+                            "LINEAR_TASK_SIZING_BATCH_SIZE",
                             "LINEAR_STUDIO_SIZING_BATCH_SIZE",
                             3,
                         )
-                        or 3
                     ),
                     safety_identifier=linear_safety_identifier(
                         requester_slack_id
@@ -5436,7 +5942,7 @@ Chunk {index} source: {label}
                             raise RuntimeError(
                                 sizing_errors.get(
                                     candidate_key,
-                                    "Studio sizing returned no assessment.",
+                                    "Effort sizing returned no assessment.",
                                 )
                             )
                         metadata = assessment_metadata(
@@ -5444,12 +5950,12 @@ Chunk {index} source: {label}
                             project=live_project,
                             model=LINEAR_SKILL_MODEL,
                             rubric_version=str(
-                                getattr(
+                                _linear_task_sizing_setting(
                                     settings,
+                                    "LINEAR_TASK_SIZING_RUBRIC_VERSION",
                                     "LINEAR_STUDIO_SIZING_RUBRIC_VERSION",
-                                    "studio-effort-v1",
+                                    "project-effort-v2",
                                 )
-                                or "studio-effort-v1"
                             ),
                         )
                         effort_label = assessment.effort_label
@@ -5495,6 +6001,7 @@ Chunk {index} source: {label}
                         }
                     )
                     if mode in {"review", "required"}:
+                        prepared["sizing_error"] = detail
                         prepared["studio_sizing_error"] = detail
         return shadow_results
 
@@ -5915,7 +6422,10 @@ Chunk {index} source: {label}
                 "Ask the team to set `MLAI_BACKEND_URL`."
             )
 
-        from roo.clients.mlai_backend import MLAIBackendClient, MLAIBackendUnavailableError
+        from roo.clients.mlai_backend import (
+            MLAIBackendClient,
+            MLAIBackendUnavailableError,
+        )
 
         backend_client = MLAIBackendClient(
             base_url=settings.MLAI_BACKEND_URL,
@@ -6047,7 +6557,10 @@ Chunk {index} source: {label}
         if action == "generate_report" and not channel_id:
             return "I need a Slack channel or DM to upload the reconciliation report."
 
-        from roo.clients.mlai_backend import MLAIBackendClient, MLAIBackendUnavailableError
+        from roo.clients.mlai_backend import (
+            MLAIBackendClient,
+            MLAIBackendUnavailableError,
+        )
 
         backend_client = MLAIBackendClient(
             base_url=settings.MLAI_BACKEND_URL,
@@ -6169,7 +6682,10 @@ Chunk {index} source: {label}
         if since > until:
             return "The audit start date needs to be on or before the end date."
 
-        from roo.clients.mlai_backend import MLAIBackendClient, MLAIBackendUnavailableError
+        from roo.clients.mlai_backend import (
+            MLAIBackendClient,
+            MLAIBackendUnavailableError,
+        )
 
         backend_client = MLAIBackendClient(
             base_url=settings.MLAI_BACKEND_URL,
@@ -9782,11 +10298,13 @@ Chunk {index} source: {label}
     ) -> Any:
         """Execute the MLAI Points skill."""
         import httpx
-        from roo.clients.mlai_backend import MLAIBackendUnavailableError
-        
+
         # Get client from skill's implementation module
         # ClientClass = skill.get_client_class("MLAIBackendClient")
-        from roo.clients.mlai_backend import MLAIBackendClient
+        from roo.clients.mlai_backend import (
+            MLAIBackendClient,
+            MLAIBackendUnavailableError,
+        )
         ClientClass = MLAIBackendClient
         
         if ClientClass is None:
