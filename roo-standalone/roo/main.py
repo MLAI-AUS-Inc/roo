@@ -122,6 +122,8 @@ from .meeting_room_booking import (
     parse_action_value as parse_meeting_room_action_value,
 )
 from .meeting_room_actions import (
+    MeetingRoomActionResult,
+    action_retry_exhausted,
     get_meeting_room_action_store,
     meeting_room_action_retry_loop,
     process_meeting_room_action,
@@ -4829,21 +4831,28 @@ async def _review_admin_action(
 
 
 def _slack_delivery_succeeded(response: Any) -> bool:
-    return bool(
-        response
-        and (
-            response.get("ok")
-            or response.get("error") == "duplicate_message"
-        )
-    )
+    return bool(response and response.get("ok"))
 
 
-def _slack_exception_is_duplicate(exc: Exception) -> bool:
-    response = getattr(exc, "response", None)
+def _slack_error_code(value: Any) -> str:
+    response = value if isinstance(value, dict) else getattr(value, "response", None)
     try:
-        return bool(response and response.get("error") == "duplicate_message")
+        return str(response.get("error") or "") if response else ""
     except (AttributeError, TypeError):
-        return False
+        return ""
+
+
+PERMANENT_TARGET_NOTIFICATION_ERRORS = {
+    "account_inactive",
+    "channel_not_found",
+    "invalid_auth",
+    "missing_scope",
+    "not_authed",
+    "not_in_channel",
+    "token_revoked",
+    "user_not_found",
+    "users_not_found",
+}
 
 
 def _meeting_room_failure_is_retryable(
@@ -4906,11 +4915,15 @@ async def _handle_meeting_room_action(
     message_ts: str,
     retry_failures: bool = False,
     target_notification_already_delivered: bool = False,
-    mark_target_notification_delivered: Optional[Any] = None,
-) -> None:
+    target_notification_state: str = "pending",
+    begin_target_notification: Optional[Any] = None,
+    set_target_notification_state: Optional[Any] = None,
+    final_attempt: bool = False,
+) -> MeetingRoomActionResult:
     """Complete one verified, backend-idempotent Meeting Room action."""
     mutation_started = False
     retry_error: Optional[Exception] = None
+    needs_attention = False
     value: dict[str, Any] = {}
     if not settings.MEETING_ROOM_BOOKING_ENABLED:
         outcome = "Meeting-room booking is not enabled right now. Nothing was changed."
@@ -4961,15 +4974,28 @@ async def _handle_meeting_room_action(
                             or value.get("target_slack_user_id")
                             or ""
                         ).strip()
-                        notification_delivered = bool(
-                            target_notification_already_delivered
+                        notification_state = (
+                            "sent"
+                            if target_notification_already_delivered
+                            else str(target_notification_state or "pending")
                         )
-                        notification_error = (
-                            "already_delivered"
-                            if notification_delivered
-                            else "missing_target"
-                        )
-                        if target_slack_user_id and not notification_delivered:
+                        notification_error = "none"
+                        if not target_slack_user_id and notification_state != "sent":
+                            notification_state = "failed"
+                            notification_error = "missing_target"
+                        elif notification_state == "sending":
+                            if set_target_notification_state is not None:
+                                await set_target_notification_state("uncertain")
+                            notification_state = "uncertain"
+                            notification_error = "previous_delivery_result_unknown"
+                        elif target_slack_user_id and notification_state == "pending":
+                            claimed = True
+                            if begin_target_notification is not None:
+                                claimed = bool(await begin_target_notification())
+                            if not claimed:
+                                raise RuntimeError(
+                                    "meeting_room_target_notification_lease_lost"
+                                )
                             try:
                                 notification = await asyncio.to_thread(
                                     send_dm,
@@ -4978,46 +5004,54 @@ async def _handle_meeting_room_action(
                                         result,
                                         admin_slack_user_id=actor_user_id,
                                     ),
-                                    client_msg_id=value["client_request_id"],
-                                )
-                                notification_delivered = (
-                                    _slack_delivery_succeeded(notification)
-                                )
-                                notification_error = (
-                                    "none" if notification_delivered else "delivery_rejected"
+                                    raise_on_error=True,
                                 )
                             except Exception as exc:
-                                notification_delivered = _slack_exception_is_duplicate(exc)
                                 notification_error = (
-                                    "duplicate_message"
-                                    if notification_delivered
-                                    else exc.__class__.__name__
+                                    _slack_error_code(exc)
+                                    or exc.__class__.__name__
                                 )
-                        if (
-                            notification_delivered
-                            and not target_notification_already_delivered
-                            and mark_target_notification_delivered is not None
-                        ):
-                            try:
-                                notification_delivered = bool(
-                                    await mark_target_notification_delivered()
-                                )
-                                if not notification_delivered:
-                                    notification_error = "state_persistence_rejected"
-                            except Exception as exc:
-                                notification_delivered = False
-                                notification_error = exc.__class__.__name__
-                        if notification_delivered:
-                            if target_notification_already_delivered:
-                                outcome += (
-                                    f"\n\n<@{target_slack_user_id}> was already "
-                                    "notified privately."
-                                )
+                                if _slack_error_code(exc) in PERMANENT_TARGET_NOTIFICATION_ERRORS:
+                                    notification_state = "failed"
+                                elif _slack_error_code(exc):
+                                    notification_state = "pending"
+                                else:
+                                    notification_state = "uncertain"
                             else:
-                                outcome += (
-                                    f"\n\nI notified <@{target_slack_user_id}> privately."
+                                if _slack_delivery_succeeded(notification):
+                                    notification_state = "sent"
+                                else:
+                                    notification_error = (
+                                        _slack_error_code(notification)
+                                        or "delivery_rejected"
+                                    )
+                                    notification_state = (
+                                        "failed"
+                                        if _slack_error_code(notification)
+                                        in PERMANENT_TARGET_NOTIFICATION_ERRORS
+                                        else "pending"
+                                    )
+
+                            if notification_state == "pending" and final_attempt:
+                                notification_state = "failed"
+                                notification_error = "retry_limit_reached"
+                            if set_target_notification_state is not None:
+                                persisted = bool(
+                                    await set_target_notification_state(
+                                        notification_state
+                                    )
                                 )
-                        else:
+                                if not persisted:
+                                    notification_state = "uncertain"
+                                    notification_error = "state_persistence_rejected"
+
+                        if notification_state == "sent":
+                            outcome += (
+                                f"\n\n<@{target_slack_user_id}> was already notified privately."
+                                if target_notification_already_delivered
+                                else f"\n\nI notified <@{target_slack_user_id}> privately."
+                            )
+                        elif notification_state == "pending":
                             outcome += (
                                 "\n\nThe booking is confirmed, but the member notification "
                                 "is still pending. Roo will retry it automatically."
@@ -5025,10 +5059,24 @@ async def _handle_meeting_room_action(
                             retry_error = RuntimeError(
                                 "meeting_room_target_notification_failed"
                             )
+                        elif notification_state == "uncertain":
+                            outcome += (
+                                "\n\nThe booking is confirmed, but Roo could not verify whether "
+                                f"<@{target_slack_user_id}> received the private notification. "
+                                "Roo will not send another automatically; please check with them directly."
+                            )
+                            needs_attention = True
+                        else:
+                            outcome += (
+                                "\n\nThe booking is confirmed, but Roo could not notify "
+                                f"<@{target_slack_user_id}> privately. Please let them know directly."
+                            )
+                            needs_attention = True
+                        if notification_state != "sent":
                             print(
                                 "MEETING_ROOM_TARGET_NOTIFICATION_FAILED "
                                 f"booking_id={(result.get('booking') or {}).get('id')} "
-                                f"reason={notification_error}"
+                                f"state={notification_state} reason={notification_error}"
                             )
                     print(
                         "MEETING_ROOM_BOOKING_CONFIRMED "
@@ -5055,11 +5103,18 @@ async def _handle_meeting_room_action(
                 exc,
                 mutation_started=mutation_started,
             ):
-                outcome = (
-                    "Roo is still confirming this Meeting Room change. "
-                    "It will retry automatically; do not create another request."
-                )
-                retry_error = exc
+                if final_attempt:
+                    outcome = (
+                        "Roo could not finish confirming this Meeting Room change after "
+                        "repeated attempts. Check your upcoming bookings before trying again."
+                    )
+                    needs_attention = True
+                else:
+                    outcome = (
+                        "Roo is still confirming this Meeting Room change. "
+                        "It will retry automatically; do not create another request."
+                    )
+                    retry_error = exc
             else:
                 outcome = meeting_room_backend_error_message(
                     exc,
@@ -5080,26 +5135,42 @@ async def _handle_meeting_room_action(
     )
     if not delivered:
         print(f"MEETING_ROOM_ACTION_DELIVERY_FAILED action={action_id}")
-        if retry_failures:
+        if retry_failures and not final_attempt:
             retry_error = retry_error or RuntimeError(
                 "meeting_room_action_delivery_failed"
             )
+        elif retry_failures:
+            needs_attention = True
     if retry_error is not None and retry_failures:
         raise retry_error
+    return MeetingRoomActionResult(
+        outcome=outcome,
+        needs_attention=needs_attention,
+    )
 
 
-async def _process_meeting_room_action_record(action: dict[str, Any]) -> None:
+async def _process_meeting_room_action_record(
+    action: dict[str, Any],
+) -> MeetingRoomActionResult:
     settings = get_settings()
     store = get_meeting_room_action_store(settings.SLACK_RECEIPTS_DB_PATH)
 
-    async def mark_target_notification_delivered() -> bool:
+    async def begin_target_notification() -> bool:
         return await asyncio.to_thread(
-            store.mark_target_notified,
+            store.begin_target_notification,
             int(action["id"]),
             owner=str(action["locked_by"]),
         )
 
-    await _handle_meeting_room_action(
+    async def set_target_notification_state(state: str) -> bool:
+        return await asyncio.to_thread(
+            store.set_target_notification_state,
+            int(action["id"]),
+            owner=str(action["locked_by"]),
+            state=state,
+        )
+
+    return await _handle_meeting_room_action(
         settings=settings,
         action_id=str(action["action_id"]),
         action_value=str(action["action_value"]),
@@ -5110,7 +5181,12 @@ async def _process_meeting_room_action_record(action: dict[str, Any]) -> None:
         target_notification_already_delivered=bool(
             action.get("target_notified_at")
         ),
-        mark_target_notification_delivered=mark_target_notification_delivered,
+        target_notification_state=str(
+            action.get("target_notification_state") or "pending"
+        ),
+        begin_target_notification=begin_target_notification,
+        set_target_notification_state=set_target_notification_state,
+        final_attempt=action_retry_exhausted(action),
     )
 
 
@@ -5157,6 +5233,29 @@ async def _persist_and_start_meeting_room_action(
                 actor_user_id=actor_user_id,
                 channel_id=channel_id,
                 message_ts=message_ts,
+            )
+        )
+        return
+    if action.get("status") in {"completed", "failed"}:
+        if action["status"] == "completed":
+            prefix = (
+                "This booking confirmation was already processed. No additional Roo Points were charged."
+                if action_id == MEETING_ROOM_BOOK_ACTION_ID
+                else "This cancellation was already processed. No additional refund was issued."
+            )
+        else:
+            prefix = "This action previously stopped and needs attention."
+        stored_outcome = str(action.get("final_outcome") or "").strip()
+        replay_outcome = (
+            f"{prefix}\n\n{stored_outcome}"
+            if stored_outcome
+            else prefix
+        )
+        start_slack_action(
+            _deliver_meeting_room_action_outcome(
+                channel_id=channel_id,
+                message_ts=message_ts,
+                outcome=replay_outcome,
             )
         )
         return

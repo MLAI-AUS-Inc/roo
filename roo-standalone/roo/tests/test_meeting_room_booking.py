@@ -65,7 +65,8 @@ class FakeMeetingRoomClient:
             starts_at = datetime.fromisoformat(kwargs["starts_at"])
             ends_at = datetime.fromisoformat(kwargs["ends_at"])
             duration_seconds = int((ends_at - starts_at).total_seconds())
-            cost = (duration_seconds + 3599) // 3600
+            bookable = 3600 <= duration_seconds <= 7200
+            cost = (duration_seconds + 3599) // 3600 if bookable else None
             requested = {
                 "starts_at": kwargs["starts_at"],
                 "ends_at": kwargs["ends_at"],
@@ -73,9 +74,11 @@ class FakeMeetingRoomClient:
         else:
             cost = None
             requested = None
+            bookable = None
         return {
             "room": {"id": "room-id", "slug": "meeting-room", "name": "Meeting Room"},
             "available": True if requested else None,
+            "bookable": bookable,
             "requested_interval": requested,
             "points_cost": cost,
             "remaining_daily_hours": {},
@@ -235,6 +238,29 @@ def test_interval_parser_accepts_unambiguous_24_hour_time():
     assert ends_at == datetime(2026, 8, 12, 10, tzinfo=MELBOURNE)
 
 
+@pytest.mark.parametrize("time_value", ("2:30", "9:30", "12:30"))
+def test_interval_parser_asks_am_or_pm_for_colloquial_times_with_minutes(
+    time_value,
+):
+    with pytest.raises(MeetingRoomInputError) as raised:
+        resolve_interval(
+            f"book tomorrow at {time_value}",
+            now=datetime(2026, 8, 11, 8, tzinfo=MELBOURNE),
+        )
+
+    assert raised.value.code == "ambiguous_time"
+
+
+def test_interval_parser_keeps_leading_zero_time_unambiguous():
+    starts_at, ends_at = resolve_interval(
+        "book tomorrow at 09:30",
+        now=datetime(2026, 8, 11, 8, tzinfo=MELBOURNE),
+    )
+
+    assert starts_at == datetime(2026, 8, 12, 9, 30, tzinfo=MELBOURNE)
+    assert ends_at == datetime(2026, 8, 12, 10, 30, tzinfo=MELBOURNE)
+
+
 @pytest.mark.parametrize(
     "text",
     (
@@ -263,6 +289,59 @@ def test_interval_parser_accepts_half_hour_boundaries_and_bare_start_time():
 
     assert starts_at == datetime(2026, 8, 12, 14, 30, tzinfo=MELBOURNE)
     assert ends_at == datetime(2026, 8, 12, 16, tzinfo=MELBOURNE)
+
+
+@pytest.mark.parametrize(
+    "text",
+    (
+        "book tomorrow at 2pm for half an hour",
+        "book tomorrow at 2pm for a half-hour",
+    ),
+)
+def test_booking_parser_rejects_half_hour_wording_without_defaulting(text):
+    with pytest.raises(MeetingRoomInputError, match="between 1 and 2 hours"):
+        resolve_interval(
+            text,
+            now=datetime(2026, 8, 11, 9, tzinfo=MELBOURNE),
+        )
+
+
+def test_booking_parser_rejects_unrecognized_duration_without_defaulting():
+    with pytest.raises(MeetingRoomInputError, match="could not understand that duration"):
+        resolve_interval(
+            "book tomorrow at 2pm for three quarters of an hour",
+            now=datetime(2026, 8, 11, 9, tzinfo=MELBOURNE),
+        )
+
+
+def test_availability_parser_allows_long_and_half_hour_checks():
+    long_start, long_end = room_module.resolve_availability_interval(
+        "is the room free tomorrow from 2pm to 6pm?",
+        now=datetime(2026, 8, 11, 9, tzinfo=MELBOURNE),
+    )
+    short_start, short_end = room_module.resolve_availability_interval(
+        "is the room free tomorrow at 2pm for half an hour?",
+        now=datetime(2026, 8, 11, 9, tzinfo=MELBOURNE),
+    )
+
+    assert long_end - long_start == timedelta(hours=4)
+    assert short_end - short_start == timedelta(minutes=30)
+
+
+def test_past_implicit_weekday_rolls_to_next_week_but_explicit_today_does_not():
+    now = datetime(2026, 8, 14, 16, tzinfo=MELBOURNE)
+
+    starts_at, _ = resolve_interval("book friday at 3pm", now=now)
+
+    assert starts_at == datetime(2026, 8, 21, 15, tzinfo=MELBOURNE)
+    routed_start, _ = resolve_interval(
+        "book friday at 3pm",
+        {"date": "2026-08-14", "start_time": "3pm"},
+        now=now,
+    )
+    assert routed_start == datetime(2026, 8, 21, 15, tzinfo=MELBOURNE)
+    with pytest.raises(MeetingRoomInputError, match="start in the future"):
+        resolve_interval("book today friday at 3pm", now=now)
 
 
 def test_interval_parser_rejects_past_start_before_backend_call():
@@ -481,6 +560,27 @@ async def test_bare_24_hour_availability_request_checks_exact_interval(monkeypat
     assert datetime.fromisoformat(call[2]["starts_at"]).hour == 14
     assert datetime.fromisoformat(call[2]["ends_at"]).hour == 15
     assert "is available" in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_long_availability_request_is_answered_without_booking_price(monkeypatch):
+    configured = _settings()
+    _patch_executor(monkeypatch, configured)
+
+    result = await SkillExecutor()._execute_meeting_room_booking(
+        text="is the meeting room free tomorrow from 2pm to 6pm?",
+        params={"action": "check_room_availability"},
+        user_id="UOWNER",
+        channel_id="DOWNER",
+    )
+
+    call = FakeMeetingRoomClient.instances[0].calls[0]
+    assert datetime.fromisoformat(call[2]["ends_at"]) - datetime.fromisoformat(
+        call[2]["starts_at"]
+    ) == timedelta(hours=4)
+    assert "is available" in result["message"]
+    assert "availability check only" in result["message"]
+    assert "costs" not in result["message"]
 
 
 @pytest.mark.asyncio
@@ -794,7 +894,7 @@ async def test_action_handler_uses_verified_admin_actor_and_notifies_target(
     assert "Charged to your account:* 2 Roo Points" in target_dms[0][1]
     assert "show my meeting room bookings" in target_dms[0][1]
     assert "Remaining balance" not in target_dms[0][1]
-    assert target_dms[0][2]["client_msg_id"] == expected_request_id
+    assert target_dms[0][2] == {"raise_on_error": True}
 
 
 @pytest.mark.asyncio
@@ -820,7 +920,6 @@ async def test_replayed_admin_booking_recovers_target_notification_idempotently(
         async def book_meeting_room(self, slack_user_id, **kwargs):
             return _admin_booking_response(starts_at, created=False)
 
-    expected_request_id = json.loads(action_value)["client_request_id"]
     updates = []
     target_dms = []
     monkeypatch.setattr("roo.clients.mlai_backend.MLAIBackendClient", Client)
@@ -848,7 +947,7 @@ async def test_replayed_admin_booking_recovers_target_notification_idempotently(
     assert "was already confirmed" in updates[0]["text"]
     assert "notified" in updates[0]["text"]
     assert target_dms[0][0][0] == "UTARGET"
-    assert target_dms[0][1]["client_msg_id"] == expected_request_id
+    assert target_dms[0][1] == {"raise_on_error": True}
 
 
 @pytest.mark.asyncio

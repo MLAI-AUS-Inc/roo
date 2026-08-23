@@ -7,6 +7,7 @@ import json
 import sqlite3
 import threading
 import time
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
@@ -22,9 +23,30 @@ from .meeting_room_booking import (
 
 DEFAULT_PROCESSING_LEASE_SECONDS = 90.0
 DEFAULT_RETRY_POLL_SECONDS = 5.0
-COMPLETED_RETENTION_SECONDS = 90 * 24 * 60 * 60
+TERMINAL_RETENTION_SECONDS = 90 * 24 * 60 * 60
+MAX_ACTION_ATTEMPTS = 20
+MAX_ACTION_AGE_SECONDS = 24 * 60 * 60
 
-MeetingRoomActionProcessor = Callable[[dict[str, Any]], Awaitable[None]]
+
+@dataclass(frozen=True)
+class MeetingRoomActionResult:
+    outcome: Optional[str] = None
+    needs_attention: bool = False
+
+
+MeetingRoomActionProcessor = Callable[
+    [dict[str, Any]],
+    Awaitable[Optional[MeetingRoomActionResult]],
+]
+
+
+def action_retry_exhausted(action: dict[str, Any]) -> bool:
+    attempts = int(action.get("attempt_count") or 0)
+    created_at = float(action.get("created_at") or time.time())
+    return (
+        attempts >= MAX_ACTION_ATTEMPTS
+        or time.time() - created_at >= MAX_ACTION_AGE_SECONDS
+    )
 
 
 def _canonical_action(
@@ -77,6 +99,9 @@ class MeetingRoomActionStore:
             if self._initialized:
                 return
             with self._connect() as connection:
+                # Serialize schema upgrades across Roo worker processes sharing
+                # the same SQLite outbox.
+                connection.execute("BEGIN IMMEDIATE")
                 connection.execute(
                     """
                     CREATE TABLE IF NOT EXISTS meeting_room_action_outbox (
@@ -94,6 +119,9 @@ class MeetingRoomActionStore:
                         locked_by TEXT,
                         last_error TEXT,
                         target_notified_at REAL,
+                        target_notification_state TEXT NOT NULL DEFAULT 'pending',
+                        target_notification_attempted_at REAL,
+                        final_outcome TEXT,
                         created_at REAL NOT NULL,
                         updated_at REAL NOT NULL,
                         completed_at REAL
@@ -119,6 +147,36 @@ class MeetingRoomActionStore:
                         ADD COLUMN target_notified_at REAL
                         """
                     )
+                if "target_notification_state" not in columns:
+                    connection.execute(
+                        """
+                        ALTER TABLE meeting_room_action_outbox
+                        ADD COLUMN target_notification_state TEXT NOT NULL DEFAULT 'pending'
+                        """
+                    )
+                if "target_notification_attempted_at" not in columns:
+                    connection.execute(
+                        """
+                        ALTER TABLE meeting_room_action_outbox
+                        ADD COLUMN target_notification_attempted_at REAL
+                        """
+                    )
+                if "final_outcome" not in columns:
+                    connection.execute(
+                        """
+                        ALTER TABLE meeting_room_action_outbox
+                        ADD COLUMN final_outcome TEXT
+                        """
+                    )
+                connection.execute(
+                    """
+                    UPDATE meeting_room_action_outbox
+                    SET target_notification_state = 'sent'
+                    WHERE target_notified_at IS NOT NULL
+                      AND target_notification_state != 'sent'
+                    """
+                )
+                connection.commit()
             self._initialized = True
 
     @staticmethod
@@ -163,9 +221,9 @@ class MeetingRoomActionStore:
             connection.execute(
                 """
                 DELETE FROM meeting_room_action_outbox
-                WHERE status = 'completed' AND completed_at < ?
+                WHERE status IN ('completed', 'failed') AND completed_at < ?
                 """,
-                (current_time - COMPLETED_RETENTION_SECONDS,),
+                (current_time - TERMINAL_RETENTION_SECONDS,),
             )
             existing = connection.execute(
                 """
@@ -215,7 +273,7 @@ class MeetingRoomActionStore:
                     and existing["locked_until"] is not None
                     and float(existing["locked_until"]) > current_time
                 )
-                if existing["status"] != "completed" and not lease_is_active:
+                if existing["status"] not in {"completed", "failed"} and not lease_is_active:
                     connection.execute(
                         """
                         UPDATE meeting_room_action_outbox
@@ -324,7 +382,13 @@ class MeetingRoomActionStore:
                 claimed.append(action)
         return claimed
 
-    def mark_completed(self, action_id: int, *, owner: str) -> bool:
+    def mark_completed(
+        self,
+        action_id: int,
+        *,
+        owner: str,
+        outcome: Optional[str] = None,
+    ) -> bool:
         self._ensure_schema()
         current_time = time.time()
         with self._lock, self._connect() as connection:
@@ -332,27 +396,98 @@ class MeetingRoomActionStore:
                 """
                 UPDATE meeting_room_action_outbox
                 SET status = 'completed', locked_until = NULL,
-                    locked_by = NULL, last_error = NULL, completed_at = ?,
+                    locked_by = NULL, last_error = NULL, final_outcome = ?, completed_at = ?,
                     updated_at = ?
                 WHERE id = ? AND status = 'processing' AND locked_by = ?
                 """,
-                (current_time, current_time, int(action_id), str(owner)),
+                (
+                    str(outcome)[:4000] if outcome else None,
+                    current_time,
+                    current_time,
+                    int(action_id),
+                    str(owner),
+                ),
             )
             return cursor.rowcount == 1
 
-    def mark_target_notified(self, action_id: int, *, owner: str) -> bool:
-        """Persist target-DM success without completing admin result delivery."""
+    def mark_failed(
+        self,
+        action_id: int,
+        *,
+        owner: str,
+        error: str,
+        outcome: Optional[str] = None,
+    ) -> bool:
         self._ensure_schema()
         current_time = time.time()
         with self._lock, self._connect() as connection:
             cursor = connection.execute(
                 """
                 UPDATE meeting_room_action_outbox
-                SET target_notified_at = COALESCE(target_notified_at, ?),
-                    updated_at = ?
+                SET status = 'failed', locked_until = NULL, locked_by = NULL,
+                    last_error = ?, final_outcome = ?, completed_at = ?, updated_at = ?
                 WHERE id = ? AND status = 'processing' AND locked_by = ?
                 """,
+                (
+                    str(error)[:500],
+                    str(outcome)[:4000] if outcome else None,
+                    current_time,
+                    current_time,
+                    int(action_id),
+                    str(owner),
+                ),
+            )
+            return cursor.rowcount == 1
+
+    def begin_target_notification(self, action_id: int, *, owner: str) -> bool:
+        """Claim the one target-DM attempt before calling Slack."""
+        self._ensure_schema()
+        current_time = time.time()
+        with self._lock, self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE meeting_room_action_outbox
+                SET target_notification_state = 'sending',
+                    target_notification_attempted_at = ?, updated_at = ?
+                WHERE id = ? AND status = 'processing' AND locked_by = ?
+                  AND target_notification_state = 'pending'
+                """,
                 (current_time, current_time, int(action_id), str(owner)),
+            )
+            return cursor.rowcount == 1
+
+    def set_target_notification_state(
+        self,
+        action_id: int,
+        *,
+        owner: str,
+        state: str,
+    ) -> bool:
+        if state not in {"pending", "sent", "uncertain", "failed"}:
+            raise ValueError("Unsupported target notification state")
+        self._ensure_schema()
+        current_time = time.time()
+        with self._lock, self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE meeting_room_action_outbox
+                SET target_notification_state = ?,
+                    target_notified_at = CASE
+                        WHEN ? = 'sent' THEN COALESCE(target_notified_at, ?)
+                        ELSE target_notified_at
+                    END,
+                    updated_at = ?
+                WHERE id = ? AND status = 'processing' AND locked_by = ?
+                  AND target_notification_state = 'sending'
+                """,
+                (
+                    state,
+                    state,
+                    current_time,
+                    current_time,
+                    int(action_id),
+                    str(owner),
+                ),
             )
             return cursor.rowcount == 1
 
@@ -410,7 +545,7 @@ async def _process_leased_action(
     action_id = int(action["id"])
     owner = str(action["locked_by"])
     try:
-        await processor(action)
+        result = await processor(action)
     except asyncio.CancelledError:
         await asyncio.to_thread(
             store.release,
@@ -421,19 +556,51 @@ async def _process_leased_action(
         )
         raise
     except Exception as exc:
+        if action_retry_exhausted(action):
+            outcome = (
+                "Roo could not finish this Meeting Room action after repeated attempts. "
+                "Check your upcoming bookings before trying again."
+            )
+            await asyncio.to_thread(
+                store.mark_failed,
+                action_id,
+                owner=owner,
+                error=exc.__class__.__name__,
+                outcome=outcome,
+            )
+            print(
+                "MEETING_ROOM_ACTION_NEEDS_ATTENTION "
+                f"action_id={action_id} error_type={exc.__class__.__name__}"
+            )
+        else:
+            await asyncio.to_thread(
+                store.release,
+                action_id,
+                owner=owner,
+                error=exc.__class__.__name__,
+                delay_seconds=_retry_delay(int(action.get("attempt_count") or 1)),
+            )
+            print(
+                "MEETING_ROOM_ACTION_RETRY "
+                f"action_id={action_id} error_type={exc.__class__.__name__}"
+            )
+        return
+    if isinstance(result, MeetingRoomActionResult) and result.needs_attention:
         await asyncio.to_thread(
-            store.release,
+            store.mark_failed,
             action_id,
             owner=owner,
-            error=exc.__class__.__name__,
-            delay_seconds=_retry_delay(int(action.get("attempt_count") or 1)),
+            error="needs_attention",
+            outcome=result.outcome,
         )
-        print(
-            "MEETING_ROOM_ACTION_RETRY "
-            f"action_id={action_id} error_type={exc.__class__.__name__}"
-        )
+        print(f"MEETING_ROOM_ACTION_NEEDS_ATTENTION action_id={action_id}")
         return
-    await asyncio.to_thread(store.mark_completed, action_id, owner=owner)
+    await asyncio.to_thread(
+        store.mark_completed,
+        action_id,
+        owner=owner,
+        outcome=result.outcome if isinstance(result, MeetingRoomActionResult) else None,
+    )
 
 
 async def process_meeting_room_action(

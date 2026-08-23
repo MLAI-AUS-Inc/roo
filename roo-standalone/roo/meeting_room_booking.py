@@ -19,6 +19,8 @@ CANCEL_ACTION_ID = "meeting_room_cancel_booking"
 CONFIRMATION_TTL = timedelta(minutes=10)
 MIN_BOOKING_HALF_HOURS = 2
 MAX_BOOKING_HALF_HOURS = 4
+MIN_AVAILABILITY_HALF_HOURS = 1
+MAX_AVAILABILITY_HALF_HOURS = 48
 WEEKDAYS = {
     "monday": 0,
     "tuesday": 1,
@@ -135,7 +137,8 @@ def _parse_time_value(value: Any, field_label: str) -> Optional[time]:
             "invalid_time",
             f"I could not understand the {field_label}. Use a time like `2pm` or `14:00`.",
         )
-    hour = int(match.group("hour"))
+    hour_text = match.group("hour")
+    hour = int(hour_text)
     minute = int(match.group("minute") or 0)
     ampm = match.group("ampm")
     if minute not in (0, 30):
@@ -150,7 +153,7 @@ def _parse_time_value(value: Any, field_label: str) -> Optional[time]:
             hour = 0
         if ampm == "pm":
             hour += 12
-    elif hour <= 12 and match.group("minute") is None and not raw.startswith("0"):
+    elif hour <= 12 and not hour_text.startswith("0"):
         raise MeetingRoomInputError(
             "ambiguous_time",
             f"Is the {field_label} AM or PM? Try `2pm` or `14:00`.",
@@ -188,7 +191,12 @@ def _add_actual_half_hours(value: datetime, half_hours: int) -> datetime:
     )
 
 
-def _duration_half_hours(value: Any) -> int:
+def _duration_half_hours(
+    value: Any,
+    *,
+    minimum: int = MIN_BOOKING_HALF_HOURS,
+    maximum: int = MAX_BOOKING_HALF_HOURS,
+) -> int:
     if isinstance(value, bool):
         raise MeetingRoomInputError(
             "invalid_time",
@@ -208,16 +216,25 @@ def _duration_half_hours(value: Any) -> int:
             "The duration must use 30-minute increments, such as 1 or 1.5 hours.",
         )
     result = int(half_hours)
-    if result < MIN_BOOKING_HALF_HOURS or result > MAX_BOOKING_HALF_HOURS:
+    if result < minimum or result > maximum:
+        if minimum == MIN_AVAILABILITY_HALF_HOURS and maximum == MAX_AVAILABILITY_HALF_HOURS:
+            message = "Availability checks must be between 30 minutes and 24 hours."
+        else:
+            message = "Meeting Room bookings must be between 1 and 2 hours."
         raise MeetingRoomInputError(
             "invalid_time",
-            "Meeting Room bookings must be between 1 and 2 hours.",
+            message,
         )
     return result
 
 
 def _natural_duration(text: str) -> Optional[str]:
     normalized = str(text or "").lower()
+    if re.search(
+        r"\bfor\s+(?:half\s+(?:an?\s+)?hour|an?\s+half[- ]hour)\b",
+        normalized,
+    ):
+        return "0.5"
     if re.search(
         r"\bfor\s+(?:(?:an?|one)\s+hour\s+and\s+a\s+half|one\s+and\s+a\s+half\s+hours?)\b",
         normalized,
@@ -237,6 +254,14 @@ def _natural_duration(text: str) -> Optional[str]:
     )
     if minutes_match:
         return str(Decimal(minutes_match.group("minutes")) / Decimal(60))
+    if re.search(
+        r"\bfor\b[^.?!,\n]{0,40}\b(?:hours?|hrs?|minutes?|mins?)\b",
+        normalized,
+    ):
+        raise MeetingRoomInputError(
+            "invalid_time",
+            "I could not understand that duration. Try `1 hour`, `1.5 hours`, or `90 minutes`.",
+        )
     return None
 
 
@@ -268,6 +293,8 @@ def _validate_resolved_interval(
     ends_at: datetime,
     *,
     now: Optional[datetime],
+    minimum_half_hours: int = MIN_BOOKING_HALF_HOURS,
+    maximum_half_hours: int = MAX_BOOKING_HALF_HOURS,
 ) -> tuple[datetime, datetime]:
     current = (now or get_current_datetime()).astimezone(timezone.utc)
     utc_start = _as_utc(starts_at)
@@ -290,17 +317,58 @@ def _validate_resolved_interval(
             "Meeting Room bookings must use 30-minute increments.",
         )
     duration_half_hours = int(duration_seconds // 1800)
-    if duration_half_hours < MIN_BOOKING_HALF_HOURS:
-        raise MeetingRoomInputError(
-            "invalid_time",
-            "Meeting Room bookings must be at least one hour.",
+    if duration_half_hours < minimum_half_hours:
+        minimum_message = (
+            "Availability checks must be at least 30 minutes."
+            if minimum_half_hours == MIN_AVAILABILITY_HALF_HOURS
+            else "Meeting Room bookings must be at least one hour."
         )
-    if duration_half_hours > MAX_BOOKING_HALF_HOURS:
         raise MeetingRoomInputError(
             "invalid_time",
-            "Meeting Room bookings can be at most two hours. Check the end time and try again.",
+            minimum_message,
+        )
+    if duration_half_hours > maximum_half_hours:
+        maximum_message = (
+            "Availability checks can span at most 24 hours."
+            if maximum_half_hours == MAX_AVAILABILITY_HALF_HOURS
+            else "Meeting Room bookings can be at most two hours. Check the end time and try again."
+        )
+        raise MeetingRoomInputError(
+            "invalid_time",
+            maximum_message,
         )
     return starts_at, ends_at
+
+
+def _implicit_same_day_weekday_has_passed(
+    text: str,
+    params: dict,
+    *,
+    local_date: date,
+    starts_at: datetime,
+    now: Optional[datetime],
+) -> bool:
+    current = (now or get_current_datetime()).astimezone(MELBOURNE_TZ)
+    if local_date != current.date() or _as_utc(starts_at) > _as_utc(current):
+        return False
+
+    normalized = str(text or "").lower()
+    if re.search(r"\b\d{4}-\d{2}-\d{2}\b|\btoday\b|\btomorrow\b", normalized):
+        return False
+    if re.search(
+        r"\b(?<!next\s)(?:" + "|".join(WEEKDAYS) + r")\b",
+        normalized,
+    ):
+        return True
+
+    raw_param_date = str(params.get("date") or "").strip().lower()
+    return bool(
+        raw_param_date in WEEKDAYS
+        and not re.search(
+            r"\bnext\s+(?:" + "|".join(WEEKDAYS) + r")\b",
+            normalized,
+        )
+    )
 
 
 def resolve_interval(
@@ -308,6 +376,8 @@ def resolve_interval(
     params: Optional[dict] = None,
     *,
     now: Optional[datetime] = None,
+    minimum_half_hours: int = MIN_BOOKING_HALF_HOURS,
+    maximum_half_hours: int = MAX_BOOKING_HALF_HOURS,
 ) -> tuple[datetime, datetime]:
     params = params or {}
     exact_start = _parse_iso_timestamp(params.get("starts_at"))
@@ -316,13 +386,29 @@ def resolve_interval(
         if not exact_start:
             raise MeetingRoomInputError("missing_start_time", "What time should the booking start?")
         if exact_end:
-            return _validate_resolved_interval(exact_start, exact_end, now=now)
+            return _validate_resolved_interval(
+                exact_start,
+                exact_end,
+                now=now,
+                minimum_half_hours=minimum_half_hours,
+                maximum_half_hours=maximum_half_hours,
+            )
         duration = params.get("duration_hours", 1)
         ends_at = _add_actual_half_hours(
             exact_start,
-            _duration_half_hours(duration),
+            _duration_half_hours(
+                duration,
+                minimum=minimum_half_hours,
+                maximum=maximum_half_hours,
+            ),
         )
-        return _validate_resolved_interval(exact_start, ends_at, now=now)
+        return _validate_resolved_interval(
+            exact_start,
+            ends_at,
+            now=now,
+            minimum_half_hours=minimum_half_hours,
+            maximum_half_hours=maximum_half_hours,
+        )
 
     local_date = resolve_local_date(text, params, now=now)
     natural_start, natural_end = _natural_time_tokens(text)
@@ -347,9 +433,49 @@ def resolve_interval(
             raw_duration = _natural_duration(text) or 1
         ends_at = _add_actual_half_hours(
             starts_at,
-            _duration_half_hours(raw_duration),
+            _duration_half_hours(
+                raw_duration,
+                minimum=minimum_half_hours,
+                maximum=maximum_half_hours,
+            ),
         )
-    return _validate_resolved_interval(starts_at, ends_at, now=now)
+    if _implicit_same_day_weekday_has_passed(
+        text,
+        params,
+        local_date=local_date,
+        starts_at=starts_at,
+        now=now,
+    ):
+        starts_at = _local_datetime(
+            starts_at.date() + timedelta(days=7),
+            starts_at.time().replace(tzinfo=None),
+        )
+        ends_at = _local_datetime(
+            ends_at.date() + timedelta(days=7),
+            ends_at.time().replace(tzinfo=None),
+        )
+    return _validate_resolved_interval(
+        starts_at,
+        ends_at,
+        now=now,
+        minimum_half_hours=minimum_half_hours,
+        maximum_half_hours=maximum_half_hours,
+    )
+
+
+def resolve_availability_interval(
+    text: str,
+    params: Optional[dict] = None,
+    *,
+    now: Optional[datetime] = None,
+) -> tuple[datetime, datetime]:
+    return resolve_interval(
+        text,
+        params,
+        now=now,
+        minimum_half_hours=MIN_AVAILABILITY_HALF_HOURS,
+        maximum_half_hours=MAX_AVAILABILITY_HALF_HOURS,
+    )
 
 
 def _format_clock(value: datetime) -> str:

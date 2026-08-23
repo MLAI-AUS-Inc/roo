@@ -2,8 +2,11 @@ import asyncio
 import hashlib
 import hmac
 import json
+import sqlite3
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -233,13 +236,204 @@ def test_completed_action_is_not_reopened_by_another_click(tmp_path):
     action = _record(store, action_value)
     reserved = store.reserve(action["id"], owner="worker")
     assert reserved is not None
-    assert store.mark_completed(action["id"], owner="worker") is True
+    assert store.mark_completed(
+        action["id"],
+        owner="worker",
+        outcome="The booking is confirmed.",
+    ) is True
 
     replay = _record(store, action_value)
 
     assert replay["id"] == action["id"]
     assert replay["status"] == "completed"
+    assert replay["final_outcome"] == "The booking is confirmed."
     assert store.reserve(action["id"]) is None
+
+
+def test_existing_outbox_schema_is_upgraded_without_losing_notification_state(
+    tmp_path,
+):
+    database_path = tmp_path / "legacy-actions.db"
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE meeting_room_action_outbox (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                action_key TEXT NOT NULL UNIQUE,
+                action_id TEXT NOT NULL,
+                action_value TEXT NOT NULL,
+                actor_user_id TEXT NOT NULL,
+                channel_id TEXT NOT NULL,
+                message_ts TEXT NOT NULL,
+                status TEXT NOT NULL,
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                next_attempt_at REAL NOT NULL,
+                locked_until REAL,
+                locked_by TEXT,
+                last_error TEXT,
+                target_notified_at REAL,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                completed_at REAL
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO meeting_room_action_outbox (
+                action_key, action_id, action_value, actor_user_id,
+                channel_id, message_ts, status, next_attempt_at,
+                target_notified_at, created_at, updated_at
+            ) VALUES ('legacy', ?, '{}', 'UOWNER', 'DOWNER', '123.456',
+                      'pending', 1, 2, 1, 1)
+            """,
+            (BOOK_ACTION_ID,),
+        )
+
+    upgraded = action_module.MeetingRoomActionStore(database_path).get(1)
+
+    assert upgraded["target_notification_state"] == "sent"
+    assert upgraded["target_notification_attempted_at"] is None
+    assert upgraded["final_outcome"] is None
+
+
+def test_concurrent_workers_serialize_existing_outbox_schema_upgrade(tmp_path):
+    database_path = tmp_path / "legacy-actions.db"
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE meeting_room_action_outbox (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                action_key TEXT NOT NULL UNIQUE,
+                action_id TEXT NOT NULL,
+                action_value TEXT NOT NULL,
+                actor_user_id TEXT NOT NULL,
+                channel_id TEXT NOT NULL,
+                message_ts TEXT NOT NULL,
+                status TEXT NOT NULL,
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                next_attempt_at REAL NOT NULL,
+                locked_until REAL,
+                locked_by TEXT,
+                last_error TEXT,
+                target_notified_at REAL,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                completed_at REAL
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO meeting_room_action_outbox (
+                action_key, action_id, action_value, actor_user_id,
+                channel_id, message_ts, status, next_attempt_at,
+                created_at, updated_at
+            ) VALUES ('legacy', ?, '{}', 'UOWNER', 'DOWNER', '123.456',
+                      'pending', 1, 1, 1)
+            """,
+            (BOOK_ACTION_ID,),
+        )
+
+    stores = [
+        action_module.MeetingRoomActionStore(database_path),
+        action_module.MeetingRoomActionStore(database_path),
+    ]
+    barrier = threading.Barrier(len(stores))
+
+    def upgrade(store):
+        barrier.wait()
+        return store.get(1)
+
+    with ThreadPoolExecutor(max_workers=len(stores)) as executor:
+        rows = list(executor.map(upgrade, stores))
+
+    assert [row["target_notification_state"] for row in rows] == [
+        "pending",
+        "pending",
+    ]
+    with sqlite3.connect(database_path) as connection:
+        columns = {
+            str(row[1])
+            for row in connection.execute(
+                "PRAGMA table_info(meeting_room_action_outbox)"
+            ).fetchall()
+        }
+    assert {
+        "target_notification_state",
+        "target_notification_attempted_at",
+        "final_outcome",
+    } <= columns
+
+
+@pytest.mark.asyncio
+async def test_retry_exhaustion_parks_action_in_terminal_state(tmp_path, monkeypatch):
+    store = action_module.MeetingRoomActionStore(tmp_path / "actions.db")
+    action = _record(store)
+    monkeypatch.setattr(action_module, "MAX_ACTION_ATTEMPTS", 1)
+
+    async def failing_processor(record):
+        raise RuntimeError("deterministic failure")
+
+    await action_module.process_meeting_room_action(
+        action["id"],
+        store=store,
+        processor=failing_processor,
+    )
+
+    terminal = store.get(action["id"])
+    assert terminal["status"] == "failed"
+    assert "repeated attempts" in terminal["final_outcome"]
+    assert store.claim_due() == []
+
+
+@pytest.mark.asyncio
+async def test_completed_button_reclick_replays_stored_outcome(tmp_path, monkeypatch):
+    configured = _settings(tmp_path)
+    store = action_module.MeetingRoomActionStore(configured.SLACK_RECEIPTS_DB_PATH)
+    action_value = _booking_action_value()
+    action = _record(store, action_value)
+    reserved = store.reserve(action["id"], owner="worker")
+    assert reserved is not None
+    assert store.mark_completed(
+        action["id"],
+        owner="worker",
+        outcome="The booking is confirmed.",
+    )
+    scheduled = []
+    deliveries = []
+
+    async def deliver(**kwargs):
+        deliveries.append(kwargs)
+        return True
+
+    monkeypatch.setattr(
+        main_module,
+        "get_meeting_room_action_store",
+        lambda path: store,
+    )
+    monkeypatch.setattr(main_module, "start_slack_action", scheduled.append)
+    monkeypatch.setattr(
+        main_module,
+        "_deliver_meeting_room_action_outcome",
+        deliver,
+    )
+
+    await main_module._persist_and_start_meeting_room_action(
+        settings=configured,
+        action_id=BOOK_ACTION_ID,
+        action_value=action_value,
+        actor_user_id="UOWNER",
+        channel_id="DOWNER",
+        message_ts="original-card.123",
+    )
+
+    assert len(scheduled) == 1
+    await scheduled[0]
+    assert "already processed" in deliveries[0]["outcome"]
+    assert "No additional Roo Points" in deliveries[0]["outcome"]
+    assert "The booking is confirmed" in deliveries[0]["outcome"]
+    assert store.get(action["id"])["status"] == "completed"
 
 
 def test_same_request_id_cannot_be_reused_with_different_payload(tmp_path):
@@ -334,7 +528,7 @@ async def test_backend_commit_response_loss_recovers_target_notification(
     assert backend_calls == [request_id, request_id]
     assert store.get(action["id"])["status"] == "completed"
     assert target_dms[0][0][0] == "UTARGET"
-    assert target_dms[0][1]["client_msg_id"] == request_id
+    assert target_dms[0][1] == {"raise_on_error": True}
     assert "was already confirmed" in updates[-1]["text"]
 
 
@@ -395,12 +589,12 @@ async def test_expired_queued_replay_recovers_committed_admin_booking(
     assert backend_calls == [request_id]
     assert store.get(action["id"])["status"] == "completed"
     assert target_dms[0][0][0] == "UTARGET"
-    assert target_dms[0][1]["client_msg_id"] == request_id
+    assert target_dms[0][1] == {"raise_on_error": True}
     assert "was already confirmed" in updates[-1]["text"]
 
 
 @pytest.mark.asyncio
-async def test_target_dm_failure_is_retried_with_stable_client_message_id(
+async def test_definite_target_dm_failure_is_retried_without_unsupported_slack_id(
     tmp_path,
     monkeypatch,
 ):
@@ -445,10 +639,111 @@ async def test_target_dm_failure_is_retried_with_stable_client_message_id(
 
     assert store.get(action["id"])["status"] == "completed"
     assert backend_calls == [request_id, request_id]
-    assert [attempt[1]["client_msg_id"] for attempt in dm_attempts] == [
-        request_id,
-        request_id,
+    assert [attempt[1] for attempt in dm_attempts] == [
+        {"raise_on_error": True},
+        {"raise_on_error": True},
     ]
+
+
+@pytest.mark.asyncio
+async def test_abandoned_sending_notification_is_not_sent_twice(
+    tmp_path,
+    monkeypatch,
+):
+    current_time = [1_000.0]
+    monkeypatch.setattr(action_module.time, "time", lambda: current_time[0])
+    configured = _settings(tmp_path)
+    action_value = _booking_action_value()
+    store = action_module.MeetingRoomActionStore(configured.SLACK_RECEIPTS_DB_PATH)
+    action = _record(store, action_value)
+    first_attempt = store.reserve(action["id"], owner="crashed", lease_seconds=1)
+    assert first_attempt is not None
+    assert store.begin_target_notification(action["id"], owner="crashed") is True
+    current_time[0] += 2
+    target_dms = []
+    updates = []
+
+    class Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def book_meeting_room(self, slack_user_id, **kwargs):
+            return _admin_booking_response(action_value, created=False)
+
+    monkeypatch.setattr("roo.clients.mlai_backend.MLAIBackendClient", Client)
+    monkeypatch.setattr(main_module, "get_settings", lambda: configured)
+    monkeypatch.setattr(
+        main_module,
+        "send_dm",
+        lambda *args, **kwargs: target_dms.append((args, kwargs)) or {"ok": True},
+    )
+    monkeypatch.setattr(
+        "roo.slack_client.get_slack_client",
+        lambda: SimpleNamespace(
+            chat_update=lambda **kwargs: updates.append(kwargs) or {"ok": True}
+        ),
+    )
+
+    await action_module.process_meeting_room_action(
+        action["id"],
+        store=store,
+        processor=main_module._process_meeting_room_action_record,
+    )
+
+    terminal = store.get(action["id"])
+    assert terminal["status"] == "failed"
+    assert terminal["target_notification_state"] == "uncertain"
+    assert target_dms == []
+    assert "will not send another automatically" in updates[-1]["text"]
+
+
+@pytest.mark.asyncio
+async def test_permanent_target_dm_failure_stops_without_retry(
+    tmp_path,
+    monkeypatch,
+):
+    configured = _settings(tmp_path)
+    action_value = _booking_action_value()
+    store = action_module.MeetingRoomActionStore(configured.SLACK_RECEIPTS_DB_PATH)
+    action = _record(store, action_value)
+    backend_calls = []
+    dm_attempts = []
+
+    class Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def book_meeting_room(self, slack_user_id, **kwargs):
+            backend_calls.append(kwargs["client_request_id"])
+            return _admin_booking_response(action_value, created=True)
+
+    monkeypatch.setattr("roo.clients.mlai_backend.MLAIBackendClient", Client)
+    monkeypatch.setattr(main_module, "get_settings", lambda: configured)
+    monkeypatch.setattr(
+        main_module,
+        "send_dm",
+        lambda *args, **kwargs: (
+            dm_attempts.append((args, kwargs))
+            or {"ok": False, "error": "users_not_found"}
+        ),
+    )
+    monkeypatch.setattr(
+        "roo.slack_client.get_slack_client",
+        lambda: SimpleNamespace(chat_update=lambda **kwargs: {"ok": True}),
+    )
+
+    await action_module.process_meeting_room_action(
+        action["id"],
+        store=store,
+        processor=main_module._process_meeting_room_action_record,
+    )
+
+    terminal = store.get(action["id"])
+    assert terminal["status"] == "failed"
+    assert terminal["target_notification_state"] == "failed"
+    assert len(backend_calls) == 1
+    assert len(dm_attempts) == 1
+    assert store.claim_due() == []
 
 
 @pytest.mark.asyncio

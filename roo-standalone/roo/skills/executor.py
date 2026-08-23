@@ -102,6 +102,7 @@ from ..meeting_room_booking import (
     cancellation_selection,
     format_interval as format_meeting_room_interval,
     parse_backend_timestamp,
+    resolve_availability_interval as resolve_meeting_room_availability_interval,
     resolve_interval as resolve_meeting_room_interval,
     resolve_local_date as resolve_meeting_room_date,
 )
@@ -513,6 +514,12 @@ class SkillExecutor:
             starts_at = parse_backend_timestamp(requested.get("starts_at"))
             ends_at = parse_backend_timestamp(requested.get("ends_at"))
             if result.get("available"):
+                if result.get("bookable") is False:
+                    return (
+                        f"The *{room_name}* is available {format_meeting_room_interval(starts_at, ends_at)} "
+                        "(Melbourne time). This is an availability check only; one booking must be "
+                        "between 1 and 2 hours."
+                    )
                 cost = int(result.get("points_cost") or 0)
                 return (
                     f"The *{room_name}* is available {format_meeting_room_interval(starts_at, ends_at)} "
@@ -612,7 +619,10 @@ class SkillExecutor:
                         "What date should I check? Try `tomorrow` or `2026-08-14`.",
                     )
                 if self._meeting_room_time_is_present(text, params):
-                    starts_at, ends_at = resolve_meeting_room_interval(text, params)
+                    starts_at, ends_at = resolve_meeting_room_availability_interval(
+                        text,
+                        params,
+                    )
                     availability = await client.check_meeting_room_availability(
                         user_id,
                         starts_at=starts_at.isoformat(),
