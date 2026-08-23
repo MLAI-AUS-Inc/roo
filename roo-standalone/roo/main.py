@@ -88,6 +88,8 @@ from .slack_security import (
     SlackRequestVerificationError,
     verify_and_claim_slack_request,
 )
+from .slack_action_tasks import drain as drain_slack_actions
+from .slack_action_tasks import start as start_slack_action
 from .backend_identity import (
     BackendActorContext,
     get_backend_actor_context,
@@ -107,6 +109,29 @@ from .admin_brain import (
     parse_admin_action_value,
     parse_feedback_value,
     parse_incorrect_feedback_submission,
+)
+from .meeting_room_booking import (
+    BOOK_ACTION_ID as MEETING_ROOM_BOOK_ACTION_ID,
+    CANCEL_ACTION_ID as MEETING_ROOM_CANCEL_ACTION_ID,
+    CHOOSE_ROOM_ACTION_ID as MEETING_ROOM_CHOOSE_ROOM_ACTION_ID,
+    MeetingRoomInputError,
+    backend_error_message as meeting_room_backend_error_message,
+    booking_preview as meeting_room_booking_preview,
+    confirmation_expired as meeting_room_confirmation_expired,
+    format_admin_target_notification as format_meeting_room_admin_target_notification,
+    format_booking_result as format_meeting_room_booking_result,
+    format_cancellation_result as format_meeting_room_cancellation_result,
+    parse_action_value as parse_meeting_room_action_value,
+    parse_backend_timestamp as parse_meeting_room_backend_timestamp,
+    room_choice_already_selected_message as meeting_room_choice_already_selected_message,
+    room_choice_expired as meeting_room_choice_expired,
+)
+from .meeting_room_actions import (
+    MeetingRoomActionResult,
+    action_retry_exhausted,
+    get_meeting_room_action_store,
+    meeting_room_action_retry_loop,
+    process_meeting_room_action,
 )
 
 # Pending intents for auto-continue after prerequisite steps complete.
@@ -131,8 +156,6 @@ CONTENT_FACTORY_WATCHDOG_STOP_STATUSES = {
     "denied",
     "cancelled",
 }
-
-
 def _is_duplicate_slack_request(request: Request) -> bool:
     state = getattr(request, "state", None)
     return bool(getattr(state, "slack_duplicate", False))
@@ -2159,6 +2182,7 @@ async def lifespan(app: FastAPI):
     boost_post_retry_task: Optional[asyncio.Task] = None
     link_love_task: Optional[asyncio.Task] = None
     start_here_intro_task: Optional[asyncio.Task] = None
+    meeting_room_action_retry_task: Optional[asyncio.Task] = None
     jobs_scheduler_task: Optional[asyncio.Task] = None
     print(f"🦘 Roo Standalone starting...")
     print(f"   Surface: {settings.ROO_SURFACE}")
@@ -2171,6 +2195,17 @@ async def lifespan(app: FastAPI):
     if settings.ROO_SURFACE == "public":
         coworking_retry_task = asyncio.create_task(coworking_booking_retry_loop())
         app.state.coworking_retry_task = coworking_retry_task
+        if settings.MEETING_ROOM_BOOKING_ENABLED:
+            meeting_room_action_store = get_meeting_room_action_store(
+                settings.SLACK_RECEIPTS_DB_PATH
+            )
+            meeting_room_action_retry_task = asyncio.create_task(
+                meeting_room_action_retry_loop(
+                    store=meeting_room_action_store,
+                    processor=_process_meeting_room_action_record,
+                )
+            )
+            app.state.meeting_room_action_retry_task = meeting_room_action_retry_task
         if settings.BOOST_LINK_LOVE_ENABLED:
             link_love_task = asyncio.create_task(link_love_retry_loop())
             app.state.link_love_task = link_love_task
@@ -2211,6 +2246,11 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        if meeting_room_action_retry_task:
+            meeting_room_action_retry_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await meeting_room_action_retry_task
+        await drain_slack_actions()
         if jobs_scheduler_task:
             jobs_scheduler_task.cancel()
             with suppress(asyncio.CancelledError):
@@ -4795,6 +4835,532 @@ async def _review_admin_action(
 
 
 
+def _slack_delivery_succeeded(response: Any) -> bool:
+    return bool(response and response.get("ok"))
+
+
+def _slack_error_code(value: Any) -> str:
+    response = value if isinstance(value, dict) else getattr(value, "response", None)
+    try:
+        return str(response.get("error") or "") if response else ""
+    except (AttributeError, TypeError):
+        return ""
+
+
+PERMANENT_TARGET_NOTIFICATION_ERRORS = {
+    "account_inactive",
+    "user_not_found",
+    "users_not_found",
+}
+
+
+def _meeting_room_failure_is_retryable(
+    exc: Exception,
+    *,
+    mutation_started: bool,
+) -> bool:
+    if not mutation_started:
+        return False
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code >= 500
+    return not isinstance(exc, MeetingRoomInputError)
+
+
+async def _deliver_meeting_room_action_outcome(
+    *,
+    channel_id: str,
+    message_ts: str,
+    outcome: str,
+    blocks: Optional[list[dict[str, Any]]] = None,
+) -> bool:
+    rendered_blocks = blocks or [
+        {"type": "section", "text": {"type": "mrkdwn", "text": outcome}}
+    ]
+    try:
+        from .slack_client import get_slack_client
+
+        response = await asyncio.to_thread(
+            get_slack_client().chat_update,
+            channel=channel_id,
+            ts=message_ts,
+            text=outcome,
+            blocks=rendered_blocks,
+        )
+        if _slack_delivery_succeeded(response):
+            return True
+    except Exception:
+        pass
+    try:
+        response = await asyncio.to_thread(
+            post_message,
+            channel=channel_id,
+            text=outcome,
+            blocks=rendered_blocks,
+        )
+        return _slack_delivery_succeeded(response)
+    except Exception:
+        return False
+
+
+async def _deliver_meeting_room_choice_feedback(
+    *,
+    channel_id: str,
+    outcome: str,
+) -> bool:
+    """Send choice feedback without replacing the winning confirmation card."""
+    if not str(channel_id or "").startswith("D"):
+        return False
+    try:
+        response = await asyncio.to_thread(
+            post_message,
+            channel=channel_id,
+            text=outcome,
+        )
+        delivered = _slack_delivery_succeeded(response)
+        if not delivered:
+            print("MEETING_ROOM_CHOICE_FEEDBACK_FAILED reason=delivery_rejected")
+        return delivered
+    except Exception as exc:
+        print(
+            "MEETING_ROOM_CHOICE_FEEDBACK_FAILED "
+            f"reason={exc.__class__.__name__}"
+        )
+        return False
+
+
+async def _handle_meeting_room_action(
+    *,
+    settings: Settings,
+    action_id: str,
+    action_value: str,
+    actor_user_id: str,
+    channel_id: str,
+    message_ts: str,
+    retry_failures: bool = False,
+    target_notification_already_delivered: bool = False,
+    target_notification_state: str = "pending",
+    begin_target_notification: Optional[Any] = None,
+    set_target_notification_state: Optional[Any] = None,
+    final_attempt: bool = False,
+) -> MeetingRoomActionResult:
+    """Complete one verified, backend-idempotent Meeting Room action."""
+    mutation_started = False
+    retry_error: Optional[Exception] = None
+    needs_attention = False
+    outcome_blocks: Optional[list[dict[str, Any]]] = None
+    value: dict[str, Any] = {}
+    if not settings.MEETING_ROOM_BOOKING_ENABLED:
+        outcome = "Meeting-room booking is not enabled right now. Nothing was changed."
+    elif not str(channel_id or "").startswith("D"):
+        outcome = "Meeting Room actions must be completed in your private Roo DM. Nothing was changed."
+    else:
+        try:
+            value = parse_meeting_room_action_value(
+                action_value,
+                expected_action=action_id,
+            )
+            if value["owner_slack_user_id"] != actor_user_id:
+                outcome = "Only the member who requested this action can use it. Nothing was changed."
+            # Persisted actions may be recovering a committed mutation whose
+            # response was lost. The backend checks the idempotency key before
+            # expiry, so durable processing must let it determine the result.
+            elif (
+                action_id == MEETING_ROOM_BOOK_ACTION_ID
+                and not retry_failures
+                and meeting_room_confirmation_expired(value)
+            ):
+                outcome = "That confirmation expired. Ask Roo to check the time again for a fresh button."
+            elif (
+                action_id == MEETING_ROOM_CHOOSE_ROOM_ACTION_ID
+                and meeting_room_choice_expired(value)
+            ):
+                outcome = "Those room choices expired. Ask Roo to start the booking again."
+            else:
+                from .clients.mlai_backend import MLAIBackendClient
+
+                client = MLAIBackendClient(
+                    base_url=settings.MLAI_BACKEND_URL,
+                    api_key=settings.ROO_API_KEY,
+                    internal_api_key=settings.ROO_API_KEY,
+                )
+                if action_id == MEETING_ROOM_BOOK_ACTION_ID:
+                    mutation_started = True
+                    result = await client.book_meeting_room(
+                        actor_user_id,
+                        room_slug=value["room_slug"],
+                        starts_at=value["starts_at"],
+                        ends_at=value["ends_at"],
+                        client_request_id=value["client_request_id"],
+                        confirmation_expires_at=value["confirmation_expires_at"],
+                        expected_points_cost=int(value["expected_points_cost"]),
+                        slack_channel_id=channel_id or None,
+                        target_slack_user_id=value.get("target_slack_user_id"),
+                    )
+                    outcome = format_meeting_room_booking_result(result)
+                    if result.get("admin_booking"):
+                        target_slack_user_id = str(
+                            result.get("booked_for_slack_user_id")
+                            or value.get("target_slack_user_id")
+                            or ""
+                        ).strip()
+                        notification_state = (
+                            "sent"
+                            if target_notification_already_delivered
+                            else str(target_notification_state or "pending")
+                        )
+                        notification_error = "none"
+                        if not target_slack_user_id and notification_state != "sent":
+                            notification_state = "failed"
+                            notification_error = "missing_target"
+                        elif notification_state == "sending":
+                            if set_target_notification_state is not None:
+                                await set_target_notification_state("uncertain")
+                            notification_state = "uncertain"
+                            notification_error = "previous_delivery_result_unknown"
+                        elif target_slack_user_id and notification_state == "pending":
+                            claimed = True
+                            if begin_target_notification is not None:
+                                claimed = bool(await begin_target_notification())
+                            if not claimed:
+                                raise RuntimeError(
+                                    "meeting_room_target_notification_lease_lost"
+                                )
+                            try:
+                                notification = await asyncio.to_thread(
+                                    send_dm,
+                                    target_slack_user_id,
+                                    format_meeting_room_admin_target_notification(
+                                        result,
+                                        admin_slack_user_id=actor_user_id,
+                                    ),
+                                    raise_on_error=True,
+                                )
+                            except Exception as exc:
+                                notification_error = (
+                                    _slack_error_code(exc)
+                                    or exc.__class__.__name__
+                                )
+                                if _slack_error_code(exc) in PERMANENT_TARGET_NOTIFICATION_ERRORS:
+                                    notification_state = "failed"
+                                elif _slack_error_code(exc):
+                                    notification_state = "pending"
+                                else:
+                                    notification_state = "uncertain"
+                            else:
+                                if _slack_delivery_succeeded(notification):
+                                    notification_state = "sent"
+                                else:
+                                    notification_error = (
+                                        _slack_error_code(notification)
+                                        or "delivery_rejected"
+                                    )
+                                    notification_state = (
+                                        "failed"
+                                        if _slack_error_code(notification)
+                                        in PERMANENT_TARGET_NOTIFICATION_ERRORS
+                                        else "pending"
+                                    )
+
+                            if notification_state == "pending" and final_attempt:
+                                notification_state = "failed"
+                                notification_error = "retry_limit_reached"
+                            if set_target_notification_state is not None:
+                                persisted = bool(
+                                    await set_target_notification_state(
+                                        notification_state
+                                    )
+                                )
+                                if not persisted:
+                                    notification_state = "uncertain"
+                                    notification_error = "state_persistence_rejected"
+
+                        if notification_state == "sent":
+                            outcome += (
+                                f"\n\n<@{target_slack_user_id}> was already notified privately."
+                                if target_notification_already_delivered
+                                else f"\n\nI notified <@{target_slack_user_id}> privately."
+                            )
+                        elif notification_state == "pending":
+                            outcome += (
+                                "\n\nThe booking is confirmed, but the member notification "
+                                "is still pending. Roo will retry it automatically."
+                            )
+                            retry_error = RuntimeError(
+                                "meeting_room_target_notification_failed"
+                            )
+                        elif notification_state == "uncertain":
+                            outcome += (
+                                "\n\nThe booking is confirmed, but Roo could not verify whether "
+                                f"<@{target_slack_user_id}> received the private notification. "
+                                "Roo will not send another automatically; please check with them directly."
+                            )
+                            needs_attention = True
+                        else:
+                            outcome += (
+                                "\n\nThe booking is confirmed, but Roo could not notify "
+                                f"<@{target_slack_user_id}> privately. Please let them know directly."
+                            )
+                            needs_attention = True
+                        if notification_state != "sent":
+                            print(
+                                "MEETING_ROOM_TARGET_NOTIFICATION_FAILED "
+                                f"booking_id={(result.get('booking') or {}).get('id')} "
+                                f"state={notification_state} reason={notification_error}"
+                            )
+                    print(
+                        "MEETING_ROOM_BOOKING_CONFIRMED "
+                        f"booking_id={(result.get('booking') or {}).get('id')} "
+                        f"request_id={value['client_request_id']} "
+                        f"created={bool(result.get('created'))}"
+                    )
+                elif action_id == MEETING_ROOM_CHOOSE_ROOM_ACTION_ID:
+                    starts_at = parse_meeting_room_backend_timestamp(
+                        value["starts_at"]
+                    )
+                    ends_at = parse_meeting_room_backend_timestamp(value["ends_at"])
+                    availability = await client.check_meeting_room_availability(
+                        actor_user_id,
+                        room_slug=value["room_slug"],
+                        starts_at=starts_at.isoformat(),
+                        ends_at=ends_at.isoformat(),
+                        target_slack_user_id=value.get("target_slack_user_id"),
+                    )
+                    room_name = str(
+                        (availability.get("room") or {}).get("name")
+                        or "Meeting Room"
+                    )
+                    if not availability.get("available"):
+                        outcome = (
+                            f"The *{room_name}* is no longer available for that time. "
+                            "No booking was created and no Roo Points were charged."
+                        )
+                    else:
+                        preview = meeting_room_booking_preview(
+                            availability,
+                            owner_slack_user_id=actor_user_id,
+                            starts_at=starts_at,
+                            ends_at=ends_at,
+                            expected_room_slug=value["room_slug"],
+                            target_slack_user_id=value.get(
+                                "target_slack_user_id"
+                            ),
+                            client_request_id=value[
+                                "booking_client_request_id"
+                            ],
+                        )
+                        outcome = preview["message"]
+                        outcome_blocks = preview["blocks"]
+                else:
+                    mutation_started = True
+                    result = await client.cancel_meeting_room_booking(
+                        actor_user_id,
+                        value["booking_id"],
+                    )
+                    outcome = format_meeting_room_cancellation_result(result)
+                    print(
+                        "MEETING_ROOM_BOOKING_CANCELLED "
+                        f"booking_id={value['booking_id']} "
+                        f"cancelled={bool(result.get('cancelled'))}"
+                    )
+        except MeetingRoomInputError as exc:
+            outcome = exc.message
+        except Exception as exc:
+            if retry_failures and _meeting_room_failure_is_retryable(
+                exc,
+                mutation_started=mutation_started,
+            ):
+                if final_attempt:
+                    outcome = (
+                        "Roo could not finish confirming this Meeting Room change after "
+                        "repeated attempts. Check your upcoming bookings before trying again."
+                    )
+                    needs_attention = True
+                else:
+                    outcome = (
+                        "Roo is still confirming this Meeting Room change. "
+                        "It will retry automatically; do not create another request."
+                    )
+                    retry_error = exc
+            else:
+                outcome = meeting_room_backend_error_message(
+                    exc,
+                    mutation_result_uncertain=mutation_started,
+                    target_slack_user_id=(
+                        value.get("target_slack_user_id")
+                    ),
+                    room_slug=value.get("room_slug"),
+                )
+            print(
+                "MEETING_ROOM_ACTION_FAILED "
+                f"action={action_id} reason={exc.__class__.__name__}"
+            )
+
+    delivered = await _deliver_meeting_room_action_outcome(
+        channel_id=channel_id,
+        message_ts=message_ts,
+        outcome=outcome,
+        blocks=outcome_blocks,
+    )
+    if not delivered:
+        print(f"MEETING_ROOM_ACTION_DELIVERY_FAILED action={action_id}")
+        if retry_failures and not final_attempt:
+            retry_error = retry_error or RuntimeError(
+                "meeting_room_action_delivery_failed"
+            )
+        elif retry_failures:
+            needs_attention = True
+    if retry_error is not None and retry_failures:
+        raise retry_error
+    return MeetingRoomActionResult(
+        outcome=outcome,
+        blocks=outcome_blocks,
+        needs_attention=needs_attention,
+    )
+
+
+async def _process_meeting_room_action_record(
+    action: dict[str, Any],
+) -> MeetingRoomActionResult:
+    settings = get_settings()
+    store = get_meeting_room_action_store(settings.SLACK_RECEIPTS_DB_PATH)
+
+    async def begin_target_notification() -> bool:
+        return await asyncio.to_thread(
+            store.begin_target_notification,
+            int(action["id"]),
+            owner=str(action["locked_by"]),
+        )
+
+    async def set_target_notification_state(state: str) -> bool:
+        return await asyncio.to_thread(
+            store.set_target_notification_state,
+            int(action["id"]),
+            owner=str(action["locked_by"]),
+            state=state,
+        )
+
+    return await _handle_meeting_room_action(
+        settings=settings,
+        action_id=str(action["action_id"]),
+        action_value=str(action["action_value"]),
+        actor_user_id=str(action["actor_user_id"]),
+        channel_id=str(action["channel_id"]),
+        message_ts=str(action["message_ts"]),
+        retry_failures=True,
+        target_notification_already_delivered=bool(
+            action.get("target_notified_at")
+        ),
+        target_notification_state=str(
+            action.get("target_notification_state") or "pending"
+        ),
+        begin_target_notification=begin_target_notification,
+        set_target_notification_state=set_target_notification_state,
+        final_attempt=action_retry_exhausted(action),
+    )
+
+
+async def _persist_and_start_meeting_room_action(
+    *,
+    settings: Settings,
+    action_id: str,
+    action_value: str,
+    actor_user_id: str,
+    channel_id: str,
+    message_ts: str,
+    duplicate_delivery: bool = False,
+) -> None:
+    if not settings.MEETING_ROOM_BOOKING_ENABLED:
+        # Leave previously queued uncertain mutations untouched while the
+        # feature is disabled. They can resume after the flag is re-enabled,
+        # while old buttons still receive a clear non-mutating response.
+        start_slack_action(
+            _handle_meeting_room_action(
+                settings=settings,
+                action_id=action_id,
+                action_value=action_value,
+                actor_user_id=actor_user_id,
+                channel_id=channel_id,
+                message_ts=message_ts,
+            )
+        )
+        return
+    store = get_meeting_room_action_store(settings.SLACK_RECEIPTS_DB_PATH)
+    try:
+        action = await asyncio.to_thread(
+            store.record_action,
+            action_id=action_id,
+            action_value=action_value,
+            actor_user_id=actor_user_id,
+            channel_id=channel_id,
+            message_ts=message_ts,
+        )
+    except MeetingRoomInputError as exc:
+        if exc.code == "room_already_selected":
+            if not duplicate_delivery:
+                start_slack_action(
+                    _deliver_meeting_room_choice_feedback(
+                        channel_id=channel_id,
+                        outcome=exc.message,
+                    )
+                )
+            return
+        start_slack_action(
+            _deliver_meeting_room_action_outcome(
+                channel_id=channel_id,
+                message_ts=message_ts,
+                outcome=exc.message,
+            )
+        )
+        return
+    if action.get("status") in {"completed", "failed"}:
+        if (
+            action["status"] == "completed"
+            and action_id == MEETING_ROOM_CHOOSE_ROOM_ACTION_ID
+        ):
+            if not duplicate_delivery:
+                selected = parse_meeting_room_action_value(
+                    str(action["action_value"]),
+                    expected_action=MEETING_ROOM_CHOOSE_ROOM_ACTION_ID,
+                )
+                start_slack_action(
+                    _deliver_meeting_room_choice_feedback(
+                        channel_id=channel_id,
+                        outcome=meeting_room_choice_already_selected_message(
+                            selected
+                        ),
+                    )
+                )
+            return
+        if action["status"] == "completed":
+            if action_id == MEETING_ROOM_BOOK_ACTION_ID:
+                prefix = "This booking confirmation was already processed. No additional Roo Points were charged."
+            else:
+                prefix = "This cancellation was already processed. No additional refund was issued."
+        else:
+            prefix = "This action previously stopped and needs attention."
+        stored_outcome = str(action.get("final_outcome") or "").strip()
+        replay_outcome = (
+            f"{prefix}\n\n{stored_outcome}"
+            if stored_outcome
+            else prefix
+        )
+        start_slack_action(
+            _deliver_meeting_room_action_outcome(
+                channel_id=channel_id,
+                message_ts=message_ts,
+                outcome=replay_outcome,
+            )
+        )
+        return
+    start_slack_action(
+        process_meeting_room_action(
+            int(action["id"]),
+            store=store,
+            processor=_process_meeting_room_action_record,
+        )
+    )
+
+
 @app.post("/slack/actions")
 async def slack_actions(
     request: Request,
@@ -4810,10 +5376,8 @@ async def slack_actions(
         payload = json.loads(payload_json)
     except json.JSONDecodeError:
         return JSONResponse(status_code=400, content={"error": "Invalid JSON"})
-
-    if _is_duplicate_slack_request(request):
-        print("↩️ Ignoring duplicate signed Slack action request")
-        return JSONResponse(status_code=200, content={})
+    if not isinstance(payload, dict):
+        return JSONResponse(status_code=400, content={"error": "Invalid payload"})
 
     settings = _request_settings(request)
     payload_type = str(payload.get("type") or "")
@@ -4843,6 +5407,45 @@ async def slack_actions(
         channel_type=channel_type,
     ):
         print("🔒 Ignoring Slack action outside the deployment context allowlist")
+        return JSONResponse(status_code=200, content={})
+
+    early_actions = payload.get("actions", [])
+    if not isinstance(early_actions, list):
+        early_actions = []
+    early_action = early_actions[0] if early_actions else {}
+    if not isinstance(early_action, dict):
+        early_action = {}
+    early_action_id = str(early_action.get("action_id") or "")
+    early_message = payload.get("message", {})
+    if not isinstance(early_message, dict):
+        early_message = {}
+    early_action_message_ts = str(
+        (payload.get("container") or {}).get("message_ts")
+        or early_message.get("ts")
+        or ""
+    )
+    if (
+        getattr(settings, "ROO_SURFACE", "public") == "public"
+        and early_action_id
+        in {
+            MEETING_ROOM_BOOK_ACTION_ID,
+            MEETING_ROOM_CANCEL_ACTION_ID,
+            MEETING_ROOM_CHOOSE_ROOM_ACTION_ID,
+        }
+    ):
+        await _persist_and_start_meeting_room_action(
+            settings=settings,
+            action_id=early_action_id,
+            action_value=str(early_action.get("value") or ""),
+            actor_user_id=str(user_id or ""),
+            channel_id=str(channel_id or ""),
+            message_ts=early_action_message_ts,
+            duplicate_delivery=_is_duplicate_slack_request(request),
+        )
+        return JSONResponse(status_code=200, content={})
+
+    if _is_duplicate_slack_request(request):
+        print("↩️ Ignoring duplicate signed Slack action request")
         return JSONResponse(status_code=200, content={})
 
     if settings.ROO_SURFACE == "admin":
