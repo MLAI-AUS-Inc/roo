@@ -1,61 +1,130 @@
-# Roo Standalone - AI Agent Service
+# Roo
 
-A standalone FastAPI microservice for the Roo AI agent with PostgreSQL + pgvector for vector embeddings and a skills-based architecture.
+Roo is MLAI's Slack-facing AI agent service. The active FastAPI application,
+tests, skills, runtime configuration, and Docker files live under
+[`roo-standalone/`](roo-standalone/).
 
-## Quick Start
+Roo integrates with Slack, `mlai-backend`, Linear, content services, and
+configured AI providers. It supports separate public and administrative
+surfaces; their credentials and permissions must remain isolated.
+
+For the wider platform map, start with
+[`mlai-engineering`](https://github.com/MLAI-AUS-Inc/mlai-engineering). AI
+coding agents must read [`AGENTS.md`](AGENTS.md).
+
+## Repository layout
+
+```text
+roo/
+├── roo-standalone/
+│   ├── roo/                  # FastAPI application and tests
+│   ├── skills/               # Runtime skill packages
+│   ├── bridge/               # Bridge adapter and tests
+│   ├── slack-app-manifests/  # Slack application definitions
+│   ├── docs/                 # Service-specific operations and incidents
+│   ├── .env.example          # Public Roo configuration template
+│   ├── .env.admin.example    # Admin Roo configuration template
+│   └── docker-compose*.yml   # Runtime profiles
+├── Luma-Stripe-Reconcile/    # Standalone reconciliation utility
+└── *.md                      # Historical audits and implementation plans
+```
+
+The root planning and audit files are background context. They are not the
+authoritative runtime instructions unless this README or a current service
+document links to them explicitly.
+
+## Requirements
+
+- Python 3.11
+- A virtual environment
+- Docker only when working with a Compose runtime profile
+- Development credentials for whichever external integration is in scope
+
+## Local setup
+
+Run application commands from `roo-standalone`, not the repository root:
 
 ```bash
-# Install dependencies
+cd roo-standalone
+python3.11 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
 pip install -r requirements.txt
+test -f .env || cp .env.example .env
+```
 
-# Run development server
+At least one supported model provider must be configured for live model calls.
+Slack and backend credentials are only required for features that call those
+services. Use explicitly provisioned development or staging values; do not use
+production credentials for routine local work.
+
+Start the public development application with:
+
+```bash
 uvicorn roo.main:app --reload
-
-# Run with Docker
-docker-compose up -d
 ```
 
-## Project Structure
+## Tests
 
-```
-roo-standalone/
-├── roo/                    # Main application
-│   ├── main.py             # FastAPI entrypoint
-│   ├── config.py           # Settings
-│   ├── agent.py            # Core agent
-│   ├── llm.py              # LLM client
-│   ├── database.py         # PostgreSQL + pgvector
-│   ├── embeddings.py       # Vector embeddings
-│   ├── slack_client.py     # Slack SDK
-│   ├── skills/             # Skill system
-│   └── clients/            # External API clients
-├── skills/                 # Skill definitions (*.md)
-├── tests/                  # Test suite
-└── docker-compose.yml
+From `roo-standalone`:
+
+```bash
+pytest
 ```
 
-## Skills System
+Prefer targeted tests while developing. Application tests are under
+`roo/tests`; bridge tests are under `bridge/tests`.
 
-Skills are defined as markdown files in `skills/`. Each skill specifies:
-- Trigger keywords
-- Parameters to extract
-- Actions to perform (LLM, database, API calls)
+## Skills
 
-See `skills/connect_users.md` for an example.
+Runtime skills are directories under `roo-standalone/skills`. Inspect the
+selected skill package and its tests before changing routing or permissions.
+The similarly named Python modules under `roo-standalone/roo/skills` implement
+application-side behavior and are not Markdown-only skill definitions.
 
-## Environment Variables
+Skill availability is constrained by the runtime surface and configuration.
+Adding a skill directory does not grant the public agent permission to perform
+administrative actions.
 
-Copy `roo-standalone/.env.example` to `roo-standalone/.env` and configure:
-- `DATABASE_URL` - PostgreSQL connection
-- `SLACK_BOT_TOKEN` - Slack bot token
-- `OPENAI_API_KEY` - For LLM and embeddings
-- `MLAI_BACKEND_URL` - Backend API URL for points, admin lookup, and Luma attendee reports
-- `ROO_API_KEY`/`MLAI_API_KEY`/`INTERNAL_API_KEY` - Backend auth key for Roo-to-mlai-backend calls
+## Public and Admin Roo
 
-For Slack file parsing, the Roo Slack app must include the `files:read` bot scope. Contextual Linear commands additionally require `channels:history`/`channels:read` for public channels, `groups:history`/`groups:read` for private channels, and `users:read` plus `users:read.email` for reliable Slack-to-Linear identity matching. Reinstall the app after adding scopes. If Slack rotates the bot token during reinstall, update `SLACK_BOT_TOKEN` in production and restart Roo.
+- Public Roo handles approved community-facing interactions.
+- Admin Roo is a separately scoped internal surface.
+- Public Roo must not receive administrative organisational-memory credentials.
+- Service-to-service credentials must be distinct from Slack user or bot
+  credentials.
+- Keep fail-closed feature flags disabled until the corresponding service and
+  review gate are ready.
 
-For daily jobs, the recommended production setup is:
-- `mlai-backend` owns the 7am Melbourne scheduler and Slack posting
-- Roo keeps `JOBS_SCHEDULER_ENABLED=false`
-- Roo only needs `JOBS_API_URL` and `JOBS_TRIGGER_TOKEN` to trigger backend jobs manually
-- Active Points Admins, including committee members, can DM Roo `run the daily jobs scrape now`; Roo replies directly in the DM, while channel requests receive a threaded reply
+Use `.env.example` for public configuration and `.env.admin.example` for the
+separate administrative profile. Never merge the two files into a shared
+credential set.
+
+## Docker profiles
+
+The Compose files represent different runtime surfaces:
+
+- `docker-compose.yml`: public Roo service
+- `docker-compose.admin.yml`: administrative service
+- `docker-compose.bridge.yml`: bridge adapter
+
+Read the selected file and its referenced environment template before starting
+it. Compose startup may contact external services when credentials are present.
+
+## Slack configuration
+
+Slack manifests live in `roo-standalone/slack-app-manifests`. Required scopes
+depend on the enabled features. File handling requires `files:read`; contextual
+Linear features require the appropriate channel history/read scopes plus
+`users:read` and `users:read.email` for identity matching. Reinstalling a Slack
+application may rotate credentials, so coordinate manifest changes with the
+runtime owner.
+
+## Scheduled jobs
+
+The recommended production arrangement keeps `JOBS_SCHEDULER_ENABLED=false` in
+Roo. `mlai-backend` owns the 7 a.m. Melbourne schedule and Slack posting. Roo
+only needs job trigger configuration when explicitly used as a manual caller.
+Active Points Admins, including committee members, can DM Roo
+`run the daily jobs scrape now`; Roo replies directly in the DM, while channel
+requests receive a threaded reply.
