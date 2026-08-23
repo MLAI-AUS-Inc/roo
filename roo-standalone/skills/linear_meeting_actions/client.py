@@ -5,9 +5,7 @@ from typing import Any, Optional
 from urllib.parse import quote
 
 import httpx
-
 from roo.clients.mlai_backend import MLAIBackendClient, MLAIBackendUnavailableError
-
 
 LINEAR_MEETING_CONTEXT_ENDPOINT = "/api/v1/integrations/linear/meeting-context"
 LINEAR_MEETING_ISSUES_ENDPOINT = "/api/v1/integrations/linear/issues"
@@ -40,6 +38,7 @@ class LinearMeetingActionsClient:
         endpoint: str,
         *,
         payload: Optional[dict[str, Any]] = None,
+        params: Optional[dict[str, Any]] = None,
         timeout: float = 30.0,
         allow_not_found: bool = False,
     ) -> dict[str, Any]:
@@ -47,6 +46,7 @@ class LinearMeetingActionsClient:
             response = await self.backend._request(
                 method,
                 endpoint,
+                params=params,
                 json=payload,
                 timeout=timeout,
                 circuit_breaker=True,
@@ -122,6 +122,178 @@ class LinearMeetingActionsClient:
             "GET",
             f"/api/v1/integrations/linear/projects/{encoded_project_id}/sizing-context",
             timeout=45.0,
+        )
+
+    async def list_project_issues(
+        self,
+        project_id: str,
+        *,
+        page_size: int = 50,
+        max_issues: int = 500,
+    ) -> dict[str, Any]:
+        encoded_project_id = quote(str(project_id or "").strip(), safe="")
+        if not encoded_project_id:
+            raise ValueError("project_id is required")
+        nodes: list[dict[str, Any]] = []
+        cursor: Optional[str] = None
+        project: dict[str, Any] = {}
+        snapshot_at = ""
+        terminal_types: list[str] = []
+        seen_cursors: set[str] = set()
+        while True:
+            params: dict[str, Any] = {"limit": max(1, min(int(page_size), 100))}
+            if cursor:
+                params["after"] = cursor
+            page = await self._request_json(
+                "GET",
+                f"/api/v1/integrations/linear/projects/{encoded_project_id}/issues",
+                params=params,
+                timeout=45.0,
+            )
+            if not project and isinstance(page.get("project"), dict):
+                project = dict(page["project"])
+            if not snapshot_at:
+                snapshot_at = str(page.get("snapshotAt") or "")
+            if not terminal_types and isinstance(page.get("terminalStateTypes"), list):
+                terminal_types = [str(value) for value in page["terminalStateTypes"]]
+            nodes.extend(_dict_list(page.get("nodes")))
+            if len(nodes) > max(1, int(max_issues)):
+                raise RuntimeError(
+                    f"Project has more than the configured {max_issues} issue safety limit; nothing was changed."
+                )
+            page_info = page.get("pageInfo") if isinstance(page.get("pageInfo"), dict) else {}
+            if not page_info.get("hasNextPage"):
+                break
+            next_cursor = str(page_info.get("endCursor") or "").strip()
+            if not next_cursor or next_cursor in seen_cursors:
+                raise RuntimeError("Linear issue pagination did not advance safely.")
+            if len(nodes) >= max(1, int(max_issues)):
+                raise RuntimeError(
+                    f"Project has more than the configured {max_issues} issue safety limit; nothing was changed."
+                )
+            seen_cursors.add(next_cursor)
+            cursor = next_cursor
+        return {
+            "project": project,
+            "nodes": nodes,
+            "snapshotAt": snapshot_at,
+            "terminalStateTypes": terminal_types,
+            "truncated": False,
+        }
+
+    async def list_project_updates(
+        self,
+        project_id: str,
+        *,
+        page_size: int = 25,
+        max_updates: int = 500,
+    ) -> dict[str, Any]:
+        encoded_project_id = quote(str(project_id or "").strip(), safe="")
+        if not encoded_project_id:
+            raise ValueError("project_id is required")
+        nodes: list[dict[str, Any]] = []
+        cursor: Optional[str] = None
+        project: dict[str, Any] = {}
+        snapshot_at = ""
+        seen_cursors: set[str] = set()
+        while True:
+            params: dict[str, Any] = {"limit": max(1, min(int(page_size), 100))}
+            if cursor:
+                params["after"] = cursor
+            page = await self._request_json(
+                "GET",
+                f"/api/v1/integrations/linear/projects/{encoded_project_id}/updates",
+                params=params,
+                timeout=45.0,
+            )
+            if not project and isinstance(page.get("project"), dict):
+                project = dict(page["project"])
+            if not snapshot_at:
+                snapshot_at = str(page.get("snapshotAt") or "")
+            nodes.extend(_dict_list(page.get("nodes")))
+            if len(nodes) > max(1, int(max_updates)):
+                raise RuntimeError(
+                    f"Project has more than the configured {max_updates} update safety limit; nothing was changed."
+                )
+            page_info = page.get("pageInfo") if isinstance(page.get("pageInfo"), dict) else {}
+            if not page_info.get("hasNextPage"):
+                break
+            next_cursor = str(page_info.get("endCursor") or "").strip()
+            if not next_cursor or next_cursor in seen_cursors:
+                raise RuntimeError("Linear project-update pagination did not advance safely.")
+            if len(nodes) >= max(1, int(max_updates)):
+                raise RuntimeError(
+                    f"Project has more than the configured {max_updates} update safety limit; nothing was changed."
+                )
+            seen_cursors.add(next_cursor)
+            cursor = next_cursor
+        return {
+            "project": project,
+            "nodes": nodes,
+            "snapshotAt": snapshot_at,
+            "truncated": False,
+        }
+
+    async def create_project_sizing_run(
+        self,
+        *,
+        project_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        encoded_project_id = quote(str(project_id or "").strip(), safe="")
+        if not encoded_project_id:
+            raise ValueError("project_id is required")
+        return await self._request_json(
+            "POST",
+            f"/api/v1/integrations/linear/projects/{encoded_project_id}/sizing-runs",
+            payload=payload,
+            timeout=60.0,
+        )
+
+    async def get_project_sizing_run(self, run_id: str) -> dict[str, Any]:
+        encoded_run_id = quote(str(run_id or "").strip(), safe="")
+        if not encoded_run_id:
+            raise ValueError("run_id is required")
+        return await self._request_json(
+            "GET",
+            f"/api/v1/integrations/linear/project-sizing-runs/{encoded_run_id}",
+            timeout=30.0,
+        )
+
+    async def apply_project_sizing_run(
+        self,
+        run_id: str,
+        *,
+        requested_by_slack_user_id: str,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        encoded_run_id = quote(str(run_id or "").strip(), safe="")
+        if not encoded_run_id:
+            raise ValueError("run_id is required")
+        return await self._request_json(
+            "POST",
+            f"/api/v1/integrations/linear/project-sizing-runs/{encoded_run_id}/apply",
+            payload={
+                "requested_by_slack_user_id": requested_by_slack_user_id,
+                "limit": limit,
+            },
+            timeout=60.0,
+        )
+
+    async def cancel_project_sizing_run(
+        self,
+        run_id: str,
+        *,
+        requested_by_slack_user_id: str,
+    ) -> dict[str, Any]:
+        encoded_run_id = quote(str(run_id or "").strip(), safe="")
+        if not encoded_run_id:
+            raise ValueError("run_id is required")
+        return await self._request_json(
+            "POST",
+            f"/api/v1/integrations/linear/project-sizing-runs/{encoded_run_id}/cancel",
+            payload={"requested_by_slack_user_id": requested_by_slack_user_id},
+            timeout=30.0,
         )
 
     async def get_issue_receipt(self, idempotency_key: str) -> dict[str, Any]:

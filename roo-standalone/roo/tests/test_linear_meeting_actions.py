@@ -546,6 +546,68 @@ async def test_linear_client_reads_project_sizing_context(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_linear_client_pages_complete_project_issue_inventory(monkeypatch):
+    module_path = (
+        Path(__file__).resolve().parents[2]
+        / "skills"
+        / "linear_meeting_actions"
+        / "client.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "linear_issue_inventory_client_test",
+        module_path,
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    calls = []
+    pages = [
+        {
+            "project": {"id": "project-1", "name": "Aaron AI"},
+            "nodes": [{"id": f"issue-{index}"} for index in range(100)],
+            "pageInfo": {"hasNextPage": True, "endCursor": "cursor-1"},
+            "snapshotAt": "2026-08-23T01:00:00Z",
+            "terminalStateTypes": ["completed", "canceled", "duplicate"],
+        },
+        {
+            "project": {"id": "project-1", "name": "Aaron AI"},
+            "nodes": [{"id": f"issue-{index}"} for index in range(100, 130)],
+            "pageInfo": {"hasNextPage": False, "endCursor": None},
+            "snapshotAt": "2026-08-23T01:00:01Z",
+        },
+    ]
+
+    class FakeResponse:
+        status_code = 200
+
+        def __init__(self, payload):
+            self.payload = payload
+
+        def json(self):
+            return self.payload
+
+    class FakeBackend:
+        def __init__(self, **kwargs):
+            pass
+
+        async def _request(self, method, endpoint, **kwargs):
+            calls.append((method, endpoint, kwargs))
+            return FakeResponse(pages.pop(0))
+
+    monkeypatch.setattr(module, "MLAIBackendClient", FakeBackend)
+    result = await module.LinearMeetingActionsClient().list_project_issues(
+        "project-1",
+        page_size=100,
+        max_issues=500,
+    )
+
+    assert len(result["nodes"]) == 130
+    assert result["truncated"] is False
+    assert calls[0][2]["params"] == {"limit": 100}
+    assert calls[1][2]["params"] == {"limit": 100, "after": "cursor-1"}
+
+
+@pytest.mark.asyncio
 async def test_linear_client_resolves_concurrent_create_from_receipt(monkeypatch):
     module_path = (
         Path(__file__).resolve().parents[2]
@@ -2000,6 +2062,93 @@ async def test_linear_meeting_slack_reject_clears_contextual_issue(monkeypatch):
     assert response.status_code == 200
     assert pending_id not in live_executor_module.LINEAR_MEETING_PENDING_ACTIONS
     assert posted_messages[0]["text"] == "Skipped Linear issue creation for: Decide event positioning"
+
+
+@pytest.mark.asyncio
+async def test_linear_project_sizing_apply_is_requester_bound_and_reports_counts(
+    monkeypatch,
+):
+    import roo.main as main_module
+
+    apply_calls = []
+    posted_messages = []
+    background = []
+
+    class FakeClient:
+        async def apply_project_sizing_run(
+            self,
+            run_id,
+            *,
+            requested_by_slack_user_id,
+            limit,
+        ):
+            apply_calls.append((run_id, requested_by_slack_user_id, limit))
+            return {
+                "status": "completed",
+                "project": {"name": "Aaron AI"},
+                "counts": {
+                    "applied": 3,
+                    "already_sized": 1,
+                    "skipped_terminal": 1,
+                    "conflict": 0,
+                    "failed": 0,
+                },
+                "items": [],
+            }
+
+    class FakeSkill:
+        def get_client_class(self, name):
+            assert name == "LinearMeetingActionsClient"
+            return FakeClient
+
+    class FakeAgent:
+        def _get_skill_by_name(self, name):
+            assert name == "linear-meeting-actions"
+            return FakeSkill()
+
+    class FakeRequest:
+        async def form(self):
+            return {
+                "payload": json.dumps(
+                    {
+                        "user": {"id": "UASKER"},
+                        "channel": {"id": "C1"},
+                        "message": {"ts": "1.2", "thread_ts": "1.1"},
+                        "actions": [
+                            {
+                                "action_id": "linear_project_sizing_apply",
+                                "value": json.dumps(
+                                    {
+                                        "run_id": "run-1",
+                                        "requested_by": "UASKER",
+                                    }
+                                ),
+                            }
+                        ],
+                    }
+                )
+            }
+
+    monkeypatch.setattr(main_module, "get_agent", lambda: FakeAgent())
+    monkeypatch.setattr(
+        main_module,
+        "post_message",
+        lambda **kwargs: posted_messages.append(kwargs),
+    )
+    monkeypatch.setattr(
+        main_module.asyncio,
+        "create_task",
+        lambda coroutine: background.append(coroutine),
+    )
+
+    response = await main_module.slack_actions(FakeRequest())
+    await background[0]
+
+    assert response.status_code == 200
+    assert apply_calls == [("run-1", "UASKER", 20)]
+    assert posted_messages[0]["text"] == "Applying the reviewed effort labels now..."
+    assert "3 applied" in posted_messages[1]["text"]
+    assert "1 terminal" in posted_messages[1]["text"]
 
 
 @pytest.mark.parametrize(

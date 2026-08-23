@@ -5098,6 +5098,129 @@ async def slack_actions(
         )
         return JSONResponse(status_code=200, content={})
 
+    if action_id in {
+        "linear_project_sizing_apply",
+        "linear_project_sizing_cancel",
+    }:
+        value = actions[0].get("value", "")
+        try:
+            value_data = json.loads(value) if value else {}
+        except json.JSONDecodeError:
+            value_data = {}
+        run_id = str(value_data.get("run_id") or "").strip()
+        requested_by = str(value_data.get("requested_by") or "").strip()
+        if not run_id:
+            if channel_id:
+                post_message(
+                    channel=channel_id,
+                    thread_ts=thread_ts,
+                    text="That Linear project-sizing preview is invalid. Re-run the sizing request.",
+                )
+            return JSONResponse(status_code=200, content={})
+        if requested_by and str(user_id or "") != requested_by:
+            if channel_id:
+                post_message(
+                    channel=channel_id,
+                    thread_ts=thread_ts,
+                    text="Only the person who requested this project-sizing preview can apply or cancel it.",
+                )
+            return JSONResponse(status_code=200, content={})
+
+        skill = get_agent()._get_skill_by_name("linear-meeting-actions")
+        ClientClass = (
+            skill.get_client_class("LinearMeetingActionsClient") if skill else None
+        )
+        if ClientClass is None:
+            if channel_id:
+                post_message(
+                    channel=channel_id,
+                    thread_ts=thread_ts,
+                    text="Roo could not load the Linear meeting actions client for this sizing run.",
+                )
+            return JSONResponse(status_code=200, content={})
+
+        async def process_project_sizing_action():
+            client = ClientClass()
+            try:
+                if action_id == "linear_project_sizing_cancel":
+                    run = await client.cancel_project_sizing_run(
+                        run_id,
+                        requested_by_slack_user_id=str(user_id or ""),
+                    )
+                    message = (
+                        f"Cancelled the effort-sizing preview for "
+                        f"{((run.get('project') or {}).get('name')) or 'that Linear project'}. "
+                        "No labels were changed."
+                    )
+                else:
+                    run = {}
+                    for _page in range(30):
+                        run = await client.apply_project_sizing_run(
+                            run_id,
+                            requested_by_slack_user_id=str(user_id or ""),
+                            limit=20,
+                        )
+                        if str(run.get("status") or "") in {
+                            "completed",
+                            "cancelled",
+                            "expired",
+                        }:
+                            break
+                        await asyncio.sleep(0.1)
+                    counts = run.get("counts") if isinstance(run.get("counts"), dict) else {}
+                    project_name = (
+                        ((run.get("project") or {}).get("name"))
+                        or "the Linear project"
+                    )
+                    status_label = str(run.get("status") or "")
+                    message = (
+                        (
+                            f"Finished effort sizing for {project_name}: "
+                            if status_label == "completed"
+                            else f"Effort sizing for {project_name} is still in progress: "
+                        )
+                        + f"{int(counts.get('applied') or 0)} applied, "
+                        f"{int(counts.get('already_sized') or 0)} already sized, "
+                        f"{int(counts.get('skipped_terminal') or 0)} terminal, "
+                        f"{int(counts.get('conflict') or 0)} changed after preview, and "
+                        f"{int(counts.get('failed') or 0)} failed."
+                    )
+                    problem_items = [
+                        item
+                        for item in run.get("items") or []
+                        if isinstance(item, dict)
+                        and item.get("status") in {"conflict", "failed"}
+                    ]
+                    for item in problem_items[:5]:
+                        message += (
+                            f"\n- {item.get('identifier') or item.get('title')}: "
+                            f"{item.get('error') or item.get('status')}"
+                        )
+            except Exception as exc:
+                message = (
+                    f"I couldn't finish that Linear project-sizing action: "
+                    f"{exc.__class__.__name__}: {exc}"
+                )
+            if channel_id:
+                post_message(
+                    channel=channel_id,
+                    thread_ts=thread_ts,
+                    text=message,
+                )
+
+        if channel_id:
+            post_message(
+                channel=channel_id,
+                thread_ts=thread_ts,
+                text=(
+                    "Applying the reviewed effort labels now..."
+                    if action_id == "linear_project_sizing_apply"
+                    else "Cancelling that effort-sizing preview..."
+                ),
+            )
+        asyncio.create_task(process_project_sizing_action())
+        return JSONResponse(status_code=200, content={})
+
     if action_id in {"linear_meeting_approve", "linear_meeting_reject"}:
         value = actions[0].get("value", "")
         try:
