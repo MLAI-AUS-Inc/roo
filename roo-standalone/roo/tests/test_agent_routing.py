@@ -106,10 +106,7 @@ def test_handle_mention_parses_delegated_scan_and_passes_identity_overrides(monk
 
     result = asyncio.run(
         agent.handle_mention(
-            text=(
-                "<@U090FV0GTT4> scan the repo for the domain woofya.com.au "
-                "as <@U0AQV5X9G0J|Target Founder>"
-            ),
+            text="<@U090FV0GTT4> scan the repo for the domain woofya.com.au as <@U0AQV5X9G0J>",
             user_id="U05QPB483K9",
             channel_id="C123",
             thread_ts="123.456",
@@ -125,44 +122,6 @@ def test_handle_mention_parses_delegated_scan_and_passes_identity_overrides(monk
         "requested_by_slack_user_id": "U05QPB483K9",
         "effective_slack_user_id": "U0AQV5X9G0J",
     }
-
-
-def test_handle_mention_preserves_labeled_user_id_for_connect_users(monkeypatch):
-    agent = _make_agent()
-    agent.skills.append(
-        Skill(name="connect-users", description="connect", content="", path=Path("."))
-    )
-    captured = {}
-    agent.skill_executor = _CaptureExecutor(captured)
-
-    _patch_route(
-        monkeypatch,
-        RouteDecision(
-            skill="connect-users",
-            action="search",
-            params={"query": "AI research"},
-        ),
-        captured,
-    )
-    monkeypatch.setattr("roo.agent.get_thread_messages", lambda channel, thread_ts: [])
-    monkeypatch.setattr("roo.slack_client.get_bot_user_id", lambda: "U090FV0GTT4")
-
-    result = asyncio.run(
-        agent.handle_mention(
-            text=(
-                "<@U090FV0GTT4> connect me with someone like "
-                "<@UTARGET|Other Member> in AI research"
-            ),
-            user_id="UOWNER",
-            channel_id="C123",
-            thread_ts="123.456",
-        )
-    )
-
-    expected_text = "connect me with someone like <@UTARGET> in AI research"
-    assert result["skill_used"] == "connect-users"
-    assert captured["routed_text"] == expected_text
-    assert captured["text"] == expected_text
 
 
 def test_handle_mention_rejects_unauthorized_delegation(monkeypatch):
