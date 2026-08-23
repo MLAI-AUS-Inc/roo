@@ -123,6 +123,7 @@ from .meeting_room_booking import (
     format_cancellation_result as format_meeting_room_cancellation_result,
     parse_action_value as parse_meeting_room_action_value,
     parse_backend_timestamp as parse_meeting_room_backend_timestamp,
+    room_choice_already_selected_message as meeting_room_choice_already_selected_message,
     room_choice_expired as meeting_room_choice_expired,
 )
 from .meeting_room_actions import (
@@ -4848,12 +4849,6 @@ def _slack_error_code(value: Any) -> str:
 
 PERMANENT_TARGET_NOTIFICATION_ERRORS = {
     "account_inactive",
-    "channel_not_found",
-    "invalid_auth",
-    "missing_scope",
-    "not_authed",
-    "not_in_channel",
-    "token_revoked",
     "user_not_found",
     "users_not_found",
 }
@@ -4904,6 +4899,32 @@ async def _deliver_meeting_room_action_outcome(
         )
         return _slack_delivery_succeeded(response)
     except Exception:
+        return False
+
+
+async def _deliver_meeting_room_choice_feedback(
+    *,
+    channel_id: str,
+    outcome: str,
+) -> bool:
+    """Send choice feedback without replacing the winning confirmation card."""
+    if not str(channel_id or "").startswith("D"):
+        return False
+    try:
+        response = await asyncio.to_thread(
+            post_message,
+            channel=channel_id,
+            text=outcome,
+        )
+        delivered = _slack_delivery_succeeded(response)
+        if not delivered:
+            print("MEETING_ROOM_CHOICE_FEEDBACK_FAILED reason=delivery_rejected")
+        return delivered
+    except Exception as exc:
+        print(
+            "MEETING_ROOM_CHOICE_FEEDBACK_FAILED "
+            f"reason={exc.__class__.__name__}"
+        )
         return False
 
 
@@ -5246,6 +5267,7 @@ async def _persist_and_start_meeting_room_action(
     actor_user_id: str,
     channel_id: str,
     message_ts: str,
+    duplicate_delivery: bool = False,
 ) -> None:
     if not settings.MEETING_ROOM_BOOKING_ENABLED:
         # Leave previously queued uncertain mutations untouched while the
@@ -5274,6 +5296,13 @@ async def _persist_and_start_meeting_room_action(
         )
     except MeetingRoomInputError as exc:
         if exc.code == "room_already_selected":
+            if not duplicate_delivery:
+                start_slack_action(
+                    _deliver_meeting_room_choice_feedback(
+                        channel_id=channel_id,
+                        outcome=exc.message,
+                    )
+                )
             return
         start_slack_action(
             _deliver_meeting_room_action_outcome(
@@ -5288,12 +5317,23 @@ async def _persist_and_start_meeting_room_action(
             action["status"] == "completed"
             and action_id == MEETING_ROOM_CHOOSE_ROOM_ACTION_ID
         ):
+            if not duplicate_delivery:
+                selected = parse_meeting_room_action_value(
+                    str(action["action_value"]),
+                    expected_action=MEETING_ROOM_CHOOSE_ROOM_ACTION_ID,
+                )
+                start_slack_action(
+                    _deliver_meeting_room_choice_feedback(
+                        channel_id=channel_id,
+                        outcome=meeting_room_choice_already_selected_message(
+                            selected
+                        ),
+                    )
+                )
             return
         if action["status"] == "completed":
             if action_id == MEETING_ROOM_BOOK_ACTION_ID:
                 prefix = "This booking confirmation was already processed. No additional Roo Points were charged."
-            elif action_id == MEETING_ROOM_CHOOSE_ROOM_ACTION_ID:
-                prefix = "This room choice was already processed. No booking or Roo Points charge happened from this repeat click."
             else:
                 prefix = "This cancellation was already processed. No additional refund was issued."
         else:
@@ -5400,6 +5440,7 @@ async def slack_actions(
             actor_user_id=str(user_id or ""),
             channel_id=str(channel_id or ""),
             message_ts=early_action_message_ts,
+            duplicate_delivery=_is_duplicate_slack_request(request),
         )
         return JSONResponse(status_code=200, content={})
 

@@ -322,6 +322,16 @@ def test_interval_parser_accepts_ninety_minute_phrasings(text):
     assert ends_at == datetime(2026, 8, 12, 15, 30, tzinfo=MELBOURNE)
 
 
+def test_interval_parser_accepts_word_number_two_hours():
+    starts_at, ends_at = resolve_interval(
+        "book tomorrow at 2pm for two hours",
+        now=datetime(2026, 8, 11, 9, tzinfo=MELBOURNE),
+    )
+
+    assert starts_at == datetime(2026, 8, 12, 14, tzinfo=MELBOURNE)
+    assert ends_at == datetime(2026, 8, 12, 16, tzinfo=MELBOURNE)
+
+
 def test_interval_parser_accepts_half_hour_boundaries_and_bare_start_time():
     starts_at, ends_at = resolve_interval(
         "book tomorrow 2:30pm",
@@ -1342,6 +1352,76 @@ def test_duplicate_signed_button_delivery_processes_one_durable_action(tmp_path,
         configured.SLACK_RECEIPTS_DB_PATH
     )
     assert store.get(1)["status"] == "completed"
+
+
+def test_competing_room_click_feedback_is_not_repeated_for_slack_retry(
+    tmp_path,
+    monkeypatch,
+):
+    configured = _settings(SLACK_RECEIPTS_DB_PATH=str(tmp_path / "receipts.db"))
+    main_module.app.dependency_overrides[get_settings] = lambda: configured
+    starts_at = (
+        datetime.now(MELBOURNE).replace(minute=0, second=0, microsecond=0)
+        + timedelta(days=1)
+    )
+    prompt = room_module.room_selection_prompt(
+        [
+            {"slug": "small-meeting-room", "name": "Small Meeting Room"},
+            {"slug": "big-meeting-room", "name": "Big Meeting Room"},
+        ],
+        owner_slack_user_id="UOWNER",
+        starts_at=starts_at,
+        ends_at=starts_at + timedelta(hours=1),
+    )
+    small_button, big_button = prompt["blocks"][1]["elements"]
+    store = action_module.get_meeting_room_action_store(
+        configured.SLACK_RECEIPTS_DB_PATH
+    )
+    store.record_action(
+        action_id=CHOOSE_ROOM_ACTION_ID,
+        action_value=small_button["value"],
+        actor_user_id="UOWNER",
+        channel_id="DOWNER",
+        message_ts="card.456",
+    )
+    payload = {
+        "type": "block_actions",
+        "user": {"id": "UOWNER"},
+        "channel": {"id": "DOWNER"},
+        "container": {"message_ts": "card.456"},
+        "message": {"ts": "card.456"},
+        "actions": [big_button],
+    }
+    body = urlencode({"payload": json.dumps(payload)}).encode()
+    timestamp = int(time.time())
+    headers = {
+        "X-Slack-Request-Timestamp": str(timestamp),
+        "X-Slack-Signature": _signature(
+            configured.SLACK_SIGNING_SECRET,
+            timestamp,
+            body,
+        ),
+        "Content-Type": "application/x-www-form-urlencoded",
+    }
+    scheduled = []
+    posted = []
+    monkeypatch.setattr(main_module, "start_slack_action", scheduled.append)
+    monkeypatch.setattr(
+        main_module,
+        "post_message",
+        lambda **kwargs: posted.append(kwargs) or {"ok": True},
+    )
+    client = TestClient(main_module.app)
+
+    first = client.post("/slack/actions", content=body, headers=headers)
+    retry = client.post("/slack/actions", content=body, headers=headers)
+
+    assert first.status_code == 200
+    assert retry.status_code == 200
+    assert len(scheduled) == 1
+    asyncio.run(scheduled[0])
+    assert len(posted) == 1
+    assert "already chose the *Small Meeting Room*" in posted[0]["text"]
 
 
 @pytest.mark.asyncio

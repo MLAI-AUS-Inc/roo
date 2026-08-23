@@ -293,7 +293,10 @@ def test_room_choice_is_first_choice_wins_and_duplicate_safe(tmp_path):
         message_ts="123.456",
     )
 
-    with pytest.raises(ValueError, match="conflicts with an earlier request"):
+    with pytest.raises(
+        ValueError,
+        match=r"already chose the \*Small Meeting Room\*",
+    ):
         store.record_action(
             action_id=CHOOSE_ROOM_ACTION_ID,
             action_value=big_value,
@@ -377,6 +380,8 @@ async def test_competing_room_click_does_not_overwrite_first_choice(
         channel_id="DOWNER",
         message_ts="123.456",
     )
+    scheduled = []
+    posted = []
     monkeypatch.setattr(
         main_module,
         "get_meeting_room_action_store",
@@ -385,7 +390,7 @@ async def test_competing_room_click_does_not_overwrite_first_choice(
     monkeypatch.setattr(
         main_module,
         "start_slack_action",
-        lambda action: pytest.fail("competing choice must not schedule work"),
+        lambda action: scheduled.append(action),
     )
     monkeypatch.setattr(
         main_module,
@@ -393,6 +398,11 @@ async def test_competing_room_click_does_not_overwrite_first_choice(
         lambda **kwargs: pytest.fail(
             "competing choice must not overwrite the first choice card"
         ),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "post_message",
+        lambda **kwargs: posted.append(kwargs) or {"ok": True},
     )
 
     await main_module._persist_and_start_meeting_room_action(
@@ -403,6 +413,7 @@ async def test_competing_room_click_does_not_overwrite_first_choice(
         channel_id="DOWNER",
         message_ts="123.456",
     )
+    await scheduled[0]
 
     persisted = store.get(first["id"])
     assert persisted["action_value"] == json.dumps(
@@ -414,10 +425,20 @@ async def test_competing_room_click_does_not_overwrite_first_choice(
         sort_keys=True,
     )
     assert persisted["status"] == "pending"
+    assert posted == [
+        {
+            "channel": "DOWNER",
+            "text": (
+                "You already chose the *Small Meeting Room* for this request. "
+                "Continue with that confirmation card, or start a new booking "
+                "request to choose a different room."
+            ),
+        }
+    ]
 
 
 @pytest.mark.asyncio
-async def test_completed_room_choice_retry_keeps_confirmation_card(
+async def test_completed_room_choice_reclick_keeps_card_and_posts_feedback(
     tmp_path,
     monkeypatch,
 ):
@@ -440,6 +461,8 @@ async def test_completed_room_choice_retry_keeps_confirmation_card(
         owner="worker",
         outcome="Confirm your Small Meeting Room booking.",
     )
+    scheduled = []
+    posted = []
     monkeypatch.setattr(
         main_module,
         "get_meeting_room_action_store",
@@ -448,9 +471,19 @@ async def test_completed_room_choice_retry_keeps_confirmation_card(
     monkeypatch.setattr(
         main_module,
         "start_slack_action",
-        lambda action: pytest.fail(
-            "completed room choice retry must not replace the confirmation card"
+        lambda action: scheduled.append(action),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_deliver_meeting_room_action_outcome",
+        lambda **kwargs: pytest.fail(
+            "completed room choice re-click must not replace the confirmation card"
         ),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "post_message",
+        lambda **kwargs: posted.append(kwargs) or {"ok": True},
     )
 
     await main_module._persist_and_start_meeting_room_action(
@@ -461,8 +494,50 @@ async def test_completed_room_choice_retry_keeps_confirmation_card(
         channel_id="DOWNER",
         message_ts="123.456",
     )
+    await scheduled[0]
 
     assert store.get(action["id"])["status"] == "completed"
+    assert posted[0]["channel"] == "DOWNER"
+    assert "already chose the *Small Meeting Room*" in posted[0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_duplicate_room_choice_delivery_does_not_repeat_feedback(
+    tmp_path,
+    monkeypatch,
+):
+    configured = _settings(tmp_path)
+    store = action_module.MeetingRoomActionStore(
+        configured.SLACK_RECEIPTS_DB_PATH
+    )
+    small_value, big_value = _room_choice_values()
+    store.record_action(
+        action_id=CHOOSE_ROOM_ACTION_ID,
+        action_value=small_value,
+        actor_user_id="UOWNER",
+        channel_id="DOWNER",
+        message_ts="123.456",
+    )
+    monkeypatch.setattr(
+        main_module,
+        "get_meeting_room_action_store",
+        lambda path: store,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "start_slack_action",
+        lambda action: pytest.fail("duplicate delivery must not repeat feedback"),
+    )
+
+    await main_module._persist_and_start_meeting_room_action(
+        settings=configured,
+        action_id=CHOOSE_ROOM_ACTION_ID,
+        action_value=big_value,
+        actor_user_id="UOWNER",
+        channel_id="DOWNER",
+        message_ts="123.456",
+        duplicate_delivery=True,
+    )
 
 
 @pytest.mark.asyncio
@@ -1124,6 +1199,63 @@ async def test_permanent_target_dm_failure_stops_without_retry(
     assert len(backend_calls) == 1
     assert len(dm_attempts) == 1
     assert store.claim_due() == []
+
+
+@pytest.mark.parametrize(
+    "credential_error",
+    ("invalid_auth", "token_revoked", "not_authed", "missing_scope"),
+)
+@pytest.mark.asyncio
+async def test_roo_credential_target_dm_failure_retries_within_bounds(
+    tmp_path,
+    monkeypatch,
+    credential_error,
+):
+    configured = _settings(tmp_path)
+    action_value = _booking_action_value()
+    store = action_module.MeetingRoomActionStore(configured.SLACK_RECEIPTS_DB_PATH)
+    action = _record(store, action_value)
+    backend_calls = []
+    dm_attempts = []
+
+    class Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def book_meeting_room(self, slack_user_id, **kwargs):
+            backend_calls.append(kwargs["client_request_id"])
+            return _admin_booking_response(
+                action_value,
+                created=len(backend_calls) == 1,
+            )
+
+    def send_target_dm(*args, **kwargs):
+        dm_attempts.append((args, kwargs))
+        if len(dm_attempts) == 1:
+            return {"ok": False, "error": credential_error}
+        return {"ok": True}
+
+    monkeypatch.setattr("roo.clients.mlai_backend.MLAIBackendClient", Client)
+    monkeypatch.setattr(main_module, "get_settings", lambda: configured)
+    monkeypatch.setattr(action_module, "_retry_delay", lambda attempts: 0)
+    monkeypatch.setattr(main_module, "send_dm", send_target_dm)
+    monkeypatch.setattr(
+        "roo.slack_client.get_slack_client",
+        lambda: SimpleNamespace(chat_update=lambda **kwargs: {"ok": True}),
+    )
+
+    for _ in range(2):
+        await action_module.process_meeting_room_action(
+            action["id"],
+            store=store,
+            processor=main_module._process_meeting_room_action_record,
+        )
+
+    terminal = store.get(action["id"])
+    assert terminal["status"] == "completed"
+    assert terminal["target_notification_state"] == "sent"
+    assert len(backend_calls) == 2
+    assert len(dm_attempts) == 2
 
 
 @pytest.mark.asyncio

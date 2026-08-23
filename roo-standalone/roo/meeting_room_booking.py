@@ -276,6 +276,8 @@ def _natural_duration(text: str) -> Optional[str]:
         return "1.5"
     if re.search(r"\bfor\s+(?:an?|one)\s+hours?\b", normalized):
         return "1"
+    if re.search(r"\bfor\s+two\s+(?:hours?|hrs?)\b", normalized):
+        return "2"
     hours_match = re.search(
         r"\bfor\s+(?P<hours>\d+(?:\.\d+)?)\s*(?:hours?|hrs?)\b",
         normalized,
@@ -745,6 +747,8 @@ def room_selection_prompt(
     )
     buttons = []
     for room in choices:
+        # Each option owns a booking id; the shared durable selection id ensures
+        # only the first room clicked can advance to its confirmation card.
         buttons.append(
             {
                 "type": "button",
@@ -773,6 +777,18 @@ def room_selection_prompt(
             },
         ],
     }
+
+
+def room_choice_already_selected_message(payload: dict) -> str:
+    room_name = ROOM_NAMES.get(
+        str(payload.get("room_slug") or ""),
+        "meeting room",
+    )
+    return (
+        f"You already chose the *{room_name}* for this request. "
+        "Continue with that confirmation card, or start a new booking request "
+        "to choose a different room."
+    )
 
 
 def booking_preview(

@@ -19,6 +19,7 @@ from .meeting_room_booking import (
     CHOOSE_ROOM_ACTION_ID,
     MeetingRoomInputError,
     parse_action_value,
+    room_choice_already_selected_message,
 )
 
 
@@ -282,7 +283,13 @@ class MeetingRoomActionStore:
                             if action_id == CHOOSE_ROOM_ACTION_ID
                             else "invalid_action"
                         ),
-                        "This action conflicts with an earlier request.",
+                        (
+                            room_choice_already_selected_message(
+                                json.loads(existing["action_value"])
+                            )
+                            if action_id == CHOOSE_ROOM_ACTION_ID
+                            else "This action conflicts with an earlier request."
+                        ),
                     )
                 lease_is_active = (
                     existing["status"] == "processing"
