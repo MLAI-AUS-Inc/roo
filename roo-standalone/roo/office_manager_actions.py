@@ -14,8 +14,15 @@ from uuid import uuid4
 
 DEFAULT_PROCESSING_LEASE_SECONDS = 90.0
 DEFAULT_RETRY_POLL_SECONDS = 5.0
+COMPLETED_RETENTION_SECONDS = 90 * 24 * 60 * 60
 
 OfficeManagerActionProcessor = Callable[[dict[str, Any]], Awaitable[None]]
+
+
+def _retry_delay(attempt_count: int) -> float:
+    """Return capped exponential backoff for a failed processing attempt."""
+    bounded_attempt = max(1, min(int(attempt_count), 16))
+    return min(5 * 60.0, 5.0 * (2 ** (bounded_attempt - 1)))
 
 
 def build_office_manager_action_key(slack_user_id: str, booking_date: str) -> str:
@@ -107,6 +114,15 @@ class OfficeManagerActionStore:
         with self._lock:
             with self._connect() as connection:
                 connection.execute("BEGIN IMMEDIATE")
+                connection.execute(
+                    """
+                    DELETE FROM office_manager_action_outbox
+                    WHERE status = 'completed'
+                      AND completed_at IS NOT NULL
+                      AND completed_at <= ?
+                    """,
+                    (current_time - COMPLETED_RETENTION_SECONDS,),
+                )
                 existing = connection.execute(
                     """
                     SELECT * FROM office_manager_action_outbox
@@ -369,7 +385,7 @@ async def _process_leased_action(
             action_id,
             owner=owner,
             error=exc.__class__.__name__,
-            delay_seconds=DEFAULT_RETRY_POLL_SECONDS,
+            delay_seconds=_retry_delay(int(action.get("attempt_count") or 1)),
         )
         print(
             "OFFICE_MANAGER_ACTION_RETRY "
@@ -400,10 +416,15 @@ async def process_due_office_manager_actions(
     limit: int = 10,
 ) -> int:
     """Recover actions left pending by a previous Roo process."""
-    actions = await asyncio.to_thread(store.claim_due, limit=limit)
-    for action in actions:
+    processed = 0
+    for _ in range(max(1, int(limit))):
+        actions = await asyncio.to_thread(store.claim_due, limit=1)
+        if not actions:
+            break
+        action = actions[0]
         await _process_leased_action(action, store=store, processor=processor)
-    return len(actions)
+        processed += 1
+    return processed
 
 
 async def office_manager_action_retry_loop(

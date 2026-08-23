@@ -152,6 +152,7 @@ class Settings(BaseSettings):
     LINEAR_CONTEXTUAL_AUTO_CREATE_ENABLED: bool = True
     COWORKING_INTENTS_DB_PATH: str = "data/coworking_booking_intents.db"
     COWORKING_RETRY_POLL_SECONDS: float = 30.0
+    OFFICE_MANAGER_ACTIONS_ENABLED: bool = False
     ROO_POINTS_TOPUP_ENABLED: bool = False
     ROO_POINTS_TOPUP_BUTTONS_ENABLED: bool = False
     ROO_POINTS_STRIPE_CHECKOUT_HOSTS: str = "checkout.stripe.com"

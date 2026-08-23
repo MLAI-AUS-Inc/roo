@@ -2217,18 +2217,19 @@ async def lifespan(app: FastAPI):
                 )
             )
             app.state.meeting_room_action_retry_task = meeting_room_action_retry_task
-        office_manager_action_store = get_office_manager_action_store(
-            settings.SLACK_RECEIPTS_DB_PATH
-        )
-        office_manager_action_retry_task = asyncio.create_task(
-            office_manager_action_retry_loop(
-                store=office_manager_action_store,
-                processor=_process_office_manager_action_record,
+        if settings.OFFICE_MANAGER_ACTIONS_ENABLED:
+            office_manager_action_store = get_office_manager_action_store(
+                settings.SLACK_RECEIPTS_DB_PATH
             )
-        )
-        app.state.office_manager_action_retry_task = (
-            office_manager_action_retry_task
-        )
+            office_manager_action_retry_task = asyncio.create_task(
+                office_manager_action_retry_loop(
+                    store=office_manager_action_store,
+                    processor=_process_office_manager_action_record,
+                )
+            )
+            app.state.office_manager_action_retry_task = (
+                office_manager_action_retry_task
+            )
         if settings.BOOST_LINK_LOVE_ENABLED:
             link_love_task = asyncio.create_task(link_love_retry_loop())
             app.state.link_love_task = link_love_task
@@ -4939,6 +4940,19 @@ async def _send_office_manager_private_feedback(
             "OFFICE_MANAGER_PRIVATE_FEEDBACK_FAILED "
             f"error_type={exc.__class__.__name__}"
         )
+        raise RuntimeError("office_manager_private_feedback_failed") from exc
+
+
+def _office_manager_claim_failure_is_retryable(
+    exc: httpx.HTTPStatusError,
+    *,
+    code: str,
+) -> bool:
+    """Classify only transient or commit-uncertain backend responses for replay."""
+    if code == "feature_disabled":
+        return False
+    status_code = int(exc.response.status_code)
+    return status_code in {408, 425, 429} or status_code >= 500
 
 
 async def _claim_office_manager_from_action(
@@ -4958,6 +4972,17 @@ async def _claim_office_manager_from_action(
         payload = _office_manager_error_payload(exc)
         code = str(payload.get("code") or "")
         assignee = str(payload.get("assignee_slack_user_id") or "").strip()
+        if _office_manager_claim_failure_is_retryable(exc, code=code):
+            message = (
+                "Roo is still confirming your Office Manager request and will "
+                "retry automatically. Please don't click the button again."
+            )
+            await _send_office_manager_private_feedback(
+                channel_id=channel_id,
+                user_id=user_id,
+                text=message,
+            )
+            raise RuntimeError("office_manager_claim_result_uncertain") from exc
         if code == "already_claimed":
             selected = f" <@{assignee}> has the role." if assignee else ""
             message = f"Someone has already volunteered for today.{selected}"
@@ -4970,6 +4995,8 @@ async def _claim_office_manager_from_action(
             )
         elif code == "office_manager_day_not_found":
             message = "Today's Office Manager volunteer request is no longer available."
+        elif code == "feature_disabled":
+            message = "Office Manager volunteering is temporarily unavailable."
         else:
             message = (
                 "Roo could not confirm the result of your volunteer request. "
@@ -4982,10 +5009,15 @@ async def _claim_office_manager_from_action(
             f"error_type={exc.__class__.__name__}"
         )
         message = (
-            "Roo could not confirm the result of your volunteer request right "
-            "now. Check Roo's latest Office Manager announcement before trying "
-            "the button again."
+            "Roo is still confirming your Office Manager request and will retry "
+            "automatically. Please don't click the button again."
         )
+        await _send_office_manager_private_feedback(
+            channel_id=channel_id,
+            user_id=user_id,
+            text=message,
+        )
+        raise RuntimeError("office_manager_claim_result_uncertain") from exc
     else:
         message = _office_manager_claim_success_message(result)
 
@@ -5657,6 +5689,16 @@ async def slack_actions(
     if office_manager_action is not None:
         if settings.ROO_SURFACE != "public":
             print("Ignoring Office Manager action outside Public Roo")
+            return JSONResponse(status_code=200, content={})
+        if not settings.OFFICE_MANAGER_ACTIONS_ENABLED:
+            if user_id and channel_id:
+                start_slack_action(
+                    _send_office_manager_private_feedback(
+                        channel_id=str(channel_id),
+                        user_id=str(user_id),
+                        text="Office Manager volunteering is temporarily unavailable.",
+                    )
+                )
             return JSONResponse(status_code=200, content={})
         try:
             action_value = json.loads(
