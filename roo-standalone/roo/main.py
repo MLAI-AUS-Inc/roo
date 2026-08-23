@@ -73,6 +73,7 @@ from .slack_client import (
 from .coworking_messages import OFFICE_MANAGER_VOLUNTEER_ACTION_ID
 from .coworking_booking_intents import coworking_booking_retry_loop
 from .office_manager_actions import (
+    OfficeManagerActionStore,
     get_office_manager_action_store,
     office_manager_action_retry_loop,
     process_office_manager_action,
@@ -4955,6 +4956,10 @@ def _office_manager_claim_failure_is_retryable(
     return status_code in {408, 425, 429} or status_code >= 500
 
 
+class OfficeManagerClaimUncertainError(RuntimeError):
+    """The backend result is unknown and the durable outbox must retry it."""
+
+
 async def _claim_office_manager_from_action(
     *,
     user_id: str,
@@ -4973,16 +4978,9 @@ async def _claim_office_manager_from_action(
         code = str(payload.get("code") or "")
         assignee = str(payload.get("assignee_slack_user_id") or "").strip()
         if _office_manager_claim_failure_is_retryable(exc, code=code):
-            message = (
-                "Roo is still confirming your Office Manager request and will "
-                "retry automatically. Please don't click the button again."
-            )
-            await _send_office_manager_private_feedback(
-                channel_id=channel_id,
-                user_id=user_id,
-                text=message,
-            )
-            raise RuntimeError("office_manager_claim_result_uncertain") from exc
+            raise OfficeManagerClaimUncertainError(
+                "office_manager_claim_result_uncertain"
+            ) from exc
         if code == "already_claimed":
             selected = f" <@{assignee}> has the role." if assignee else ""
             message = f"Someone has already volunteered for today.{selected}"
@@ -5008,16 +5006,9 @@ async def _claim_office_manager_from_action(
             "OFFICE_MANAGER_CLAIM_FAILED "
             f"error_type={exc.__class__.__name__}"
         )
-        message = (
-            "Roo is still confirming your Office Manager request and will retry "
-            "automatically. Please don't click the button again."
-        )
-        await _send_office_manager_private_feedback(
-            channel_id=channel_id,
-            user_id=user_id,
-            text=message,
-        )
-        raise RuntimeError("office_manager_claim_result_uncertain") from exc
+        raise OfficeManagerClaimUncertainError(
+            "office_manager_claim_result_uncertain"
+        ) from exc
     else:
         message = _office_manager_claim_success_message(result)
 
@@ -5554,12 +5545,40 @@ async def _persist_and_start_meeting_room_action(
     )
 
 
-async def _process_office_manager_action_record(action: dict[str, Any]) -> None:
-    await _claim_office_manager_from_action(
-        user_id=str(action["slack_user_id"]),
-        channel_id=str(action["channel_id"]),
-        booking_date=str(action["booking_date"]),
-    )
+async def _process_office_manager_action_record(
+    action: dict[str, Any],
+    store: OfficeManagerActionStore,
+) -> None:
+    try:
+        await _claim_office_manager_from_action(
+            user_id=str(action["slack_user_id"]),
+            channel_id=str(action["channel_id"]),
+            booking_date=str(action["booking_date"]),
+        )
+    except OfficeManagerClaimUncertainError:
+        should_notify = await asyncio.to_thread(
+            store.claim_uncertainty_notice,
+            int(action["id"]),
+            owner=str(action["locked_by"]),
+        )
+        if should_notify:
+            try:
+                await _send_office_manager_private_feedback(
+                    channel_id=str(action["channel_id"]),
+                    user_id=str(action["slack_user_id"]),
+                    text=(
+                        "Roo is still confirming your Office Manager request and "
+                        "will retry automatically. Please don't click the button "
+                        "again."
+                    ),
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # This is a one-time informational notice. The durable claim retry
+                # and its required terminal private result remain authoritative.
+                pass
+        raise
 
 
 @app.post("/slack/actions")

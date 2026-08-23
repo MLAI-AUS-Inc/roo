@@ -16,8 +16,6 @@ DEFAULT_PROCESSING_LEASE_SECONDS = 90.0
 DEFAULT_RETRY_POLL_SECONDS = 5.0
 COMPLETED_RETENTION_SECONDS = 90 * 24 * 60 * 60
 
-OfficeManagerActionProcessor = Callable[[dict[str, Any]], Awaitable[None]]
-
 
 def _retry_delay(attempt_count: int) -> float:
     """Return capped exponential backoff for a failed processing attempt."""
@@ -74,6 +72,7 @@ class OfficeManagerActionStore:
                         locked_until REAL,
                         locked_by TEXT,
                         last_error TEXT,
+                        uncertainty_notice_attempted_at REAL,
                         created_at REAL NOT NULL,
                         updated_at REAL NOT NULL,
                         completed_at REAL
@@ -86,6 +85,19 @@ class OfficeManagerActionStore:
                     ON office_manager_action_outbox (status, next_attempt_at)
                     """
                 )
+                columns = {
+                    str(row[1])
+                    for row in connection.execute(
+                        "PRAGMA table_info(office_manager_action_outbox)"
+                    ).fetchall()
+                }
+                if "uncertainty_notice_attempted_at" not in columns:
+                    connection.execute(
+                        """
+                        ALTER TABLE office_manager_action_outbox
+                        ADD COLUMN uncertainty_notice_attempted_at REAL
+                        """
+                    )
             self._initialized = True
 
     @staticmethod
@@ -308,6 +320,25 @@ class OfficeManagerActionStore:
                 )
                 return cursor.rowcount == 1
 
+    def claim_uncertainty_notice(self, action_id: int, *, owner: str) -> bool:
+        """Claim the one allowed transient-status notification attempt."""
+        self._ensure_schema()
+        current_time = time.time()
+        with self._lock:
+            with self._connect() as connection:
+                cursor = connection.execute(
+                    """
+                    UPDATE office_manager_action_outbox
+                    SET uncertainty_notice_attempted_at = ?, updated_at = ?
+                    WHERE id = ?
+                      AND status = 'processing'
+                      AND locked_by = ?
+                      AND uncertainty_notice_attempted_at IS NULL
+                    """,
+                    (current_time, current_time, int(action_id), str(owner)),
+                )
+                return cursor.rowcount == 1
+
     def release(
         self,
         action_id: int,
@@ -356,6 +387,12 @@ class OfficeManagerActionStore:
             )
 
 
+OfficeManagerActionProcessor = Callable[
+    [dict[str, Any], OfficeManagerActionStore],
+    Awaitable[None],
+]
+
+
 @lru_cache(maxsize=8)
 def get_office_manager_action_store(database_path: str) -> OfficeManagerActionStore:
     return OfficeManagerActionStore(database_path)
@@ -370,7 +407,7 @@ async def _process_leased_action(
     action_id = int(action["id"])
     owner = str(action["locked_by"])
     try:
-        await processor(action)
+        await processor(action, store)
     except asyncio.CancelledError:
         await asyncio.to_thread(
             store.release,

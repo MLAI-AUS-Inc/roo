@@ -3,6 +3,7 @@ import hashlib
 import hmac
 import json
 import os
+import sqlite3
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -250,7 +251,7 @@ def test_commit_uncertain_retry_is_recovered_by_durable_worker(
             raise TimeoutError("synthetic response loss after commit")
         return result
 
-    async def capture_processed(action):
+    async def capture_processed(action, _store):
         processed.append(action["idempotency_key"])
 
     monkeypatch.setattr(
@@ -740,33 +741,24 @@ async def test_unknown_backend_failure_is_reported_and_raised_for_durable_retry(
                 response=response,
             )
 
-    feedback = []
-
-    async def capture_feedback(**kwargs):
-        feedback.append(kwargs)
-
     monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeClient)
-    monkeypatch.setattr(
-        main_module,
-        "_send_office_manager_private_feedback",
-        capture_feedback,
-    )
 
-    with pytest.raises(RuntimeError, match="claim_result_uncertain"):
+    with pytest.raises(
+        main_module.OfficeManagerClaimUncertainError,
+        match="claim_result_uncertain",
+    ):
         await main_module._claim_office_manager_from_action(
             user_id="UVERIFIED",
             channel_id="CCOWORK",
             booking_date="2026-08-03",
         )
 
-    message = feedback[0]["text"]
-    assert "still confirming" in message
-    assert "retry automatically" in message
-    assert "No Office Manager booking was created" not in message
-
 
 @pytest.mark.asyncio
-async def test_cancellation_while_reporting_uncertain_claim_is_not_masked(monkeypatch):
+async def test_cancellation_while_reporting_uncertain_claim_is_not_masked(
+    tmp_path,
+    monkeypatch,
+):
     class FakeClient:
         async def claim_office_manager_day(self, slack_user_id, booking_date):
             request = httpx.Request("POST", "https://backend.test/claim")
@@ -786,13 +778,21 @@ async def test_cancellation_while_reporting_uncertain_claim_is_not_masked(monkey
         "_send_office_manager_private_feedback",
         cancelled_feedback,
     )
+    store = action_module.OfficeManagerActionStore(tmp_path / "actions.db")
+    action, _ = store.record_action(
+        slack_user_id="UVERIFIED",
+        channel_id="CCOWORK",
+        booking_date="2026-08-03",
+    )
+    leased = store.reserve(action["id"], owner="cancelling-worker")
+    assert leased is not None
 
     with pytest.raises(asyncio.CancelledError):
-        await main_module._claim_office_manager_from_action(
-            user_id="UVERIFIED",
-            channel_id="CCOWORK",
-            booking_date="2026-08-03",
+        await main_module._process_office_manager_action_record(
+            leased,
+            store,
         )
+    assert store.get(action["id"])["uncertainty_notice_attempted_at"] is not None
 
 
 @pytest.mark.asyncio
@@ -853,6 +853,160 @@ async def test_transient_claim_failure_retries_then_recovers_idempotent_result(
     assert len(calls) == 2
     assert "still confirming" in delivered[0]
     assert "already today's Office Manager" in delivered[1]
+
+
+@pytest.mark.asyncio
+async def test_repeated_transient_failures_send_one_uncertainty_notice(
+    tmp_path,
+    monkeypatch,
+):
+    current_time = [3_000.0]
+    monkeypatch.setattr(action_module.time, "time", lambda: current_time[0])
+    backend_calls = []
+    delivered = []
+
+    class FailingClient:
+        async def claim_office_manager_day(self, slack_user_id, booking_date):
+            backend_calls.append((slack_user_id, booking_date, current_time[0]))
+            request = httpx.Request("POST", "https://backend.test/claim")
+            response = httpx.Response(502, request=request)
+            raise httpx.HTTPStatusError(
+                "backend unavailable",
+                request=request,
+                response=response,
+            )
+
+    async def capture_feedback(**kwargs):
+        delivered.append((current_time[0], kwargs["text"]))
+
+    monkeypatch.setattr(backend_module, "MLAIBackendClient", FailingClient)
+    monkeypatch.setattr(
+        main_module,
+        "_send_office_manager_private_feedback",
+        capture_feedback,
+    )
+    database_path = tmp_path / "actions.db"
+    store = action_module.OfficeManagerActionStore(database_path)
+    action, _ = store.record_action(
+        slack_user_id="UVERIFIED",
+        channel_id="CCOWORK",
+        booking_date="2026-08-03",
+    )
+
+    await action_module.process_office_manager_action(
+        action["id"],
+        store=store,
+        processor=main_module._process_office_manager_action_record,
+    )
+    first_attempt = store.get(action["id"])
+    assert first_attempt["uncertainty_notice_attempted_at"] == 3_000.0
+
+    # A restarted process reads the durable notice state and retries silently.
+    recovered_store = action_module.OfficeManagerActionStore(database_path)
+    for retry_time in (3_005.0, 3_015.0, 3_035.0):
+        current_time[0] = retry_time
+        assert await action_module.process_due_office_manager_actions(
+            store=recovered_store,
+            processor=main_module._process_office_manager_action_record,
+        ) == 1
+
+    assert len(backend_calls) == 4
+    assert len(delivered) == 1
+    assert delivered[0][0] == 3_000.0
+    assert "still confirming" in delivered[0][1]
+    pending = recovered_store.get(action["id"])
+    assert pending["status"] == "pending"
+    assert pending["attempt_count"] == 4
+    assert pending["next_attempt_at"] == 3_075.0
+
+
+@pytest.mark.asyncio
+async def test_failed_uncertainty_notice_is_not_repeated(
+    tmp_path,
+    monkeypatch,
+):
+    current_time = [4_000.0]
+    monkeypatch.setattr(action_module.time, "time", lambda: current_time[0])
+    backend_calls = []
+    notice_attempts = []
+
+    class FailingClient:
+        async def claim_office_manager_day(self, slack_user_id, booking_date):
+            backend_calls.append(current_time[0])
+            request = httpx.Request("POST", "https://backend.test/claim")
+            response = httpx.Response(502, request=request)
+            raise httpx.HTTPStatusError(
+                "backend unavailable",
+                request=request,
+                response=response,
+            )
+
+    async def fail_feedback(**kwargs):
+        notice_attempts.append(current_time[0])
+        raise RuntimeError("Slack unavailable")
+
+    monkeypatch.setattr(backend_module, "MLAIBackendClient", FailingClient)
+    monkeypatch.setattr(
+        main_module,
+        "_send_office_manager_private_feedback",
+        fail_feedback,
+    )
+    store = action_module.OfficeManagerActionStore(tmp_path / "actions.db")
+    action, _ = store.record_action(
+        slack_user_id="UVERIFIED",
+        channel_id="CCOWORK",
+        booking_date="2026-08-03",
+    )
+
+    await action_module.process_office_manager_action(
+        action["id"],
+        store=store,
+        processor=main_module._process_office_manager_action_record,
+    )
+    current_time[0] = 4_005.0
+    await action_module.process_due_office_manager_actions(
+        store=store,
+        processor=main_module._process_office_manager_action_record,
+    )
+
+    assert backend_calls == [4_000.0, 4_005.0]
+    assert notice_attempts == [4_000.0]
+    assert store.get(action["id"])["status"] == "pending"
+
+
+def test_existing_outbox_schema_adds_uncertainty_notice_column(tmp_path):
+    database_path = tmp_path / "legacy-actions.db"
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE office_manager_action_outbox (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                idempotency_key TEXT NOT NULL UNIQUE,
+                slack_user_id TEXT NOT NULL,
+                channel_id TEXT NOT NULL,
+                booking_date TEXT NOT NULL,
+                status TEXT NOT NULL,
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                next_attempt_at REAL NOT NULL,
+                locked_until REAL,
+                locked_by TEXT,
+                last_error TEXT,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                completed_at REAL
+            )
+            """
+        )
+
+    store = action_module.OfficeManagerActionStore(database_path)
+    action, should_process = store.record_action(
+        slack_user_id="UVERIFIED",
+        channel_id="CCOWORK",
+        booking_date="2026-08-03",
+    )
+
+    assert should_process is True
+    assert action["uncertainty_notice_attempted_at"] is None
 
 
 @pytest.mark.asyncio
@@ -1057,7 +1211,7 @@ async def test_pending_action_is_recovered_after_restart(tmp_path):
     recovered_store = action_module.OfficeManagerActionStore(database_path)
     processed = []
 
-    async def processor(record):
+    async def processor(record, _store):
         processed.append(record["idempotency_key"])
 
     count = await action_module.process_due_office_manager_actions(
@@ -1098,7 +1252,7 @@ async def test_due_actions_are_leased_only_immediately_before_processing(tmp_pat
     )
     observed_second_status = []
 
-    async def processor(record):
+    async def processor(record, _store):
         if record["id"] == first["id"]:
             observed_second_status.append(store.get(second["id"])["status"])
 
@@ -1153,7 +1307,7 @@ async def test_expired_processing_lease_is_recovered(tmp_path, monkeypatch):
     current_time[0] += 61
     processed = []
 
-    async def processor(record):
+    async def processor(record, _store):
         processed.append(record["attempt_count"])
 
     count = await action_module.process_due_office_manager_actions(
@@ -1227,7 +1381,7 @@ async def test_cancelled_action_returns_to_pending_for_recovery(tmp_path):
     assert should_process is True
     started = asyncio.Event()
 
-    async def processor(record):
+    async def processor(record, _store):
         started.set()
         await asyncio.Event().wait()
 
