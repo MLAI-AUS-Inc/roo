@@ -82,25 +82,25 @@ def _tool_description(skill: Skill) -> str:
     parts: List[str] = [skill.description.strip()] if skill.description else []
     use_when = str(routing.get("use_when") or "").strip()
     if use_when:
-        parts.append(f"Use when: {use_when}")
+        parts.append(f"Use: {use_when}")
     avoid_when = str(routing.get("avoid_when") or "").strip()
     if avoid_when:
-        parts.append(f"Do NOT use when: {avoid_when}")
+        parts.append(f"Do NOT: {avoid_when}")
     examples = routing.get("examples") or []
     if examples:
         lines = []
         for example in examples:
             action = example.get("action")
-            suffix = f" (action: {action})" if action else ""
+            suffix = f" -> {action}" if action else ""
             lines.append(f'- "{example["text"]}"{suffix}')
-        parts.append("Examples:\n" + "\n".join(lines))
+        parts.append("Actions:\n" + "\n".join(lines))
     negatives = routing.get("negative_examples") or []
     if negatives:
         lines = [
-            f'- "{example["text"]}" -> use {example.get("instead", RESPOND_IN_CHAT)}'
+            f'- "{example["text"]}" -> {example.get("instead", RESPOND_IN_CHAT)}'
             for example in negatives
         ]
-        parts.append("Counter-examples (pick the other tool):\n" + "\n".join(lines))
+        parts.append("Other tools:\n" + "\n".join(lines))
     return "\n".join(parts)
 
 
@@ -140,7 +140,7 @@ def _skill_tool(skill: Skill) -> Dict[str, Any]:
         properties["action"] = {
             "type": "string",
             "enum": action_names,
-            "description": "What to do:\n" + "\n".join(action_lines),
+            "description": "\n".join(action_lines),
         }
         required.append("action")
         properties.update(_action_param_properties(skill))
