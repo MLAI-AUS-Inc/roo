@@ -66,6 +66,7 @@ from .slack_client import (
     get_message,
     get_recent_channel_messages,
     get_thread_messages,
+    post_ephemeral,
     post_message,
     send_dm,
 )
@@ -134,7 +135,9 @@ from .meeting_room_actions import (
     process_meeting_room_action,
 )
 from .meeting_room_clarifications import (
+    PUBLIC_ROOM_CHOICE_ACTION_ID as MEETING_ROOM_PUBLIC_CHOOSE_ROOM_ACTION_ID,
     get_meeting_room_clarification_store,
+    parse_public_room_choice_action_value,
     room_choice_from_reply,
 )
 
@@ -515,6 +518,15 @@ async def _handle_meeting_room_text_choice(
             f"channel_id={channel_id} thread_ts={thread_ts}"
         )
         return True
+    if str(pending.get("choice_mode") or "text") != "text":
+        if room_slug is not None:
+            await _post_meeting_room_public_reply(
+                channel_id=channel_id,
+                thread_ts=thread_ts,
+                text="Please use the Big or Small Meeting Room button above.",
+            )
+            return True
+        return False
     if room_slug is None:
         return False
     if (
@@ -5218,6 +5230,194 @@ async def _deliver_meeting_room_choice_feedback(
         return False
 
 
+async def _deliver_public_meeting_room_choice_feedback(
+    *,
+    channel_id: str,
+    actor_user_id: str,
+    outcome: str,
+) -> bool:
+    """Keep rejected public button clicks visible only to the clicker."""
+
+    if not channel_id or channel_id.startswith("D") or not actor_user_id:
+        return False
+    try:
+        response = await asyncio.to_thread(
+            post_ephemeral,
+            channel=channel_id,
+            user=actor_user_id,
+            text=outcome,
+        )
+        return _slack_delivery_succeeded(response)
+    except Exception as exc:
+        print(
+            "MEETING_ROOM_PUBLIC_CHOICE_FEEDBACK_FAILED "
+            f"reason={exc.__class__.__name__}"
+        )
+        return False
+
+
+async def _update_public_meeting_room_choice_prompt(
+    *,
+    channel_id: str,
+    message_ts: str,
+    outcome: str,
+) -> bool:
+    """Idempotently replace public choice buttons with privacy-safe status."""
+
+    try:
+        from .slack_client import get_slack_client
+
+        response = await asyncio.to_thread(
+            get_slack_client().chat_update,
+            channel=channel_id,
+            ts=message_ts,
+            text=outcome,
+            blocks=[
+                {"type": "section", "text": {"type": "mrkdwn", "text": outcome}}
+            ],
+        )
+        return _slack_delivery_succeeded(response)
+    except Exception as exc:
+        print(
+            "MEETING_ROOM_PUBLIC_CHOICE_UPDATE_FAILED "
+            f"reason={exc.__class__.__name__}"
+        )
+        return False
+
+
+async def _handle_public_meeting_room_button_action(
+    *,
+    settings: Settings,
+    action: dict[str, Any],
+) -> MeetingRoomActionResult:
+    """Resume one persisted public room choice and deliver details privately."""
+
+    value = parse_public_room_choice_action_value(str(action["action_value"]))
+    actor_user_id = str(action["actor_user_id"])
+    channel_id = str(action["channel_id"])
+    message_ts = str(action["message_ts"])
+    if (
+        not settings.MEETING_ROOM_BOOKING_ENABLED
+        or channel_id.startswith("D")
+        or value["owner_slack_user_id"] != actor_user_id
+    ):
+        outcome = (
+            "Meeting-room booking is not enabled right now."
+            if not settings.MEETING_ROOM_BOOKING_ENABLED
+            else "This room choice is not valid. Ask Roo to start again."
+        )
+        if not await _update_public_meeting_room_choice_prompt(
+            channel_id=channel_id,
+            message_ts=message_ts,
+            outcome=outcome,
+        ):
+            raise RuntimeError("meeting_room_public_choice_update_failed")
+        return MeetingRoomActionResult(outcome=outcome)
+
+    store = get_meeting_room_clarification_store(
+        settings.SLACK_RECEIPTS_DB_PATH
+    )
+    pending = await asyncio.to_thread(
+        store.find,
+        team_id=value["slack_team_id"],
+        channel_id=channel_id,
+        thread_ts=value["thread_ts"],
+        owner_user_id=actor_user_id,
+    )
+    if (
+        pending is None
+        or int(pending.get("id") or 0) != value["clarification_id"]
+        or str(pending.get("request_message_ts") or "")
+        != value["request_message_ts"]
+        or str(pending.get("choice_mode") or "") != "buttons"
+    ):
+        outcome = "Those room choices are no longer current. Ask Roo to start again."
+        if not await _update_public_meeting_room_choice_prompt(
+            channel_id=channel_id,
+            message_ts=message_ts,
+            outcome=outcome,
+        ):
+            raise RuntimeError("meeting_room_public_choice_update_failed")
+        return MeetingRoomActionResult(outcome=outcome)
+
+    claim = await asyncio.to_thread(
+        store.claim_choice,
+        team_id=value["slack_team_id"],
+        channel_id=channel_id,
+        thread_ts=value["thread_ts"],
+        actor_user_id=actor_user_id,
+        room_slug=value["room_slug"],
+        choice_message_ts=f"button:{action['id']}",
+        expected_record_id=value["clarification_id"],
+        expected_request_message_ts=value["request_message_ts"],
+    )
+    disposition = str(claim.get("disposition") or "missing")
+    record = claim.get("record") or pending
+    if disposition not in {"claimed", "duplicate"}:
+        if disposition == "expired":
+            outcome = "Those room choices expired. Ask Roo to start again."
+        elif disposition in {"processing", "already_selected", "completed"}:
+            outcome = "I'm already handling the first room choice. Check your Roo DM."
+        else:
+            outcome = "I couldn't use that room choice. Ask Roo to start again."
+        if not await _update_public_meeting_room_choice_prompt(
+            channel_id=channel_id,
+            message_ts=message_ts,
+            outcome=outcome,
+        ):
+            raise RuntimeError("meeting_room_public_choice_update_failed")
+        return MeetingRoomActionResult(outcome=outcome)
+
+    context = BackendActorContext(
+        slack_team_id=value["slack_team_id"],
+        acting_slack_user_id=actor_user_id,
+        slack_channel_id=channel_id,
+        slack_thread_ts=value["thread_ts"],
+        event_id=f"meeting-room-public-choice:{action['id']}",
+    )
+    with use_backend_actor_context(context):
+        result = await get_agent().skill_executor.complete_meeting_room_room_choice(
+            user_id=actor_user_id,
+            channel_id=channel_id,
+            room_slug=value["room_slug"],
+            starts_at=str(record.get("starts_at") or ""),
+            ends_at=str(record.get("ends_at") or ""),
+            booking_client_request_id=str(
+                record.get("booking_client_request_id") or ""
+            ),
+            target_slack_user_id=(
+                str(record.get("target_user_id") or "").strip() or None
+            ),
+        )
+
+    result_data = result.get("data") or {}
+    delivered_privately = (
+        result_data.get("delivery") == "direct_message"
+        and not result_data.get("delivery_failed")
+    )
+    record_was_complete = str(record.get("status") or "") == "completed"
+    if not record_was_complete:
+        finished = await asyncio.to_thread(
+            store.finish,
+            int(record["id"]),
+            success=delivered_privately,
+        )
+        if not finished:
+            raise RuntimeError("meeting_room_public_choice_finish_failed")
+    outcome = (
+        "I've sent you a private reply about the Meeting Room."
+        if delivered_privately
+        else "I couldn't open a private Slack DM. DM Roo `meeting room` and try again there."
+    )
+    if not await _update_public_meeting_room_choice_prompt(
+        channel_id=channel_id,
+        message_ts=message_ts,
+        outcome=outcome,
+    ):
+        raise RuntimeError("meeting_room_public_choice_update_failed")
+    return MeetingRoomActionResult(outcome=outcome)
+
+
 async def _handle_meeting_room_action(
     *,
     settings: Settings,
@@ -5512,6 +5712,11 @@ async def _process_meeting_room_action_record(
     action: dict[str, Any],
 ) -> MeetingRoomActionResult:
     settings = get_settings()
+    if str(action.get("action_id") or "") == MEETING_ROOM_PUBLIC_CHOOSE_ROOM_ACTION_ID:
+        return await _handle_public_meeting_room_button_action(
+            settings=settings,
+            action=action,
+        )
     store = get_meeting_room_action_store(settings.SLACK_RECEIPTS_DB_PATH)
 
     async def begin_target_notification() -> bool:
@@ -5546,6 +5751,128 @@ async def _process_meeting_room_action_record(
         begin_target_notification=begin_target_notification,
         set_target_notification_state=set_target_notification_state,
         final_attempt=action_retry_exhausted(action),
+    )
+
+
+async def _persist_and_start_public_meeting_room_choice(
+    *,
+    settings: Settings,
+    action_value: str,
+    actor_user_id: str,
+    slack_team_id: str,
+    channel_id: str,
+    thread_ts: str,
+    message_ts: str,
+    duplicate_delivery: bool = False,
+) -> None:
+    """Validate public context and persist the button click before Slack ACK."""
+
+    try:
+        value = parse_public_room_choice_action_value(action_value)
+    except ValueError as exc:
+        if not duplicate_delivery:
+            start_slack_action(
+                _deliver_public_meeting_room_choice_feedback(
+                    channel_id=channel_id,
+                    actor_user_id=actor_user_id,
+                    outcome=str(exc),
+                )
+            )
+        return
+    context_matches = (
+        settings.MEETING_ROOM_BOOKING_ENABLED
+        and channel_id
+        and not channel_id.startswith("D")
+        and message_ts
+        and thread_ts == value["thread_ts"]
+        and slack_team_id == value["slack_team_id"]
+    )
+    if not context_matches or actor_user_id != value["owner_slack_user_id"]:
+        if not duplicate_delivery:
+            outcome = (
+                "Only the person who requested this booking can choose the room."
+                if context_matches
+                else "This room choice is not valid. Ask Roo to start again."
+            )
+            start_slack_action(
+                _deliver_public_meeting_room_choice_feedback(
+                    channel_id=channel_id,
+                    actor_user_id=actor_user_id,
+                    outcome=outcome,
+                )
+            )
+        return
+
+    clarification_store = get_meeting_room_clarification_store(
+        settings.SLACK_RECEIPTS_DB_PATH
+    )
+    pending = await asyncio.to_thread(
+        clarification_store.find,
+        team_id=slack_team_id,
+        channel_id=channel_id,
+        thread_ts=thread_ts,
+        owner_user_id=actor_user_id,
+    )
+    binding_matches = (
+        pending is not None
+        and int(pending.get("id") or 0) == value["clarification_id"]
+        and str(pending.get("request_message_ts") or "")
+        == value["request_message_ts"]
+        and str(pending.get("choice_mode") or "") == "buttons"
+    )
+    if not binding_matches:
+        if not duplicate_delivery:
+            start_slack_action(
+                _deliver_public_meeting_room_choice_feedback(
+                    channel_id=channel_id,
+                    actor_user_id=actor_user_id,
+                    outcome=(
+                        "Those room choices are no longer current. "
+                        "Ask Roo to start again."
+                    ),
+                )
+            )
+        return
+
+    action_store = get_meeting_room_action_store(
+        settings.SLACK_RECEIPTS_DB_PATH
+    )
+    try:
+        action = await asyncio.to_thread(
+            action_store.record_action,
+            action_id=MEETING_ROOM_PUBLIC_CHOOSE_ROOM_ACTION_ID,
+            action_value=action_value,
+            actor_user_id=actor_user_id,
+            channel_id=channel_id,
+            message_ts=message_ts,
+        )
+    except MeetingRoomInputError as exc:
+        if not duplicate_delivery:
+            start_slack_action(
+                _deliver_public_meeting_room_choice_feedback(
+                    channel_id=channel_id,
+                    actor_user_id=actor_user_id,
+                    outcome=exc.message,
+                )
+            )
+        return
+    if action.get("status") in {"completed", "failed"}:
+        if not duplicate_delivery:
+            stored = json.loads(str(action.get("action_value") or "{}"))
+            start_slack_action(
+                _deliver_public_meeting_room_choice_feedback(
+                    channel_id=channel_id,
+                    actor_user_id=actor_user_id,
+                    outcome=meeting_room_choice_already_selected_message(stored),
+                )
+            )
+        return
+    start_slack_action(
+        process_meeting_room_action(
+            int(action["id"]),
+            store=action_store,
+            processor=_process_meeting_room_action_record,
+        )
     )
 
 
@@ -5714,6 +6041,35 @@ async def slack_actions(
         or early_message.get("ts")
         or ""
     )
+    if (
+        getattr(settings, "ROO_SURFACE", "public") == "public"
+        and early_action_id == MEETING_ROOM_PUBLIC_CHOOSE_ROOM_ACTION_ID
+    ):
+        try:
+            await _persist_and_start_public_meeting_room_choice(
+                settings=settings,
+                action_value=str(early_action.get("value") or ""),
+                actor_user_id=str(user_id or ""),
+                slack_team_id=str((payload.get("team") or {}).get("id") or ""),
+                channel_id=str(channel_id or ""),
+                thread_ts=str(
+                    early_message.get("thread_ts")
+                    or (payload.get("container") or {}).get("thread_ts")
+                    or ""
+                ),
+                message_ts=early_action_message_ts,
+                duplicate_delivery=_is_duplicate_slack_request(request),
+            )
+        except Exception as exc:
+            print(
+                "MEETING_ROOM_PUBLIC_CHOICE_PERSIST_FAILED "
+                f"reason={exc.__class__.__name__}"
+            )
+            return JSONResponse(
+                status_code=503,
+                content={"error": "room_choice_state_unavailable"},
+            )
+        return JSONResponse(status_code=200, content={})
     if (
         getattr(settings, "ROO_SURFACE", "public") == "public"
         and early_action_id

@@ -111,7 +111,10 @@ from ..meeting_room_booking import (
     resolve_local_date as resolve_meeting_room_date,
     supported_active_rooms,
 )
-from ..meeting_room_clarifications import get_meeting_room_clarification_store
+from ..meeting_room_clarifications import (
+    get_meeting_room_clarification_store,
+    public_room_choice_prompt,
+)
 
 
 POINTS_SUPER_ADMIN_SLACK_ID = "U05QPB483K9"
@@ -477,6 +480,7 @@ class SkillExecutor:
         message: str,
         blocks: Optional[list] = None,
         action: Optional[str] = None,
+        client_msg_id: Optional[str] = None,
     ) -> dict:
         data = {"action": action, "delivery": "direct_message"}
         if channel_id and str(channel_id).startswith("D"):
@@ -490,10 +494,36 @@ class SkillExecutor:
                 "data": {**data, "delivery_failed": True},
             }
         try:
-            dm_response = send_dm(user_id, message, blocks=blocks) if blocks else send_dm(user_id, message)
-        except Exception:
-            dm_response = None
-        if not dm_response or not dm_response.get("ok"):
+            delivery_options = {}
+            if blocks:
+                delivery_options["blocks"] = blocks
+            if client_msg_id:
+                delivery_options["client_msg_id"] = client_msg_id
+                delivery_options["raise_on_error"] = True
+            dm_response = send_dm(user_id, message, **delivery_options)
+        except Exception as exc:
+            error_response = getattr(exc, "response", None)
+            try:
+                duplicate_message = bool(
+                    error_response is not None
+                    and error_response.get("error") == "duplicate_message"
+                )
+            except (AttributeError, TypeError):
+                duplicate_message = False
+            if duplicate_message:
+                dm_response = {"error": "duplicate_message"}
+            elif client_msg_id:
+                raise
+            else:
+                dm_response = None
+        delivered = bool(
+            dm_response
+            and (
+                dm_response.get("ok")
+                or dm_response.get("error") == "duplicate_message"
+            )
+        )
+        if not delivered:
             return {
                 "message": (
                     "I could not open a private Slack DM. DM Roo `meeting room` "
@@ -743,20 +773,15 @@ class SkillExecutor:
                             ends_at=ends_at.isoformat(),
                             available_room_slugs=[room["slug"] for room in rooms],
                             target_user_id=target_slack_user_id,
+                            choice_mode="buttons",
                         )
-                        room_names = [room["name"] for room in reversed(rooms)]
-                        room_options = " or ".join(
-                            f"*{room_name}*" for room_name in room_names
-                        )
-                        reply_options = " or ".join(
-                            f"`{room_name.split()[0].lower()} room`"
-                            for room_name in room_names
+                        prompt = public_room_choice_prompt(
+                            clarification,
+                            rooms,
                         )
                         return {
-                            "message": (
-                                f"Which room should I use: {room_options}? "
-                                f"Reply in this thread with {reply_options}."
-                            ),
+                            "message": prompt["message"],
+                            "blocks": prompt["blocks"],
                             "data": {
                                 "action": action,
                                 "delivery": "public_thread_clarification",
@@ -996,6 +1021,7 @@ class SkillExecutor:
                 message=preview["message"],
                 blocks=preview["blocks"],
                 action=action,
+                client_msg_id=booking_client_request_id,
             )
         except MeetingRoomInputError as exc:
             return self._deliver_meeting_room_response(
