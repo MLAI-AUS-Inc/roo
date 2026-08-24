@@ -37,7 +37,7 @@ from roo.meeting_room_booking import (
     resolve_interval,
 )
 from roo.meeting_room_clarifications import (
-    PUBLIC_ROOM_CHOICE_ACTION_ID,
+    PUBLIC_ROOM_CHOICE_ACTION_IDS_BY_ROOM,
     parse_public_room_choice_action_value,
 )
 from roo.skills.executor import SkillExecutor
@@ -764,10 +764,11 @@ async def test_public_unspecified_booking_asks_for_room_in_same_thread(
         "Big Meeting Room",
         "Small Meeting Room",
     ]
-    assert all(
-        button["action_id"] == PUBLIC_ROOM_CHOICE_ACTION_ID
-        for button in buttons
-    )
+    assert [button["action_id"] for button in buttons] == [
+        PUBLIC_ROOM_CHOICE_ACTION_IDS_BY_ROOM["big-meeting-room"],
+        PUBLIC_ROOM_CHOICE_ACTION_IDS_BY_ROOM["small-meeting-room"],
+    ]
+    assert len({button["action_id"] for button in buttons}) == len(buttons)
     button_values = [
         parse_public_room_choice_action_value(button["value"])
         for button in buttons
