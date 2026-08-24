@@ -881,7 +881,7 @@ async def test_linear_meeting_candidate_extraction_chunks_sources(monkeypatch):
 
     assert len(calls) > 1
     assert all(call["transcript"].startswith("Source: notes.pdf") for call in calls)
-    assert all(len(call["transcript"]) <= 10100 for call in calls)
+    assert all(len(call["transcript"]) <= 8100 for call in calls)
     assert all(call["source_count"] == 1 for call in calls)
     assert {call["batch_chunk_count"] for call in calls} == {len(calls)}
     assert {call["batch_chunk_index"] for call in calls} == set(
@@ -897,8 +897,8 @@ async def test_linear_meeting_timeout_retries_only_failed_chunk_at_smaller_scope
 ):
     executor = SkillExecutor()
     calls = []
-    body = ("Sam will update the onboarding checklist after the meeting. " * 150).strip()
-    assert 5_000 < len(body) < 10_000
+    body = ("Sam will update the onboarding checklist after the meeting. " * 100).strip()
+    assert 4_000 < len(body) < 8_000
 
     async def fake_extract(
         *,
@@ -1010,9 +1010,166 @@ async def test_linear_meeting_chunk_extraction_uses_bounded_concurrency(monkeypa
         projects=[],
     )
 
-    assert peak_active == 2
+    assert peak_active == 3
     assert total_calls >= 3
     assert candidates
+
+
+@pytest.mark.asyncio
+async def test_linear_meeting_production_sized_batch_recovers_failed_chunk_twice(
+    monkeypatch,
+):
+    executor = SkillExecutor()
+    calls = []
+    titles = [
+        "Prepare project budget",
+        "Schedule user interviews",
+        "Review CRM schema",
+        "Draft onboarding guide",
+        "Configure API credentials",
+        "Publish launch announcement",
+        "Audit workflow permissions",
+        "Design feedback survey",
+        "Reconcile customer records",
+        "Book stakeholder workshop",
+        "Document release checklist",
+    ]
+    paragraphs = [
+        f"Sam will complete action {index}. " + (f"context-{index} " * 580)
+        for index in range(1, 12)
+    ]
+
+    async def fake_extract(
+        *,
+        transcript,
+        params,
+        users,
+        projects,
+        source_label=None,
+        source_count=1,
+        batch_chunk_index=1,
+        batch_chunk_count=1,
+        recovery_depth=0,
+    ):
+        calls.append(
+            {
+                "batch_chunk_index": batch_chunk_index,
+                "batch_chunk_count": batch_chunk_count,
+                "recovery_depth": recovery_depth,
+                "chars": len(transcript),
+            }
+        )
+        if batch_chunk_index == 3 and recovery_depth < 2:
+            raise _meeting_timeout_error(
+                source_chars=len(transcript),
+                batch_chunk_index=batch_chunk_index,
+                batch_chunk_count=batch_chunk_count,
+                recovery_depth=recovery_depth,
+            )
+        return [
+            {
+                "title": titles[batch_chunk_index - 1],
+                "owner_hint": "Sam",
+                "source_label": source_label,
+                "confidence": 0.9,
+            }
+        ]
+
+    monkeypatch.setattr(executor, "_extract_linear_meeting_candidates", fake_extract)
+
+    candidates = await executor._extract_linear_meeting_candidates_from_sources(
+        sources=[
+            ParsedSource(
+                label="Study Nash project brief.pdf",
+                text="\n\n".join(paragraphs),
+                kind="pdf",
+            )
+        ],
+        params={
+            "project_hint": "[Studio] Studynash",
+            "default_assignee_hint": "Dr Sam",
+        },
+        users=[],
+        projects=[],
+    )
+
+    assert {call["batch_chunk_count"] for call in calls} == {11}
+    chunk_three_depths = {
+        call["recovery_depth"]
+        for call in calls
+        if call["batch_chunk_index"] == 3
+    }
+    assert chunk_three_depths == {0, 1, 2}
+    assert {candidate["title"] for candidate in candidates} == set(titles)
+
+
+@pytest.mark.asyncio
+async def test_linear_meeting_terminal_chunk_failure_cancels_siblings(
+    monkeypatch,
+):
+    executor = SkillExecutor()
+    second_started = asyncio.Event()
+    second_cancelled = asyncio.Event()
+    calls = []
+    monkeypatch.setattr(
+        executor_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            LINEAR_MEETING_EXTRACTION_CONCURRENCY=2,
+            LINEAR_MEETING_EXTRACTION_TOTAL_TIMEOUT_SECONDS=360,
+            LINEAR_MEETING_EXTRACTION_CHUNK_MAX_CHARS=8_000,
+            LINEAR_MEETING_EXTRACTION_RECOVERY_MAX_CHARS=4_000,
+            LINEAR_MEETING_EXTRACTION_RECOVERY_DEPTH=0,
+        ),
+    )
+
+    async def fake_extract(
+        *,
+        transcript,
+        params,
+        users,
+        projects,
+        source_label=None,
+        source_count=1,
+        batch_chunk_index=1,
+        batch_chunk_count=1,
+        recovery_depth=0,
+    ):
+        calls.append(batch_chunk_index)
+        if batch_chunk_index == 1:
+            await second_started.wait()
+            raise _meeting_timeout_error(
+                source_chars=len(transcript),
+                batch_chunk_index=batch_chunk_index,
+                batch_chunk_count=batch_chunk_count,
+            )
+        if batch_chunk_index == 2:
+            second_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                second_cancelled.set()
+                raise
+        return []
+
+    monkeypatch.setattr(executor, "_extract_linear_meeting_candidates", fake_extract)
+
+    with pytest.raises(LinearInferenceTimeoutError):
+        await asyncio.wait_for(
+            executor._extract_linear_meeting_candidates_from_sources(
+                sources=[
+                    ParsedSource(label=f"notes-{index}.pdf", text="action", kind="pdf")
+                    for index in range(1, 4)
+                ],
+                params={},
+                users=[],
+                projects=[],
+            ),
+            timeout=0.5,
+        )
+
+    assert second_cancelled.is_set()
+    assert calls[:2] == [1, 2]
 
 
 @pytest.mark.asyncio
@@ -2156,6 +2313,10 @@ async def test_linear_project_sizing_apply_is_requester_bound_and_reports_counts
     [
         ("if you're not sure who to assign to, assign to Dr Sam Donegan", "Dr Sam Donegan"),
         ("extract tasks and add to linear; if unsure, assign to Jane Doe", "Jane Doe"),
+        (
+            "If you cant find the right person or are unsure, assign them to dr sam.",
+            "dr sam",
+        ),
         ("turn these notes into tasks. Default assignee: Sam Donegan", "Sam Donegan"),
         ("add these to linear and assign to the correct people", None),
     ],
