@@ -48,8 +48,11 @@ full-day booking flow in `mlai-points`.
 
 - Treat every date and time as Australia/Melbourne.
 - Treat `tomorow`, `tommorow`, and `tommorrow` as `tomorrow`.
-- If an availability check or booking gives no date, use the next Melbourne
-  calendar day. If it gives a vague or invalid date, ask for an explicit date.
+- If an availability check or booking gives a time but no date, use the next
+  occurrence of that time in Melbourne: later today when it is still upcoming,
+  otherwise tomorrow. If it gives a vague or invalid date, ask for an explicit
+  date. For an availability check with neither date nor time, use the next
+  Melbourne calendar day; a booking with no time must ask for one.
 - The active choices are `Small Meeting Room` and `Big Meeting Room`. Treat
   `large room` as the Big Meeting Room.
 - Derive an explicit room only from the member's message, never from a model-only

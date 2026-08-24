@@ -118,7 +118,7 @@ def _parse_date_value(value: Any) -> Optional[date]:
 
 def has_date_reference(text: str, params: Optional[dict] = None) -> bool:
     params = params or {}
-    if params.get("date") or params.get("starts_at"):
+    if params.get("date") or params.get("starts_at") or params.get("start"):
         return True
     normalized = str(text or "").lower()
     return bool(
@@ -452,6 +452,7 @@ def resolve_interval(
     maximum_half_hours: int = MAX_BOOKING_HALF_HOURS,
 ) -> tuple[datetime, datetime]:
     params = params or {}
+    reference_now = now or get_current_datetime()
     exact_start = _parse_iso_timestamp(params.get("starts_at"))
     exact_end = _parse_iso_timestamp(params.get("ends_at"))
     if exact_start or exact_end:
@@ -461,7 +462,7 @@ def resolve_interval(
             return _validate_resolved_interval(
                 exact_start,
                 exact_end,
-                now=now,
+                now=reference_now,
                 minimum_half_hours=minimum_half_hours,
                 maximum_half_hours=maximum_half_hours,
             )
@@ -477,12 +478,12 @@ def resolve_interval(
         return _validate_resolved_interval(
             exact_start,
             ends_at,
-            now=now,
+            now=reference_now,
             minimum_half_hours=minimum_half_hours,
             maximum_half_hours=maximum_half_hours,
         )
 
-    local_date = resolve_local_date(text, params, now=now)
+    local_date = resolve_local_date(text, params, now=reference_now)
     natural_start, natural_end = _natural_time_tokens(text)
     start_value = params.get("start_time") or natural_start
     end_value = params.get("end_time") or natural_end
@@ -491,6 +492,15 @@ def resolve_interval(
         raise MeetingRoomInputError(
             "missing_start_time",
             "What time should the booking start? Try `2pm`.",
+        )
+
+    if not has_date_reference(text, params):
+        current = reference_now.astimezone(MELBOURNE_TZ)
+        same_day_start = _local_datetime(current.date(), start_time)
+        local_date = (
+            current.date()
+            if _as_utc(same_day_start) > _as_utc(current)
+            else current.date() + timedelta(days=1)
         )
 
     starts_at = _local_datetime(local_date, start_time)
@@ -516,7 +526,7 @@ def resolve_interval(
         params,
         local_date=local_date,
         starts_at=starts_at,
-        now=now,
+        now=reference_now,
     ):
         starts_at = _local_datetime(
             starts_at.date() + timedelta(days=7),
@@ -529,7 +539,7 @@ def resolve_interval(
     return _validate_resolved_interval(
         starts_at,
         ends_at,
-        now=now,
+        now=reference_now,
         minimum_half_hours=minimum_half_hours,
         maximum_half_hours=maximum_half_hours,
     )

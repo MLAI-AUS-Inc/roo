@@ -197,13 +197,58 @@ def test_interval_parser_accepts_misspelled_tomorrow_model_parameter():
     assert ends_at == datetime(2026, 8, 12, 14, tzinfo=MELBOURNE)
 
 
-def test_interval_parser_defaults_missing_date_to_next_melbourne_day():
-    now = datetime(2026, 8, 11, 9, tzinfo=MELBOURNE)
+def test_interval_parser_defaults_missing_date_to_next_occurrence_today():
+    now = datetime(2026, 8, 11, 7, 20, tzinfo=MELBOURNE)
 
-    starts_at, ends_at = resolve_interval("at 3pm", now=now)
+    starts_at, ends_at = resolve_interval("at 1pm", now=now)
 
-    assert starts_at == datetime(2026, 8, 12, 15, tzinfo=MELBOURNE)
-    assert ends_at == datetime(2026, 8, 12, 16, tzinfo=MELBOURNE)
+    assert starts_at == datetime(2026, 8, 11, 13, tzinfo=MELBOURNE)
+    assert ends_at == datetime(2026, 8, 11, 14, tzinfo=MELBOURNE)
+
+
+def test_missing_date_next_occurrence_uses_melbourne_date_for_utc_clock():
+    now = datetime(2026, 8, 24, 21, 20, tzinfo=timezone.utc)
+
+    starts_at, _ = resolve_interval("at 1pm", now=now)
+
+    assert starts_at == datetime(2026, 8, 25, 13, tzinfo=MELBOURNE)
+
+
+def test_interval_parser_defaults_missing_date_to_tomorrow_after_time_passes():
+    now = datetime(2026, 8, 11, 19, 20, tzinfo=MELBOURNE)
+
+    starts_at, ends_at = resolve_interval("at 1pm", now=now)
+
+    assert starts_at == datetime(2026, 8, 12, 13, tzinfo=MELBOURNE)
+    assert ends_at == datetime(2026, 8, 12, 14, tzinfo=MELBOURNE)
+
+
+def test_interval_parser_defaults_missing_date_to_tomorrow_at_exact_start_time():
+    now = datetime(2026, 8, 11, 13, tzinfo=MELBOURNE)
+
+    starts_at, _ = resolve_interval("at 1pm", now=now)
+
+    assert starts_at == datetime(2026, 8, 12, 13, tzinfo=MELBOURNE)
+
+
+def test_interval_parser_uses_next_occurrence_for_routed_start_time():
+    now = datetime(2026, 8, 11, 7, 20, tzinfo=MELBOURNE)
+
+    starts_at, _ = resolve_interval(
+        "book the big meeting room",
+        {"start_time": "1pm"},
+        now=now,
+    )
+
+    assert starts_at == datetime(2026, 8, 11, 13, tzinfo=MELBOURNE)
+
+
+def test_missing_date_next_occurrence_rejects_nonexistent_daylight_saving_hour():
+    with pytest.raises(MeetingRoomInputError, match="does not exist"):
+        resolve_interval(
+            "at 2am",
+            now=datetime(2026, 10, 4, 0, 30, tzinfo=MELBOURNE),
+        )
 
 
 def test_missing_date_default_uses_melbourne_calendar_at_day_boundary():
@@ -683,6 +728,11 @@ async def test_public_unspecified_booking_asks_for_room_in_same_thread(
     )
     sent = []
     _patch_executor(monkeypatch, configured)
+    monkeypatch.setattr(
+        room_module,
+        "get_current_datetime",
+        lambda: datetime(2026, 8, 25, 7, 20, tzinfo=MELBOURNE),
+    )
     monkeypatch.setitem(
         SkillExecutor._deliver_meeting_room_response.__globals__,
         "send_dm",
@@ -690,7 +740,7 @@ async def test_public_unspecified_booking_asks_for_room_in_same_thread(
     )
 
     result = await SkillExecutor()._execute_meeting_room_booking(
-        text="book the meeting room tomorrow from 2pm to 4pm",
+        text="book the meeting room at 1pm",
         params={
             "action": "book_meeting_room",
             "room_slug": "big-meeting-room",
@@ -719,6 +769,8 @@ async def test_public_unspecified_booking_asks_for_room_in_same_thread(
         "big-meeting-room",
         "small-meeting-room",
     ]
+    assert stored["starts_at"] == "2026-08-25T13:00:00+10:00"
+    assert stored["ends_at"] == "2026-08-25T14:00:00+10:00"
     assert [call[0] for call in FakeMeetingRoomClient.instances[0].calls] == ["rooms"]
 
 
@@ -891,13 +943,13 @@ async def test_misspelled_tomorrow_clarification_checks_requested_time(monkeypat
 
 
 @pytest.mark.asyncio
-async def test_availability_without_date_defaults_to_next_day(monkeypatch):
+async def test_availability_without_date_defaults_to_next_occurrence(monkeypatch):
     configured = _settings()
     _patch_executor(monkeypatch, configured)
     monkeypatch.setattr(
         room_module,
         "get_current_datetime",
-        lambda: datetime(2026, 8, 11, 9, tzinfo=MELBOURNE),
+        lambda: datetime(2026, 8, 11, 7, 20, tzinfo=MELBOURNE),
     )
 
     result = await SkillExecutor()._execute_meeting_room_booking(
@@ -909,18 +961,18 @@ async def test_availability_without_date_defaults_to_next_day(monkeypatch):
 
     calls = FakeMeetingRoomClient.instances[0].calls
     starts_at = datetime.fromisoformat(calls[1][2]["starts_at"])
-    assert starts_at == datetime(2026, 8, 12, 15, tzinfo=MELBOURNE)
+    assert starts_at == datetime(2026, 8, 11, 15, tzinfo=MELBOURNE)
     assert "What date should I check?" not in result["message"]
 
 
 @pytest.mark.asyncio
-async def test_booking_without_date_defaults_to_next_day(monkeypatch):
+async def test_booking_without_date_defaults_to_next_occurrence(monkeypatch):
     configured = _settings()
     _patch_executor(monkeypatch, configured)
     monkeypatch.setattr(
         room_module,
         "get_current_datetime",
-        lambda: datetime(2026, 8, 11, 9, tzinfo=MELBOURNE),
+        lambda: datetime(2026, 8, 11, 7, 20, tzinfo=MELBOURNE),
     )
 
     result = await SkillExecutor()._execute_meeting_room_booking(
@@ -932,7 +984,7 @@ async def test_booking_without_date_defaults_to_next_day(monkeypatch):
 
     calls = FakeMeetingRoomClient.instances[0].calls
     starts_at = datetime.fromisoformat(calls[1][2]["starts_at"])
-    assert starts_at == datetime(2026, 8, 12, 15, tzinfo=MELBOURNE)
+    assert starts_at == datetime(2026, 8, 11, 15, tzinfo=MELBOURNE)
     assert "Big Meeting Room" in result["message"]
     assert result["blocks"][1]["elements"][0]["text"]["text"] == "Confirm booking"
 
