@@ -54,7 +54,9 @@ full-day booking flow in `mlai-points`.
   `large room` as the Big Meeting Room.
 - Derive an explicit room only from the member's message, never from a model-only
   parameter. If availability does not name a room, show both. If a booking does
-  not name a room, privately ask with room-choice buttons.
+  not name a room in a public channel, ask publicly in the same thread whether
+  they want the Big or Small Meeting Room. Accept only that requester's room
+  reply in that thread, then continue privately. In a DM, use room-choice buttons.
 - Ask for a missing booking start time. Do not invent one.
 - If the member gives a start but no duration or end, use one hour.
 - Bookings last 1 to 2 hours and use 30-minute increments. Accept phrases such
@@ -66,7 +68,10 @@ full-day booking flow in `mlai-points`.
 - Non-admins cannot book for tagged users. Never use a model-provided Slack identity.
 - Never claim a slot is reserved before the member clicks Confirm booking.
 - Keep availability, bookings, balances, and cancellation details private.
-- Public requests receive only a short acknowledgement after the private DM succeeds.
+- Public room-choice prompts may name the Big and Small Meeting Rooms. Keep the
+  resolved time, availability, points, preview, confirmation, and cancellation
+  details private; after a room reply, post only a short public acknowledgement
+  once the private DM succeeds.
 - Do not support titles, attendees, recurrence, calendar invitations, or reminders.
 
 ## Examples

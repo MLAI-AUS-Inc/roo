@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from roo import main as main_module
 from roo import meeting_room_booking as room_module
 from roo import meeting_room_actions as action_module
+from roo import meeting_room_clarifications as clarification_module
 from roo import slack_action_tasks
 from roo.agent import RooAgent
 from roo.clients.mlai_backend import MLAIBackendUnavailableError
@@ -153,11 +154,13 @@ def reset_test_state():
     FakeMeetingRoomClient.instances.clear()
     slack_action_tasks._tasks.clear()
     action_module.get_meeting_room_action_store.cache_clear()
+    clarification_module.get_meeting_room_clarification_store.cache_clear()
     get_slack_receipt_store.cache_clear()
     main_module.app.dependency_overrides.clear()
     yield
     slack_action_tasks._tasks.clear()
     action_module.get_meeting_room_action_store.cache_clear()
+    clarification_module.get_meeting_room_clarification_store.cache_clear()
     get_slack_receipt_store.cache_clear()
     main_module.app.dependency_overrides.clear()
 
@@ -671,8 +674,13 @@ def test_cross_room_conflict_error_is_clear_and_names_selected_room():
 
 
 @pytest.mark.asyncio
-async def test_public_unspecified_booking_sends_private_room_choices(monkeypatch):
-    configured = _settings()
+async def test_public_unspecified_booking_asks_for_room_in_same_thread(
+    tmp_path,
+    monkeypatch,
+):
+    configured = _settings(
+        SLACK_RECEIPTS_DB_PATH=str(tmp_path / "clarifications.db")
+    )
     sent = []
     _patch_executor(monkeypatch, configured)
     monkeypatch.setitem(
@@ -689,25 +697,98 @@ async def test_public_unspecified_booking_sends_private_room_choices(monkeypatch
         },
         user_id="UOWNER",
         channel_id="CPUBLIC",
+        thread_ts="111.000",
+        slack_team_id="TMLAI",
+        request_message_ts="111.000",
+    )
+
+    assert "Which room should I use" in result["message"]
+    assert "Reply in this thread" in result["message"]
+    assert "`big room` or `small room`" in result["message"]
+    assert sent == []
+    stored = clarification_module.get_meeting_room_clarification_store(
+        configured.SLACK_RECEIPTS_DB_PATH
+    ).find(
+        team_id="TMLAI",
+        channel_id="CPUBLIC",
+        thread_ts="111.000",
+    )
+    assert stored["owner_user_id"] == "UOWNER"
+    assert stored["status"] == "awaiting_choice"
+    assert stored["available_room_slugs"] == [
+        "big-meeting-room",
+        "small-meeting-room",
+    ]
+    assert [call[0] for call in FakeMeetingRoomClient.instances[0].calls] == ["rooms"]
+
+
+@pytest.mark.asyncio
+async def test_public_room_reply_sends_only_private_deterministic_preview(monkeypatch):
+    configured = _settings()
+    sent = []
+    _patch_executor(monkeypatch, configured)
+    monkeypatch.setitem(
+        SkillExecutor._deliver_meeting_room_response.__globals__,
+        "send_dm",
+        lambda user_id, message, **kwargs: (
+            sent.append((user_id, message, kwargs)) or {"ok": True}
+        ),
+    )
+
+    result = await SkillExecutor().complete_meeting_room_room_choice(
+        user_id="UOWNER",
+        channel_id="CPUBLIC",
+        room_slug="big-meeting-room",
+        starts_at="2026-08-25T14:00:00+10:00",
+        ends_at="2026-08-25T15:00:00+10:00",
+        booking_client_request_id="1409fd17-c84d-4774-af8a-7b847c16bd30",
     )
 
     assert result["message"] == "I've sent you a private reply about the Meeting Room."
     assert len(sent) == 1
-    blocks = sent[0][2]["blocks"]
-    buttons = blocks[1]["elements"]
-    assert [button["text"]["text"] for button in buttons] == [
-        "Small Meeting Room",
-        "Big Meeting Room",
+    assert sent[0][0] == "UOWNER"
+    assert "Big Meeting Room" in sent[0][1]
+    assert "2:00 PM to 3:00 PM" in sent[0][1]
+    confirm = sent[0][2]["blocks"][1]["elements"][0]
+    parsed = parse_action_value(confirm["value"], expected_action=BOOK_ACTION_ID)
+    assert parsed["client_request_id"] == "1409fd17-c84d-4774-af8a-7b847c16bd30"
+    assert [call[0] for call in FakeMeetingRoomClient.instances[0].calls] == [
+        "rooms",
+        "availability",
     ]
-    assert {button["action_id"] for button in buttons} == {CHOOSE_ROOM_ACTION_ID}
-    parsed = [
-        parse_action_value(button["value"], expected_action=CHOOSE_ROOM_ACTION_ID)
-        for button in buttons
-    ]
-    assert {row["owner_slack_user_id"] for row in parsed} == {"UOWNER"}
-    assert len({row["selection_id"] for row in parsed}) == 1
-    assert len({row["booking_client_request_id"] for row in parsed}) == 2
-    assert [call[0] for call in FakeMeetingRoomClient.instances[0].calls] == ["rooms"]
+
+
+@pytest.mark.asyncio
+async def test_public_room_prompt_fails_closed_when_state_cannot_persist(monkeypatch):
+    configured = _settings()
+    sent = []
+    _patch_executor(monkeypatch, configured)
+    monkeypatch.setitem(
+        SkillExecutor._execute_meeting_room_booking.__globals__,
+        "get_meeting_room_clarification_store",
+        lambda path: (_ for _ in ()).throw(RuntimeError("state unavailable")),
+    )
+    monkeypatch.setitem(
+        SkillExecutor._deliver_meeting_room_response.__globals__,
+        "send_dm",
+        lambda *args, **kwargs: sent.append((args, kwargs)) or {"ok": True},
+    )
+
+    result = await SkillExecutor().execute(
+        skill=SimpleNamespace(name="meeting-room-booking"),
+        text="book the meeting room tomorrow at 2pm",
+        user_id="UOWNER",
+        channel_id="CPUBLIC",
+        thread_ts="111.000",
+        param_overrides={"action": "book_meeting_room"},
+        slack_team_id="TMLAI",
+        current_message_ts="111.000",
+    )
+
+    assert result.success is False
+    assert "problem executing" in result.message
+    assert "Which room" not in result.message
+    assert sent == []
 
 
 def test_missing_channel_never_returns_private_meeting_room_details_inline():
