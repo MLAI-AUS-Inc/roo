@@ -15,7 +15,7 @@ routing:
     - {text: "what's my balance", action: balance}
     - {text: "flex my points", action: flex_points}
     - {text: "book me in for coworking tomorrow", action: book_coworking}
-    - {text: "book me in", action: book_coworking}
+    - {text: "book me in for 1pm today", action: book_coworking}
     - {text: "claim task ROO-12", action: claim_task}
     - {text: "how busy was the coworking space in may?", action: coworking_report}
     - {text: "give 10 points to @member for organising the meetup", action: award_points}
@@ -138,6 +138,11 @@ actions:
 # MLAI Points System Skill
 
 This skill enables Roo to interact with the MLAI Points System via API, allowing members to check their balance, book coworking days, browse open and assigned task queues, claim and submit structured tasks, and redeem rewards.
+
+Generic, resource-free booking language means coworking. `book`, `book me in`,
+and `book me in for 1pm today` must use `book_coworking`; ignore a supplied time
+because coworking is a full-day booking. Meeting-room booking requires the member
+to explicitly say `room` or `meeting room`.
 
 ## Capabilities
 

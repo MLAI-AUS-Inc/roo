@@ -44,6 +44,10 @@ actions:
 Use this skill only for the hourly MLAI meeting rooms. Coworking is a separate,
 full-day booking flow in `mlai-points`.
 
+A generic booking such as `book`, `book me in`, or `book me in for 1pm today`
+means coworking. Do not select this skill or ask coworking-versus-room questions
+unless the member explicitly says `room` or `meeting room`.
+
 ## Rules
 
 - Treat every date and time as Australia/Melbourne.
