@@ -8,6 +8,7 @@ import httpx
 from roo.clients.mlai_backend import MLAIBackendClient, MLAIBackendUnavailableError
 
 LINEAR_MEETING_CONTEXT_ENDPOINT = "/api/v1/integrations/linear/meeting-context"
+LINEAR_PROJECT_RESOLVE_ENDPOINT = "/api/v1/integrations/linear/projects/resolve"
 LINEAR_MEETING_ISSUES_ENDPOINT = "/api/v1/integrations/linear/issues"
 LINEAR_MEETING_PROJECT_UPDATES_ENDPOINT = "/api/v1/integrations/linear/project-updates"
 
@@ -113,6 +114,17 @@ class LinearMeetingActionsClient:
     async def list_recent_open_issues(self, limit: int = 100) -> list[dict[str, Any]]:
         context = await self._meeting_context()
         return _dict_list(context.get("recentIssues") or context.get("recent_issues"))
+
+    async def resolve_project(self, query: str) -> dict[str, Any]:
+        query = str(query or "").strip()
+        if not query:
+            raise ValueError("query is required")
+        return await self._request_json(
+            "GET",
+            LINEAR_PROJECT_RESOLVE_ENDPOINT,
+            params={"query": query},
+            timeout=45.0,
+        )
 
     async def get_project_sizing_context(self, project_id: str) -> dict[str, Any]:
         encoded_project_id = quote(str(project_id or "").strip(), safe="")
