@@ -343,6 +343,45 @@ jobs:
             })
             '
 
+            docker compose exec -T roo python -c '
+            import asyncio
+            import importlib.util
+            from pathlib import Path
+            from roo.skills.executor import SkillExecutor
+
+            module_path = Path("skills/linear_meeting_actions/client.py")
+            spec = importlib.util.spec_from_file_location("linear_meeting_diagnostics", module_path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+
+            async def diagnose_linear_projects():
+                projects = await module.LinearMeetingActionsClient().list_active_projects()
+                match = SkillExecutor()._match_linear_meeting_project(
+                    {}, projects, None, "[Studio] Studynash"
+                )
+                print({
+                    "active_project_count": len(projects),
+                    "study_nash_candidates": [
+                        {
+                            "id": project.get("id"),
+                            "name": project.get("name"),
+                            "slugId": project.get("slugId"),
+                        }
+                        for project in projects
+                        if "study" in str(project.get("name") or "").lower()
+                        or "nash" in str(project.get("name") or "").lower()
+                    ],
+                    "explicit_hint_match": {
+                        "id": (match.get("project") or {}).get("id"),
+                        "name": (match.get("project") or {}).get("name"),
+                        "confidence": match.get("confidence"),
+                        "reason": match.get("reason"),
+                    },
+                })
+
+            asyncio.run(diagnose_linear_projects())
+            '
+
             docker compose logs --since=6h --tail=10000 2>&1 \
               | grep -E 'Received Slack event|Slack private|Private message|ROUTING_DECISION|LINEAR_INFERENCE|LINEAR_MEETING_EXTRACTION|LINEAR_PROJECT_RESOLUTION|topup|checkout-options|Traceback|ERROR|Error|Exception|error_type|1785144941' \
               | sed -E 's#https://checkout\.stripe\.com/[^ ]+#https://checkout.stripe.com/[redacted]#g' \
