@@ -21,6 +21,10 @@ from .meeting_room_booking import (
     parse_action_value,
     room_choice_already_selected_message,
 )
+from .meeting_room_clarifications import (
+    PUBLIC_ROOM_CHOICE_ACTION_ID,
+    parse_public_room_choice_action_value,
+)
 
 
 DEFAULT_PROCESSING_LEASE_SECONDS = 90.0
@@ -56,11 +60,22 @@ def _canonical_action(
     action_id: str,
     action_value: str,
 ) -> tuple[str, str]:
-    parsed = parse_action_value(action_value, expected_action=action_id)
+    if action_id == PUBLIC_ROOM_CHOICE_ACTION_ID:
+        try:
+            parsed = parse_public_room_choice_action_value(action_value)
+        except ValueError as exc:
+            raise MeetingRoomInputError("invalid_action", str(exc)) from exc
+    else:
+        parsed = parse_action_value(action_value, expected_action=action_id)
     if action_id == BOOK_ACTION_ID:
         action_key = f"book:{parsed['client_request_id']}"
     elif action_id == CHOOSE_ROOM_ACTION_ID:
         action_key = f"choose:{parsed['selection_id']}"
+    elif action_id == PUBLIC_ROOM_CHOICE_ACTION_ID:
+        action_key = (
+            f"public_choose:{parsed['clarification_id']}:"
+            f"{parsed['request_message_ts']}"
+        )
     elif action_id == CANCEL_ACTION_ID:
         action_key = (
             f"cancel:{parsed['owner_slack_user_id']}:{parsed['booking_id']}"
@@ -218,7 +233,13 @@ class MeetingRoomActionStore:
                 "invalid_actor",
                 "Only the member who requested this action can use it.",
             )
-        if not channel_id.startswith("D"):
+        is_public_choice = action_id == PUBLIC_ROOM_CHOICE_ACTION_ID
+        if is_public_choice and channel_id.startswith("D"):
+            raise MeetingRoomInputError(
+                "invalid_channel",
+                "This public room choice is not valid. Ask Roo to start again.",
+            )
+        if not is_public_choice and not channel_id.startswith("D"):
             raise MeetingRoomInputError(
                 "invalid_channel",
                 "Meeting Room actions must be completed in your private Roo DM.",
@@ -280,14 +301,16 @@ class MeetingRoomActionStore:
                     raise MeetingRoomInputError(
                         (
                             "room_already_selected"
-                            if action_id == CHOOSE_ROOM_ACTION_ID
+                            if action_id
+                            in {CHOOSE_ROOM_ACTION_ID, PUBLIC_ROOM_CHOICE_ACTION_ID}
                             else "invalid_action"
                         ),
                         (
                             room_choice_already_selected_message(
                                 json.loads(existing["action_value"])
                             )
-                            if action_id == CHOOSE_ROOM_ACTION_ID
+                            if action_id
+                            in {CHOOSE_ROOM_ACTION_ID, PUBLIC_ROOM_CHOICE_ACTION_ID}
                             else "This action conflicts with an earlier request."
                         ),
                     )

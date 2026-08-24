@@ -36,6 +36,10 @@ from roo.meeting_room_booking import (
     room_slug_from_text,
     resolve_interval,
 )
+from roo.meeting_room_clarifications import (
+    PUBLIC_ROOM_CHOICE_ACTION_ID,
+    parse_public_room_choice_action_value,
+)
 from roo.skills.executor import SkillExecutor
 from roo.skills.loader import load_skill_from_directory
 from roo.slack_security import get_slack_receipt_store
@@ -753,8 +757,27 @@ async def test_public_unspecified_booking_asks_for_room_in_same_thread(
     )
 
     assert "Which room should I use" in result["message"]
-    assert "Reply in this thread" in result["message"]
-    assert "`big room` or `small room`" in result["message"]
+    assert "buttons expire in 10 minutes" in result["message"]
+    assert "1:00" not in result["message"]
+    buttons = result["blocks"][1]["elements"]
+    assert [button["text"]["text"] for button in buttons] == [
+        "Big Meeting Room",
+        "Small Meeting Room",
+    ]
+    assert all(
+        button["action_id"] == PUBLIC_ROOM_CHOICE_ACTION_ID
+        for button in buttons
+    )
+    button_values = [
+        parse_public_room_choice_action_value(button["value"])
+        for button in buttons
+    ]
+    assert [value["room_slug"] for value in button_values] == [
+        "big-meeting-room",
+        "small-meeting-room",
+    ]
+    assert all("starts_at" not in button["value"] for button in buttons)
+    assert all("ends_at" not in button["value"] for button in buttons)
     assert sent == []
     stored = clarification_module.get_meeting_room_clarification_store(
         configured.SLACK_RECEIPTS_DB_PATH
@@ -765,6 +788,7 @@ async def test_public_unspecified_booking_asks_for_room_in_same_thread(
     )
     assert stored["owner_user_id"] == "UOWNER"
     assert stored["status"] == "awaiting_choice"
+    assert stored["choice_mode"] == "buttons"
     assert stored["available_room_slugs"] == [
         "big-meeting-room",
         "small-meeting-room",
@@ -801,6 +825,7 @@ async def test_public_room_reply_sends_only_private_deterministic_preview(monkey
     assert sent[0][0] == "UOWNER"
     assert "Big Meeting Room" in sent[0][1]
     assert "2:00 PM to 3:00 PM" in sent[0][1]
+    assert sent[0][2]["client_msg_id"] == "1409fd17-c84d-4774-af8a-7b847c16bd30"
     confirm = sent[0][2]["blocks"][1]["elements"][0]
     parsed = parse_action_value(confirm["value"], expected_action=BOOK_ACTION_ID)
     assert parsed["client_request_id"] == "1409fd17-c84d-4774-af8a-7b847c16bd30"
@@ -808,6 +833,53 @@ async def test_public_room_reply_sends_only_private_deterministic_preview(monkey
         "rooms",
         "availability",
     ]
+
+
+@pytest.mark.asyncio
+async def test_public_room_preview_recovers_duplicate_deterministic_dm(monkeypatch):
+    configured = _settings()
+    _patch_executor(monkeypatch, configured)
+
+    class DuplicateMessageError(RuntimeError):
+        response = {"error": "duplicate_message"}
+
+    monkeypatch.setitem(
+        SkillExecutor._deliver_meeting_room_response.__globals__,
+        "send_dm",
+        lambda *args, **kwargs: (_ for _ in ()).throw(DuplicateMessageError()),
+    )
+
+    result = await SkillExecutor().complete_meeting_room_room_choice(
+        user_id="UOWNER",
+        channel_id="CPUBLIC",
+        room_slug="big-meeting-room",
+        starts_at="2026-08-25T14:00:00+10:00",
+        ends_at="2026-08-25T15:00:00+10:00",
+        booking_client_request_id="1409fd17-c84d-4774-af8a-7b847c16bd30",
+    )
+
+    assert result["message"] == "I've sent you a private reply about the Meeting Room."
+
+
+@pytest.mark.asyncio
+async def test_public_room_preview_surfaces_uncertain_dm_for_durable_retry(monkeypatch):
+    configured = _settings()
+    _patch_executor(monkeypatch, configured)
+    monkeypatch.setitem(
+        SkillExecutor._deliver_meeting_room_response.__globals__,
+        "send_dm",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("response lost")),
+    )
+
+    with pytest.raises(RuntimeError, match="response lost"):
+        await SkillExecutor().complete_meeting_room_room_choice(
+            user_id="UOWNER",
+            channel_id="CPUBLIC",
+            room_slug="big-meeting-room",
+            starts_at="2026-08-25T14:00:00+10:00",
+            ends_at="2026-08-25T15:00:00+10:00",
+            booking_client_request_id="1409fd17-c84d-4774-af8a-7b847c16bd30",
+        )
 
 
 @pytest.mark.asyncio

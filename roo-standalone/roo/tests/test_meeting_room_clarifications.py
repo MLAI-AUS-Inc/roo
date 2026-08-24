@@ -1,4 +1,6 @@
 import asyncio
+import json
+import sqlite3
 import sys
 import time
 from datetime import datetime, timedelta
@@ -14,9 +16,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from roo import main as main_module
 from roo.backend_identity import get_backend_actor_context
 from roo.config import Settings
+from roo.meeting_room_booking import MeetingRoomInputError
 from roo.meeting_room_clarifications import (
+    PUBLIC_ROOM_CHOICE_ACTION_ID,
     MeetingRoomClarificationStore,
+    build_public_room_choice_action_value,
     get_meeting_room_clarification_store,
+    parse_public_room_choice_action_value,
+    public_room_choice_prompt,
     room_choice_from_reply,
 )
 
@@ -40,7 +47,7 @@ def _settings(tmp_path, **overrides):
     return Settings(**values)
 
 
-def _record_prompt(store, *, now=None, ttl_seconds=600):
+def _record_prompt(store, *, now=None, ttl_seconds=600, choice_mode="text"):
     starts_at = datetime(2026, 8, 25, 14, tzinfo=MELBOURNE)
     return store.record_prompt(
         team_id="TMLAI",
@@ -51,6 +58,7 @@ def _record_prompt(store, *, now=None, ttl_seconds=600):
         starts_at=starts_at.isoformat(),
         ends_at=(starts_at + timedelta(hours=1)).isoformat(),
         available_room_slugs=["small-meeting-room", "big-meeting-room"],
+        choice_mode=choice_mode,
         ttl_seconds=ttl_seconds,
         now=now,
     )
@@ -77,6 +85,119 @@ def reset_store_cache():
 )
 def test_room_choice_reply_parser_requires_one_unambiguous_room(reply, expected):
     assert room_choice_from_reply(reply) == expected
+
+
+def test_public_room_choice_buttons_bind_state_without_private_details(tmp_path):
+    store = MeetingRoomClarificationStore(tmp_path / "state.db")
+    clarification = _record_prompt(store, choice_mode="buttons")
+
+    prompt = public_room_choice_prompt(
+        clarification,
+        [
+            {"slug": "small-meeting-room", "name": "Small Meeting Room"},
+            {"slug": "big-meeting-room", "name": "Big Meeting Room"},
+        ],
+    )
+
+    buttons = prompt["blocks"][1]["elements"]
+    assert [button["text"]["text"] for button in buttons] == [
+        "Big Meeting Room",
+        "Small Meeting Room",
+    ]
+    assert all(button["action_id"] == PUBLIC_ROOM_CHOICE_ACTION_ID for button in buttons)
+    parsed = [
+        parse_public_room_choice_action_value(button["value"])
+        for button in buttons
+    ]
+    assert {value["room_slug"] for value in parsed} == {
+        "big-meeting-room",
+        "small-meeting-room",
+    }
+    assert all(value["clarification_id"] == clarification["id"] for value in parsed)
+    rendered = str(prompt)
+    assert clarification["starts_at"] not in rendered
+    assert clarification["ends_at"] not in rendered
+    assert "2:00" not in rendered
+
+
+def test_existing_clarification_schema_adds_backward_compatible_choice_mode(tmp_path):
+    database_path = tmp_path / "state.db"
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE meeting_room_clarifications (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                status TEXT NOT NULL,
+                expires_at REAL NOT NULL
+            )
+            """
+        )
+
+    store = MeetingRoomClarificationStore(database_path)
+    store._initialise()
+
+    with sqlite3.connect(database_path) as connection:
+        columns = {
+            str(row[1]): str(row[4])
+            for row in connection.execute(
+                "PRAGMA table_info(meeting_room_clarifications)"
+            ).fetchall()
+        }
+    assert columns["choice_mode"] == "'text'"
+
+
+def test_public_room_choice_parser_rejects_tampered_binding(tmp_path):
+    store = MeetingRoomClarificationStore(tmp_path / "state.db")
+    clarification = _record_prompt(store, choice_mode="buttons")
+    payload = json.loads(
+        build_public_room_choice_action_value(
+            clarification,
+            room_slug="big-meeting-room",
+        )
+    )
+    payload["clarification_id"] = "not-an-id"
+
+    with pytest.raises(ValueError, match="not valid"):
+        parse_public_room_choice_action_value(json.dumps(payload))
+
+
+@pytest.mark.asyncio
+async def test_button_prompt_cannot_be_claimed_by_legacy_text_reply(
+    tmp_path,
+    monkeypatch,
+):
+    configured = _settings(tmp_path)
+    store = get_meeting_room_clarification_store(
+        configured.SLACK_RECEIPTS_DB_PATH
+    )
+    _record_prompt(store, choice_mode="buttons")
+    monkeypatch.setattr(main_module, "get_settings", lambda: configured)
+    posted = []
+    monkeypatch.setattr(
+        main_module,
+        "post_message",
+        lambda **kwargs: posted.append(kwargs) or {"ok": True},
+    )
+
+    handled = await main_module._handle_meeting_room_text_choice(
+        {
+            "user": "UOWNER",
+            "channel": "CROOMS",
+            "thread_ts": "111.000",
+            "ts": "112.000",
+            "text": "big room",
+        },
+        slack_team_id="TMLAI",
+    )
+
+    assert handled is True
+    assert posted[0]["thread_ts"] == "111.000"
+    assert "button above" in posted[0]["text"]
+    assert store.find(
+        team_id="TMLAI",
+        channel_id="CROOMS",
+        thread_ts="111.000",
+    )["status"] == "awaiting_choice"
 
 
 def test_clarification_survives_restart_and_first_room_choice_wins(tmp_path):
@@ -137,6 +258,131 @@ def test_clarification_rejects_another_actor_and_expires(tmp_path):
     assert wrong_actor["disposition"] == "wrong_owner"
     assert expired["disposition"] == "expired"
     assert expired["record"]["status"] == "expired"
+
+
+def test_button_claim_rejects_stale_request_binding(tmp_path):
+    store = MeetingRoomClarificationStore(tmp_path / "state.db")
+    clarification = _record_prompt(store, now=1000)
+
+    stale = store.claim_choice(
+        team_id="TMLAI",
+        channel_id="CROOMS",
+        thread_ts="111.000",
+        actor_user_id="UOWNER",
+        room_slug="big-meeting-room",
+        choice_message_ts="button:1",
+        expected_record_id=clarification["id"],
+        expected_request_message_ts="999.000",
+        now=1001,
+    )
+
+    assert stale["disposition"] == "stale"
+    assert store.find(
+        team_id="TMLAI",
+        channel_id="CROOMS",
+        thread_ts="111.000",
+        now=1001,
+    )["status"] == "awaiting_choice"
+
+
+def test_claimed_button_remains_recoverable_after_choice_ttl(tmp_path):
+    store = MeetingRoomClarificationStore(tmp_path / "state.db")
+    _record_prompt(store, now=1000, ttl_seconds=10)
+    first = store.claim_choice(
+        team_id="TMLAI",
+        channel_id="CROOMS",
+        thread_ts="111.000",
+        actor_user_id="UOWNER",
+        room_slug="big-meeting-room",
+        choice_message_ts="button:1",
+        lease_seconds=1,
+        now=1005,
+    )
+
+    recovered = store.claim_choice(
+        team_id="TMLAI",
+        channel_id="CROOMS",
+        thread_ts="111.000",
+        actor_user_id="UOWNER",
+        room_slug="big-meeting-room",
+        choice_message_ts="button:1",
+        lease_seconds=1,
+        now=1020,
+    )
+
+    assert first["disposition"] == "claimed"
+    assert recovered["disposition"] == "claimed"
+    assert recovered["record"]["booking_client_request_id"] == first["record"][
+        "booking_client_request_id"
+    ]
+
+
+def test_new_prompt_cannot_overwrite_a_claimed_room_choice(tmp_path):
+    store = MeetingRoomClarificationStore(tmp_path / "state.db")
+    original = _record_prompt(store, now=1000)
+    store.claim_choice(
+        team_id="TMLAI",
+        channel_id="CROOMS",
+        thread_ts="111.000",
+        actor_user_id="UOWNER",
+        room_slug="big-meeting-room",
+        choice_message_ts="button:1",
+        now=1001,
+    )
+    starts_at = datetime(2026, 8, 26, 16, tzinfo=MELBOURNE)
+
+    with pytest.raises(MeetingRoomInputError) as raised:
+        store.record_prompt(
+            team_id="TMLAI",
+            channel_id="CROOMS",
+            thread_ts="111.000",
+            request_message_ts="222.000",
+            owner_user_id="UOWNER",
+            starts_at=starts_at.isoformat(),
+            ends_at=(starts_at + timedelta(hours=1)).isoformat(),
+            available_room_slugs=["small-meeting-room", "big-meeting-room"],
+            now=1002,
+        )
+
+    assert raised.value.code == "room_choice_processing"
+    persisted = store.find(
+        team_id="TMLAI",
+        channel_id="CROOMS",
+        thread_ts="111.000",
+        now=1002,
+    )
+    assert persisted["request_message_ts"] == original["request_message_ts"]
+    assert persisted["starts_at"] == original["starts_at"]
+
+
+def test_abandoned_choice_does_not_block_thread_forever(tmp_path):
+    store = MeetingRoomClarificationStore(tmp_path / "state.db")
+    _record_prompt(store, now=1000)
+    store.claim_choice(
+        team_id="TMLAI",
+        channel_id="CROOMS",
+        thread_ts="111.000",
+        actor_user_id="UOWNER",
+        room_slug="big-meeting-room",
+        choice_message_ts="button:1",
+        now=1001,
+    )
+    starts_at = datetime(2026, 8, 26, 16, tzinfo=MELBOURNE)
+
+    replacement = store.record_prompt(
+        team_id="TMLAI",
+        channel_id="CROOMS",
+        thread_ts="111.000",
+        request_message_ts="222.000",
+        owner_user_id="UOWNER",
+        starts_at=starts_at.isoformat(),
+        ends_at=(starts_at + timedelta(hours=1)).isoformat(),
+        available_room_slugs=["small-meeting-room", "big-meeting-room"],
+        now=1001 + (24 * 60 * 60) + 1,
+    )
+
+    assert replacement["status"] == "awaiting_choice"
+    assert replacement["request_message_ts"] == "222.000"
 
 
 def test_two_requesters_can_clarify_independently_in_one_thread(tmp_path):

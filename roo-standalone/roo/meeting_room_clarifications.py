@@ -16,12 +16,18 @@ from pathlib import Path
 from typing import Any, Optional
 from uuid import uuid4
 
-from .meeting_room_booking import ROOM_NAMES, parse_backend_timestamp
+from .meeting_room_booking import (
+    ROOM_NAMES,
+    MeetingRoomInputError,
+    parse_backend_timestamp,
+)
 
 
+PUBLIC_ROOM_CHOICE_ACTION_ID = "meeting_room_choose_room_public"
 DEFAULT_CHOICE_TTL_SECONDS = 10 * 60
 DEFAULT_PROCESSING_LEASE_SECONDS = 60.0
 TERMINAL_RETENTION_SECONDS = 24 * 60 * 60
+MAX_PROCESSING_AGE_SECONDS = 24 * 60 * 60
 
 
 def room_choice_from_reply(text: str) -> Optional[str]:
@@ -48,6 +54,111 @@ def room_choice_from_reply(text: str) -> Optional[str]:
         if match.group("size") == "small"
         else "big-meeting-room"
     )
+
+
+def build_public_room_choice_action_value(
+    clarification: dict[str, Any],
+    *,
+    room_slug: str,
+) -> str:
+    """Bind one public button to the exact persisted clarification request."""
+
+    if str(clarification.get("choice_mode") or "") != "buttons":
+        raise ValueError("clarification is not configured for public buttons")
+    if room_slug not in set(clarification.get("available_room_slugs") or []):
+        raise ValueError("room_slug is not available for this clarification")
+    payload = {
+        "clarification_id": int(clarification["id"]),
+        "owner_slack_user_id": str(clarification["owner_user_id"]),
+        "request_message_ts": str(clarification["request_message_ts"]),
+        "room_slug": room_slug,
+        "slack_team_id": str(clarification["team_id"]),
+        "thread_ts": str(clarification["thread_ts"]),
+    }
+    return json.dumps(payload, separators=(",", ":"), sort_keys=True)
+
+
+def parse_public_room_choice_action_value(raw_value: Any) -> dict[str, Any]:
+    try:
+        payload = json.loads(str(raw_value or ""))
+    except (TypeError, json.JSONDecodeError):
+        raise ValueError("This room choice is not valid. Ask Roo to start again.")
+    if not isinstance(payload, dict):
+        raise ValueError("This room choice is not valid. Ask Roo to start again.")
+    try:
+        clarification_id = int(payload.get("clarification_id"))
+    except (TypeError, ValueError):
+        clarification_id = 0
+    owner = str(payload.get("owner_slack_user_id") or "").strip()
+    team_id = str(payload.get("slack_team_id") or "").strip()
+    thread_ts = str(payload.get("thread_ts") or "").strip()
+    request_message_ts = str(payload.get("request_message_ts") or "").strip()
+    room_slug = str(payload.get("room_slug") or "").strip()
+    if (
+        clarification_id <= 0
+        or not re.fullmatch(r"[A-Z0-9]+", owner)
+        or not re.fullmatch(r"T[A-Z0-9]+", team_id)
+        or not re.fullmatch(r"\d+(?:\.\d+)?", thread_ts)
+        or not re.fullmatch(r"\d+(?:\.\d+)?", request_message_ts)
+        or room_slug not in ROOM_NAMES
+    ):
+        raise ValueError("This room choice is not valid. Ask Roo to start again.")
+    return {
+        "clarification_id": clarification_id,
+        "owner_slack_user_id": owner,
+        "request_message_ts": request_message_ts,
+        "room_slug": room_slug,
+        "slack_team_id": team_id,
+        "thread_ts": thread_ts,
+    }
+
+
+def public_room_choice_prompt(
+    clarification: dict[str, Any],
+    rooms: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Build a public, privacy-safe room prompt backed by durable state."""
+
+    available = set(clarification.get("available_room_slugs") or [])
+    choices = [
+        room
+        for room in rooms
+        if str(room.get("slug") or "") in available
+        and str(room.get("slug") or "") in ROOM_NAMES
+    ]
+    if not choices:
+        raise ValueError("No supported rooms are available for this clarification")
+    choices.sort(key=lambda room: 0 if room.get("slug") == "big-meeting-room" else 1)
+    message = (
+        "Which room should I use? Only the person who requested this booking "
+        "can choose. These buttons expire in 10 minutes."
+    )
+    buttons = [
+        {
+            "type": "button",
+            "action_id": PUBLIC_ROOM_CHOICE_ACTION_ID,
+            "text": {
+                "type": "plain_text",
+                "text": ROOM_NAMES[str(room["slug"])],
+            },
+            "value": build_public_room_choice_action_value(
+                clarification,
+                room_slug=str(room["slug"]),
+            ),
+        }
+        for room in choices
+    ]
+    return {
+        "message": message,
+        "blocks": [
+            {"type": "section", "text": {"type": "mrkdwn", "text": message}},
+            {
+                "type": "actions",
+                "block_id": f"meeting_room_public_choice_{clarification['id']}",
+                "elements": buttons,
+            },
+        ],
+    }
 
 
 class MeetingRoomClarificationStore:
@@ -90,6 +201,7 @@ class MeetingRoomClarificationStore:
                         ends_at TEXT NOT NULL,
                         target_user_id TEXT,
                         available_room_slugs TEXT NOT NULL,
+                        choice_mode TEXT NOT NULL DEFAULT 'text',
                         status TEXT NOT NULL,
                         selected_room_slug TEXT,
                         choice_message_ts TEXT,
@@ -109,6 +221,19 @@ class MeetingRoomClarificationStore:
                     ON meeting_room_clarifications (status, expires_at)
                     """
                 )
+                columns = {
+                    str(row[1])
+                    for row in connection.execute(
+                        "PRAGMA table_info(meeting_room_clarifications)"
+                    ).fetchall()
+                }
+                if "choice_mode" not in columns:
+                    connection.execute(
+                        """
+                        ALTER TABLE meeting_room_clarifications
+                        ADD COLUMN choice_mode TEXT NOT NULL DEFAULT 'text'
+                        """
+                    )
                 connection.commit()
             self._initialised = True
 
@@ -137,6 +262,7 @@ class MeetingRoomClarificationStore:
         ends_at: str,
         available_room_slugs: list[str],
         target_user_id: Optional[str] = None,
+        choice_mode: str = "text",
         ttl_seconds: int = DEFAULT_CHOICE_TTL_SECONDS,
         now: Optional[float] = None,
     ) -> dict[str, Any]:
@@ -164,6 +290,9 @@ class MeetingRoomClarificationStore:
             raise ValueError("target_user_id must be a Slack user ID")
         if ttl_seconds <= 0:
             raise ValueError("ttl_seconds must be positive")
+        normalized_choice_mode = str(choice_mode or "").strip().lower()
+        if normalized_choice_mode not in {"text", "buttons"}:
+            raise ValueError("choice_mode must be text or buttons")
 
         parsed_start = parse_backend_timestamp(starts_at)
         parsed_end = parse_backend_timestamp(ends_at)
@@ -202,14 +331,25 @@ class MeetingRoomClarificationStore:
             if existing is not None and str(existing["request_message_ts"]) == cleaned_request:
                 connection.commit()
                 return self._row(existing) or {}
+            if (
+                existing is not None
+                and str(existing["status"]) == "processing"
+                and current_time - float(existing["updated_at"])
+                < MAX_PROCESSING_AGE_SECONDS
+            ):
+                connection.rollback()
+                raise MeetingRoomInputError(
+                    "room_choice_processing",
+                    "I'm already handling your first room choice in this thread. Check your Roo DM.",
+                )
             connection.execute(
                 """
                 INSERT INTO meeting_room_clarifications (
                     team_id, channel_id, thread_ts, request_message_ts,
                     owner_user_id, starts_at, ends_at, target_user_id,
-                    available_room_slugs, status, created_at, updated_at,
+                    available_room_slugs, choice_mode, status, created_at, updated_at,
                     expires_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'awaiting_choice', ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'awaiting_choice', ?, ?, ?)
                 ON CONFLICT(team_id, channel_id, thread_ts, owner_user_id) DO UPDATE SET
                     request_message_ts = excluded.request_message_ts,
                     owner_user_id = excluded.owner_user_id,
@@ -217,6 +357,7 @@ class MeetingRoomClarificationStore:
                     ends_at = excluded.ends_at,
                     target_user_id = excluded.target_user_id,
                     available_room_slugs = excluded.available_room_slugs,
+                    choice_mode = excluded.choice_mode,
                     status = 'awaiting_choice',
                     selected_room_slug = NULL,
                     choice_message_ts = NULL,
@@ -237,6 +378,7 @@ class MeetingRoomClarificationStore:
                     parsed_end.isoformat(),
                     target or None,
                     json.dumps(supported_rooms, separators=(",", ":")),
+                    normalized_choice_mode,
                     current_time,
                     current_time,
                     current_time + ttl_seconds,
@@ -282,7 +424,7 @@ class MeetingRoomClarificationStore:
             row = connection.execute(query, parameters).fetchone()
             if (
                 row is not None
-                and row["status"] in {"awaiting_choice", "processing"}
+                and row["status"] == "awaiting_choice"
                 and float(row["expires_at"]) <= current_time
             ):
                 connection.execute("BEGIN IMMEDIATE")
@@ -310,6 +452,8 @@ class MeetingRoomClarificationStore:
         actor_user_id: str,
         room_slug: str,
         choice_message_ts: str,
+        expected_record_id: Optional[int] = None,
+        expected_request_message_ts: Optional[str] = None,
         lease_seconds: float = DEFAULT_PROCESSING_LEASE_SECONDS,
         now: Optional[float] = None,
     ) -> dict[str, Any]:
@@ -351,6 +495,16 @@ class MeetingRoomClarificationStore:
             if row is None:
                 connection.commit()
                 return {"disposition": "missing"}
+            if expected_record_id is not None and int(row["id"]) != int(
+                expected_record_id
+            ):
+                connection.commit()
+                return {"disposition": "stale", "record": self._row(row)}
+            if expected_request_message_ts is not None and str(
+                row["request_message_ts"]
+            ) != str(expected_request_message_ts):
+                connection.commit()
+                return {"disposition": "stale", "record": self._row(row)}
             status = str(row["status"])
             if status == "completed":
                 connection.commit()
@@ -364,7 +518,10 @@ class MeetingRoomClarificationStore:
             if status == "failed":
                 connection.commit()
                 return {"disposition": "failed", "record": self._row(row)}
-            if status == "expired" or float(row["expires_at"]) <= current_time:
+            if status == "expired" or (
+                status == "awaiting_choice"
+                and float(row["expires_at"]) <= current_time
+            ):
                 connection.execute(
                     """
                     UPDATE meeting_room_clarifications
