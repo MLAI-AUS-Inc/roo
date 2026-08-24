@@ -47,12 +47,15 @@ full-day booking flow in `mlai-points`.
 ## Rules
 
 - Treat every date and time as Australia/Melbourne.
+- Treat `tomorow`, `tommorow`, and `tommorrow` as `tomorrow`.
+- If an availability check or booking gives no date, use the next Melbourne
+  calendar day. If it gives a vague or invalid date, ask for an explicit date.
 - The active choices are `Small Meeting Room` and `Big Meeting Room`. Treat
   `large room` as the Big Meeting Room.
 - Derive an explicit room only from the member's message, never from a model-only
   parameter. If availability does not name a room, show both. If a booking does
   not name a room, privately ask with room-choice buttons.
-- Ask for a missing date or start time. Do not invent one.
+- Ask for a missing booking start time. Do not invent one.
 - If the member gives a start but no duration or end, use one hour.
 - Bookings last 1 to 2 hours and use 30-minute increments. Accept phrases such
   as `an hour and a half`, `1.5 hours`, and `90 minutes`.

@@ -171,6 +171,68 @@ def test_interval_parser_uses_melbourne_time_and_one_hour_default():
     assert ends_at == datetime(2026, 8, 12, 15, tzinfo=MELBOURNE)
 
 
+@pytest.mark.parametrize("alias", ("tomorow", "tommorow", "tommorrow"))
+def test_interval_parser_accepts_common_tomorrow_misspellings(alias):
+    now = datetime(2026, 8, 11, 9, tzinfo=MELBOURNE)
+
+    starts_at, ends_at = resolve_interval(f"{alias} at 1pm", now=now)
+
+    assert starts_at == datetime(2026, 8, 12, 13, tzinfo=MELBOURNE)
+    assert ends_at == datetime(2026, 8, 12, 14, tzinfo=MELBOURNE)
+
+
+def test_interval_parser_accepts_misspelled_tomorrow_model_parameter():
+    now = datetime(2026, 8, 11, 9, tzinfo=MELBOURNE)
+
+    starts_at, ends_at = resolve_interval(
+        "at 1pm",
+        {"date": "tommorrow"},
+        now=now,
+    )
+
+    assert starts_at == datetime(2026, 8, 12, 13, tzinfo=MELBOURNE)
+    assert ends_at == datetime(2026, 8, 12, 14, tzinfo=MELBOURNE)
+
+
+def test_interval_parser_defaults_missing_date_to_next_melbourne_day():
+    now = datetime(2026, 8, 11, 9, tzinfo=MELBOURNE)
+
+    starts_at, ends_at = resolve_interval("at 3pm", now=now)
+
+    assert starts_at == datetime(2026, 8, 12, 15, tzinfo=MELBOURNE)
+    assert ends_at == datetime(2026, 8, 12, 16, tzinfo=MELBOURNE)
+
+
+def test_missing_date_default_uses_melbourne_calendar_at_day_boundary():
+    now = datetime(2026, 8, 11, 23, 55, tzinfo=MELBOURNE)
+
+    starts_at, ends_at = resolve_interval("at 12:30am", now=now)
+
+    assert starts_at == datetime(2026, 8, 12, 0, 30, tzinfo=MELBOURNE)
+    assert ends_at == datetime(2026, 8, 12, 1, 30, tzinfo=MELBOURNE)
+
+
+def test_interval_parser_does_not_fuzz_unrelated_date_words():
+    with pytest.raises(MeetingRoomInputError) as raised:
+        resolve_interval(
+            "tomorrowish at 1pm",
+            now=datetime(2026, 8, 11, 9, tzinfo=MELBOURNE),
+        )
+
+    assert raised.value.code == "invalid_date"
+
+
+@pytest.mark.parametrize("text", ("next month at 1pm", "someday at 1pm"))
+def test_interval_parser_rejects_vague_dates_instead_of_defaulting(text):
+    with pytest.raises(MeetingRoomInputError) as raised:
+        resolve_interval(
+            text,
+            now=datetime(2026, 8, 11, 9, tzinfo=MELBOURNE),
+        )
+
+    assert raised.value.code == "invalid_date"
+
+
 @pytest.mark.parametrize(
     ("text", "expected"),
     (
@@ -437,7 +499,6 @@ def test_interval_parser_rejects_ambiguous_daylight_saving_hour():
 @pytest.mark.parametrize(
     ("text", "code"),
     (
-        ("book at 2pm", "missing_date"),
         ("book tomorrow", "missing_start_time"),
         ("book tomorrow at 2", "ambiguous_time"),
         ("book tomorrow at 2:15pm", "invalid_time"),
@@ -724,6 +785,116 @@ async def test_bare_24_hour_availability_request_checks_exact_interval(monkeypat
     assert datetime.fromisoformat(call[2]["starts_at"]).hour == 14
     assert datetime.fromisoformat(call[2]["ends_at"]).hour == 15
     assert "is available" in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_misspelled_tomorrow_clarification_checks_requested_time(monkeypatch):
+    configured = _settings()
+    _patch_executor(monkeypatch, configured)
+
+    result = await SkillExecutor()._execute_meeting_room_booking(
+        text="tommorrow at 1pm",
+        params={"action": "check_room_availability"},
+        user_id="UOWNER",
+        channel_id="DOWNER",
+    )
+
+    calls = FakeMeetingRoomClient.instances[0].calls
+    assert [call[0] for call in calls] == ["rooms", "availability", "availability"]
+    starts_at = datetime.fromisoformat(calls[1][2]["starts_at"])
+    ends_at = datetime.fromisoformat(calls[1][2]["ends_at"])
+    assert starts_at.hour == 13
+    assert ends_at.hour == 14
+    assert "What date should I check?" not in result["message"]
+    assert "is available" in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_availability_without_date_defaults_to_next_day(monkeypatch):
+    configured = _settings()
+    _patch_executor(monkeypatch, configured)
+    monkeypatch.setattr(
+        room_module,
+        "get_current_datetime",
+        lambda: datetime(2026, 8, 11, 9, tzinfo=MELBOURNE),
+    )
+
+    result = await SkillExecutor()._execute_meeting_room_booking(
+        text="is the meeting room free at 3pm",
+        params={"action": "check_room_availability"},
+        user_id="UOWNER",
+        channel_id="DOWNER",
+    )
+
+    calls = FakeMeetingRoomClient.instances[0].calls
+    starts_at = datetime.fromisoformat(calls[1][2]["starts_at"])
+    assert starts_at == datetime(2026, 8, 12, 15, tzinfo=MELBOURNE)
+    assert "What date should I check?" not in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_booking_without_date_defaults_to_next_day(monkeypatch):
+    configured = _settings()
+    _patch_executor(monkeypatch, configured)
+    monkeypatch.setattr(
+        room_module,
+        "get_current_datetime",
+        lambda: datetime(2026, 8, 11, 9, tzinfo=MELBOURNE),
+    )
+
+    result = await SkillExecutor()._execute_meeting_room_booking(
+        text="book the big meeting room for me at 3pm",
+        params={"action": "book_meeting_room"},
+        user_id="UOWNER",
+        channel_id="DOWNER",
+    )
+
+    calls = FakeMeetingRoomClient.instances[0].calls
+    starts_at = datetime.fromisoformat(calls[1][2]["starts_at"])
+    assert starts_at == datetime(2026, 8, 12, 15, tzinfo=MELBOURNE)
+    assert "Big Meeting Room" in result["message"]
+    assert result["blocks"][1]["elements"][0]["text"]["text"] == "Confirm booking"
+
+
+@pytest.mark.asyncio
+async def test_booking_without_date_or_time_asks_only_for_time(monkeypatch):
+    configured = _settings()
+    _patch_executor(monkeypatch, configured)
+
+    result = await SkillExecutor()._execute_meeting_room_booking(
+        text="book meeting room",
+        params={"action": "book_meeting_room"},
+        user_id="UOWNER",
+        channel_id="DOWNER",
+    )
+
+    assert result["message"] == "What time should the booking start? Try `2pm`."
+    assert "What date should I check?" not in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_bare_misspelled_tomorrow_clarification_checks_the_day(monkeypatch):
+    configured = _settings()
+    _patch_executor(monkeypatch, configured)
+    monkeypatch.setattr(
+        room_module,
+        "get_current_datetime",
+        lambda: datetime(2026, 8, 11, 9, tzinfo=MELBOURNE),
+    )
+
+    result = await SkillExecutor()._execute_meeting_room_booking(
+        text="tommorrow",
+        params={"action": "check_room_availability"},
+        user_id="UOWNER",
+        channel_id="DOWNER",
+    )
+
+    calls = FakeMeetingRoomClient.instances[0].calls
+    assert [call[0] for call in calls] == ["rooms", "availability", "availability"]
+    assert calls[1][2]["date"] == "2026-08-12"
+    assert "starts_at" not in calls[1][2]
+    assert "What date should I check?" not in result["message"]
+    assert "no bookings currently shown" in result["message"]
 
 
 @pytest.mark.asyncio
