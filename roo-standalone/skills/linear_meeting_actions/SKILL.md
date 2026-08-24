@@ -59,6 +59,7 @@ This skill turns pasted Slack meeting transcripts, summaries, supported Slack fi
 - Use the latest Linear project update and recent project issues as context for concise PDF/transcript-derived project updates.
 - Download and parse `.pdf`, `.docx`, `.txt`, `.md`, `.csv`, `.png`, `.jpg`, `.jpeg`, `.webp`, and non-animated `.gif` files from the current Slack thread.
 - Inspect Linear teams, users, active projects, project members, labels, and recent open issues.
+- Resolve an explicitly named destination against the full Linear project catalogue when it is absent from the active-project snapshot.
 - Assign new issues to the best matching Linear user.
 - Attach new issues to the best matching Linear project and team.
 - Avoid likely duplicate open issues and make retries idempotent from Slack source evidence.
@@ -94,7 +95,7 @@ This skill turns pasted Slack meeting transcripts, summaries, supported Slack fi
 5. If a project update was affirmatively requested and not explicitly negated, summarize all parsed source chunks, compare against the latest project update context, and create a concise Linear project update for the matched project.
 6. If no concrete action item is found but the user asked to add the thread context to Linear, draft one contextual issue and require Slack approval before creation.
 7. Match owners by explicit requester/self-reference and Slack mention/email first, then unique Linear name/email-prefix match, then display/name similarity.
-8. Match projects by explicit project hint, exact name/slug, linked Slack channel, project description/content/update/recent issues, and true project membership as a tie-breaker.
+8. Match projects by explicit project hint, exact name/slug, linked Slack channel, project description/content/update/recent issues, and true project membership as a tie-breaker. If an explicit name is not an exact active-snapshot match, resolve it against the full live project catalogue before extraction; use a unique exact/strong match and fail closed on ambiguity or absence.
 9. Resolve relative dates from the evidence message in the configured workspace timezone.
 10. Suppress candidates that are already completed, cancelled, or duplicates.
 11. For each resolved project, read its bounded project updates, active work, terminal references, related issues, label registry, and labelled precedents. Estimate candidates in bounded groups of three with structured `gpt-5.6-sol` Responses API calls.
@@ -120,6 +121,7 @@ This skill turns pasted Slack meeting transcripts, summaries, supported Slack fi
 - Do not auto-create contextual discussion-thread issues; always request Slack approval first.
 - Honor an explicit fallback such as "if you can't find the right person or are unsure, assign them to Dr Sam" for otherwise unresolved action-item owners.
 - Project updates are created immediately only when affirmatively requested, not when the request says not to write one, and the project match is confident.
+- Never substitute a merely similar active project for an unresolved explicit destination. A full-catalogue lookup may use an inactive project only when the user's explicit title uniquely matches it.
 - Apply the compatible `meeting-action` label if it already exists.
 - In project sizing `review` or `required` mode, apply exactly one of `Extra Small (XS)`, `Small (S)`, `Medium (M)`, `Large (L)`, or `Extra Large (XL)`. Fail closed if sizing context, structured output, or the compatible label is unavailable.
 - Project sizing `shadow` mode captures estimates without mutating issue labels or descriptions; `review` sends every candidate for approval; `required` may auto-create only a high-confidence, context-sufficient assessment.

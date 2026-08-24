@@ -3511,6 +3511,30 @@ Keep the response concise but informative."""
                 "message": f"I couldn't read Linear context yet: {detail}"
             }
 
+        projects, explicit_project_resolution = (
+            await self._resolve_explicit_linear_project_context(
+                client=client,
+                params=params,
+                projects=projects,
+            )
+        )
+        resolution_status = str(
+            (explicit_project_resolution or {}).get("status") or ""
+        )
+        if resolution_status in {"not_found", "ambiguous", "unavailable"}:
+            return {
+                "message": self._linear_explicit_project_resolution_error_message(
+                    str(params.get("project_hint") or ""),
+                    explicit_project_resolution or {},
+                ),
+                "data": {
+                    "created_count": 0,
+                    "review_count": 0,
+                    "skipped_count": 0,
+                    "project_resolution_status": resolution_status,
+                },
+            }
+
         project_update_requested = self._linear_meeting_project_update_requested(text, params)
         contextual_review_mode = False
         try:
@@ -6028,6 +6052,167 @@ Chunk {index} source: {label}
             seen.add(key)
             deduped.append(user)
         return deduped
+
+    async def _resolve_explicit_linear_project_context(
+        self,
+        *,
+        client: Any,
+        params: dict[str, Any],
+        projects: list[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], Optional[dict[str, Any]]]:
+        hint = str(params.get("project_hint") or "").strip()
+        if not hint:
+            return projects, None
+        context_project_count = len(projects)
+
+        snapshot_match = self._match_linear_meeting_project(
+            {},
+            projects,
+            None,
+            hint,
+        )
+        snapshot_confidence = float(snapshot_match.get("confidence") or 0.0)
+        if snapshot_match.get("project") and snapshot_confidence >= 0.95:
+            payload = {
+                "status": "matched_snapshot",
+                "project": snapshot_match["project"],
+                "confidence": snapshot_confidence,
+                "reason": snapshot_match.get("reason"),
+            }
+            self._log_linear_project_resolution(
+                hint=hint,
+                active_project_count=context_project_count,
+                payload=payload,
+            )
+            return projects, payload
+
+        resolver = getattr(client, "resolve_project", None)
+        if not callable(resolver):
+            return projects, None
+
+        try:
+            payload = await resolver(hint)
+        except Exception as exc:
+            if snapshot_match.get("project") and snapshot_confidence >= 0.78:
+                payload = {
+                    "status": "matched_snapshot",
+                    "project": snapshot_match["project"],
+                    "confidence": snapshot_confidence,
+                    "reason": snapshot_match.get("reason"),
+                    "lookupError": exc.__class__.__name__,
+                }
+                self._log_linear_project_resolution(
+                    hint=hint,
+                    active_project_count=context_project_count,
+                    payload=payload,
+                )
+                return projects, payload
+            payload = {
+                "status": "unavailable",
+                "project": None,
+                "confidence": 0.0,
+                "reason": exc.__class__.__name__,
+            }
+            self._log_linear_project_resolution(
+                hint=hint,
+                active_project_count=context_project_count,
+                payload=payload,
+            )
+            return projects, payload
+
+        if not isinstance(payload, dict):
+            payload = {
+                "status": "unavailable",
+                "project": None,
+                "confidence": 0.0,
+                "reason": "Invalid project resolver response",
+            }
+        status = str(payload.get("status") or "")
+        resolved_project = payload.get("project")
+        resolved_confidence = float(payload.get("confidence") or 0.0)
+        if (
+            status == "matched"
+            and isinstance(resolved_project, dict)
+            and resolved_project.get("id")
+            and resolved_confidence >= 0.82
+        ):
+            canonical_name = str(resolved_project.get("name") or "").strip()
+            if canonical_name:
+                params["project_hint"] = canonical_name
+            projects = self._dedupe_linear_projects_by_id(
+                [resolved_project, *projects]
+            )
+        elif status not in {"not_found", "ambiguous"}:
+            payload = {
+                "status": "unavailable",
+                "project": None,
+                "confidence": 0.0,
+                "reason": "Invalid project resolver response",
+            }
+        self._log_linear_project_resolution(
+            hint=hint,
+            active_project_count=context_project_count,
+            payload=payload,
+        )
+        return projects, payload
+
+    @staticmethod
+    def _log_linear_project_resolution(
+        *,
+        hint: str,
+        active_project_count: int,
+        payload: dict[str, Any],
+    ) -> None:
+        project = payload.get("project")
+        project = project if isinstance(project, dict) else {}
+        print(
+            "LINEAR_PROJECT_RESOLUTION "
+            + json.dumps(
+                {
+                    "event": "explicit_project_lookup",
+                    "hint": hint,
+                    "active_project_count": active_project_count,
+                    "status": payload.get("status"),
+                    "confidence": payload.get("confidence"),
+                    "reason": payload.get("reason"),
+                    "matched_project_id": project.get("id"),
+                    "matched_project_name": project.get("name"),
+                    "is_inactive": payload.get("isInactive"),
+                    "candidate_count": payload.get("candidateCount"),
+                    "lookup_error": payload.get("lookupError"),
+                },
+                ensure_ascii=True,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+        )
+
+    @staticmethod
+    def _linear_explicit_project_resolution_error_message(
+        hint: str,
+        payload: dict[str, Any],
+    ) -> str:
+        status = str(payload.get("status") or "")
+        if status == "ambiguous":
+            candidate_names = [
+                str(candidate.get("name") or "").strip()
+                for candidate in payload.get("candidates") or []
+                if isinstance(candidate, dict) and candidate.get("name")
+            ]
+            choices = f" Matches: {', '.join(candidate_names)}." if candidate_names else ""
+            return (
+                f"I found multiple Linear projects matching {hint!r}.{choices} "
+                "Please use the exact project title. Nothing was changed."
+            )
+        if status == "not_found":
+            return (
+                f"I couldn't find a Linear project matching {hint!r} in the full "
+                "workspace. Check the exact title or Roo's access. Nothing was changed."
+            )
+        return (
+            f"I couldn't verify the Linear project {hint!r} because the full project "
+            "lookup is temporarily unavailable. Nothing was changed. Please try again."
+        )
 
     def _match_linear_meeting_project(
         self,

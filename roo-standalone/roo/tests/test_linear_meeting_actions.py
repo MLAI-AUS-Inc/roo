@@ -448,6 +448,66 @@ async def test_linear_client_reads_context_from_backend(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_linear_client_resolves_explicit_project_from_full_catalog(monkeypatch):
+    module_path = (
+        Path(__file__).resolve().parents[2]
+        / "skills"
+        / "linear_meeting_actions"
+        / "client.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "linear_meeting_actions_client_resolve_test",
+        module_path,
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    calls = []
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self):
+            return {
+                "status": "matched",
+                "project": {
+                    "id": "project-study-nash",
+                    "name": "[Studio] Study Nash",
+                },
+                "confidence": 1.0,
+                "isInactive": True,
+            }
+
+    class FakeBackend:
+        def __init__(self, **kwargs):
+            pass
+
+        async def _request(self, method, endpoint, **kwargs):
+            calls.append((method, endpoint, kwargs))
+            return FakeResponse()
+
+    monkeypatch.setattr(module, "MLAIBackendClient", FakeBackend)
+    client = module.LinearMeetingActionsClient()
+
+    result = await client.resolve_project("[Studio] Studynash")
+
+    assert result["project"]["id"] == "project-study-nash"
+    assert calls == [
+        (
+            "GET",
+            "/api/v1/integrations/linear/projects/resolve",
+            {
+                "params": {"query": "[Studio] Studynash"},
+                "json": None,
+                "timeout": 45.0,
+                "circuit_breaker": True,
+                "use_admin_headers": True,
+            },
+        )
+    ]
+
+
+@pytest.mark.asyncio
 async def test_linear_client_create_issue_calls_backend(monkeypatch):
     module_path = (
         Path(__file__).resolve().parents[2]
@@ -1251,6 +1311,84 @@ async def test_linear_meeting_repeated_timeout_aborts_before_any_linear_write(
 
 
 @pytest.mark.asyncio
+async def test_linear_meeting_missing_explicit_project_stops_before_extraction(
+    monkeypatch,
+):
+    executor = SkillExecutor()
+
+    async def fake_source_result(**kwargs):
+        return SourceParseResult(
+            sources=[
+                ParsedSource(
+                    label="Study Nash notes.pdf",
+                    text="Sam will configure the CRM workflow.",
+                    kind="pdf",
+                )
+            ],
+            files_seen=1,
+            files_parsed=1,
+        )
+
+    async def unexpected_extraction(**kwargs):
+        raise AssertionError("extraction must not run without a verified project")
+
+    class FakeClient:
+        async def list_teams(self):
+            return []
+
+        async def list_users(self):
+            return []
+
+        async def list_active_projects(self):
+            return []
+
+        async def list_issue_labels(self):
+            return []
+
+        async def list_recent_open_issues(self):
+            return []
+
+        async def resolve_project(self, query):
+            assert query == "[Studio] Studynash"
+            return {
+                "status": "not_found",
+                "project": None,
+                "confidence": 0.0,
+                "reason": "No Linear project matched the explicit query.",
+            }
+
+    class FakeSkill:
+        def get_client_class(self, name):
+            assert name == "LinearMeetingActionsClient"
+            return FakeClient
+
+    monkeypatch.setattr(executor_module, "get_settings", lambda: SimpleNamespace())
+    monkeypatch.setattr(executor, "_build_linear_meeting_source_result", fake_source_result)
+    monkeypatch.setattr(
+        executor,
+        "_extract_linear_meeting_candidates_from_sources",
+        unexpected_extraction,
+    )
+
+    result = await executor._execute_linear_meeting_actions(
+        skill=FakeSkill(),
+        text=(
+            "Use this PDF for a project update and tasks in the Linear project "
+            "'[Studio] Studynash'."
+        ),
+        params={"project_hint": "[Studio] Studynash"},
+        user_id="U1",
+        channel_id="C1",
+        thread_ts="1.1",
+        event_files=[{"id": "F1", "name": "Study Nash notes.pdf"}],
+    )
+
+    assert result["data"]["project_resolution_status"] == "not_found"
+    assert "full workspace" in result["message"]
+    assert "Nothing was changed" in result["message"]
+
+
+@pytest.mark.asyncio
 async def test_linear_meeting_executor_queues_review_from_parsed_file_source(monkeypatch):
     executor = SkillExecutor()
     executor_module.LINEAR_MEETING_PENDING_ACTIONS.clear()
@@ -1684,7 +1822,17 @@ async def test_linear_meeting_executor_creates_project_update_when_requested(mon
             return [user]
 
         async def list_active_projects(self):
-            return [project]
+            return []
+
+        async def resolve_project(self, query):
+            assert query == "Bounties / Venture Studio"
+            return {
+                "status": "matched",
+                "project": project,
+                "confidence": 1.0,
+                "reason": "Matched project by exact normalized name",
+                "isInactive": True,
+            }
 
         async def list_issue_labels(self):
             return []
@@ -1733,8 +1881,11 @@ async def test_linear_meeting_executor_creates_project_update_when_requested(mon
 
     result = await executor._execute_linear_meeting_actions(
         skill=FakeSkill(),
-        text="Please do a project update in Linear and extract to-dos",
-        params={},
+        text=(
+            "Please do a project update in Linear for project "
+            "'Bounties / Venture Studio' and extract to-dos"
+        ),
+        params={"project_hint": "Bounties / Venture Studio"},
         user_id="U1",
         channel_id="C1",
         thread_ts="1.1",
