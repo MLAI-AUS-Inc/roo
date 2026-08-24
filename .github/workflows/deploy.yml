@@ -238,13 +238,7 @@ jobs:
 
             if [ "$MEETING_ROOM_BOOKING_ENABLED" = "true" ]; then
               echo "Verifying the Meeting Room skill is enabled on Public Roo..."
-              docker compose exec -T roo python -c '
-              from roo.config import get_settings
-              settings = get_settings()
-              assert settings.ROO_SURFACE == "public"
-              assert settings.MEETING_ROOM_BOOKING_ENABLED is True
-              assert "meeting-room-booking" in settings.enabled_skill_names
-              '
+              docker compose exec -T roo python -c 'from roo.config import get_settings; settings = get_settings(); assert settings.ROO_SURFACE == "public"; assert settings.MEETING_ROOM_BOOKING_ENABLED is True; assert "meeting-room-booking" in settings.enabled_skill_names'
             fi
 
             # The cross-workspace Slack bridge is a separate Compose project.
