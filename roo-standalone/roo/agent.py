@@ -845,15 +845,66 @@ class RooAgent:
         if re.match(r'^(?:points\s+rewards|rewards)$', text_lower):
             return "list_rewards"
 
-        # 5. Coworking Book Today: "coworking book today"
+        # 5. A generic self-booking means coworking. Keep this grammar narrow:
+        # an explicitly named resource (for example, a meeting room) must still
+        # go through the tool-calling router for the appropriate skill.
+        if self._generic_coworking_booking_date_hint(text_lower) is not None:
+            return "book_coworking"
+
+        # 6. Coworking Book Today: "coworking book today"
         if re.match(r'^coworking\s+book\s+today$', text_lower):
             return "book_coworking"
 
-        # 6. Coworking Cancel: "coworking cancel" (assumes today/upcoming)
+        # 7. Coworking Cancel: "coworking cancel" (assumes today/upcoming)
         if re.match(r'^coworking\s+cancel$', text_lower):
             return "cancel_coworking"
 
         return None
+
+    @staticmethod
+    def _generic_coworking_booking_date_hint(text: str) -> Optional[str]:
+        """Return the date hint for a resource-free self-booking request.
+
+        ``book me in`` has historically meant a coworking booking at MLAI.
+        This parser intentionally accepts only an empty tail, a date, a time,
+        or a date/time combination. Any named object stays out of the fast path.
+        Times are ignored because coworking bookings cover the full day.
+        """
+        cleaned = str(text or "").lower().strip()
+        cleaned = re.sub(r"[.!?]+$", "", cleaned).strip()
+        cleaned = re.sub(r"^please\s+", "", cleaned)
+        cleaned = re.sub(r"\s+please$", "", cleaned)
+        cleaned = re.sub(r"^(?:can|could|would)\s+you\s+", "", cleaned)
+
+        booking_match = re.fullmatch(
+            r"book(?:\s+me(?:\s+in)?)?(?:\s+(?P<tail>.+))?",
+            cleaned,
+        )
+        if not booking_match:
+            return None
+
+        tail = str(booking_match.group("tail") or "").strip()
+        if not tail:
+            return "today"
+
+        date_token = r"(?:today|tomorrow|tomorow|tommorow|tommorrow|\d{4}-\d{2}-\d{2})"
+        time_token = r"(?:(?:[01]?\d|2[0-3])(?::[0-5]\d)?\s*(?:am|pm)?)"
+        tail_match = re.fullmatch(
+            rf"(?:(?:for|at|on)\s+)?(?:"
+            rf"(?P<date_first>{date_token})(?:\s+(?:at\s+)?{time_token})?"
+            rf"|{time_token}(?:\s+(?P<date_last>{date_token}))?"
+            rf")",
+            tail,
+        )
+        if not tail_match:
+            return None
+
+        date_hint = str(
+            tail_match.group("date_first") or tail_match.group("date_last") or "today"
+        )
+        if date_hint in {"tomorow", "tommorow", "tommorrow"}:
+            return "tomorrow"
+        return date_hint
 
     async def _try_fast_path(
         self,
@@ -905,10 +956,17 @@ class RooAgent:
             )
 
         if action == "book_coworking":
-            today = self._get_today().isoformat()
+            date_hint = self._generic_coworking_booking_date_hint(text) or "today"
+            today = self._get_today()
+            if date_hint == "tomorrow":
+                booking_date = (today + timedelta(days=1)).isoformat()
+            elif re.fullmatch(r"\d{4}-\d{2}-\d{2}", date_hint):
+                booking_date = date_hint
+            else:
+                booking_date = today.isoformat()
             return await self._execute_fast_points(
                 user_id, "book_coworking",
-                date=today, channel_id=channel_id, thread_ts=thread_ts
+                date=booking_date, channel_id=channel_id, thread_ts=thread_ts
             )
 
         if action == "cancel_coworking":

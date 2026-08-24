@@ -204,11 +204,19 @@
 - id: blessed-coworking-book-me-in
   text: "book me in"
   expect: {skill: mlai-points, action: book_coworking}
-  tags: [blessed]
+  tags: [blessed, fast-path]
+- id: blessed-coworking-book
+  text: "book"
+  expect: {skill: mlai-points, action: book_coworking}
+  tags: [blessed, fast-path]
 - id: blessed-coworking-book-me-in-today
   text: "book me in today"
   expect: {skill: mlai-points, action: book_coworking}
-  tags: [blessed]
+  tags: [blessed, fast-path]
+- id: blessed-coworking-book-me-in-for-time-today
+  text: "book me in for 1pm today"
+  expect: {skill: mlai-points, action: book_coworking}
+  tags: [blessed, fast-path]
 - id: blessed-coworking-checkin-mention
   text: "check <@U123ABC> in today"
   expect: {skill: mlai-points, action: admin_checkin_coworking}

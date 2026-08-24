@@ -2,6 +2,7 @@
 import asyncio
 import sys
 import types
+from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -66,6 +67,82 @@ def test_v2_on_routes_via_router_and_passes_action_params(monkeypatch):
     assert result["skill_used"] == "mlai-points"
     assert captured["routed_text"] == "book me a coworking spot for friday"
     assert captured["param_overrides"] == {"action": "book_coworking", "date": "2026-06-13"}
+
+
+def test_generic_booking_bypasses_model_and_books_coworking_today(monkeypatch):
+    agent = _make_agent()
+    calls = []
+
+    async def fake_execute_fast_points(user_id, action, **kwargs):
+        calls.append((user_id, action, kwargs))
+        return {
+            "message": "Booked coworking",
+            "skill_used": "mlai-points (fast)",
+            "data": {"action": action},
+        }
+
+    async def router_must_not_run(*args, **kwargs):
+        raise AssertionError("generic bookings must not reach the model router")
+
+    monkeypatch.setattr(agent, "_execute_fast_points", fake_execute_fast_points)
+    monkeypatch.setattr(agent, "_route_v2", router_must_not_run)
+    monkeypatch.setattr(agent, "_get_today", lambda: date(2026, 8, 25))
+    monkeypatch.setattr("roo.agent.get_thread_messages", lambda channel, thread_ts: [])
+    monkeypatch.setattr("roo.slack_client.get_bot_user_id", lambda: "U090FV0GTT4")
+
+    result = asyncio.run(
+        agent.handle_mention(
+            text="<@U090FV0GTT4> book me in for 1pm today",
+            user_id="U123",
+            channel_id="C123",
+            thread_ts="1.2",
+        )
+    )
+
+    assert result["skill_used"] == "mlai-points (fast)"
+    assert calls == [
+        (
+            "U123",
+            "book_coworking",
+            {
+                "date": "2026-08-25",
+                "channel_id": "C123",
+                "thread_ts": "1.2",
+            },
+        )
+    ]
+
+
+def test_generic_booking_date_and_resource_boundaries(monkeypatch):
+    agent = _make_agent()
+    monkeypatch.setattr(agent, "_get_today", lambda: date(2026, 8, 25))
+
+    assert agent._match_fast_path("book") == "book_coworking"
+    assert agent._match_fast_path("book me in") == "book_coworking"
+    assert agent._match_fast_path("book me in tomorrow") == "book_coworking"
+    assert agent._match_fast_path("please book me in at 1:30 pm tomorrow") == "book_coworking"
+    assert agent._match_fast_path("book me in on 2026-09-01") == "book_coworking"
+
+    assert agent._match_fast_path("book the meeting room at 1pm today") is None
+    assert agent._match_fast_path("book the big room") is None
+    assert agent._match_fast_path("book a photographer") is None
+
+
+def test_generic_booking_fast_path_preserves_tomorrow_and_iso_dates(monkeypatch):
+    agent = _make_agent()
+    calls = []
+
+    async def fake_execute_fast_points(user_id, action, **kwargs):
+        calls.append(kwargs["date"])
+        return {"message": "ok", "data": {"action": action}}
+
+    monkeypatch.setattr(agent, "_execute_fast_points", fake_execute_fast_points)
+    monkeypatch.setattr(agent, "_get_today", lambda: date(2026, 8, 25))
+
+    asyncio.run(agent._try_fast_path("book me in tomorrow", "U123"))
+    asyncio.run(agent._try_fast_path("book me in on 2026-09-01", "U123"))
+
+    assert calls == ["2026-08-26", "2026-09-01"]
 
 
 def test_v2_on_clarification_returns_question_directly(monkeypatch):
