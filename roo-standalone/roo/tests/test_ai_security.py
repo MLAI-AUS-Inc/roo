@@ -447,6 +447,9 @@ def test_deploy_workflow_requires_and_secretly_upserts_security_values():
         '"$MEETING_ROOM_BOOKING_ENABLED"'
     ) in workflow
     assert 'assert settings.MEETING_ROOM_BOOKING_ENABLED is True' in workflow
+    assert (
+        "python -c 'from roo.config import get_settings; settings = get_settings();"
+    ) in workflow
     assert 'assert "meeting-room-booking" in settings.enabled_skill_names' in workflow
     assert 'if [ "${#ROO_API_KEY}" -lt 32 ]' in workflow
     assert 'if [ "${#VICTOR_AI_ROO_SIGNING_SECRET}" -lt 32 ]' in workflow
