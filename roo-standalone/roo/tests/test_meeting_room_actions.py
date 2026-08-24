@@ -34,6 +34,7 @@ from roo.meeting_room_booking import (
 )
 from roo.meeting_room_clarifications import (
     PUBLIC_ROOM_CHOICE_ACTION_ID,
+    PUBLIC_ROOM_CHOICE_ACTION_IDS_BY_ROOM,
     get_meeting_room_clarification_store,
     public_room_choice_prompt,
 )
@@ -1444,7 +1445,12 @@ def test_public_button_retry_recovers_failed_outbox_handoff(tmp_path, monkeypatc
         "container": {"message_ts": "112.000"},
         "message": {"ts": "112.000", "thread_ts": "111.000"},
         "actions": [
-            {"action_id": PUBLIC_ROOM_CHOICE_ACTION_ID, "value": big_value}
+            {
+                "action_id": PUBLIC_ROOM_CHOICE_ACTION_IDS_BY_ROOM[
+                    "big-meeting-room"
+                ],
+                "value": big_value,
+            }
         ],
     }
     body = urlencode({"payload": json.dumps(payload)}).encode()
@@ -1499,7 +1505,12 @@ def test_duplicate_public_button_delivery_processes_one_durable_choice(
         "container": {"message_ts": "112.000"},
         "message": {"ts": "112.000", "thread_ts": "111.000"},
         "actions": [
-            {"action_id": PUBLIC_ROOM_CHOICE_ACTION_ID, "value": big_value}
+            {
+                "action_id": PUBLIC_ROOM_CHOICE_ACTION_IDS_BY_ROOM[
+                    "big-meeting-room"
+                ],
+                "value": big_value,
+            }
         ],
     }
     body = urlencode({"payload": json.dumps(payload)}).encode()
@@ -1591,6 +1602,63 @@ def test_public_button_rejects_another_member_without_persisting(tmp_path, monke
     asyncio.run(scheduled[0])
     assert ephemeral[0]["user"] == "UOTHER"
     assert "Only the person" in ephemeral[0]["text"]
+
+
+def test_public_button_rejects_action_id_room_mismatch(tmp_path, monkeypatch):
+    configured = _settings(tmp_path)
+    main_module.app.dependency_overrides[get_settings] = lambda: configured
+    _, (big_value, _) = _public_room_choice_values(
+        configured.SLACK_RECEIPTS_DB_PATH
+    )
+    payload = {
+        "type": "block_actions",
+        "team": {"id": "TMLAI"},
+        "user": {"id": "UOWNER"},
+        "channel": {"id": "CROOMS"},
+        "container": {"message_ts": "112.000"},
+        "message": {"ts": "112.000", "thread_ts": "111.000"},
+        "actions": [
+            {
+                "action_id": PUBLIC_ROOM_CHOICE_ACTION_IDS_BY_ROOM[
+                    "small-meeting-room"
+                ],
+                "value": big_value,
+            }
+        ],
+    }
+    body = urlencode({"payload": json.dumps(payload)}).encode()
+    timestamp = int(time.time())
+    headers = {
+        "X-Slack-Request-Timestamp": str(timestamp),
+        "X-Slack-Signature": _signature(
+            configured.SLACK_SIGNING_SECRET,
+            timestamp,
+            body,
+        ),
+        "Content-Type": "application/x-www-form-urlencoded",
+    }
+    scheduled = []
+    ephemeral = []
+    monkeypatch.setattr(
+        main_module,
+        "get_meeting_room_action_store",
+        lambda path: (_ for _ in ()).throw(AssertionError("must not persist")),
+    )
+    monkeypatch.setattr(main_module, "start_slack_action", scheduled.append)
+    monkeypatch.setattr(
+        main_module,
+        "post_ephemeral",
+        lambda **kwargs: ephemeral.append(kwargs) or {"ok": True},
+    )
+    client = TestClient(main_module.app)
+
+    response = client.post("/slack/actions", content=body, headers=headers)
+
+    assert response.status_code == 200
+    assert len(scheduled) == 1
+    asyncio.run(scheduled[0])
+    assert ephemeral[0]["user"] == "UOWNER"
+    assert "not valid" in ephemeral[0]["text"]
 
 
 @pytest.mark.asyncio

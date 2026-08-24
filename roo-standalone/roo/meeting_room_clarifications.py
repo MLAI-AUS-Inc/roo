@@ -23,7 +23,18 @@ from .meeting_room_booking import (
 )
 
 
+# Keep the original identifier as the durable/internal canonical ID and as a
+# backward-compatible callback for any one-button prompt posted by an older
+# release. Slack requires every interactive element in one message to have a
+# unique action_id, so newly rendered Big and Small buttons use distinct IDs.
 PUBLIC_ROOM_CHOICE_ACTION_ID = "meeting_room_choose_room_public"
+PUBLIC_ROOM_CHOICE_ACTION_IDS_BY_ROOM = {
+    "big-meeting-room": f"{PUBLIC_ROOM_CHOICE_ACTION_ID}_big",
+    "small-meeting-room": f"{PUBLIC_ROOM_CHOICE_ACTION_ID}_small",
+}
+PUBLIC_ROOM_CHOICE_ACTION_IDS = frozenset(
+    {PUBLIC_ROOM_CHOICE_ACTION_ID, *PUBLIC_ROOM_CHOICE_ACTION_IDS_BY_ROOM.values()}
+)
 DEFAULT_CHOICE_TTL_SECONDS = 10 * 60
 DEFAULT_PROCESSING_LEASE_SECONDS = 60.0
 TERMINAL_RETENTION_SECONDS = 24 * 60 * 60
@@ -54,6 +65,15 @@ def room_choice_from_reply(text: str) -> Optional[str]:
         if match.group("size") == "small"
         else "big-meeting-room"
     )
+
+
+def public_room_choice_action_id(room_slug: str) -> str:
+    """Return the unique Slack action ID for one supported public room."""
+
+    try:
+        return PUBLIC_ROOM_CHOICE_ACTION_IDS_BY_ROOM[str(room_slug)]
+    except KeyError as exc:
+        raise ValueError("room_slug is not supported for public buttons") from exc
 
 
 def build_public_room_choice_action_value(
@@ -136,7 +156,7 @@ def public_room_choice_prompt(
     buttons = [
         {
             "type": "button",
-            "action_id": PUBLIC_ROOM_CHOICE_ACTION_ID,
+            "action_id": public_room_choice_action_id(str(room["slug"])),
             "text": {
                 "type": "plain_text",
                 "text": ROOM_NAMES[str(room["slug"])],

@@ -18,7 +18,7 @@ from roo.backend_identity import get_backend_actor_context
 from roo.config import Settings
 from roo.meeting_room_booking import MeetingRoomInputError
 from roo.meeting_room_clarifications import (
-    PUBLIC_ROOM_CHOICE_ACTION_ID,
+    PUBLIC_ROOM_CHOICE_ACTION_IDS_BY_ROOM,
     MeetingRoomClarificationStore,
     build_public_room_choice_action_value,
     get_meeting_room_clarification_store,
@@ -104,7 +104,11 @@ def test_public_room_choice_buttons_bind_state_without_private_details(tmp_path)
         "Big Meeting Room",
         "Small Meeting Room",
     ]
-    assert all(button["action_id"] == PUBLIC_ROOM_CHOICE_ACTION_ID for button in buttons)
+    assert [button["action_id"] for button in buttons] == [
+        PUBLIC_ROOM_CHOICE_ACTION_IDS_BY_ROOM["big-meeting-room"],
+        PUBLIC_ROOM_CHOICE_ACTION_IDS_BY_ROOM["small-meeting-room"],
+    ]
+    assert len({button["action_id"] for button in buttons}) == len(buttons)
     parsed = [
         parse_public_room_choice_action_value(button["value"])
         for button in buttons

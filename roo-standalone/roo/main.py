@@ -136,8 +136,10 @@ from .meeting_room_actions import (
 )
 from .meeting_room_clarifications import (
     PUBLIC_ROOM_CHOICE_ACTION_ID as MEETING_ROOM_PUBLIC_CHOOSE_ROOM_ACTION_ID,
+    PUBLIC_ROOM_CHOICE_ACTION_IDS as MEETING_ROOM_PUBLIC_CHOOSE_ROOM_ACTION_IDS,
     get_meeting_room_clarification_store,
     parse_public_room_choice_action_value,
+    public_room_choice_action_id as meeting_room_public_choice_action_id,
     room_choice_from_reply,
 )
 
@@ -5757,6 +5759,7 @@ async def _process_meeting_room_action_record(
 async def _persist_and_start_public_meeting_room_choice(
     *,
     settings: Settings,
+    action_id: str,
     action_value: str,
     actor_user_id: str,
     slack_team_id: str,
@@ -5779,8 +5782,14 @@ async def _persist_and_start_public_meeting_room_choice(
                 )
             )
         return
+    expected_action_id = meeting_room_public_choice_action_id(value["room_slug"])
+    action_id_matches = action_id in {
+        MEETING_ROOM_PUBLIC_CHOOSE_ROOM_ACTION_ID,
+        expected_action_id,
+    }
     context_matches = (
         settings.MEETING_ROOM_BOOKING_ENABLED
+        and action_id_matches
         and channel_id
         and not channel_id.startswith("D")
         and message_ts
@@ -6043,11 +6052,12 @@ async def slack_actions(
     )
     if (
         getattr(settings, "ROO_SURFACE", "public") == "public"
-        and early_action_id == MEETING_ROOM_PUBLIC_CHOOSE_ROOM_ACTION_ID
+        and early_action_id in MEETING_ROOM_PUBLIC_CHOOSE_ROOM_ACTION_IDS
     ):
         try:
             await _persist_and_start_public_meeting_room_choice(
                 settings=settings,
+                action_id=early_action_id,
                 action_value=str(early_action.get("value") or ""),
                 actor_user_id=str(user_id or ""),
                 slack_team_id=str((payload.get("team") or {}).get("id") or ""),
