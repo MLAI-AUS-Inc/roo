@@ -83,6 +83,28 @@ def test_reasoning_policy_varies_by_inference_difficulty(
     assert decision.effort != "max"
 
 
+def test_meeting_reasoning_uses_extraction_specific_timeout_floors():
+    ordinary = choose_linear_reasoning(
+        LinearReasoningSignals(
+            stage="meeting_actions",
+            source_chars=2_500,
+            explicit_project=True,
+            explicit_owner=True,
+        )
+    )
+    complex_chunk = choose_linear_reasoning(
+        LinearReasoningSignals(
+            stage="meeting_actions",
+            source_chars=4_000,
+            explicit_project=False,
+            explicit_owner=False,
+        )
+    )
+
+    assert (ordinary.effort, ordinary.timeout_seconds) == ("medium", 60.0)
+    assert (complex_chunk.effort, complex_chunk.timeout_seconds) == ("high", 90.0)
+
+
 @pytest.mark.asyncio
 async def test_linear_gateway_always_uses_exact_sol_model(monkeypatch):
     providers = []
@@ -254,6 +276,7 @@ async def test_linear_gateway_surfaces_timeout_without_validation_escalation(
     assert len(calls) == 1
     assert calls[0]["model"] == LINEAR_SKILL_MODEL == "gpt-5.6-sol"
     assert calls[0]["reasoning_effort"] == "medium"
+    assert calls[0]["timeout"] == 60.0
     assert calls[0]["max_retries"] == 0
     assert error.value.signals == signals
     assert error.value.attempt == 1

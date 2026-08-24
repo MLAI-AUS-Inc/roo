@@ -119,11 +119,7 @@ VICTOR_AI_ACCESS_UNAVAILABLE_MESSAGE = (
     "Victor application data is not available in this conversation."
 )
 LINEAR_MEETING_PENDING_ACTIONS: dict[str, dict[str, Any]] = {}
-LINEAR_MEETING_EXTRACTION_CONCURRENCY = 2
-LINEAR_MEETING_EXTRACTION_TOTAL_TIMEOUT_SECONDS = 240.0
-LINEAR_MEETING_TIMEOUT_RECOVERY_MAX_CHARS = 5_000
 LINEAR_MEETING_TIMEOUT_RECOVERY_OVERLAP_CHARS = 300
-LINEAR_MEETING_TIMEOUT_RECOVERY_DEPTH = 1
 
 
 class LinearMeetingExtractionDeadlineError(RuntimeError):
@@ -4325,6 +4321,7 @@ Keep the response concise but informative."""
         value = str(text or "").strip()
         person = r'(<@[A-Z0-9]+>|@?[A-Z][\w.\-]*(?:\s+[A-Z][\w.\-]*){0,3})'
         patterns = (
+            rf'\bif\b[^.!?]{{0,180}}?\b(?:can(?:not|[\'’]?t)|could(?:not|[\'’]?t))\s+find\b[^.!?]{{0,180}}?\bassign(?:ed)?\b[^.!?]*?\bto\s+{person}',
             rf'\bif\s+(?:you(?:\'re|\s+are)?\s+)?(?:not\s+sure|unsure|in\s+doubt|you\s+don\'?t\s+know)\b[^.!?]*?\bassign(?:ed)?\b[^.!?]*?\bto\s+{person}',
             rf'\bif\s+(?:it\'?s\s+)?(?:unclear|unknown|ambiguous)\b[^.!?]*?\bassign(?:ed)?\b[^.!?]*?\bto\s+{person}',
             rf'\b(?:otherwise|by\s+default|as\s+a\s+fallback|default(?:ing)?)\b[^.!?]*?\bassign(?:ed)?\b[^.!?]*?\bto\s+{person}',
@@ -4404,7 +4401,7 @@ Keep the response concise but informative."""
     def _clean_linear_meeting_owner_hint(value: str) -> Optional[str]:
         cleaned = str(value or "").strip(" \t\n\r'\"“”`")
         cleaned = re.sub(r'^(?:@|to\s+)', '', cleaned, flags=re.IGNORECASE).strip()
-        cleaned = re.sub(r'\s+', ' ', cleaned).strip(" ,;:")
+        cleaned = re.sub(r'\s+', ' ', cleaned).strip(" ,;:.!?")
         return cleaned or None
 
     def _is_linear_direct_issue_request(self, text: str, params: dict[str, Any]) -> bool:
@@ -4743,18 +4740,81 @@ Return the structured issue list. Preserve the parsed project and assignee hints
         users: list[dict[str, Any]],
         projects: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
+        settings = get_settings()
+        extraction_concurrency = max(
+            1,
+            min(
+                int(
+                    getattr(
+                        settings,
+                        "LINEAR_MEETING_EXTRACTION_CONCURRENCY",
+                        3,
+                    )
+                ),
+                6,
+            ),
+        )
+        extraction_timeout_seconds = max(
+            120.0,
+            float(
+                getattr(
+                    settings,
+                    "LINEAR_MEETING_EXTRACTION_TOTAL_TIMEOUT_SECONDS",
+                    360.0,
+                )
+            ),
+        )
+        chunk_max_chars = max(
+            2_000,
+            min(
+                int(
+                    getattr(
+                        settings,
+                        "LINEAR_MEETING_EXTRACTION_CHUNK_MAX_CHARS",
+                        8_000,
+                    )
+                ),
+                12_000,
+            ),
+        )
+        recovery_max_chars = max(
+            1_000,
+            min(
+                int(
+                    getattr(
+                        settings,
+                        "LINEAR_MEETING_EXTRACTION_RECOVERY_MAX_CHARS",
+                        4_000,
+                    )
+                ),
+                chunk_max_chars - 1,
+            ),
+        )
+        recovery_depth_limit = max(
+            0,
+            min(
+                int(
+                    getattr(
+                        settings,
+                        "LINEAR_MEETING_EXTRACTION_RECOVERY_DEPTH",
+                        2,
+                    )
+                ),
+                3,
+            ),
+        )
         source_chunks = [
             (source, chunk)
             for source in sources
-            for chunk in source_text_chunks(source)
+            for chunk in source_text_chunks(source, max_chars=chunk_max_chars)
         ]
         if not source_chunks:
             return []
 
-        semaphore = asyncio.Semaphore(LINEAR_MEETING_EXTRACTION_CONCURRENCY)
+        semaphore = asyncio.Semaphore(extraction_concurrency)
         batch_chunk_count = len(source_chunks)
 
-        async def extract_chunk(
+        async def extract_chunk_with_recovery(
             source: ParsedSource,
             chunk: str,
             *,
@@ -4762,27 +4822,28 @@ Return the structured issue list. Preserve the parsed project and assignee hints
             recovery_depth: int = 0,
         ) -> list[dict[str, Any]]:
             try:
-                async with semaphore:
-                    return await self._extract_linear_meeting_candidates(
-                        transcript=chunk,
-                        params=params,
-                        users=users,
-                        projects=projects,
-                        source_label=source.label,
-                        # This model request contains one source chunk. The total
-                        # batch size is logged separately and must not inflate
-                        # reasoning effort for every individual request.
-                        source_count=1,
-                        batch_chunk_index=batch_chunk_index,
-                        batch_chunk_count=batch_chunk_count,
-                        recovery_depth=recovery_depth,
-                    )
+                return await self._extract_linear_meeting_candidates(
+                    transcript=chunk,
+                    params=params,
+                    users=users,
+                    projects=projects,
+                    source_label=source.label,
+                    # This model request contains one source chunk. The total
+                    # batch size is logged separately and must not inflate
+                    # reasoning effort for every individual request.
+                    source_count=1,
+                    batch_chunk_index=batch_chunk_index,
+                    batch_chunk_count=batch_chunk_count,
+                    recovery_depth=recovery_depth,
+                )
             except LinearInferenceTimeoutError as exc:
-                if recovery_depth >= LINEAR_MEETING_TIMEOUT_RECOVERY_DEPTH:
+                if recovery_depth >= recovery_depth_limit:
                     raise
                 recovery_chunks = self._linear_meeting_timeout_recovery_chunks(
                     source=source,
                     chunk=chunk,
+                    recovery_depth=recovery_depth,
+                    recovery_max_chars=recovery_max_chars,
                 )
                 print(
                     "LINEAR_MEETING_EXTRACTION "
@@ -4802,53 +4863,68 @@ Return the structured issue list. Preserve the parsed project and assignee hints
                         sort_keys=True,
                     )
                 )
-                recovered = await asyncio.gather(
-                    *(
-                        extract_chunk(
+                recovered_candidates: list[dict[str, Any]] = []
+                # Keep the worker slot until its failed chunk has recovered. This
+                # prevents a retry from sitting behind the entire initial queue and
+                # makes the total deadline predictable for long PDFs.
+                for recovery_chunk in recovery_chunks:
+                    recovered_candidates.extend(
+                        await extract_chunk_with_recovery(
                             source,
                             recovery_chunk,
                             batch_chunk_index=batch_chunk_index,
                             recovery_depth=recovery_depth + 1,
                         )
-                        for recovery_chunk in recovery_chunks
-                    ),
-                    return_exceptions=True,
-                )
-                recovered_candidates: list[dict[str, Any]] = []
-                for result in recovered:
-                    if isinstance(result, BaseException):
-                        raise result
-                    recovered_candidates.extend(result)
+                    )
                 return self._dedupe_linear_meeting_candidates(recovered_candidates)
 
+        async def extract_chunk(
+            source: ParsedSource,
+            chunk: str,
+            *,
+            batch_chunk_index: int,
+        ) -> list[dict[str, Any]]:
+            async with semaphore:
+                return await extract_chunk_with_recovery(
+                    source,
+                    chunk,
+                    batch_chunk_index=batch_chunk_index,
+                )
+
         async def extract_all_chunks() -> list[list[dict[str, Any]]]:
-            extracted = await asyncio.gather(
-                *(
+            tasks = [
+                asyncio.create_task(
                     extract_chunk(
                         source,
                         chunk,
                         batch_chunk_index=index,
                     )
-                    for index, (source, chunk) in enumerate(source_chunks, start=1)
-                ),
-                return_exceptions=True,
-            )
-            for result in extracted:
-                if isinstance(result, BaseException):
-                    raise result
-            return extracted
+                )
+                for index, (source, chunk) in enumerate(source_chunks, start=1)
+            ]
+            try:
+                return await asyncio.gather(*tasks)
+            except BaseException:
+                # asyncio.gather does not cancel siblings when one raises. Stop
+                # queued/in-flight calls so a terminal chunk failure fails fast and
+                # no model work outlives the fail-closed extraction request.
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                raise
 
         try:
             extracted_batches = await asyncio.wait_for(
                 extract_all_chunks(),
-                timeout=LINEAR_MEETING_EXTRACTION_TOTAL_TIMEOUT_SECONDS,
+                timeout=extraction_timeout_seconds,
             )
         except LinearInferenceTimeoutError:
             raise
         except asyncio.TimeoutError as exc:
             raise LinearMeetingExtractionDeadlineError(
                 "Meeting-action extraction exceeded its "
-                f"{LINEAR_MEETING_EXTRACTION_TOTAL_TIMEOUT_SECONDS:g} second runtime budget."
+                f"{extraction_timeout_seconds:g} second runtime budget."
             ) from exc
 
         candidates: list[dict[str, Any]] = []
@@ -4863,6 +4939,8 @@ Return the structured issue list. Preserve the parsed project and assignee hints
         *,
         source: ParsedSource,
         chunk: str,
+        recovery_depth: int,
+        recovery_max_chars: int,
     ) -> list[str]:
         source_header = f"Source: {source.label}\n"
         source_text = (
@@ -4878,8 +4956,11 @@ Return the structured issue list. Preserve the parsed project and assignee hints
         )
         return source_text_chunks(
             recovery_source,
-            max_chars=LINEAR_MEETING_TIMEOUT_RECOVERY_MAX_CHARS,
-            hard_split_overlap_chars=LINEAR_MEETING_TIMEOUT_RECOVERY_OVERLAP_CHARS,
+            max_chars=max(1_000, recovery_max_chars // (2**recovery_depth)),
+            hard_split_overlap_chars=min(
+                LINEAR_MEETING_TIMEOUT_RECOVERY_OVERLAP_CHARS,
+                max(1_000, recovery_max_chars // (2**recovery_depth)) - 1,
+            ),
         ) or [chunk]
 
     async def _extract_linear_meeting_candidates(

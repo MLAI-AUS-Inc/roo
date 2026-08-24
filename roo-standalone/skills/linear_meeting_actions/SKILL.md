@@ -64,7 +64,7 @@ This skill turns pasted Slack meeting transcripts, summaries, supported Slack fi
 - Avoid likely duplicate open issues and make retries idempotent from Slack source evidence.
 - Use the exact `gpt-5.6-sol` model through the OpenAI Responses API for every Linear inference stage.
 - Select model reasoning effort from source length, source count, ambiguity, partial work, dependencies, artifacts, and conflicting context; never derive model effort from the XS/S/M/L/XL task label.
-- Recover a timed-out meeting-note chunk once at smaller scope while keeping the overall extraction bounded and creating no partial Linear issues.
+- Recover a timed-out meeting-note chunk at progressively smaller scope while keeping the overall extraction bounded and creating no partial Linear issues.
 - For every resolved project, estimate remaining effort in bounded batches and apply exactly one compatible XS/S/M/L/XL label to each new non-terminal issue.
 - Preview effort labels for every eligible active issue in one named project and apply them only after the requester confirms.
 - Ask for Slack approval when an action item is useful but not confident enough to create automatically.
@@ -102,7 +102,7 @@ This skill turns pasted Slack meeting transcripts, summaries, supported Slack fi
 13. Start direct cleanup at `low`, ordinary extraction and source summaries at `medium`, and contextual inference, project synthesis, and effort sizing at `high`. Increase to `xhigh` when deterministic complexity signals warrant it.
 14. Treat each extracted source chunk as one inference source; track total batch chunks separately so a long PDF does not artificially increase every chunk's reasoning effort.
 15. Retry a structured parsing or workflow-contract failure at most once. For a missing effort-sizing structured response, lower reasoning effort and increase the output allowance so the model can emit the full schema; for other validation failures, use the next reasoning level.
-16. If meeting-action inference times out, retry only the failed chunk once at smaller paragraph/page-aligned scope with bounded concurrency. Finish extraction and deduplication before any issue write; if recovery or the total extraction deadline fails, create nothing and say so explicitly.
+16. If meeting-action inference times out, keep that worker slot and retry only the failed chunk at progressively smaller paragraph/page-aligned scope. Cancel queued work immediately when bounded recovery is exhausted. Finish extraction and deduplication before any issue write; if recovery or the total extraction deadline fails, create nothing and say so explicitly.
 17. Discard duplicate or unrecognized optional evidence references without rejecting an otherwise valid effort assessment. Normalize its rationale to one sentence and, when duration-based, add the rubric's canonical time anchor if the model omitted one.
 18. If an effort-sizing batch still fails its required candidate or rubric fields, retry its candidates individually and preserve successful assessments. Add the exact effort label and normalized one-sentence rationale to each new issue description and Slack preview. Never create an eligible project issue without exactly one valid effort label.
 19. Send an idempotency fingerprint and preserve a Slack permalink in the Linear issue.
@@ -118,6 +118,7 @@ This skill turns pasted Slack meeting transcripts, summaries, supported Slack fi
 - Do not auto-create an issue without a high-confidence assignee and project.
 - A contextual command can auto-create only when its source contains an explicit assignment/commitment and the assignee, project, team, and due date are unambiguous.
 - Do not auto-create contextual discussion-thread issues; always request Slack approval first.
+- Honor an explicit fallback such as "if you can't find the right person or are unsure, assign them to Dr Sam" for otherwise unresolved action-item owners.
 - Project updates are created immediately only when affirmatively requested, not when the request says not to write one, and the project match is confident.
 - Apply the compatible `meeting-action` label if it already exists.
 - In project sizing `review` or `required` mode, apply exactly one of `Extra Small (XS)`, `Small (S)`, `Medium (M)`, `Large (L)`, or `Extra Large (XL)`. Fail closed if sizing context, structured output, or the compatible label is unavailable.
