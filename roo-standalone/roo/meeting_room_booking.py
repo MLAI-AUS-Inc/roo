@@ -36,6 +36,23 @@ WEEKDAYS = {
     "saturday": 5,
     "sunday": 6,
 }
+TOMORROW_ALIASES = frozenset(
+    {
+        "tomorrow",
+        "tomorow",
+        "tommorow",
+        "tommorrow",
+    }
+)
+TOMORROW_REFERENCE_RE = re.compile(
+    r"\b(?:tomorrow|tomorow|tommorow|tommorrow)\b",
+    re.IGNORECASE,
+)
+UNRESOLVED_DATE_REFERENCE_RE = re.compile(
+    r"\b(?:yesterday|tonight|next\s+(?:week|month|year)|this\s+(?:week|month|year)|"
+    r"someday|tomorrow\w+|tomorow\w+|tommorow\w+|tommorrow\w+)\b",
+    re.IGNORECASE,
+)
 
 
 class MeetingRoomInputError(ValueError):
@@ -99,6 +116,22 @@ def _parse_date_value(value: Any) -> Optional[date]:
         return None
 
 
+def has_date_reference(text: str, params: Optional[dict] = None) -> bool:
+    params = params or {}
+    if params.get("date") or params.get("starts_at"):
+        return True
+    normalized = str(text or "").lower()
+    return bool(
+        re.search(
+            r"\b(?:today|next\s+)?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b",
+            normalized,
+        )
+        or re.search(r"\b\d{4}-\d{2}-\d{2}\b", normalized)
+        or re.search(r"\btoday\b", normalized)
+        or TOMORROW_REFERENCE_RE.search(normalized)
+    )
+
+
 def resolve_local_date(
     text: str,
     params: Optional[dict] = None,
@@ -114,7 +147,7 @@ def resolve_local_date(
         return direct
     if raw_param_date == "today":
         return current.date()
-    if raw_param_date == "tomorrow":
+    if raw_param_date in TOMORROW_ALIASES:
         return current.date() + timedelta(days=1)
     normalized_param_date = raw_param_date.removeprefix("next ")
     if normalized_param_date in WEEKDAYS:
@@ -139,7 +172,7 @@ def resolve_local_date(
                 "invalid_date",
                 "That date is not valid. Use a date like 2026-08-14.",
             )
-    if re.search(r"\btomorrow\b", normalized):
+    if TOMORROW_REFERENCE_RE.search(normalized):
         return current.date() + timedelta(days=1)
     if re.search(r"\btoday\b", normalized):
         return current.date()
@@ -155,10 +188,13 @@ def resolve_local_date(
             offset = offset + 7 if offset else 7
         return current.date() + timedelta(days=offset)
 
-    raise MeetingRoomInputError(
-        "missing_date",
-        "What date should I check? Try `tomorrow` or `2026-08-14`.",
-    )
+    if raw_param_date or UNRESOLVED_DATE_REFERENCE_RE.search(normalized):
+        raise MeetingRoomInputError(
+            "invalid_date",
+            "I could not understand that date. Try `tomorrow` or `2026-08-14`.",
+        )
+
+    return current.date() + timedelta(days=1)
 
 
 def _parse_time_value(value: Any, field_label: str) -> Optional[time]:
@@ -454,7 +490,7 @@ def resolve_interval(
     if start_time is None:
         raise MeetingRoomInputError(
             "missing_start_time",
-            "What time should the booking start? Try `tomorrow at 2pm`.",
+            "What time should the booking start? Try `2pm`.",
         )
 
     starts_at = _local_datetime(local_date, start_time)

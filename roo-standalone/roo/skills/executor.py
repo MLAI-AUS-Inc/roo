@@ -102,6 +102,7 @@ from ..meeting_room_booking import (
     booking_preview,
     cancellation_selection,
     format_interval as format_meeting_room_interval,
+    has_date_reference as has_meeting_room_date_reference,
     parse_backend_timestamp,
     room_selection_prompt,
     room_slug_from_text,
@@ -503,14 +504,7 @@ class SkillExecutor:
 
     @staticmethod
     def _meeting_room_date_is_present(text: str, params: dict) -> bool:
-        if params.get("date") or params.get("starts_at"):
-            return True
-        lowered = str(text or "").lower()
-        return bool(
-            re.search(r"\b(?:today|tomorrow|next\s+)?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b", lowered)
-            or re.search(r"\b\d{4}-\d{2}-\d{2}\b", lowered)
-            or re.search(r"\b(?:today|tomorrow)\b", lowered)
-        )
+        return has_meeting_room_date_reference(text, params)
 
     @staticmethod
     def _meeting_room_time_is_present(text: str, params: dict) -> bool:
@@ -646,11 +640,6 @@ class SkillExecutor:
         try:
             requested_room_slug = room_slug_from_text(text)
             if action == "check_room_availability":
-                if not self._meeting_room_date_is_present(text, params):
-                    raise MeetingRoomInputError(
-                        "missing_date",
-                        "What date should I check? Try `tomorrow` or `2026-08-14`.",
-                    )
                 rooms = supported_active_rooms(await client.list_meeting_rooms())
                 selected_rooms = (
                     [room for room in rooms if room["slug"] == requested_room_slug]
