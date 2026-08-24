@@ -111,6 +111,7 @@ from ..meeting_room_booking import (
     resolve_local_date as resolve_meeting_room_date,
     supported_active_rooms,
 )
+from ..meeting_room_clarifications import get_meeting_room_clarification_store
 
 
 POINTS_SUPER_ADMIN_SLACK_ID = "U05QPB483K9"
@@ -277,6 +278,9 @@ class SkillExecutor:
                     params=params,
                     user_id=user_id,
                     channel_id=channel_id,
+                    thread_ts=thread_ts,
+                    slack_team_id=kwargs.get("slack_team_id"),
+                    request_message_ts=kwargs.get("current_message_ts"),
                 )
             elif skill.name == "mlai-data-query":
                 result = await self._execute_mlai_data_query(skill, text, params, user_id)
@@ -592,6 +596,9 @@ class SkillExecutor:
         params: dict,
         user_id: str,
         channel_id: Optional[str],
+        thread_ts: Optional[str] = None,
+        slack_team_id: Optional[str] = None,
+        request_message_ts: Optional[str] = None,
     ) -> dict:
         settings = get_settings()
         action = str(params.get("action") or "").strip()
@@ -696,7 +703,66 @@ class SkillExecutor:
             if action == "book_meeting_room":
                 starts_at, ends_at = resolve_meeting_room_interval(text, params)
                 rooms = supported_active_rooms(await client.list_meeting_rooms())
+                if not rooms:
+                    raise MeetingRoomInputError(
+                        "inactive_room",
+                        "No meeting rooms are accepting bookings right now.",
+                    )
                 if requested_room_slug is None:
+                    if channel_id and not str(channel_id).startswith("D"):
+                        clarification_context = all(
+                            str(value or "").strip()
+                            for value in (
+                                slack_team_id,
+                                channel_id,
+                                thread_ts,
+                                request_message_ts,
+                                user_id,
+                            )
+                        )
+                        if not clarification_context:
+                            return {
+                                "message": (
+                                    "I couldn't safely keep track of that public room choice. "
+                                    "DM Roo `book the meeting room` and try again."
+                                ),
+                                "data": {
+                                    "action": action,
+                                    "delivery_failed": True,
+                                },
+                            }
+                        clarification = get_meeting_room_clarification_store(
+                            settings.SLACK_RECEIPTS_DB_PATH
+                        ).record_prompt(
+                            team_id=str(slack_team_id),
+                            channel_id=str(channel_id),
+                            thread_ts=str(thread_ts),
+                            request_message_ts=str(request_message_ts),
+                            owner_user_id=user_id,
+                            starts_at=starts_at.isoformat(),
+                            ends_at=ends_at.isoformat(),
+                            available_room_slugs=[room["slug"] for room in rooms],
+                            target_user_id=target_slack_user_id,
+                        )
+                        room_names = [room["name"] for room in reversed(rooms)]
+                        room_options = " or ".join(
+                            f"*{room_name}*" for room_name in room_names
+                        )
+                        reply_options = " or ".join(
+                            f"`{room_name.split()[0].lower()} room`"
+                            for room_name in room_names
+                        )
+                        return {
+                            "message": (
+                                f"Which room should I use: {room_options}? "
+                                f"Reply in this thread with {reply_options}."
+                            ),
+                            "data": {
+                                "action": action,
+                                "delivery": "public_thread_clarification",
+                                "clarification_id": clarification.get("id"),
+                            },
+                        }
                     selection = room_selection_prompt(
                         rooms,
                         owner_slack_user_id=user_id,
@@ -821,6 +887,116 @@ class SkillExecutor:
                 "message": "I could not determine which Meeting Room action to perform.",
                 "data": {"action": action},
             }
+        except MeetingRoomInputError as exc:
+            return self._deliver_meeting_room_response(
+                user_id=user_id,
+                channel_id=channel_id,
+                message=exc.message,
+                action=action,
+            )
+        except (httpx.HTTPStatusError, MLAIBackendUnavailableError) as exc:
+            return self._deliver_meeting_room_response(
+                user_id=user_id,
+                channel_id=channel_id,
+                message=meeting_room_backend_error_message(
+                    exc,
+                    target_slack_user_id=target_slack_user_id,
+                    room_slug=requested_room_slug,
+                ),
+                action=action,
+            )
+
+    async def complete_meeting_room_room_choice(
+        self,
+        *,
+        user_id: str,
+        channel_id: str,
+        room_slug: str,
+        starts_at: str,
+        ends_at: str,
+        booking_client_request_id: str,
+        target_slack_user_id: Optional[str] = None,
+    ) -> dict:
+        """Privately continue a room booking from a durable public reply."""
+
+        action = "book_meeting_room"
+        settings = get_settings()
+        if not settings.MEETING_ROOM_BOOKING_ENABLED:
+            return {
+                "message": "Meeting-room booking is not enabled right now.",
+                "data": {"action": action, "feature_disabled": True},
+            }
+        if not settings.MLAI_BACKEND_URL or not settings.ROO_API_KEY:
+            return {
+                "message": "Meeting-room booking is not configured right now.",
+                "data": {"action": action, "configuration_error": True},
+            }
+
+        requested_room_slug = str(room_slug or "").strip()
+        try:
+            parsed_start = parse_backend_timestamp(starts_at)
+            parsed_end = parse_backend_timestamp(ends_at)
+            if parsed_end <= parsed_start:
+                raise MeetingRoomInputError(
+                    "invalid_time",
+                    "That room-choice request is no longer valid. Ask Roo to start again.",
+                )
+            client = MLAIBackendClient(
+                base_url=settings.MLAI_BACKEND_URL,
+                api_key=settings.ROO_API_KEY,
+                internal_api_key=settings.ROO_API_KEY,
+            )
+            selected_room = next(
+                (
+                    room
+                    for room in supported_active_rooms(
+                        await client.list_meeting_rooms()
+                    )
+                    if room["slug"] == requested_room_slug
+                ),
+                None,
+            )
+            if selected_room is None:
+                requested_name = (
+                    "Small Meeting Room"
+                    if requested_room_slug == "small-meeting-room"
+                    else "Big Meeting Room"
+                )
+                raise MeetingRoomInputError(
+                    "inactive_room",
+                    f"The {requested_name} is not accepting bookings right now.",
+                )
+            availability = await client.check_meeting_room_availability(
+                user_id,
+                room_slug=selected_room["slug"],
+                starts_at=parsed_start.isoformat(),
+                ends_at=parsed_end.isoformat(),
+                target_slack_user_id=target_slack_user_id,
+            )
+            if not availability.get("available"):
+                message = self._format_meeting_room_availability(availability)
+                return self._deliver_meeting_room_response(
+                    user_id=user_id,
+                    channel_id=channel_id,
+                    message=f"{message} No booking was created.",
+                    action=action,
+                )
+            preview = booking_preview(
+                availability,
+                owner_slack_user_id=user_id,
+                starts_at=parsed_start,
+                ends_at=parsed_end,
+                expected_room_slug=selected_room["slug"],
+                target_slack_user_id=target_slack_user_id,
+                client_request_id=booking_client_request_id,
+            )
+            return self._deliver_meeting_room_response(
+                user_id=user_id,
+                channel_id=channel_id,
+                message=preview["message"],
+                blocks=preview["blocks"],
+                action=action,
+            )
         except MeetingRoomInputError as exc:
             return self._deliver_meeting_room_response(
                 user_id=user_id,

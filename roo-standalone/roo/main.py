@@ -133,6 +133,10 @@ from .meeting_room_actions import (
     meeting_room_action_retry_loop,
     process_meeting_room_action,
 )
+from .meeting_room_clarifications import (
+    get_meeting_room_clarification_store,
+    room_choice_from_reply,
+)
 
 # Pending intents for auto-continue after prerequisite steps complete.
 # Key: "{slack_user_id}:{domain}" → {"action": "write", "topic": "...", "channel_id": "...", "thread_ts": "..."}
@@ -405,6 +409,294 @@ async def _handle_contextual_slack_message_safely(
         if trigger_source == "app_mention":
             return await _handle_mention(event)
         return None
+
+
+async def _post_meeting_room_public_reply(
+    *,
+    channel_id: str,
+    thread_ts: str,
+    text: str,
+) -> bool:
+    try:
+        response = await asyncio.to_thread(
+            post_message,
+            channel=channel_id,
+            text=text,
+            thread_ts=thread_ts,
+        )
+        delivered = _slack_delivery_succeeded(response)
+    except Exception as exc:
+        delivered = False
+        reason = exc.__class__.__name__
+    else:
+        reason = "delivery_rejected"
+    if not delivered:
+        print(
+            "MEETING_ROOM_PUBLIC_REPLY_FAILED "
+            f"reason={reason} channel_id={channel_id} thread_ts={thread_ts}"
+        )
+    return delivered
+
+
+async def _finish_meeting_room_text_choice(
+    store: Any,
+    record_id: int,
+    *,
+    success: bool,
+) -> bool:
+    try:
+        return bool(
+            await asyncio.to_thread(
+                store.finish,
+                record_id,
+                success=success,
+            )
+        )
+    except Exception as exc:
+        print(
+            "MEETING_ROOM_PUBLIC_CHOICE_STATE_FAILED "
+            f"reason={exc.__class__.__name__} record_id={record_id}"
+        )
+        return False
+
+
+async def _handle_meeting_room_text_choice(
+    event: dict[str, Any],
+    *,
+    slack_team_id: str,
+) -> bool:
+    """Handle an exact room reply only inside its persisted public thread."""
+
+    settings = get_settings()
+    channel_id = str(event.get("channel") or "").strip()
+    thread_ts = str(event.get("thread_ts") or "").strip()
+    actor_user_id = str(event.get("user") or "").strip()
+    message_ts = str(event.get("ts") or "").strip()
+    team_id = str(slack_team_id or event.get("team") or "").strip()
+    if (
+        getattr(settings, "ROO_SURFACE", "public") != "public"
+        or not bool(getattr(settings, "MEETING_ROOM_BOOKING_ENABLED", False))
+        or not team_id
+        or not channel_id
+        or channel_id.startswith("D")
+        or not thread_ts
+        or not actor_user_id
+        or not message_ts
+    ):
+        return False
+
+    store = get_meeting_room_clarification_store(
+        settings.SLACK_RECEIPTS_DB_PATH
+    )
+    pending = await asyncio.to_thread(
+        store.find,
+        team_id=team_id,
+        channel_id=channel_id,
+        thread_ts=thread_ts,
+        owner_user_id=actor_user_id,
+    )
+    room_slug = room_choice_from_reply(str(event.get("text") or ""))
+    if pending is None:
+        if room_slug is None:
+            return False
+        another_owner = await asyncio.to_thread(
+            store.find,
+            team_id=team_id,
+            channel_id=channel_id,
+            thread_ts=thread_ts,
+        )
+        if another_owner is None or str(
+            another_owner.get("status") or ""
+        ) not in {"awaiting_choice", "processing", "expired"}:
+            return False
+        print(
+            "MEETING_ROOM_PUBLIC_CHOICE_REJECTED "
+            "reason=wrong_owner "
+            f"channel_id={channel_id} thread_ts={thread_ts}"
+        )
+        return True
+    if room_slug is None:
+        return False
+    if (
+        str(pending.get("status") or "") in {"completed", "failed"}
+        and str(pending.get("choice_message_ts") or "") != message_ts
+    ):
+        return False
+
+    try:
+        claim = await asyncio.to_thread(
+            store.claim_choice,
+            team_id=team_id,
+            channel_id=channel_id,
+            thread_ts=thread_ts,
+            actor_user_id=actor_user_id,
+            room_slug=room_slug,
+            choice_message_ts=message_ts,
+        )
+    except Exception as exc:
+        print(
+            "MEETING_ROOM_PUBLIC_CHOICE_STATE_FAILED "
+            f"reason={exc.__class__.__name__} "
+            f"channel_id={channel_id} thread_ts={thread_ts}"
+        )
+        await _post_meeting_room_public_reply(
+            channel_id=channel_id,
+            thread_ts=thread_ts,
+            text=(
+                "I couldn't safely keep track of that room choice. "
+                "Ask Roo to start the booking again."
+            ),
+        )
+        return True
+    disposition = str(claim.get("disposition") or "missing")
+    record = claim.get("record") or pending
+    if disposition in {"duplicate", "wrong_owner", "missing"}:
+        return True
+    if disposition in {"processing", "already_selected", "completed"}:
+        await _post_meeting_room_public_reply(
+            channel_id=channel_id,
+            thread_ts=thread_ts,
+            text="I'm already handling the first room choice. Check your Roo DM.",
+        )
+        return True
+    if disposition == "expired":
+        await _post_meeting_room_public_reply(
+            channel_id=channel_id,
+            thread_ts=thread_ts,
+            text="That room choice expired. Ask Roo to start the booking again.",
+        )
+        return True
+    if disposition in {"failed", "unsupported_room"}:
+        await _post_meeting_room_public_reply(
+            channel_id=channel_id,
+            thread_ts=thread_ts,
+            text="I couldn't use that room choice. Ask Roo to start the booking again.",
+        )
+        return True
+    if disposition != "claimed":
+        return False
+
+    context = BackendActorContext(
+        slack_team_id=team_id,
+        acting_slack_user_id=actor_user_id,
+        slack_channel_id=channel_id,
+        slack_thread_ts=thread_ts,
+        event_id=str(
+            event.get("_slack_event_id")
+            or event.get("client_msg_id")
+            or message_ts
+        ),
+    )
+    try:
+        with use_backend_actor_context(context):
+            result = await get_agent().skill_executor.complete_meeting_room_room_choice(
+                user_id=actor_user_id,
+                channel_id=channel_id,
+                room_slug=room_slug,
+                starts_at=str(record.get("starts_at") or ""),
+                ends_at=str(record.get("ends_at") or ""),
+                booking_client_request_id=str(
+                    record.get("booking_client_request_id") or ""
+                ),
+                target_slack_user_id=(
+                    str(record.get("target_user_id") or "").strip() or None
+                ),
+            )
+    except Exception as exc:
+        await _finish_meeting_room_text_choice(
+            store,
+            int(record["id"]),
+            success=False,
+        )
+        print(
+            "MEETING_ROOM_PUBLIC_CHOICE_FAILED "
+            f"reason={exc.__class__.__name__} "
+            f"channel_id={channel_id} thread_ts={thread_ts}"
+        )
+        await _post_meeting_room_public_reply(
+            channel_id=channel_id,
+            thread_ts=thread_ts,
+            text=(
+                "I couldn't finish that room choice. No booking was created; "
+                "ask Roo to start again."
+            ),
+        )
+        return True
+
+    result_data = result.get("data") or {}
+    delivered_privately = (
+        result_data.get("delivery") == "direct_message"
+        and not result_data.get("delivery_failed")
+    )
+    await _finish_meeting_room_text_choice(
+        store,
+        int(record["id"]),
+        success=delivered_privately,
+    )
+    public_message = str(result.get("message") or "").strip()
+    if public_message:
+        await _post_meeting_room_public_reply(
+            channel_id=channel_id,
+            thread_ts=thread_ts,
+            text=public_message,
+        )
+    return True
+
+
+async def _handle_app_mention_with_room_choice(
+    event: dict[str, Any],
+    *,
+    slack_team_id: str,
+) -> Optional[dict[str, Any]]:
+    try:
+        handled = await _handle_meeting_room_text_choice(
+            event,
+            slack_team_id=slack_team_id,
+        )
+    except Exception as exc:
+        handled = False
+        print(
+            "MEETING_ROOM_PUBLIC_CHOICE_GATE_FAILED "
+            f"reason={exc.__class__.__name__} source=app_mention"
+        )
+    if handled:
+        return None
+    settings = get_settings()
+    if _is_contextual_channel_enabled(settings, event.get("channel")):
+        return await _handle_contextual_slack_message_safely(
+            event,
+            slack_team_id=slack_team_id,
+            trigger_source="app_mention",
+        )
+    return await _handle_mention(event)
+
+
+async def _handle_public_message_with_room_choice(
+    event: dict[str, Any],
+    *,
+    slack_team_id: str,
+) -> Optional[dict[str, Any]]:
+    try:
+        handled = await _handle_meeting_room_text_choice(
+            event,
+            slack_team_id=slack_team_id,
+        )
+    except Exception as exc:
+        handled = False
+        print(
+            "MEETING_ROOM_PUBLIC_CHOICE_GATE_FAILED "
+            f"reason={exc.__class__.__name__} source=channel_message"
+        )
+    if handled:
+        return None
+    settings = get_settings()
+    if _is_contextual_channel_enabled(settings, event.get("channel")):
+        return await _handle_contextual_slack_message_safely(
+            event,
+            slack_team_id=slack_team_id,
+            trigger_source="channel_message",
+        )
+    return None
 
 
 def _looks_like_linear_meeting_file_request(text: str, has_files: bool = False) -> bool:
@@ -2487,16 +2779,12 @@ async def slack_events(
         if not _mark_app_mention_event_seen(payload, event):
             return JSONResponse(status_code=200, content={})
         routed_event = _with_slack_delivery_context(event, payload)
-        if _is_contextual_channel_enabled(settings, event.get("channel")):
-            asyncio.create_task(
-                _handle_contextual_slack_message_safely(
-                    routed_event,
-                    slack_team_id=str(payload.get("team_id") or ""),
-                    trigger_source="app_mention",
-                )
+        asyncio.create_task(
+            _handle_app_mention_with_room_choice(
+                routed_event,
+                slack_team_id=str(payload.get("team_id") or ""),
             )
-        else:
-            asyncio.create_task(_handle_mention(routed_event))
+        )
         return JSONResponse(status_code=200, content={})
 
     if event_type == "reaction_added":
@@ -2618,15 +2906,17 @@ async def slack_events(
             )
             return JSONResponse(status_code=200, content={})
 
-        if (
-            not event.get("subtype")
-            and _is_contextual_channel_enabled(settings, event.get("channel"))
+        if not event.get("subtype") and (
+            _is_contextual_channel_enabled(settings, event.get("channel"))
+            or (
+                bool(getattr(settings, "MEETING_ROOM_BOOKING_ENABLED", False))
+                and bool(event.get("thread_ts"))
+            )
         ):
             asyncio.create_task(
-                _handle_contextual_slack_message_safely(
+                _handle_public_message_with_room_choice(
                     _with_slack_delivery_context(event, payload),
                     slack_team_id=str(payload.get("team_id") or ""),
-                    trigger_source="channel_message",
                 )
             )
             return JSONResponse(status_code=200, content={})
