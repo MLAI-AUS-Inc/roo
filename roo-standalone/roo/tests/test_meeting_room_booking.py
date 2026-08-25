@@ -30,11 +30,13 @@ from roo.meeting_room_booking import (
     BOOK_ACTION_ID,
     CANCEL_ACTION_ID,
     CHOOSE_ROOM_ACTION_ID,
+    CHOOSE_ROOM_ACTION_IDS_BY_ROOM,
     MeetingRoomInputError,
     build_booking_action_value,
     parse_action_value,
     room_slug_from_text,
     resolve_interval,
+    validate_room_selection_prompt,
 )
 from roo.meeting_room_clarifications import (
     PUBLIC_ROOM_CHOICE_ACTION_IDS_BY_ROOM,
@@ -942,7 +944,63 @@ async def test_direct_message_unspecified_booking_choices_preserve_default_hour(
     )
 
     assert "2:00 PM to 3:00 PM" in result["message"]
-    assert result["blocks"][1]["elements"][0]["action_id"] == CHOOSE_ROOM_ACTION_ID
+    buttons = result["blocks"][1]["elements"]
+    action_ids = {element["action_id"] for element in buttons}
+    assert action_ids == set(CHOOSE_ROOM_ACTION_IDS_BY_ROOM.values())
+    for button in buttons:
+        value = parse_action_value(
+            button["value"],
+            expected_action=CHOOSE_ROOM_ACTION_ID,
+        )
+        assert button["action_id"] == CHOOSE_ROOM_ACTION_IDS_BY_ROOM[
+            value["room_slug"]
+        ]
+
+    malformed_blocks = json.loads(json.dumps(result["blocks"]))
+    malformed_blocks[1]["elements"][1]["action_id"] = malformed_blocks[1][
+        "elements"
+    ][0]["action_id"]
+    with pytest.raises(MeetingRoomInputError, match="safe room-choice card"):
+        validate_room_selection_prompt(result["message"], malformed_blocks)
+
+    invalid_button_text_blocks = json.loads(json.dumps(result["blocks"]))
+    invalid_button_text_blocks[1]["elements"][0]["text"]["type"] = "mrkdwn"
+    with pytest.raises(MeetingRoomInputError, match="safe room-choice card"):
+        validate_room_selection_prompt(
+            result["message"],
+            invalid_button_text_blocks,
+        )
+
+    oversized_section_blocks = json.loads(json.dumps(result["blocks"]))
+    oversized_section_blocks[0]["text"]["text"] = "x" * 3_001
+    with pytest.raises(MeetingRoomInputError, match="safe room-choice card"):
+        validate_room_selection_prompt(
+            result["message"],
+            oversized_section_blocks,
+        )
+
+
+@pytest.mark.asyncio
+async def test_invalid_private_room_card_returns_specific_restart_message(monkeypatch):
+    configured = _settings()
+    _patch_executor(monkeypatch, configured)
+    monkeypatch.setattr(
+        room_module,
+        "room_choice_action_id",
+        lambda room_slug: CHOOSE_ROOM_ACTION_ID,
+    )
+
+    result = await SkillExecutor()._execute_meeting_room_booking(
+        text="book the meeting room tomorrow at 2pm",
+        params={"action": "book_meeting_room"},
+        user_id="UOWNER",
+        channel_id="DOWNER",
+    )
+
+    assert result["message"] == (
+        "I couldn't build a safe room-choice card. Ask Roo to start again."
+    )
+    assert result.get("blocks") is None
 
 
 @pytest.mark.asyncio

@@ -115,6 +115,7 @@ from .meeting_room_booking import (
     BOOK_ACTION_ID as MEETING_ROOM_BOOK_ACTION_ID,
     CANCEL_ACTION_ID as MEETING_ROOM_CANCEL_ACTION_ID,
     CHOOSE_ROOM_ACTION_ID as MEETING_ROOM_CHOOSE_ROOM_ACTION_ID,
+    CHOOSE_ROOM_ACTION_IDS as MEETING_ROOM_CHOOSE_ROOM_ACTION_IDS,
     MeetingRoomInputError,
     backend_error_message as meeting_room_backend_error_message,
     booking_preview as meeting_room_booking_preview,
@@ -125,6 +126,7 @@ from .meeting_room_booking import (
     parse_action_value as parse_meeting_room_action_value,
     parse_backend_timestamp as parse_meeting_room_backend_timestamp,
     room_choice_already_selected_message as meeting_room_choice_already_selected_message,
+    room_choice_action_id as meeting_room_private_choice_action_id,
     room_choice_expired as meeting_room_choice_expired,
 )
 from .meeting_room_actions import (
@@ -5895,6 +5897,41 @@ async def _persist_and_start_meeting_room_action(
     message_ts: str,
     duplicate_delivery: bool = False,
 ) -> None:
+    if action_id in MEETING_ROOM_CHOOSE_ROOM_ACTION_IDS:
+        try:
+            private_choice = parse_meeting_room_action_value(
+                action_value,
+                expected_action=MEETING_ROOM_CHOOSE_ROOM_ACTION_ID,
+            )
+        except MeetingRoomInputError as exc:
+            start_slack_action(
+                _deliver_meeting_room_action_outcome(
+                    channel_id=channel_id,
+                    message_ts=message_ts,
+                    outcome=exc.message,
+                )
+            )
+            return
+        expected_action_id = meeting_room_private_choice_action_id(
+            str(private_choice["room_slug"])
+        )
+        if action_id not in {
+            MEETING_ROOM_CHOOSE_ROOM_ACTION_ID,
+            expected_action_id,
+        }:
+            start_slack_action(
+                _deliver_meeting_room_action_outcome(
+                    channel_id=channel_id,
+                    message_ts=message_ts,
+                    outcome=(
+                        "This room choice is not valid. Ask Roo to start again."
+                    ),
+                )
+            )
+            return
+        # Preserve the existing durable action key so old and new buttons share
+        # first-choice-wins and duplicate-click semantics.
+        action_id = MEETING_ROOM_CHOOSE_ROOM_ACTION_ID
     if not settings.MEETING_ROOM_BOOKING_ENABLED:
         # Leave previously queued uncertain mutations untouched while the
         # feature is disabled. They can resume after the flag is re-enabled,
@@ -6086,7 +6123,7 @@ async def slack_actions(
         in {
             MEETING_ROOM_BOOK_ACTION_ID,
             MEETING_ROOM_CANCEL_ACTION_ID,
-            MEETING_ROOM_CHOOSE_ROOM_ACTION_ID,
+            *MEETING_ROOM_CHOOSE_ROOM_ACTION_IDS,
         }
     ):
         await _persist_and_start_meeting_room_action(
