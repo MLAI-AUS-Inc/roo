@@ -3538,6 +3538,124 @@ async def test_book_coworking_persists_intent_and_queues_backend_timeout(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_book_coworking_surfaces_terminal_backend_reason_instead_of_outage(
+    tmp_path,
+    monkeypatch,
+):
+    store = coworking_module.CoworkingBookingIntentStore(tmp_path / "intents.db")
+
+    class UnlinkedCoworkingClient:
+        def __init__(self):
+            self.calls = 0
+
+        async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None):
+            self.calls += 1
+            request = httpx.Request(
+                "POST",
+                "https://backend.test/api/v1/points/coworking/book/",
+            )
+            response = httpx.Response(
+                400,
+                request=request,
+                json={"error": "Please link your Slack account first"},
+            )
+            raise httpx.HTTPStatusError(
+                "bad request",
+                request=request,
+                response=response,
+            )
+
+    client = UnlinkedCoworkingClient()
+    executor = SkillExecutor()
+    monkeypatch.setattr(executor_module, "get_coworking_intent_store", lambda: store)
+
+    result = await executor._handle_points_action(
+        client=client,
+        action="book_coworking",
+        params={"date": "2026-08-25"},
+        text="book me in",
+        user_id="U123",
+        channel_id="C123",
+        thread_ts="111.222",
+        skill=SimpleNamespace(name="mlai-points"),
+    )
+
+    intent = store.get_by_key("coworking:U123:2026-08-25")
+    assert result == (
+        "🛑 I couldn't book you in for **2026-08-25**: "
+        "Please link your Slack account first"
+    )
+    assert "connecting" not in result
+    assert client.calls == 1
+    assert intent["status"] == "blocked"
+    assert intent["attempt_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_book_coworking_redacts_balance_rejection_in_channel(
+    tmp_path,
+    monkeypatch,
+):
+    store = coworking_module.CoworkingBookingIntentStore(tmp_path / "intents.db")
+    direct_messages = []
+
+    class InsufficientBalanceCoworkingClient:
+        async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None):
+            request = httpx.Request(
+                "POST",
+                "https://backend.test/api/v1/points/coworking/book/",
+            )
+            response = httpx.Response(
+                400,
+                request=request,
+                json={"error": "Insufficient balance: 0 < 8 required"},
+            )
+            raise httpx.HTTPStatusError(
+                "bad request",
+                request=request,
+                response=response,
+            )
+
+        async def get_balance(self, slack_user_id):
+            return {"balance": 0}
+
+    monkeypatch.setattr(executor_module, "get_coworking_intent_store", lambda: store)
+    monkeypatch.setattr(
+        executor_module,
+        "send_dm",
+        lambda user_id, text, **kwargs: direct_messages.append((user_id, text))
+        or {"ok": True},
+    )
+
+    result = await SkillExecutor()._handle_points_action(
+        client=InsufficientBalanceCoworkingClient(),
+        action="book_coworking",
+        params={"date": "2026-08-25"},
+        text="book",
+        user_id="U123",
+        channel_id="C123",
+        thread_ts="111.222",
+        skill=SimpleNamespace(name="mlai-points"),
+    )
+
+    assert result["message"] == (
+        "🛑 I couldn't book you in for **2026-08-25**: "
+        "There are not enough Roo Points for this action."
+    )
+    assert "balance: 0" not in result["message"]
+    assert "< 8" not in result["message"]
+    assert direct_messages == [
+        (
+            "U123",
+            "🛑 I couldn't book you in for **2026-08-25**: "
+            "There are not enough Roo Points for this action.\n\n"
+            "Your current balance is **0 Roo Points**.",
+        )
+    ]
+    assert store.get_by_key("coworking:U123:2026-08-25")["status"] == "blocked"
+
+
+@pytest.mark.asyncio
 async def test_dependency_health_check_reports_degraded_backend(monkeypatch):
     class FakeBackendClient:
         def __init__(self, *args, **kwargs):
