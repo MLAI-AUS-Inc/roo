@@ -13029,6 +13029,71 @@ Chunk {index} source: {label}
         )
         return f"🛑 I couldn't check <@{target_user_id}> in: {error_detail}"
 
+    async def _format_coworking_booking_rejection(
+        self,
+        *,
+        client,
+        target_user_id: str,
+        requested_by_user_id: str,
+        booking_date: str,
+        channel_id: Optional[str],
+        thread_ts: Optional[str],
+        admin_checkin: bool,
+        exc: httpx.HTTPStatusError,
+    ) -> Any:
+        """Render a terminal backend rejection without calling it an outage."""
+        status_code = exc.response.status_code
+        fallback_by_status = {
+            400: "The booking request was rejected.",
+            401: "That booking isn't allowed for your account.",
+            403: "That booking isn't allowed for your account.",
+            404: "I couldn't find the MLAI account needed for that booking.",
+        }
+        if status_code in {401, 403}:
+            # These statuses normally describe Roo's service credential, not a
+            # member action. Do not expose backend authentication details.
+            error_detail = fallback_by_status[status_code]
+        else:
+            error_detail = self._extract_http_error_detail(exc) or fallback_by_status.get(
+                status_code,
+                "The booking request was rejected.",
+            )
+        safe_detail = self._redact_points_balance_error(error_detail)
+
+        if admin_checkin:
+            return f"🛑 I couldn't check <@{target_user_id}> in: {safe_detail}"
+
+        public_message = (
+            f"🛑 I couldn't book you in for **{booking_date}**: {safe_detail}"
+        )
+        if not self._is_points_balance_error(error_detail):
+            return public_message
+
+        private_message = public_message
+        try:
+            balance_data = await client.get_balance(target_user_id)
+            current_balance = balance_data.get("balance")
+            if current_balance is not None:
+                private_message += (
+                    f"\n\nYour current balance is **{current_balance} Roo Points**."
+                )
+        except Exception as balance_exc:
+            print(
+                "🏢 coworking_rejection_balance_lookup_failed "
+                f"exc_type={balance_exc.__class__.__name__}"
+            )
+
+        return self._deliver_personal_points_message(
+            recipient_user_id=target_user_id,
+            requester_user_id=requested_by_user_id,
+            channel_id=channel_id,
+            thread_ts=thread_ts,
+            private_message=private_message,
+            public_message=public_message,
+            action="book_coworking_error",
+            private_ack=public_message,
+        )
+
     def _format_admin_coworking_batch_success(
         self,
         *,
@@ -13161,7 +13226,7 @@ Chunk {index} source: {label}
         channel_id: Optional[str],
         thread_ts: Optional[str],
         admin_checkin: bool,
-    ) -> str:
+    ) -> Any:
         print(
             "🏢 coworking_booking_execute "
             f"requested_by_user_id={requested_by_user_id} target_user_id={target_user_id} "
@@ -13212,6 +13277,21 @@ Chunk {index} source: {label}
                     admin_checkin=admin_checkin,
                 )
             store.mark_blocked(int(leased_intent["id"]), error=error)
+            if isinstance(exc, httpx.HTTPStatusError):
+                print(
+                    "🏢 coworking_booking_terminal_rejection "
+                    f"status={exc.response.status_code}"
+                )
+                return await self._format_coworking_booking_rejection(
+                    client=client,
+                    target_user_id=target_user_id,
+                    requested_by_user_id=requested_by_user_id,
+                    booking_date=booking_date,
+                    channel_id=channel_id,
+                    thread_ts=thread_ts,
+                    admin_checkin=admin_checkin,
+                    exc=exc,
+                )
             raise
 
         cost = result.get("points_cost", 1)
