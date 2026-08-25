@@ -17,6 +17,13 @@ MELBOURNE_TZ = ZoneInfo("Australia/Melbourne")
 BOOK_ACTION_ID = "meeting_room_confirm_booking"
 CANCEL_ACTION_ID = "meeting_room_cancel_booking"
 CHOOSE_ROOM_ACTION_ID = "meeting_room_choose_room"
+CHOOSE_ROOM_ACTION_IDS_BY_ROOM = {
+    "big-meeting-room": f"{CHOOSE_ROOM_ACTION_ID}_big",
+    "small-meeting-room": f"{CHOOSE_ROOM_ACTION_ID}_small",
+}
+CHOOSE_ROOM_ACTION_IDS = frozenset(
+    {CHOOSE_ROOM_ACTION_ID, *CHOOSE_ROOM_ACTION_IDS_BY_ROOM.values()}
+)
 CONFIRMATION_TTL = timedelta(minutes=10)
 MIN_BOOKING_HALF_HOURS = 2
 MAX_BOOKING_HALF_HOURS = 4
@@ -71,6 +78,15 @@ def room_slug_from_text(text: str) -> Optional[str]:
     if small == big:
         return None
     return "small-meeting-room" if small else "big-meeting-room"
+
+
+def room_choice_action_id(room_slug: str) -> str:
+    """Return the unique Slack action ID for a generated private room button."""
+
+    try:
+        return CHOOSE_ROOM_ACTION_IDS_BY_ROOM[str(room_slug)]
+    except KeyError as exc:
+        raise ValueError("room_slug is not supported for private buttons") from exc
 
 
 def supported_active_rooms(rooms: list[dict]) -> list[dict]:
@@ -762,6 +778,69 @@ def room_choice_expired(payload: dict, *, now: Optional[datetime] = None) -> boo
     return expires_at.astimezone(timezone.utc) <= current
 
 
+def validate_room_selection_prompt(message: str, blocks: list[dict]) -> None:
+    """Fail closed before Slack sees a malformed private room-choice card."""
+
+    def invalid_prompt() -> MeetingRoomInputError:
+        return MeetingRoomInputError(
+            "invalid_response",
+            "I couldn't build a safe room-choice card. Ask Roo to start again.",
+        )
+
+    fallback_text = str(message or "").strip()
+    if (
+        not fallback_text
+        or len(fallback_text) > 40_000
+        or not isinstance(blocks, list)
+        or len(blocks) > 50
+        or any(not isinstance(block, dict) for block in blocks)
+    ):
+        raise invalid_prompt()
+
+    actions_blocks = [block for block in blocks if block.get("type") == "actions"]
+    if len(actions_blocks) != 1:
+        raise invalid_prompt()
+    block_id = str(actions_blocks[0].get("block_id") or "")
+    if not block_id or len(block_id) > 255:
+        raise invalid_prompt()
+    elements = actions_blocks[0].get("elements")
+    if not isinstance(elements, list) or not elements or len(elements) > 25:
+        raise invalid_prompt()
+
+    seen_action_ids: set[str] = set()
+    for element in elements:
+        if not isinstance(element, dict) or element.get("type") != "button":
+            raise invalid_prompt()
+        action_id = str(element.get("action_id") or "")
+        label_payload = element.get("text")
+        if not isinstance(label_payload, dict):
+            raise invalid_prompt()
+        label = str(label_payload.get("text") or "")
+        raw_value = str(element.get("value") or "")
+        if (
+            not action_id
+            or len(action_id) > 255
+            or action_id in seen_action_ids
+            or action_id not in CHOOSE_ROOM_ACTION_IDS_BY_ROOM.values()
+            or not label
+            or len(label) > 75
+            or not raw_value
+            or len(raw_value) > 2_000
+        ):
+            raise invalid_prompt()
+        seen_action_ids.add(action_id)
+        try:
+            value = parse_action_value(
+                raw_value,
+                expected_action=CHOOSE_ROOM_ACTION_ID,
+            )
+            expected_action_id = room_choice_action_id(value["room_slug"])
+        except (KeyError, MeetingRoomInputError, ValueError) as exc:
+            raise invalid_prompt() from exc
+        if action_id != expected_action_id:
+            raise invalid_prompt()
+
+
 def room_selection_prompt(
     rooms: list[dict],
     *,
@@ -798,7 +877,7 @@ def room_selection_prompt(
         buttons.append(
             {
                 "type": "button",
-                "action_id": CHOOSE_ROOM_ACTION_ID,
+                "action_id": room_choice_action_id(room["slug"]),
                 "text": {"type": "plain_text", "text": room["name"]},
                 "value": build_room_choice_action_value(
                     owner_slack_user_id=owner_slack_user_id,
@@ -812,17 +891,16 @@ def room_selection_prompt(
                 ),
             }
         )
-    return {
-        "message": message,
-        "blocks": [
-            {"type": "section", "text": {"type": "mrkdwn", "text": message}},
-            {
-                "type": "actions",
-                "block_id": f"meeting_room_choice_{selection_id}",
-                "elements": buttons,
-            },
-        ],
-    }
+    blocks = [
+        {"type": "section", "text": {"type": "mrkdwn", "text": message}},
+        {
+            "type": "actions",
+            "block_id": f"meeting_room_choice_{selection_id}",
+            "elements": buttons,
+        },
+    ]
+    validate_room_selection_prompt(message, blocks)
+    return {"message": message, "blocks": blocks}
 
 
 def room_choice_already_selected_message(payload: dict) -> str:

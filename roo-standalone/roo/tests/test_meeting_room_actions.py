@@ -27,6 +27,7 @@ from roo.config import Settings, get_settings
 from roo.meeting_room_booking import (
     BOOK_ACTION_ID,
     CHOOSE_ROOM_ACTION_ID,
+    CHOOSE_ROOM_ACTION_IDS_BY_ROOM,
     MeetingRoomInputError,
     build_booking_action_value,
     parse_action_value,
@@ -470,6 +471,135 @@ async def test_competing_room_click_does_not_overwrite_first_choice(
             ),
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_room_specific_private_callback_is_normalized_before_persistence(
+    tmp_path,
+    monkeypatch,
+):
+    configured = _settings(tmp_path)
+    store = action_module.MeetingRoomActionStore(configured.SLACK_RECEIPTS_DB_PATH)
+    small_value, _ = _room_choice_values()
+    scheduled = []
+    monkeypatch.setattr(main_module, "get_meeting_room_action_store", lambda path: store)
+    monkeypatch.setattr(
+        main_module,
+        "start_slack_action",
+        lambda task: scheduled.append(task),
+    )
+
+    await main_module._persist_and_start_meeting_room_action(
+        settings=configured,
+        action_id=CHOOSE_ROOM_ACTION_IDS_BY_ROOM["small-meeting-room"],
+        action_value=small_value,
+        actor_user_id="UOWNER",
+        channel_id="DOWNER",
+        message_ts="123.456",
+    )
+
+    with sqlite3.connect(configured.SLACK_RECEIPTS_DB_PATH) as connection:
+        persisted_action_id = connection.execute(
+            "SELECT action_id FROM meeting_room_action_outbox"
+        ).fetchone()[0]
+    assert persisted_action_id == CHOOSE_ROOM_ACTION_ID
+    assert len(scheduled) == 1
+    scheduled[0].close()
+
+
+@pytest.mark.asyncio
+async def test_room_specific_private_callback_rejects_value_mismatch(
+    tmp_path,
+    monkeypatch,
+):
+    configured = _settings(tmp_path)
+    _, big_value = _room_choice_values()
+    delivered = []
+    monkeypatch.setattr(
+        main_module,
+        "start_slack_action",
+        lambda task: delivered.append(task),
+    )
+
+    await main_module._persist_and_start_meeting_room_action(
+        settings=configured,
+        action_id=CHOOSE_ROOM_ACTION_IDS_BY_ROOM["small-meeting-room"],
+        action_value=big_value,
+        actor_user_id="UOWNER",
+        channel_id="DOWNER",
+        message_ts="123.456",
+    )
+
+    assert len(delivered) == 1
+    with sqlite3.connect(configured.SLACK_RECEIPTS_DB_PATH) as connection:
+        exists = connection.execute(
+            "SELECT 1 FROM sqlite_master "
+            "WHERE type='table' AND name='meeting_room_action_outbox'"
+        ).fetchone()
+        count = (
+            connection.execute(
+                "SELECT COUNT(*) FROM meeting_room_action_outbox"
+            ).fetchone()[0]
+            if exists
+            else 0
+        )
+    assert count == 0
+    delivered[0].close()
+
+
+@pytest.mark.parametrize(
+    "action_id",
+    [
+        CHOOSE_ROOM_ACTION_ID,
+        CHOOSE_ROOM_ACTION_IDS_BY_ROOM["small-meeting-room"],
+    ],
+)
+def test_slack_action_ingress_accepts_new_and_legacy_private_callbacks(
+    action_id,
+    tmp_path,
+    monkeypatch,
+):
+    configured = _settings(tmp_path)
+    main_module.app.dependency_overrides[get_settings] = lambda: configured
+    small_value, _ = _room_choice_values()
+    payload = {
+        "type": "block_actions",
+        "team": {"id": "TMLAI"},
+        "user": {"id": "UOWNER"},
+        "channel": {"id": "DOWNER"},
+        "container": {"message_ts": "123.456"},
+        "message": {"ts": "123.456"},
+        "actions": [{"action_id": action_id, "value": small_value}],
+    }
+    body = urlencode({"payload": json.dumps(payload)}).encode()
+    timestamp = int(time.time())
+    headers = {
+        "X-Slack-Request-Timestamp": str(timestamp),
+        "X-Slack-Signature": _signature(
+            configured.SLACK_SIGNING_SECRET,
+            timestamp,
+            body,
+        ),
+        "Content-Type": "application/x-www-form-urlencoded",
+    }
+    persisted = []
+
+    async def persist(**kwargs):
+        persisted.append(kwargs)
+
+    monkeypatch.setattr(
+        main_module,
+        "_persist_and_start_meeting_room_action",
+        persist,
+    )
+    client = TestClient(main_module.app)
+
+    response = client.post("/slack/actions", content=body, headers=headers)
+
+    assert response.status_code == 200
+    assert len(persisted) == 1
+    assert persisted[0]["action_id"] == action_id
+    assert persisted[0]["action_value"] == small_value
 
 
 @pytest.mark.asyncio
