@@ -12005,6 +12005,9 @@ Chunk {index} source: {label}
         action: str,
         public_message: Optional[str] = None,
         private_ack: str = "I've sent your Roo Points details privately.",
+        private_failure_ack: str = (
+            "I couldn't send you a DM. DM Roo `points` to view your points privately."
+        ),
     ) -> dict:
         """Deliver personal points data without a shared-channel fallback."""
         result_data = {
@@ -12054,7 +12057,7 @@ Chunk {index} source: {label}
         acknowledgement = (
             private_ack
             if dm_delivered
-            else "I couldn't send you a DM. DM Roo `points` to view your points privately."
+            else private_failure_ack
         )
         result_data["ephemeral_delivered"] = self._post_private_points_ack(
             channel_id=channel_id,
@@ -13351,6 +13354,76 @@ Chunk {index} source: {label}
         # =====================================================================
         # Member Actions
         # =====================================================================
+
+        if action == "link_account":
+            from ..slack_client import (
+                SlackIdentityLookupError,
+                get_verified_user_email,
+            )
+
+            try:
+                email = get_verified_user_email(user_id)
+            except SlackIdentityLookupError:
+                private_message = (
+                    "I couldn't verify an email for your Slack profile, so I didn't "
+                    "change any account link. Ask an MLAI admin to check your Slack "
+                    "profile email and try again."
+                )
+            else:
+                try:
+                    linked_user_id = await client.link_slack_user(user_id, email)
+                except httpx.HTTPStatusError as exc:
+                    if exc.response.status_code == 409:
+                        private_message = (
+                            "That MLAI account is already linked to another Slack "
+                            "profile, so I didn't change either account. Ask an MLAI "
+                            "admin to resolve the existing link."
+                        )
+                    else:
+                        print(
+                            "Slack account link failed "
+                            f"status={exc.response.status_code}"
+                        )
+                        private_message = (
+                            "I couldn't safely link your Slack and MLAI accounts right now. "
+                            "Nothing was confirmed—please try `link` again in a moment."
+                        )
+                except Exception as exc:
+                    print(
+                        "Slack account link failed "
+                        f"exc_type={exc.__class__.__name__}"
+                    )
+                    private_message = (
+                        "I couldn't safely link your Slack and MLAI accounts right now. "
+                        "Nothing was confirmed—please try `link` again in a moment."
+                    )
+                else:
+                    if linked_user_id is None:
+                        private_message = (
+                            "I couldn't find an existing MLAI account with the same "
+                            "email as your Slack profile. Sign in to MLAI with that "
+                            "email, or ask an MLAI admin to update your account email, "
+                            "then try `link` again."
+                        )
+                    else:
+                        private_message = (
+                            "✅ Your Slack profile is linked to your MLAI account. "
+                            "You can now try `book me in` again."
+                        )
+
+            return self._deliver_personal_points_message(
+                recipient_user_id=user_id,
+                requester_user_id=user_id,
+                channel_id=channel_id,
+                thread_ts=thread_ts,
+                private_message=private_message,
+                action="link_account",
+                private_ack="I've sent your account-link result privately.",
+                private_failure_ack=(
+                    "I couldn't send you a DM. Open Roo's direct messages and "
+                    "run `link` there to see the result privately."
+                ),
+            )
         
         if action == "topup_points":
             settings = get_settings()

@@ -147,6 +147,7 @@ to explicitly say `room` or `meeting room`.
 ## Capabilities
 
 ### Member Actions
+- Link their own Slack identity to an existing MLAI account with the same email
 - Check points balance and history
 - Flex a lifetime-earned total in the request thread and delete your own flex later
 - Request points for yourself in Slack for admin approval

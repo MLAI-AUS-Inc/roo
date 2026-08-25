@@ -818,7 +818,15 @@ class RooAgent:
         """
         text_lower = text.lower().strip()
 
-        # 1. Explicit opt-in contribution total and owner-only deletion.
+        # 1. Self-only account linking. Keep the grammar exact so GitHub or
+        # other integration-link requests continue through their own skills.
+        if re.fullmatch(
+            r"(?:link|link (?:my )?(?:mlai |slack )?account|link my slack)",
+            text_lower,
+        ):
+            return "link_account"
+
+        # 2. Explicit opt-in contribution total and owner-only deletion.
         if re.match(
             r'^(?:delete my flex|remove my (?:points )?flex|delete my latest flex)$',
             text_lower,
@@ -828,11 +836,11 @@ class RooAgent:
         if re.match(r'^(?:flex my points|flex points|points flex)$', text_lower):
             return "flex_points"
 
-        # 2. Balance Check: "points", "balance", "my points"
+        # 3. Balance Check: "points", "balance", "my points"
         if re.match(r'^(?:points|balance|my points)$', text_lower):
             return "balance"
 
-        # 3. Earn/Tasks shortcuts
+        # 4. Earn/Tasks shortcuts
         if re.match(
             r'^(?:points\s+earn|earn\s+points|ways\s+to\s+earn|'
             r'tasks(?:\s+(?:all|mine|review|open))?|'
@@ -841,21 +849,21 @@ class RooAgent:
         ):
             return "list_tasks"
 
-        # 4. Rewards: "points rewards", "rewards"
+        # 5. Rewards: "points rewards", "rewards"
         if re.match(r'^(?:points\s+rewards|rewards)$', text_lower):
             return "list_rewards"
 
-        # 5. A generic self-booking means coworking. Keep this grammar narrow:
+        # 6. A generic self-booking means coworking. Keep this grammar narrow:
         # an explicitly named resource (for example, a meeting room) must still
         # go through the tool-calling router for the appropriate skill.
         if self._generic_coworking_booking_date_hint(text_lower) is not None:
             return "book_coworking"
 
-        # 6. Coworking Book Today: "coworking book today"
+        # 7. Coworking Book Today: "coworking book today"
         if re.match(r'^coworking\s+book\s+today$', text_lower):
             return "book_coworking"
 
-        # 7. Coworking Cancel: "coworking cancel" (assumes today/upcoming)
+        # 8. Coworking Cancel: "coworking cancel" (assumes today/upcoming)
         if re.match(r'^coworking\s+cancel$', text_lower):
             return "cancel_coworking"
 
@@ -923,6 +931,14 @@ class RooAgent:
             return None
 
         if action in {"flex_points", "delete_flex"}:
+            return await self._execute_fast_points(
+                user_id,
+                action,
+                channel_id=channel_id,
+                thread_ts=thread_ts,
+            )
+
+        if action == "link_account":
             return await self._execute_fast_points(
                 user_id,
                 action,
@@ -1002,7 +1018,7 @@ class RooAgent:
                 internal_api_key=settings.INTERNAL_API_KEY or settings.ROO_API_KEY or settings.MLAI_API_KEY,
             )
             
-            if action in {"flex_points", "delete_flex"}:
+            if action in {"flex_points", "delete_flex", "link_account"}:
                 msg = await self.skill_executor._handle_points_action(
                     client=client,
                     action=action,
@@ -1010,7 +1026,11 @@ class RooAgent:
                     text=(
                         "flex my points"
                         if action == "flex_points"
-                        else "delete my flex"
+                        else (
+                            "delete my flex"
+                            if action == "delete_flex"
+                            else "link"
+                        )
                     ),
                     user_id=user_id,
                     channel_id=kwargs.get("channel_id"),

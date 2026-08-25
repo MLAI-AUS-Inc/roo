@@ -3495,22 +3495,24 @@ class MLAIBackendClient:
 
     async def link_slack_user(self, slack_id: str, email: str) -> Optional[int]:
         """Link a Slack ID to an existing user found by email."""
-        try:
-            response = await self._request(
-                "POST",
-                "/api/v1/users/link-slack/",
-                json={"slack_id": slack_id, "email": email},
-                timeout=10.0,
-                circuit_breaker=True,
-                use_admin_headers=True,
-            )
-            if response.status_code == 404:
-                return None
-            response.raise_for_status()
-            return response.json().get("user_id")
-        except Exception as e:
-            print(f"Failed to link Slack user: {e}")
+        response = await self._request(
+            "POST",
+            "/api/v1/users/link-slack/",
+            json={"slack_id": slack_id, "email": email},
+            timeout=10.0,
+            circuit_breaker=True,
+            # Identity linking uses Roo's dedicated service credential rather
+            # than the broader legacy internal/admin credential.
+            use_admin_headers=False,
+        )
+        if response.status_code == 404:
             return None
+        self._raise_for_status_or_backend_unavailable(response)
+        payload = response.json()
+        user_id = payload.get("user_id") if isinstance(payload, dict) else None
+        if user_id is None:
+            raise ValueError("MLAI backend omitted the linked user ID")
+        return int(user_id)
 
     # --- MedHack Game State ---
 
