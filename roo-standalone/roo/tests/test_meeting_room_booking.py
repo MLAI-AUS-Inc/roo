@@ -963,6 +963,22 @@ async def test_direct_message_unspecified_booking_choices_preserve_default_hour(
     with pytest.raises(MeetingRoomInputError, match="safe room-choice card"):
         validate_room_selection_prompt(result["message"], malformed_blocks)
 
+    invalid_button_text_blocks = json.loads(json.dumps(result["blocks"]))
+    invalid_button_text_blocks[1]["elements"][0]["text"]["type"] = "mrkdwn"
+    with pytest.raises(MeetingRoomInputError, match="safe room-choice card"):
+        validate_room_selection_prompt(
+            result["message"],
+            invalid_button_text_blocks,
+        )
+
+    oversized_section_blocks = json.loads(json.dumps(result["blocks"]))
+    oversized_section_blocks[0]["text"]["text"] = "x" * 3_001
+    with pytest.raises(MeetingRoomInputError, match="safe room-choice card"):
+        validate_room_selection_prompt(
+            result["message"],
+            oversized_section_blocks,
+        )
+
 
 @pytest.mark.asyncio
 async def test_invalid_private_room_card_returns_specific_restart_message(monkeypatch):

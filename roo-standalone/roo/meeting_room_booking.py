@@ -800,6 +800,20 @@ def validate_room_selection_prompt(message: str, blocks: list[dict]) -> None:
     actions_blocks = [block for block in blocks if block.get("type") == "actions"]
     if len(actions_blocks) != 1:
         raise invalid_prompt()
+    section_blocks = [block for block in blocks if block.get("type") == "section"]
+    if len(section_blocks) != 1:
+        raise invalid_prompt()
+    section_text_payload = section_blocks[0].get("text")
+    if not isinstance(section_text_payload, dict):
+        raise invalid_prompt()
+    section_text = section_text_payload.get("text")
+    if (
+        section_text_payload.get("type") not in {"mrkdwn", "plain_text"}
+        or not isinstance(section_text, str)
+        or not section_text.strip()
+        or len(section_text) > 3_000
+    ):
+        raise invalid_prompt()
     block_id = str(actions_blocks[0].get("block_id") or "")
     if not block_id or len(block_id) > 255:
         raise invalid_prompt()
@@ -815,14 +829,16 @@ def validate_room_selection_prompt(message: str, blocks: list[dict]) -> None:
         label_payload = element.get("text")
         if not isinstance(label_payload, dict):
             raise invalid_prompt()
-        label = str(label_payload.get("text") or "")
+        label = label_payload.get("text")
         raw_value = str(element.get("value") or "")
         if (
             not action_id
             or len(action_id) > 255
             or action_id in seen_action_ids
             or action_id not in CHOOSE_ROOM_ACTION_IDS_BY_ROOM.values()
-            or not label
+            or label_payload.get("type") != "plain_text"
+            or not isinstance(label, str)
+            or not label.strip()
             or len(label) > 75
             or not raw_value
             or len(raw_value) > 2_000
