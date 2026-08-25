@@ -418,7 +418,10 @@ async def test_link_backend_client_only_treats_not_found_as_no_match(monkeypatch
         httpx.Response(500, request=request, json={"error": "backend failed"}),
     ]
 
+    request_kwargs = []
+
     async def fake_request(*args, **kwargs):
+        request_kwargs.append(kwargs)
         return responses.pop(0)
 
     client = MLAIBackendClient(
@@ -431,3 +434,4 @@ async def test_link_backend_client_only_treats_not_found_as_no_match(monkeypatch
     assert await client.link_slack_user("UREQUESTER", "member@example.com") is None
     with pytest.raises(httpx.HTTPStatusError):
         await client.link_slack_user("UREQUESTER", "member@example.com")
+    assert [kwargs["use_admin_headers"] for kwargs in request_kwargs] == [False, False]

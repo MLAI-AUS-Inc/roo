@@ -3501,7 +3501,9 @@ class MLAIBackendClient:
             json={"slack_id": slack_id, "email": email},
             timeout=10.0,
             circuit_breaker=True,
-            use_admin_headers=True,
+            # Identity linking uses Roo's dedicated service credential rather
+            # than the broader legacy internal/admin credential.
+            use_admin_headers=False,
         )
         if response.status_code == 404:
             return None
