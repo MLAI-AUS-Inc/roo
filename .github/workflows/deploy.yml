@@ -46,6 +46,13 @@ jobs:
           # Several legacy suites install import-time module stubs. Keep the
           # surface boundary gate isolated so collection order cannot weaken it.
           python -m pytest roo/tests/test_surface_security.py -q
+          # Meeting-room schema tests need the real skill parser, so keep them
+          # isolated from legacy suites that stub the frontmatter module.
+          python -m pytest \
+            roo/tests/test_meeting_room_booking.py \
+            roo/tests/test_meeting_room_clarifications.py \
+            roo/tests/test_meeting_room_actions.py \
+            -q
           python -m pytest \
             roo/tests/test_slack_security.py \
             roo/tests/test_backend_identity.py \
@@ -58,10 +65,6 @@ jobs:
             roo/tests/test_jobs_scheduler.py \
             roo/tests/test_private_points_delivery.py \
             roo/tests/test_points_flex.py \
-            roo/tests/test_agent_routing.py \
-            roo/tests/test_meeting_room_booking.py \
-            roo/tests/test_meeting_room_clarifications.py \
-            roo/tests/test_meeting_room_actions.py \
             roo/tests/test_admin_brain.py \
             roo/tests/test_admin_brain_interactions.py \
             roo/tests/test_admin_dispatch.py \
@@ -72,7 +75,6 @@ jobs:
             roo/tests/test_admin_pilot_smoke.py \
             roo/tests/test_admin_actions.py \
             roo/tests/test_router_catalog.py \
-            roo/tests/test_routing_eval_gate.py \
             roo/tests/test_linear_inference.py \
             roo/tests/test_linear_effort_sizing.py \
             roo/tests/test_linear_meeting_sources.py \
@@ -234,6 +236,7 @@ jobs:
             upsert_env "ROO_POINTS_STRIPE_CHECKOUT_HOSTS" "checkout.stripe.com"
             upsert_env "MEETING_ROOM_BOOKING_ENABLED" "$MEETING_ROOM_BOOKING_ENABLED"
             upsert_env "FOUNDER_TOOLS_LINK_ORIGINS" "https://mlai.au"
+            upsert_env "ROO_IMPLICIT_ACTION_ALLOWLIST" "respond_in_chat,mlai-points:balance,mlai-points:topup_points,mlai-points:link_founder_account"
             
             # Restart the app
             docker compose up -d --build --remove-orphans
@@ -249,6 +252,8 @@ jobs:
               fi
               sleep 5
             done
+
+            docker compose exec -T roo python -c 'from roo.config import get_settings; actions = get_settings().implicit_action_allowlist; assert "mlai-points:link_founder_account" in actions; assert "mlai-points:link_account" not in actions'
 
             if [ "$MEETING_ROOM_BOOKING_ENABLED" = "true" ]; then
               echo "Verifying the Meeting Room skill is enabled on Public Roo..."

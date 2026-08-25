@@ -106,6 +106,52 @@ def test_founder_account_link_fast_path_executes_with_event_context(monkeypatch)
     }
 
 
+def test_bare_link_in_roo_dm_uses_secure_implicit_action(monkeypatch):
+    agent = _make_agent()
+    captured = {}
+
+    async def fake_execute(user_id, action, **kwargs):
+        captured.update({"user_id": user_id, "action": action, **kwargs})
+        return {
+            "message": "Founder Tools link sent",
+            "data": {"action": action},
+        }
+
+    async def router_must_not_run(*args, **kwargs):
+        raise AssertionError("The exact DM link command must not reach the model router")
+
+    monkeypatch.setattr(agent, "_execute_fast_points", fake_execute)
+    monkeypatch.setattr(agent, "_route_v2", router_must_not_run)
+    monkeypatch.setattr("roo.agent.get_thread_messages", lambda **kwargs: [])
+    monkeypatch.setattr(
+        "roo.agent.get_settings",
+        lambda: SimpleNamespace(
+            implicit_action_allowlist=frozenset(
+                {"mlai-points:link_founder_account"}
+            )
+        ),
+    )
+
+    result = asyncio.run(
+        agent.handle_mention(
+            text="link",
+            user_id="U123",
+            channel_id="D123",
+            thread_ts="111.222",
+            implicit_addressing=True,
+        )
+    )
+
+    assert result["message"] == "Founder Tools link sent"
+    assert captured == {
+        "user_id": "U123",
+        "action": "link_founder_account",
+        "text": "link",
+        "channel_id": "D123",
+        "thread_ts": "111.222",
+    }
+
+
 def test_handle_mention_normalizes_slack_link_and_passes_scan_params(monkeypatch):
     agent = _make_agent()
     captured = {}

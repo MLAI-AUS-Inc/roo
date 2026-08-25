@@ -125,6 +125,7 @@ VICTOR_AI_ACCESS_UNAVAILABLE_MESSAGE = (
     "Victor application data is not available in this conversation."
 )
 LINEAR_MEETING_TIMEOUT_RECOVERY_OVERLAP_CHARS = 300
+FOUNDER_ACCOUNT_LINK_MAX_FUTURE_SECONDS = 35 * 60
 
 
 class LinearMeetingExtractionDeadlineError(RuntimeError):
@@ -12465,6 +12466,7 @@ Chunk {index} source: {label}
             or parsed.password
             or parsed.path != "/founder-tools/link-roo"
             or parsed.fragment
+            or port is None and parsed.netloc.endswith(":")
             or len(query) != 1
             or query[0][0] != "token"
             or not query[0][1]
@@ -12508,9 +12510,17 @@ Chunk {index} source: {label}
         if expires_at.tzinfo is None:
             return None
         expires_at = expires_at.astimezone(timezone.utc)
-        if expires_at <= datetime.now(timezone.utc):
+        now = datetime.now(timezone.utc)
+        if (
+            expires_at <= now
+            or expires_at > now + timedelta(seconds=FOUNDER_ACCOUNT_LINK_MAX_FUTURE_SECONDS)
+        ):
             return None
         return int(expires_at.timestamp())
+
+    @staticmethod
+    def _is_direct_message_channel(channel_id: Optional[str]) -> bool:
+        return bool(re.fullmatch(r"D[A-Z0-9]+", str(channel_id or "").strip()))
 
     def _founder_account_link_button_response(
         self,
@@ -12566,7 +12576,7 @@ Chunk {index} source: {label}
             "action": "link_founder_account",
             "delivery": "direct_message",
         }
-        if not str(channel_id or "").startswith("D"):
+        if not self._is_direct_message_channel(channel_id):
             try:
                 dm_response = send_dm(user_id, message, blocks=blocks)
             except Exception as exc:
@@ -12578,7 +12588,7 @@ Chunk {index} source: {label}
             if not isinstance(dm_response, dict) or not dm_response.get("ok"):
                 return {
                     "message": (
-                        f"I couldn't open a private Slack DM for <@{user_id}>. "
+                        f"I couldn't confirm a private Slack DM was delivered to <@{user_id}>. "
                         "Please DM Roo `link` and I'll create a fresh Founder Tools "
                         "account-link button there."
                     ),
@@ -12609,7 +12619,7 @@ Chunk {index} source: {label}
         user_id: str,
         channel_id: Optional[str],
     ) -> Any:
-        if str(channel_id or "").startswith("D"):
+        if SkillExecutor._is_direct_message_channel(channel_id):
             return message
 
         try:
@@ -12623,7 +12633,7 @@ Chunk {index} source: {label}
         if not isinstance(dm_response, dict) or not dm_response.get("ok"):
             return {
                 "message": (
-                    f"I couldn't open a private Slack DM for <@{user_id}>. "
+                    f"I couldn't confirm a private Slack DM was delivered to <@{user_id}>. "
                     "Please DM Roo `link` to check your Founder Tools account-link status."
                 ),
                 "data": {

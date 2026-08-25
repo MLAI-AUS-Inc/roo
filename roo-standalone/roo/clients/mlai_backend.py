@@ -2323,6 +2323,7 @@ class MLAIBackendClient:
             transport_retries=1,
             retry_backoff_seconds=0.5,
             circuit_breaker=True,
+            use_admin_headers=False,
         )
         self._raise_for_status_or_backend_unavailable(response)
         try:

@@ -164,6 +164,7 @@ async def test_public_link_dm_failure_never_exposes_url(monkeypatch):
     result = await execute_link(client, channel_id="C123")
 
     assert result["data"]["delivery_failed"] is True
+    assert "couldn't confirm a private Slack DM was delivered" in result["message"]
     assert "DM Roo `link`" in result["message"]
     assert "Founder Tools account-link button" in result["message"]
     assert LINK_TOKEN not in result["message"]
@@ -182,6 +183,7 @@ async def test_public_link_dm_exception_never_exposes_url(monkeypatch):
     result = await execute_link(client, channel_id="C123")
 
     assert result["data"]["delivery_failed"] is True
+    assert "couldn't confirm a private Slack DM was delivered" in result["message"]
     assert "DM Roo `link`" in result["message"]
     assert LINK_TOKEN not in result["message"]
     assert "https://" not in result["message"]
@@ -236,6 +238,7 @@ async def test_already_linked_dm_failure_keeps_status_private(monkeypatch):
     result = await execute_link(client, channel_id="C123")
 
     assert result["data"]["delivery_failed"] is True
+    assert "couldn't confirm a private Slack DM was delivered" in result["message"]
     assert "Please DM Roo `link`" in result["message"]
     assert "already linked" not in result["message"]
 
@@ -281,6 +284,7 @@ async def test_untrusted_backend_link_is_not_delivered(monkeypatch):
         f"https://mlai.au./founder-tools/link-roo?token={LINK_TOKEN}",
         f"https://user@mlai.au/founder-tools/link-roo?token={LINK_TOKEN}",
         f"https://mlai.au:444/founder-tools/link-roo?token={LINK_TOKEN}",
+        f"https://mlai.au:/founder-tools/link-roo?token={LINK_TOKEN}",
         f"https://mlai.au/not-link-roo?token={LINK_TOKEN}",
         f"https://mlai.au/founder-tools/link-roo?token={LINK_TOKEN}&next=/",
         f"https://mlai.au/founder-tools/link-roo?token={LINK_TOKEN}#fragment",
@@ -313,7 +317,16 @@ async def test_untrusted_or_malformed_backend_links_are_not_delivered(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("expires_at", [None, "not-a-date", "2020-01-01T00:00:00Z", "2099-01-01T00:00:00"])
+@pytest.mark.parametrize(
+    "expires_at",
+    [
+        None,
+        "not-a-date",
+        "2020-01-01T00:00:00Z",
+        "2099-01-01T00:00:00",
+        (datetime.now(timezone.utc) + timedelta(minutes=40)).isoformat(),
+    ],
+)
 async def test_missing_invalid_expired_or_naive_expiry_is_rejected(
     monkeypatch,
     expires_at,
@@ -329,6 +342,31 @@ async def test_missing_invalid_expired_or_naive_expiry_is_rejected(
     result = await execute_link(client, channel_id="C123")
 
     assert "trusted Founder Tools account link" in result
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("channel_id", ["D", "D-invalid", "d123", "C123"])
+async def test_malformed_direct_message_channel_never_receives_link_inline(
+    monkeypatch,
+    channel_id,
+):
+    delivered = {}
+    monkeypatch.setattr(
+        executor_module,
+        "send_dm",
+        lambda user_id, text, **kwargs: (
+            delivered.update({"user_id": user_id, "text": text, **kwargs})
+            or {"ok": True}
+        ),
+    )
+
+    result = await execute_link(FakeLinkClient(), channel_id=channel_id)
+
+    assert "blocks" not in result
+    assert LINK_TOKEN not in result["message"]
+    assert delivered["blocks"][1]["elements"][0]["url"].endswith(
+        f"token={LINK_TOKEN}"
+    )
 
 
 def test_localhost_link_requires_explicit_development_origin():

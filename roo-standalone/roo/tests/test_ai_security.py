@@ -414,6 +414,11 @@ def test_deploy_workflow_requires_and_secretly_upserts_security_values():
     assert "roo/tests/test_ai_security.py" in workflow
     assert "roo/tests/test_victor_ai_applications.py" in workflow
     assert "bridge/tests" in workflow
+    assert workflow.count("roo/tests/test_agent_routing.py") == 1
+    assert workflow.count("roo/tests/test_routing_eval_gate.py") == 1
+    assert workflow.count("roo/tests/test_meeting_room_booking.py") == 1
+    assert workflow.count("roo/tests/test_meeting_room_clarifications.py") == 1
+    assert workflow.count("roo/tests/test_meeting_room_actions.py") == 1
     assert "python -m compileall -q roo bridge" in workflow
     assert "docker compose config --quiet" in workflow
     assert "docker compose -f docker-compose.bridge.yml config --quiet" in workflow
@@ -446,6 +451,13 @@ def test_deploy_workflow_requires_and_secretly_upserts_security_values():
         'upsert_env "MEETING_ROOM_BOOKING_ENABLED" '
         '"$MEETING_ROOM_BOOKING_ENABLED"'
     ) in workflow
+    assert (
+        'upsert_env "ROO_IMPLICIT_ACTION_ALLOWLIST" '
+        '"respond_in_chat,mlai-points:balance,mlai-points:topup_points,'
+        'mlai-points:link_founder_account"'
+    ) in workflow
+    assert 'assert "mlai-points:link_founder_account" in actions' in workflow
+    assert 'assert "mlai-points:link_account" not in actions' in workflow
     assert 'assert settings.MEETING_ROOM_BOOKING_ENABLED is True' in workflow
     assert (
         "python -c 'from roo.config import get_settings; settings = get_settings();"

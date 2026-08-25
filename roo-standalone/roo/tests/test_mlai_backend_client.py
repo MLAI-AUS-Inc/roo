@@ -248,6 +248,7 @@ async def test_start_founder_account_link_uses_current_slack_identity(monkeypatc
         captured["method"] = method
         captured["endpoint"] = endpoint
         captured["json"] = kwargs["json"]
+        captured["use_admin_headers"] = kwargs["use_admin_headers"]
         request = httpx.Request(method, f"https://backend.test{endpoint}")
         return httpx.Response(
             201,
@@ -272,6 +273,7 @@ async def test_start_founder_account_link_uses_current_slack_identity(monkeypatc
         "method": "POST",
         "endpoint": "/api/v1/users/slack-founder-link/start/",
         "json": {"slack_user_id": "U123"},
+        "use_admin_headers": False,
     }
 
 
@@ -300,6 +302,32 @@ async def test_start_founder_account_link_rejects_malformed_success_payloads(
 
     with pytest.raises(MLAIBackendUnavailableError):
         await client.start_founder_account_link("U123")
+
+
+@pytest.mark.asyncio
+async def test_legacy_slack_link_client_only_treats_not_found_as_no_match(monkeypatch):
+    request = httpx.Request("POST", "https://backend.test/api/v1/users/link-slack/")
+    responses = [
+        httpx.Response(404, request=request, json={"error": "not found"}),
+        httpx.Response(500, request=request, json={"error": "backend failed"}),
+    ]
+    request_kwargs = []
+
+    async def fake_request(*args, **kwargs):
+        request_kwargs.append(kwargs)
+        return responses.pop(0)
+
+    client = MLAIBackendClient(
+        base_url="https://backend.test",
+        api_key="roo-key",
+        internal_api_key="internal-key",
+    )
+    monkeypatch.setattr(client, "_request", fake_request)
+
+    assert await client.link_slack_user("UREQUESTER", "member@example.com") is None
+    with pytest.raises(httpx.HTTPStatusError):
+        await client.link_slack_user("UREQUESTER", "member@example.com")
+    assert [kwargs["use_admin_headers"] for kwargs in request_kwargs] == [False, False]
 
 
 @pytest.mark.asyncio

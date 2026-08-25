@@ -57,7 +57,6 @@ def test_founder_tools_link_origins_are_validated_by_environment():
             FOUNDER_TOOLS_LINK_ORIGINS="http://localhost:3000",
             ROO_ENVIRONMENT="production",
         )
-
     with pytest.raises(ValidationError, match="must use HTTPS"):
         settings(FOUNDER_TOOLS_LINK_ORIGINS="http://mlai.au")
 
@@ -69,6 +68,13 @@ def test_founder_tools_link_origins_are_validated_by_environment():
             ROO_ENVIRONMENT="production",
             FOUNDER_TOOLS_LINK_ORIGINS="",
         )
+
+
+def test_default_implicit_allowlist_uses_only_the_secure_link_action():
+    configured = settings()
+
+    assert "mlai-points:link_founder_account" in configured.implicit_action_allowlist
+    assert "mlai-points:link_account" not in configured.implicit_action_allowlist
 
 
 def test_victor_ai_skill_is_disabled_by_default_and_uses_channel_name_only():

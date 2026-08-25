@@ -67,7 +67,7 @@ class Settings(BaseSettings):
     ROO_CONTEXTUAL_MODEL: Optional[str] = None
     ROO_IMPLICIT_ACTION_ALLOWLIST: str = (
         "respond_in_chat,mlai-points:balance,mlai-points:topup_points,"
-        "mlai-points:link_account"
+        "mlai-points:link_founder_account"
     )
     
     # LLM Providers (at least one required)
