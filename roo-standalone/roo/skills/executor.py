@@ -581,15 +581,24 @@ class SkillExecutor:
         busy = result.get("busy_intervals") or []
         if not busy:
             return (
-                f"The *{room_name}* has no bookings currently shown for that date "
-                "(Melbourne time)."
+                f"The *{room_name}* has no bookings or blocks currently shown for "
+                "that date (Melbourne time). Ask Roo to check a specific future "
+                "time before booking."
             )
         lines = [f"The *{room_name}* is unavailable at these times (Melbourne time):"]
         for interval in busy:
             starts_at = parse_backend_timestamp(interval.get("starts_at"))
             ends_at = parse_backend_timestamp(interval.get("ends_at"))
             lines.append(f"- {format_meeting_room_interval(starts_at, ends_at)}")
-        lines.extend(["", "All other times that day are currently available."])
+        lines.extend(
+            [
+                "",
+                (
+                    "No room bookings or blocks are currently shown outside these "
+                    "periods. Ask Roo to check a specific future time before booking."
+                ),
+            ]
+        )
         return "\n".join(lines)
 
     @staticmethod
