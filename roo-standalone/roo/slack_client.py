@@ -12,6 +12,10 @@ from .config import get_settings
 SLACK_FILES_READ_SCOPE = "files:read"
 
 
+class SlackIdentityLookupError(RuntimeError):
+    """Raised when Slack cannot provide a trustworthy member identity."""
+
+
 # Lazy-loaded Slack client
 _slack_client = None
 
@@ -445,6 +449,42 @@ def get_user_info(user_id: str) -> Dict[str, Any]:
     except Exception as e:
         print(f"❌ User lookup error for {user_id}: {e}")
         return {"id": user_id, "name": "Unknown"}
+
+
+def get_verified_user_email(user_id: str) -> str:
+    """Fetch an uncached email for the exact active human Slack member.
+
+    Account linking is an identity mutation, so it must not use the permissive
+    cached profile helper above or treat a stale/failed lookup as authoritative.
+    """
+    requested_user_id = str(user_id or "").strip()
+    if not requested_user_id:
+        raise SlackIdentityLookupError("Slack member ID is missing")
+
+    try:
+        response = get_slack_client().users_info(user=requested_user_id)
+    except Exception as exc:
+        raise SlackIdentityLookupError(
+            "Slack could not verify this member right now"
+        ) from exc
+
+    if not response.get("ok") or not isinstance(response.get("user"), dict):
+        raise SlackIdentityLookupError("Slack could not verify this member right now")
+
+    user = response["user"]
+    returned_user_id = str(user.get("id") or "").strip()
+    if returned_user_id != requested_user_id:
+        raise SlackIdentityLookupError("Slack returned a different member identity")
+    if user.get("is_bot") or user.get("deleted"):
+        raise SlackIdentityLookupError("This Slack profile cannot be linked")
+
+    profile = user.get("profile") or {}
+    email = str(profile.get("email") or "").strip().lower()
+    if not email:
+        raise SlackIdentityLookupError(
+            "Slack did not provide an email for this member"
+        )
+    return email
 
 
 def get_display_name(user_id: str) -> str:

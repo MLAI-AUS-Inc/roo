@@ -50,8 +50,8 @@ effect.
 - Bot messages, edits, deletes, unsupported message subtypes, and non-candidates
   are ignored before classification.
 - Implicit skill execution is restricted by `ROO_IMPLICIT_ACTION_ALLOWLIST`.
-  The default permits chat, balance checks, and top-up checkout creation. Admin
-  points actions and actions affecting another user still require a direct Roo
-  mention.
+  The default permits chat, balance checks, top-up checkout creation, and the
+  self-only `link` command. Admin points actions and actions affecting another
+  user still require a direct Roo mention.
 - The session database stores identifiers, timestamps, state, and expiry only;
   it does not store Slack message text.

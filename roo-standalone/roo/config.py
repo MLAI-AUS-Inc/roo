@@ -66,7 +66,8 @@ class Settings(BaseSettings):
     ROO_CONTEXTUAL_CLASSIFIER_TIMEOUT_SECONDS: float = 5.0
     ROO_CONTEXTUAL_MODEL: Optional[str] = None
     ROO_IMPLICIT_ACTION_ALLOWLIST: str = (
-        "respond_in_chat,mlai-points:balance,mlai-points:topup_points"
+        "respond_in_chat,mlai-points:balance,mlai-points:topup_points,"
+        "mlai-points:link_account"
     )
     
     # LLM Providers (at least one required)
