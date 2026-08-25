@@ -12470,7 +12470,7 @@ Chunk {index} source: {label}
             or len(query) != 1
             or query[0][0] != "token"
             or not query[0][1]
-            or not re.fullmatch(r"[A-Za-z0-9_-]{32,128}", query[0][1])
+            or not re.fullmatch(r"[A-Za-z0-9_-]{43}", query[0][1])
         ):
             return False
         try:
@@ -12521,6 +12521,16 @@ Chunk {index} source: {label}
     @staticmethod
     def _is_direct_message_channel(channel_id: Optional[str]) -> bool:
         return bool(re.fullmatch(r"D[A-Z0-9]+", str(channel_id or "").strip()))
+
+    @staticmethod
+    def _slack_delivery_succeeded(response: Any) -> bool:
+        """Accept Slack SDK responses while rejecting malformed delivery results."""
+        if response is None:
+            return False
+        try:
+            return response.get("ok") is True
+        except (AttributeError, TypeError):
+            return False
 
     def _founder_account_link_button_response(
         self,
@@ -12585,7 +12595,7 @@ Chunk {index} source: {label}
                     f"exc_type={exc.__class__.__name__}"
                 )
                 dm_response = None
-            if not isinstance(dm_response, dict) or not dm_response.get("ok"):
+            if not self._slack_delivery_succeeded(dm_response):
                 return {
                     "message": (
                         f"I couldn't confirm a private Slack DM was delivered to <@{user_id}>. "
@@ -12630,7 +12640,7 @@ Chunk {index} source: {label}
                 f"exc_type={exc.__class__.__name__}"
             )
             dm_response = None
-        if not isinstance(dm_response, dict) or not dm_response.get("ok"):
+        if not SkillExecutor._slack_delivery_succeeded(dm_response):
             return {
                 "message": (
                     f"I couldn't confirm a private Slack DM was delivered to <@{user_id}>. "
@@ -14529,8 +14539,9 @@ Chunk {index} source: {label}
                 result = await client.start_founder_account_link(user_id)
             except MLAIBackendUnavailableError:
                 return (
-                    "I couldn't create a Founder Tools account link right now. "
-                    "Please try `link` again shortly."
+                    "I couldn't confirm whether a Founder Tools account link was "
+                    "created right now. Please try `link` again; a fresh request "
+                    "safely replaces any incomplete link."
                 )
             except httpx.HTTPStatusError as exc:
                 try:

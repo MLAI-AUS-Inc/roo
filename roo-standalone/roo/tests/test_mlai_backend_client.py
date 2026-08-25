@@ -249,6 +249,7 @@ async def test_start_founder_account_link_uses_current_slack_identity(monkeypatc
         captured["endpoint"] = endpoint
         captured["json"] = kwargs["json"]
         captured["use_admin_headers"] = kwargs["use_admin_headers"]
+        captured["transport_retries"] = kwargs["transport_retries"]
         request = httpx.Request(method, f"https://backend.test{endpoint}")
         return httpx.Response(
             201,
@@ -274,6 +275,7 @@ async def test_start_founder_account_link_uses_current_slack_identity(monkeypatc
         "endpoint": "/api/v1/users/slack-founder-link/start/",
         "json": {"slack_user_id": "U123"},
         "use_admin_headers": False,
+        "transport_retries": 0,
     }
 
 

@@ -2320,8 +2320,9 @@ class MLAIBackendClient:
             "/api/v1/users/slack-founder-link/start/",
             json={"slack_user_id": self._clean_slack_id(slack_user_id)},
             timeout=15.0,
-            transport_retries=1,
-            retry_backoff_seconds=0.5,
+            # Creating a link invalidates older tokens, so an ambiguous POST
+            # outcome must be retried by the member as a fresh operation.
+            transport_retries=0,
             circuit_breaker=True,
             use_admin_headers=False,
         )

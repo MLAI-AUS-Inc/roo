@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+from slack_sdk.web.slack_response import SlackResponse
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
@@ -19,6 +20,18 @@ _DEFAULT_RESPONSE = object()
 
 def future_expiry() -> str:
     return (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat()
+
+
+def successful_slack_response() -> SlackResponse:
+    return SlackResponse(
+        client=None,
+        http_verb="POST",
+        api_url="https://slack.com/api/chat.postMessage",
+        req_args={},
+        data={"ok": True, "channel": "D123", "ts": "333.444"},
+        headers={},
+        status_code=200,
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -98,13 +111,15 @@ async def test_link_in_dm_uses_event_identity_and_returns_accessible_button(monk
 async def test_public_link_sends_private_button_and_posts_token_free_ack(monkeypatch):
     delivered = {}
     client = FakeLinkClient()
+
+    def deliver_link(user_id, text, **kwargs):
+        delivered.update({"user_id": user_id, "text": text, **kwargs})
+        return successful_slack_response()
+
     monkeypatch.setattr(
         executor_module,
         "send_dm",
-        lambda user_id, text, **kwargs: (
-            delivered.update({"user_id": user_id, "text": text, **kwargs})
-            or {"ok": True, "channel": "D123", "ts": "333.444"}
-        ),
+        deliver_link,
     )
 
     result = await execute_link(client, channel_id="C123")
@@ -193,13 +208,15 @@ async def test_public_link_dm_exception_never_exposes_url(monkeypatch):
 async def test_already_linked_response_has_no_button(monkeypatch):
     client = FakeLinkClient(response={"status": "already_linked"})
     delivered = {}
+
+    def deliver_status(user_id, text, **kwargs):
+        delivered.update({"user_id": user_id, "text": text, **kwargs})
+        return successful_slack_response()
+
     monkeypatch.setattr(
         executor_module,
         "send_dm",
-        lambda user_id, text, **kwargs: (
-            delivered.update({"user_id": user_id, "text": text, **kwargs})
-            or {"ok": True}
-        ),
+        deliver_status,
     )
 
     result = await execute_link(client, channel_id="C123")
@@ -250,8 +267,8 @@ async def test_backend_failure_returns_retry_message_without_link():
     result = await execute_link(client)
 
     assert result == (
-        "I couldn't create a Founder Tools account link right now. "
-        "Please try `link` again shortly."
+        "I couldn't confirm whether a Founder Tools account link was created right now. "
+        "Please try `link` again; a fresh request safely replaces any incomplete link."
     )
 
 
@@ -289,6 +306,8 @@ async def test_untrusted_backend_link_is_not_delivered(monkeypatch):
         f"https://mlai.au/founder-tools/link-roo?token={LINK_TOKEN}&next=/",
         f"https://mlai.au/founder-tools/link-roo?token={LINK_TOKEN}#fragment",
         f"https://[::1/founder-tools/link-roo?token={LINK_TOKEN}",
+        f"https://mlai.au/founder-tools/link-roo?token={'A' * 42}",
+        f"https://mlai.au/founder-tools/link-roo?token={'A' * 44}",
     ],
 )
 async def test_untrusted_or_malformed_backend_links_are_not_delivered(
