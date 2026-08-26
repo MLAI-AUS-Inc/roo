@@ -1158,7 +1158,9 @@ async def test_bare_misspelled_tomorrow_clarification_checks_the_day(monkeypatch
     assert calls[1][2]["date"] == "2026-08-12"
     assert "starts_at" not in calls[1][2]
     assert "What date should I check?" not in result["message"]
-    assert "no bookings currently shown" in result["message"]
+    assert "no bookings or blocks currently shown" in result["message"]
+    assert "specific future time" in result["message"]
+    assert "available" not in result["message"].lower()
 
 
 @pytest.mark.asyncio
@@ -1217,12 +1219,14 @@ def test_date_availability_makes_an_empty_day_explicitly_clear():
     )
 
     assert message == (
-        "The *Meeting Room* has no bookings currently shown for that date "
-        "(Melbourne time)."
+        "The *Meeting Room* has no bookings or blocks currently shown for that "
+        "date (Melbourne time). Ask Roo to check a specific future time before "
+        "booking."
     )
+    assert "available" not in message.lower()
 
 
-def test_date_availability_lists_busy_intervals_and_marks_everything_else_free():
+def test_date_availability_lists_busy_intervals_without_claiming_other_times_are_free():
     message = SkillExecutor._format_meeting_room_availability(
         {
             "room": {"name": "Meeting Room"},
@@ -1243,7 +1247,12 @@ def test_date_availability_lists_busy_intervals_and_marks_everything_else_free()
     assert "unavailable at these times" in message
     assert "10:00 AM to 11:00 AM" in message
     assert "2:00 PM to 4:00 PM" in message
-    assert message.endswith("All other times that day are currently available.")
+    assert message.endswith(
+        "No room bookings or blocks are currently shown outside these periods. "
+        "Ask Roo to check a specific future time before booking."
+    )
+    assert "all other times" not in message.lower()
+    assert "currently available" not in message.lower()
 
 
 @pytest.mark.asyncio
