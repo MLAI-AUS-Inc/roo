@@ -92,8 +92,13 @@ from ..admin_brain import (
     build_admin_action_response,
     build_admin_brain_response,
 )
-from ..clients.mlai_backend import MLAIBackendClient, MLAIBackendUnavailableError
+from ..clients.mlai_backend import (
+    MLAIBackendClient,
+    MLAIBackendUnavailableError,
+    validate_coworking_booking_result,
+)
 from ..coworking_booking_intents import (
+    deliver_coworking_booking_notification,
     get_coworking_intent_store,
     is_retryable_coworking_exception,
 )
@@ -13173,6 +13178,7 @@ Chunk {index} source: {label}
         private_failure_ack: str = (
             "I couldn't send you a DM. DM Roo `points` to view your points privately."
         ),
+        client_msg_id: Optional[str] = None,
     ) -> dict:
         """Deliver personal points data without a shared-channel fallback."""
         result_data = {
@@ -13192,14 +13198,36 @@ Chunk {index} source: {label}
             }
 
         try:
-            response = send_dm(recipient_user_id, private_message)
+            delivery_options = {}
+            if client_msg_id:
+                delivery_options = {
+                    "client_msg_id": client_msg_id,
+                    "raise_on_error": True,
+                }
+            response = send_dm(
+                recipient_user_id,
+                private_message,
+                **delivery_options,
+            )
             dm_delivered = bool(response and response.get("ok"))
         except Exception as exc:
-            print(
-                "⚠️ Private Roo Points delivery failed "
-                f"action={action} exc_type={exc.__class__.__name__}"
-            )
-            dm_delivered = False
+            error_response = getattr(exc, "response", None)
+            try:
+                duplicate_message = bool(
+                    client_msg_id
+                    and error_response is not None
+                    and error_response.get("error") == "duplicate_message"
+                )
+            except (AttributeError, TypeError):
+                duplicate_message = False
+            if duplicate_message:
+                dm_delivered = True
+            else:
+                print(
+                    "⚠️ Private Roo Points delivery failed "
+                    f"action={action} exc_type={exc.__class__.__name__}"
+                )
+                dm_delivered = False
         result_data["dm_delivered"] = dm_delivered
 
         if public_message is not None:
@@ -14201,9 +14229,14 @@ Chunk {index} source: {label}
         channel_id: Optional[str],
         thread_ts: Optional[str],
         admin_checkin: bool,
+        client_msg_id: Optional[str] = None,
     ) -> dict:
         """Render and privately deliver the backend's complete booking result."""
-        cost = backend_result.get("points_cost", 1)
+        backend_result = validate_coworking_booking_result(
+            backend_result,
+            expected_date=booking_date,
+        )
+        cost = backend_result["points_cost"]
         discount_applied = bool(
             backend_result.get("monthly_update_discount_applied", False)
         )
@@ -14254,6 +14287,7 @@ Chunk {index} source: {label}
             private_message=private_message,
             public_message=public_message,
             action="book_coworking",
+            client_msg_id=client_msg_id,
         )
 
     async def _format_admin_coworking_bad_request(
@@ -14505,7 +14539,15 @@ Chunk {index} source: {label}
 
         try:
             result = await client.book_coworking(target_user_id, booking_date, channel_id)
-            store.mark_confirmed(int(leased_intent["id"]), backend_result=result)
+            result = validate_coworking_booking_result(
+                result,
+                expected_date=booking_date,
+            )
+            confirmed = store.mark_confirmed(
+                int(leased_intent["id"]),
+                backend_result=result,
+                notification_required=True,
+            )
         except Exception as exc:
             error = f"{exc.__class__.__name__}: {exc}"
             if is_retryable_coworking_exception(exc):
@@ -14533,16 +14575,47 @@ Chunk {index} source: {label}
                 )
             raise
 
-        return await self._deliver_coworking_booking_success(
-            client=client,
-            backend_result=result,
-            booking_date=booking_date,
-            target_user_id=target_user_id,
-            requested_by_user_id=requested_by_user_id,
-            channel_id=channel_id,
-            thread_ts=thread_ts,
-            admin_checkin=admin_checkin,
+        notification = store.reserve_notification(
+            int(leased_intent["id"]),
+            owner=f"roo-sync-notification-{uuid4().hex}",
         )
+        if notification is None:
+            return {
+                "message": "",
+                "suppress_post": True,
+                "data": {
+                    "action": "book_coworking",
+                    "booking_confirmed": True,
+                    "notification_status": confirmed.get("notification_status"),
+                },
+            }
+
+        notification_result = await deliver_coworking_booking_notification(
+            notification,
+            store=store,
+            client=client,
+            executor=self,
+            post_public_message=False,
+        )
+        delivery = notification_result.get("delivery")
+        if isinstance(delivery, dict):
+            delivery_data = delivery.get("data")
+            if (
+                isinstance(delivery_data, dict)
+                and delivery_data.get("delivery") != "current_direct_message"
+            ):
+                return delivery
+        return {
+            "message": "",
+            "suppress_post": True,
+            "data": {
+                "action": "book_coworking",
+                "booking_confirmed": True,
+                "notification_status": notification_result.get(
+                    "notification_status"
+                ),
+            },
+        }
 
     async def _handle_points_action(
         self,

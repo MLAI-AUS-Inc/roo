@@ -21,6 +21,28 @@ executor_module = importlib.import_module("roo.skills.executor")
 SkillExecutor = executor_module.SkillExecutor
 
 
+def complete_coworking_booking_result(
+    booking_date,
+    *,
+    cost=8,
+    discount_applied=False,
+    explicitly_linked=False,
+):
+    return {
+        "id": "booking-1",
+        "date": booking_date,
+        "status": "booked",
+        "points_cost": cost,
+        "standard_points_cost": 8,
+        "monthly_update_discount_applied": discount_applied,
+        "founder_tools_account_linked": explicitly_linked,
+        "founder_tools_connection_type": (
+            "explicit" if explicitly_linked else None
+        ),
+        "founder_tools_explicitly_linked": explicitly_linked,
+    }
+
+
 @pytest.fixture(autouse=True)
 def clear_points_request_summary_cache():
     approval_module.clear_points_request_summaries()
@@ -2695,7 +2717,11 @@ async def test_book_coworking_still_succeeds_when_balance_refresh_times_out(tmp_
 
     class FakeCoworkingClient:
         async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None):
-            return {"points_cost": 4}
+            return complete_coworking_booking_result(
+                booking_date,
+                cost=4,
+                discount_applied=True,
+            )
 
         async def get_balance(self, slack_user_id):
             raise backend_module.MLAIBackendUnavailableError("backend unavailable")
@@ -2734,7 +2760,7 @@ async def test_book_coworking_defaults_missing_date_to_today(tmp_path, monkeypat
 
         async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None):
             self.book_args = (slack_user_id, booking_date, slack_channel_id)
-            return {"points_cost": 1}
+            return complete_coworking_booking_result(booking_date, cost=1)
 
         async def get_balance(self, slack_user_id):
             self.balance_args = slack_user_id
@@ -2789,7 +2815,7 @@ class FakeAdminCheckinCoworkingClient:
         self.book_args = (slack_user_id, booking_date, slack_channel_id)
         if self.book_exception:
             raise self.book_exception
-        return {"points_cost": 1}
+        return complete_coworking_booking_result(booking_date, cost=1)
 
     async def get_balance(self, slack_user_id):
         self.balance_args = slack_user_id
@@ -3730,13 +3756,14 @@ async def test_book_coworking_nudges_founder_when_charged_standard_price(tmp_pat
 
     class FakeCoworkingClient:
         async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None):
-            return {
-                "points_cost": 8,
-                "monthly_update_discount_applied": False,
-                "founder_tools_account_linked": True,
-                "founder_tools_connection_type": "direct",
-                "founder_tools_explicitly_linked": False,
-            }
+            result = complete_coworking_booking_result(booking_date)
+            result.update(
+                {
+                    "founder_tools_account_linked": True,
+                    "founder_tools_connection_type": "direct",
+                }
+            )
+            return result
 
         async def get_balance(self, slack_user_id):
             return {"balance": 12}
@@ -3775,13 +3802,11 @@ async def test_book_coworking_nudges_founder_when_charged_standard_price(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_book_coworking_suppresses_link_nudge_when_link_state_is_missing(
+async def test_book_coworking_treats_missing_link_state_as_commit_uncertain(
     tmp_path,
     monkeypatch,
 ):
     store = coworking_module.CoworkingBookingIntentStore(tmp_path / "intents.db")
-    delivered = {}
-
     class FakeCoworkingClient:
         async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None):
             return {
@@ -3795,13 +3820,6 @@ async def test_book_coworking_suppresses_link_nudge_when_link_state_is_missing(
     executor = SkillExecutor()
     monkeypatch.setattr("roo.utils.get_current_date", lambda: date(2026, 5, 4))
     monkeypatch.setattr(executor_module, "get_coworking_intent_store", lambda: store)
-    monkeypatch.setattr(
-        executor_module,
-        "send_dm",
-        lambda user_id, text, **kwargs: (
-            delivered.update({"user_id": user_id, "text": text}) or {"ok": True}
-        ),
-    )
 
     result = await executor._handle_points_action(
         client=FakeCoworkingClient(),
@@ -3814,9 +3832,10 @@ async def test_book_coworking_suppresses_link_nudge_when_link_state_is_missing(
         skill=SimpleNamespace(name="mlai-points"),
     )
 
-    assert "may qualify for 4-point coworking" in result["message"]
-    assert "@Roo link" not in result["message"]
-    assert "@Roo link" not in delivered["text"]
+    assert "queued it and will keep retrying automatically" in result
+    intent = store.get_by_key("coworking:U123:2026-05-04")
+    assert intent["status"] == "pending_retry"
+    assert intent["confirmed_at"] is None
 
 
 @pytest.mark.asyncio
@@ -3825,13 +3844,18 @@ async def test_book_coworking_omits_nudge_when_discount_applied(tmp_path, monkey
 
     class FakeCoworkingClient:
         async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None):
-            return {
-                "points_cost": 4,
-                "monthly_update_discount_applied": True,
-                "founder_tools_account_linked": True,
-                "founder_tools_connection_type": "direct",
-                "founder_tools_explicitly_linked": False,
-            }
+            result = complete_coworking_booking_result(
+                booking_date,
+                cost=4,
+                discount_applied=True,
+            )
+            result.update(
+                {
+                    "founder_tools_account_linked": True,
+                    "founder_tools_connection_type": "direct",
+                }
+            )
+            return result
 
         async def get_balance(self, slack_user_id):
             return {"balance": 12}
@@ -3868,13 +3892,10 @@ async def test_book_coworking_omits_link_nudge_when_accounts_are_linked(
 
     class FakeCoworkingClient:
         async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None):
-            return {
-                "points_cost": 8,
-                "monthly_update_discount_applied": False,
-                "founder_tools_account_linked": True,
-                "founder_tools_connection_type": "explicit",
-                "founder_tools_explicitly_linked": True,
-            }
+            return complete_coworking_booking_result(
+                booking_date,
+                explicitly_linked=True,
+            )
 
         async def get_balance(self, slack_user_id):
             return {"balance": 12}

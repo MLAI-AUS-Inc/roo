@@ -34,6 +34,49 @@ class MLAIBackendUnavailableError(RuntimeError):
     """Raised when Roo cannot reach mlai-backend reliably."""
 
 
+def validate_coworking_booking_result(
+    payload: Any,
+    *,
+    expected_date: Optional[str] = None,
+) -> dict:
+    """Validate a successful booking response before treating it as committed."""
+    if not isinstance(payload, dict):
+        raise MLAIBackendUnavailableError(
+            "MLAI backend returned an invalid coworking booking result"
+        )
+
+    booking_id = payload.get("id")
+    booking_date = payload.get("date")
+    status = payload.get("status")
+    points_cost = payload.get("points_cost")
+    standard_points_cost = payload.get("standard_points_cost")
+    discount_applied = payload.get("monthly_update_discount_applied")
+    explicitly_linked = payload.get("founder_tools_explicitly_linked")
+
+    complete = (
+        isinstance(booking_id, str)
+        and bool(booking_id.strip())
+        and isinstance(booking_date, str)
+        and bool(booking_date.strip())
+        and status == "booked"
+        and isinstance(points_cost, int)
+        and not isinstance(points_cost, bool)
+        and points_cost >= 0
+        and isinstance(standard_points_cost, int)
+        and not isinstance(standard_points_cost, bool)
+        and standard_points_cost >= points_cost
+        and isinstance(discount_applied, bool)
+        and isinstance(explicitly_linked, bool)
+    )
+    if expected_date is not None:
+        complete = complete and booking_date == str(expected_date)
+    if not complete:
+        raise MLAIBackendUnavailableError(
+            "MLAI backend returned an incomplete coworking booking result"
+        )
+    return payload
+
+
 class MLAIBackendClient:
     """Client for mlai-backend API."""
 
@@ -2277,7 +2320,16 @@ class MLAIBackendClient:
             circuit_breaker=True,
         )
         response.raise_for_status()
-        return response.json()
+        try:
+            result = response.json()
+        except ValueError as exc:
+            raise MLAIBackendUnavailableError(
+                "MLAI backend returned invalid JSON after coworking booking"
+            ) from exc
+        return validate_coworking_booking_result(
+            result,
+            expected_date=booking_date,
+        )
 
     async def book_coworking_many(
         self,

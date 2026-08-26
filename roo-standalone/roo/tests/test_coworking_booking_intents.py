@@ -68,13 +68,21 @@ def leased_intent(
     return store, intent, store.reserve_for_processing(intent["id"], owner="test-worker")
 
 
-def capture_delivery(monkeypatch, *, dm_response=None, post_error=None):
+def capture_delivery(
+    monkeypatch,
+    *,
+    dm_response=None,
+    dm_error=None,
+    post_error=None,
+):
     direct_messages = []
     channel_messages = []
     ephemeral_messages = []
 
     def send_dm(user_id, text, **kwargs):
         direct_messages.append({"user_id": user_id, "text": text, **kwargs})
+        if dm_error is not None:
+            raise dm_error
         if dm_response is None:
             return {"ok": True, "channel": "D123", "ts": "333.444"}
         return dm_response
@@ -238,7 +246,7 @@ async def test_retry_dm_failure_never_exposes_link_guidance_publicly(
     tmp_path,
     monkeypatch,
 ):
-    store, _intent, leased = leased_intent(tmp_path)
+    store, intent, leased = leased_intent(tmp_path)
     client = FakeClient(
         result=booking_result(
             cost=8,
@@ -250,6 +258,7 @@ async def test_retry_dm_failure_never_exposes_link_guidance_publicly(
         monkeypatch,
         dm_response={},
     )
+    monkeypatch.setattr(coworking, "retry_delay_seconds", lambda _attempt: 0)
 
     result = await coworking.process_coworking_booking_intent(
         leased,
@@ -259,12 +268,102 @@ async def test_retry_dm_failure_never_exposes_link_guidance_publicly(
     )
 
     assert result["status"] == "confirmed"
-    assert result["delivery"]["data"]["dm_delivered"] is False
+    assert result["notification_status"] == "pending_retry"
+    stored = store.get(intent["id"])
+    assert stored["status"] == "confirmed"
+    assert stored["notification_status"] == "pending_retry"
+    assert stored["notification_delivered_at"] is None
     assert len(direct_messages) == 1
     assert len(channel_messages) == 1
     assert "`@Roo link`" not in channel_messages[0]["text"]
     assert len(ephemeral_messages) == 1
     assert "private points details" in ephemeral_messages[0]["text"]
+
+    # Simulate the worker restarting after Slack recovers. Only the durable
+    # notification is retried; the backend booking is not called again.
+    due = store.claim_due_notifications(owner="restarted-worker")
+    assert len(due) == 1
+    retry_dms, retry_channel_messages, _retry_ephemeral = capture_delivery(monkeypatch)
+
+    recovered = await coworking.deliver_coworking_booking_notification(
+        due[0],
+        store=store,
+        client=client,
+    )
+
+    assert recovered["notification_status"] == "delivered"
+    assert store.get(intent["id"])["notification_status"] == "delivered"
+    assert len(retry_dms) == 1
+    assert "`@Roo link`" in retry_dms[0]["text"]
+    assert direct_messages[0]["client_msg_id"] == retry_dms[0]["client_msg_id"]
+    assert retry_dms[0]["raise_on_error"] is True
+    assert retry_channel_messages == []
+    assert client.book_calls == [("U123", "2026-04-22", "C123")]
+
+
+@pytest.mark.asyncio
+async def test_duplicate_slack_confirmation_counts_as_durable_delivery(
+    tmp_path,
+    monkeypatch,
+):
+    class DuplicateMessageError(Exception):
+        response = {"error": "duplicate_message"}
+
+    store, intent, leased = leased_intent(tmp_path)
+    client = FakeClient(result=booking_result())
+    direct_messages, channel_messages, _ephemeral = capture_delivery(
+        monkeypatch,
+        dm_error=DuplicateMessageError("already accepted"),
+    )
+
+    result = await coworking.process_coworking_booking_intent(
+        leased,
+        store=store,
+        client=client,
+        notify=True,
+    )
+
+    assert result["notification_status"] == "delivered"
+    assert store.get(intent["id"])["notification_status"] == "delivered"
+    assert len(direct_messages) == 1
+    assert direct_messages[0]["client_msg_id"]
+    assert direct_messages[0]["raise_on_error"] is True
+    assert len(channel_messages) == 1
+
+
+def test_stale_notification_worker_cannot_reopen_delivered_work(tmp_path):
+    store, intent, _leased = leased_intent(tmp_path)
+    confirmed = store.mark_confirmed(
+        intent["id"],
+        backend_result=booking_result(),
+        notification_required=True,
+    )
+    first = store.reserve_notification(
+        confirmed["id"],
+        owner="first-worker",
+        lease_seconds=0,
+    )
+    assert first["notification_locked_by"] == "first-worker"
+
+    second = store.reserve_notification(
+        confirmed["id"],
+        owner="replacement-worker",
+    )
+    assert second["notification_locked_by"] == "replacement-worker"
+    store.mark_notification_delivered(
+        confirmed["id"],
+        owner="replacement-worker",
+    )
+
+    stale_result = store.mark_notification_retryable_failure(
+        confirmed["id"],
+        owner="first-worker",
+        error="late failure",
+        delay_seconds=0,
+    )
+
+    assert stale_result["notification_status"] == "delivered"
+    assert stale_result["notification_last_error"] is None
 
 
 @pytest.mark.asyncio
@@ -320,11 +419,12 @@ async def test_retry_inside_roo_dm_posts_private_result_to_current_dm(
     assert len(channel_messages) == 1
     assert channel_messages[0]["channel"] == "D123"
     assert channel_messages[0]["thread_ts"] is None
+    assert channel_messages[0]["client_msg_id"]
     assert "`@Roo link`" in channel_messages[0]["text"]
 
 
 @pytest.mark.asyncio
-async def test_notification_failure_does_not_reclassify_confirmed_booking(
+async def test_public_ack_failure_does_not_repeat_a_delivered_private_confirmation(
     tmp_path,
     monkeypatch,
 ):
@@ -343,8 +443,11 @@ async def test_notification_failure_does_not_reclassify_confirmed_booking(
     )
 
     assert result["status"] == "confirmed"
-    assert result["delivery_error"] == "RuntimeError"
-    assert store.get(intent["id"])["status"] == "confirmed"
+    assert result["notification_status"] == "delivered"
+    stored = store.get(intent["id"])
+    assert stored["status"] == "confirmed"
+    assert stored["notification_status"] == "delivered"
+    assert store.claim_due_notifications(owner="retry-worker") == []
     assert client.book_calls == [("U123", "2026-04-22", "C123")]
 
 
@@ -391,7 +494,7 @@ async def test_process_intent_treats_malformed_success_as_commit_uncertain(
     updated = store.get(intent["id"])
     assert result["status"] == "pending_retry"
     assert updated["status"] == "pending_retry"
-    assert "incomplete coworking booking result" in updated["last_error"]
+    assert "coworking booking result" in updated["last_error"]
 
 
 def test_retryable_exception_classifier():

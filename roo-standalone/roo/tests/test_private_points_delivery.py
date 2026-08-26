@@ -456,8 +456,13 @@ class CoworkingClient:
 
     async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None):
         return {
+            "id": "booking-private-delivery",
+            "date": booking_date,
+            "status": "booked",
             "points_cost": 4,
+            "standard_points_cost": 8,
             "monthly_update_discount_applied": True,
+            "founder_tools_explicitly_linked": False,
         }
 
     async def get_balance(self, slack_user_id):
@@ -496,6 +501,13 @@ async def test_dm_coworking_confirmation_returns_remaining_balance_directly(
     tmp_path,
 ):
     direct_messages, _ = _capture_private_delivery(monkeypatch)
+    current_dm_messages = []
+
+    def post_current_dm(**kwargs):
+        current_dm_messages.append(kwargs)
+        return {"ok": True, "ts": "333.444"}
+
+    monkeypatch.setattr("roo.slack_client.post_message", post_current_dm)
     store = coworking_module.CoworkingBookingIntentStore(tmp_path / "coworking.db")
     monkeypatch.setattr(executor_module, "get_coworking_intent_store", lambda: store)
 
@@ -510,7 +522,10 @@ async def test_dm_coworking_confirmation_returns_remaining_balance_directly(
         admin_checkin=False,
     )
 
-    assert "Balance remaining: 9 points" in result["message"]
+    assert result["message"] == ""
+    assert result["suppress_post"] is True
+    assert "Balance remaining: 9 points" in current_dm_messages[0]["text"]
+    assert current_dm_messages[0]["client_msg_id"]
     assert direct_messages == []
 
 

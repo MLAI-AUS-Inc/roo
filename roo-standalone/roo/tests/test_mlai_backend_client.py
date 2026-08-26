@@ -240,6 +240,72 @@ async def test_book_coworking_many_uses_canonical_endpoint_and_deduped_payload(m
     assert captured["json"]["current_time"]
 
 
+def valid_coworking_booking_result():
+    return {
+        "id": "booking-1",
+        "date": "2026-07-04",
+        "status": "booked",
+        "points_cost": 8,
+        "standard_points_cost": 8,
+        "monthly_update_discount_applied": False,
+        "founder_tools_explicitly_linked": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_book_coworking_validates_complete_success_response(monkeypatch):
+    async def fake_request(method, endpoint, **kwargs):
+        request = httpx.Request(method, f"https://backend.test{endpoint}")
+        return httpx.Response(
+            201,
+            request=request,
+            json=valid_coworking_booking_result(),
+        )
+
+    client = MLAIBackendClient(
+        base_url="https://backend.test",
+        api_key="roo-api-key",
+        internal_api_key="roo-api-key",
+    )
+    monkeypatch.setattr(client, "_request", fake_request)
+
+    result = await client.book_coworking("U123", "2026-07-04", "C123")
+
+    assert result["points_cost"] == 8
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "response_body",
+    [
+        b"not-json",
+        b"[]",
+        b'{"points_cost":8}',
+        b'{"id":"booking-1","date":"2026-07-05","status":"booked",'
+        b'"points_cost":8,"standard_points_cost":8,'
+        b'"monthly_update_discount_applied":false,'
+        b'"founder_tools_explicitly_linked":false}',
+    ],
+)
+async def test_book_coworking_treats_malformed_2xx_as_commit_uncertain(
+    monkeypatch,
+    response_body,
+):
+    async def fake_request(method, endpoint, **kwargs):
+        request = httpx.Request(method, f"https://backend.test{endpoint}")
+        return httpx.Response(201, request=request, content=response_body)
+
+    client = MLAIBackendClient(
+        base_url="https://backend.test",
+        api_key="roo-api-key",
+        internal_api_key="roo-api-key",
+    )
+    monkeypatch.setattr(client, "_request", fake_request)
+
+    with pytest.raises(MLAIBackendUnavailableError):
+        await client.book_coworking("U123", "2026-07-04", "C123")
+
+
 @pytest.mark.asyncio
 async def test_start_founder_account_link_uses_current_slack_identity(monkeypatch):
     captured = {}
