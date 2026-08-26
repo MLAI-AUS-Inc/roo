@@ -390,6 +390,60 @@ def test_linear_meeting_decision_thresholds():
     assert decision == "skip"
 
 
+def test_linear_meeting_team_match_fails_closed_when_project_team_is_inaccessible():
+    executor = SkillExecutor()
+
+    team_match = executor._match_linear_meeting_team(
+        {
+            "id": "project-studio",
+            "name": "Studio project",
+            "teams": {
+                "nodes": [
+                    {"id": "team-studio", "key": "STU", "name": "Studio"}
+                ]
+            },
+        },
+        [{"id": "team-mlai", "key": "MLA", "name": "MLAI"}],
+        None,
+        "MLAI",
+    )
+
+    assert team_match["team"] is None
+    assert team_match["confidence"] == 0.0
+    assert "API key cannot access" in team_match["reason"]
+
+
+def test_linear_meeting_team_match_uses_accessible_project_team_not_default():
+    executor = SkillExecutor()
+    studio_team = {
+        "id": "team-studio",
+        "key": "STU",
+        "name": "Studio",
+        "members": {"nodes": [{"id": "user-1"}]},
+    }
+
+    team_match = executor._match_linear_meeting_team(
+        {
+            "id": "project-studio",
+            "name": "Studio project",
+            "teams": {
+                "nodes": [
+                    {"id": "team-studio", "key": "STU", "name": "Studio"}
+                ]
+            },
+        },
+        [
+            {"id": "team-mlai", "key": "MLA", "name": "MLAI"},
+            studio_team,
+        ],
+        None,
+        "MLAI",
+    )
+
+    assert team_match["team"] is studio_team
+    assert team_match["confidence"] == 0.96
+
+
 @pytest.mark.asyncio
 async def test_linear_client_reads_context_from_backend(monkeypatch):
     module_path = (

@@ -6420,8 +6420,41 @@ Chunk {index} source: {label}
         if project:
             project_teams = self._linear_connection_nodes(project.get("teams"))
             if project_teams:
+                accessible_project_teams: list[dict[str, Any]] = []
+                accessible_by_id = {
+                    str(team.get("id") or "").strip(): team
+                    for team in teams
+                    if str(team.get("id") or "").strip()
+                }
+                for project_team in project_teams:
+                    project_team_id = str(project_team.get("id") or "").strip()
+                    accessible_team = accessible_by_id.get(project_team_id)
+                    if accessible_team:
+                        accessible_project_teams.append(accessible_team)
+
+                if not accessible_project_teams:
+                    return {
+                        "team": None,
+                        "confidence": 0.0,
+                        "reason": (
+                            "Roo's Linear API key cannot access the matched project's team"
+                        ),
+                    }
+
+                hint = str(team_hint or "").strip()
+                if hint:
+                    hinted_team = self._find_linear_team_by_hint(
+                        accessible_project_teams,
+                        hint,
+                    )
+                    if hinted_team:
+                        return {
+                            "team": hinted_team,
+                            "confidence": 0.97,
+                            "reason": "Using hinted team from matched project",
+                        }
                 return {
-                    "team": project_teams[0],
+                    "team": accessible_project_teams[0],
                     "confidence": 0.96,
                     "reason": "Using matched project's team",
                 }
@@ -6538,6 +6571,9 @@ Chunk {index} source: {label}
                 return "Project unclear: multiple Linear projects matched"
             return "Project unclear"
         if float(team_match.get("confidence") or 0.0) < uncertain_threshold:
+            reason = str(team_match.get("reason") or "").strip()
+            if "api key cannot access" in reason.lower():
+                return reason
             return "Team unclear"
         return "Low confidence mapping"
 
