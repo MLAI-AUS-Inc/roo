@@ -98,6 +98,7 @@ from ..clients.mlai_backend import (
     validate_coworking_booking_result,
 )
 from ..coworking_booking_intents import (
+    coworking_failure_code,
     deliver_coworking_booking_notification,
     get_coworking_intent_store,
     is_retryable_coworking_exception,
@@ -14143,12 +14144,13 @@ Chunk {index} source: {label}
         if admin_checkin:
             return (
                 f"I already have a coworking check-in request for <@{target_user_id}> "
-                f"on **{booking_date}** queued or in progress. I'll confirm in this thread "
-                "when it completes."
+                f"on **{booking_date}** queued, processing, or completed. I won't create "
+                "another booking, and Roo will deliver the confirmation when it is ready."
             )
         return (
             f"I already have your coworking booking request for **{booking_date}** "
-            "queued or in progress. I'll confirm in this thread when it completes."
+            "queued, processing, or completed. I won't create another booking, and Roo "
+            "will deliver the confirmation when it is ready."
         )
 
     def _coworking_booking_queued_for_retry_message(
@@ -14495,16 +14497,13 @@ Chunk {index} source: {label}
         target_user_id: str,
         requested_by_user_id: str,
         booking_date: str,
-        text: str,
+        text: Optional[str] = None,
         channel_id: Optional[str],
         thread_ts: Optional[str],
         admin_checkin: bool,
     ) -> Any:
-        print(
-            "🏢 coworking_booking_execute "
-            f"requested_by_user_id={requested_by_user_id} target_user_id={target_user_id} "
-            f"booking_date={booking_date} admin_checkin={admin_checkin}"
-        )
+        # Keep caller compatibility while deliberately discarding raw Slack text.
+        del text
         try:
             store = get_coworking_intent_store()
             intent = store.record_intent(
@@ -14513,7 +14512,6 @@ Chunk {index} source: {label}
                 booking_date=booking_date,
                 channel_id=channel_id,
                 thread_ts=thread_ts,
-                request_text=text,
             )
             leased_intent = store.reserve_for_processing(
                 int(intent["id"]),
@@ -14522,8 +14520,7 @@ Chunk {index} source: {label}
         except Exception as exc:
             print(
                 "🏢 coworking_intent_persist_failed "
-                f"slack_user_id={target_user_id} requested_by={requested_by_user_id} "
-                f"booking_date={booking_date} exc_type={exc.__class__.__name__} exc={exc}"
+                f"exc_type={exc.__class__.__name__}"
             )
             return (
                 "I couldn't safely queue that coworking booking request just now, "
@@ -14537,6 +14534,13 @@ Chunk {index} source: {label}
                 admin_checkin=admin_checkin,
             )
 
+        mutation_owner = str(leased_intent.get("locked_by") or "")
+        if not mutation_owner:
+            return self._coworking_booking_already_queued_message(
+                booking_date=booking_date,
+                target_user_id=target_user_id,
+                admin_checkin=admin_checkin,
+            )
         try:
             result = await client.book_coworking(target_user_id, booking_date, channel_id)
             result = validate_coworking_booking_result(
@@ -14545,19 +14549,46 @@ Chunk {index} source: {label}
             )
             confirmed = store.mark_confirmed(
                 int(leased_intent["id"]),
+                owner=mutation_owner,
                 backend_result=result,
                 notification_required=True,
             )
+            if confirmed is None:
+                return self._coworking_booking_already_queued_message(
+                    booking_date=booking_date,
+                    target_user_id=target_user_id,
+                    admin_checkin=admin_checkin,
+                )
         except Exception as exc:
-            error = f"{exc.__class__.__name__}: {exc}"
+            error = coworking_failure_code(exc)
             if is_retryable_coworking_exception(exc):
-                store.mark_retryable_failure(int(leased_intent["id"]), error=error)
+                updated = store.mark_retryable_failure(
+                    int(leased_intent["id"]),
+                    owner=mutation_owner,
+                    error=error,
+                )
+                if updated is None:
+                    return self._coworking_booking_already_queued_message(
+                        booking_date=booking_date,
+                        target_user_id=target_user_id,
+                        admin_checkin=admin_checkin,
+                    )
                 return self._coworking_booking_queued_for_retry_message(
                     booking_date=booking_date,
                     target_user_id=target_user_id,
                     admin_checkin=admin_checkin,
                 )
-            store.mark_blocked(int(leased_intent["id"]), error=error)
+            blocked = store.mark_blocked(
+                int(leased_intent["id"]),
+                owner=mutation_owner,
+                error=error,
+            )
+            if blocked is None:
+                return self._coworking_booking_already_queued_message(
+                    booking_date=booking_date,
+                    target_user_id=target_user_id,
+                    admin_checkin=admin_checkin,
+                )
             if isinstance(exc, httpx.HTTPStatusError):
                 print(
                     "🏢 coworking_booking_terminal_rejection "
@@ -15440,7 +15471,6 @@ Chunk {index} source: {label}
                     target_user_id=target_user_id,
                     requested_by_user_id=user_id,
                     booking_date=booking_date,
-                    text=text,
                     channel_id=channel_id,
                     thread_ts=thread_ts,
                     admin_checkin=True,
@@ -15512,7 +15542,6 @@ Chunk {index} source: {label}
                         target_user_id=target_user_id,
                         requested_by_user_id=user_id,
                         booking_date=booking_date,
-                        text=text,
                         channel_id=channel_id,
                         thread_ts=thread_ts,
                         admin_checkin=True,
@@ -15536,7 +15565,6 @@ Chunk {index} source: {label}
                 target_user_id=user_id,
                 requested_by_user_id=user_id,
                 booking_date=booking_date,
-                text=text,
                 channel_id=channel_id,
                 thread_ts=thread_ts,
                 admin_checkin=False,

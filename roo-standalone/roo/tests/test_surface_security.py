@@ -42,6 +42,18 @@ def test_public_surface_preserves_reviewed_public_skills_and_has_no_private_skil
     )
 
 
+@pytest.mark.parametrize("retention_days", [0, 366])
+def test_coworking_intent_retention_is_bounded(retention_days):
+    with pytest.raises(
+        ValidationError,
+        match="COWORKING_INTENT_RETENTION_DAYS must be between 1 and 365",
+    ):
+        settings(COWORKING_INTENT_RETENTION_DAYS=retention_days)
+
+    configured = settings(COWORKING_INTENT_RETENTION_DAYS=30)
+    assert configured.COWORKING_INTENT_RETENTION_DAYS == 30
+
+
 def test_founder_tools_link_origins_are_validated_by_environment():
     configured = settings(FOUNDER_TOOLS_LINK_ORIGINS="https://mlai.au")
     assert configured.founder_tools_link_origins == frozenset({"https://mlai.au"})

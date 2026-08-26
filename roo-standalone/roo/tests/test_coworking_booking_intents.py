@@ -1,4 +1,7 @@
+import asyncio
 import importlib
+import sqlite3
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -63,7 +66,6 @@ def leased_intent(
         booking_date="2026-04-22",
         channel_id=channel_id,
         thread_ts=thread_ts,
-        request_text="book me in today",
     )
     return store, intent, store.reserve_for_processing(intent["id"], owner="test-worker")
 
@@ -115,7 +117,6 @@ def test_intent_store_persists_and_claims_due_work(tmp_path):
         booking_date="2026-04-22",
         channel_id="C123",
         thread_ts="111.222",
-        request_text="book me in today",
     )
 
     assert intent["status"] == "pending"
@@ -127,6 +128,7 @@ def test_intent_store_persists_and_claims_due_work(tmp_path):
 
     retry = store.mark_retryable_failure(
         intent["id"],
+        owner=leased["locked_by"],
         error="MLAIBackendUnavailableError: timeout",
         delay_seconds=0,
     )
@@ -139,6 +141,7 @@ def test_intent_store_persists_and_claims_due_work(tmp_path):
 
     confirmed = store.mark_confirmed(
         intent["id"],
+        owner=claimed[0]["locked_by"],
         backend_result={"id": "booking-1", "date": "2026-04-22"},
     )
     assert confirmed["status"] == "confirmed"
@@ -183,6 +186,7 @@ async def test_existing_booking_replay_uses_complete_result_and_private_link_gui
     assert "`@Roo link`" in direct_messages[0]["text"]
     assert len(channel_messages) == 1
     assert channel_messages[0]["thread_ts"] == "111.222"
+    assert channel_messages[0]["client_msg_id"]
     assert "`@Roo link`" not in channel_messages[0]["text"]
 
 
@@ -302,6 +306,68 @@ async def test_retry_dm_failure_never_exposes_link_guidance_publicly(
 
 
 @pytest.mark.asyncio
+async def test_terminal_rejection_notification_survives_slack_failure_and_restart(
+    tmp_path,
+    monkeypatch,
+):
+    store, intent, leased = leased_intent(tmp_path)
+    request = httpx.Request("POST", "https://backend.test/coworking")
+    response = httpx.Response(400, request=request)
+    client = FakeClient(
+        error=httpx.HTTPStatusError(
+            "sensitive backend rejection UPRIVATE private@example.com",
+            request=request,
+            response=response,
+        )
+    )
+    attempts = []
+
+    def post_message(**kwargs):
+        attempts.append(kwargs)
+        if len(attempts) == 1:
+            raise RuntimeError("Slack unavailable")
+        return {"ok": True, "ts": "444.555"}
+
+    slack_client_module = importlib.import_module("roo.slack_client")
+    monkeypatch.setattr(slack_client_module, "post_message", post_message)
+    monkeypatch.setattr(coworking, "retry_delay_seconds", lambda _attempt: 0)
+
+    first = await coworking.process_coworking_booking_intent(
+        leased,
+        store=store,
+        client=client,
+        notify=True,
+    )
+
+    stored = store.get(intent["id"])
+    assert first["status"] == "blocked"
+    assert first["notification_status"] == "pending_retry"
+    assert stored["status"] == "blocked"
+    assert stored["notification_status"] == "pending_retry"
+    assert stored["last_error"] == "backend_http_400"
+    assert client.book_calls == [("U123", "2026-04-22", "C123")]
+
+    due = store.claim_due_notifications(owner="restarted-worker")
+    assert len(due) == 1
+    recovered = await coworking.deliver_coworking_booking_notification(
+        due[0],
+        store=store,
+        client=client,
+    )
+
+    assert recovered["status"] == "blocked"
+    assert recovered["notification_status"] == "delivered"
+    assert store.get(intent["id"])["notification_status"] == "delivered"
+    assert client.book_calls == [("U123", "2026-04-22", "C123")]
+    assert len(attempts) == 2
+    assert attempts[0]["client_msg_id"] == attempts[1]["client_msg_id"]
+    assert "No new booking was created" in attempts[1]["text"]
+    assert "backend_http_400" not in attempts[1]["text"]
+    assert "UPRIVATE" not in attempts[1]["text"]
+    assert "private@example.com" not in attempts[1]["text"]
+
+
+@pytest.mark.asyncio
 async def test_duplicate_slack_confirmation_counts_as_durable_delivery(
     tmp_path,
     monkeypatch,
@@ -332,9 +398,10 @@ async def test_duplicate_slack_confirmation_counts_as_durable_delivery(
 
 
 def test_stale_notification_worker_cannot_reopen_delivered_work(tmp_path):
-    store, intent, _leased = leased_intent(tmp_path)
+    store, intent, leased = leased_intent(tmp_path)
     confirmed = store.mark_confirmed(
         intent["id"],
+        owner=leased["locked_by"],
         backend_result=booking_result(),
         notification_required=True,
     )
@@ -362,8 +429,395 @@ def test_stale_notification_worker_cannot_reopen_delivered_work(tmp_path):
         delay_seconds=0,
     )
 
-    assert stale_result["notification_status"] == "delivered"
-    assert stale_result["notification_last_error"] is None
+    assert stale_result is None
+    stored = store.get(confirmed["id"])
+    assert stored["notification_status"] == "delivered"
+    assert stored["notification_last_error"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stale_outcome", ["success", "failure"])
+async def test_stale_notification_outcome_cannot_change_winner(
+    tmp_path,
+    stale_outcome,
+):
+    store, intent, leased = leased_intent(tmp_path)
+    confirmed = store.mark_confirmed(
+        intent["id"],
+        owner=leased["locked_by"],
+        backend_result=booking_result(),
+        notification_required=True,
+    )
+    stale = store.reserve_notification(
+        confirmed["id"],
+        owner="stale-notification-worker",
+        lease_seconds=0,
+    )
+
+    class RacingExecutor:
+        async def _deliver_coworking_booking_success(self, **kwargs):
+            replacement = store.reserve_notification(
+                confirmed["id"],
+                owner="replacement-notification-worker",
+            )
+            delivered = store.mark_notification_delivered(
+                confirmed["id"],
+                owner=replacement["notification_locked_by"],
+            )
+            assert delivered is not None
+            if stale_outcome == "failure":
+                raise RuntimeError("late Slack failure")
+            return {
+                "message": "",
+                "suppress_post": True,
+                "data": {"delivery": "private_dm", "dm_delivered": True},
+            }
+
+    result = await coworking.deliver_coworking_booking_notification(
+        stale,
+        store=store,
+        client=FakeClient(),
+        executor=RacingExecutor(),
+    )
+
+    stored = store.get(confirmed["id"])
+    assert result == {
+        "status": "stale",
+        "notification_status": "stale",
+        "intent_id": confirmed["id"],
+    }
+    assert stored["notification_status"] == "delivered"
+    assert stored["notification_last_error"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stale_outcome", ["success", "failure"])
+async def test_stale_blocked_notification_outcome_cannot_change_winner(
+    tmp_path,
+    monkeypatch,
+    stale_outcome,
+):
+    store, intent, leased = leased_intent(tmp_path)
+    blocked = store.mark_blocked(
+        intent["id"],
+        owner=leased["locked_by"],
+        error="backend_http_400",
+        notification_required=True,
+    )
+    stale = store.reserve_notification(
+        blocked["id"],
+        owner="stale-notification-worker",
+        lease_seconds=0,
+    )
+    attempted_message_ids = []
+
+    def race_delivery(**kwargs):
+        attempted_message_ids.append(kwargs["client_msg_id"])
+        replacement = store.reserve_notification(
+            blocked["id"],
+            owner="replacement-notification-worker",
+        )
+        delivered = store.mark_notification_delivered(
+            blocked["id"],
+            owner=replacement["notification_locked_by"],
+        )
+        assert delivered is not None
+        if stale_outcome == "failure":
+            raise RuntimeError("late Slack failure")
+        return True
+
+    monkeypatch.setattr(coworking, "_safe_post_message", race_delivery)
+
+    result = await coworking.deliver_coworking_booking_notification(
+        stale,
+        store=store,
+        client=FakeClient(),
+    )
+
+    stored = store.get(blocked["id"])
+    assert result == {
+        "status": "stale",
+        "notification_status": "stale",
+        "intent_id": blocked["id"],
+    }
+    assert stored["status"] == "blocked"
+    assert stored["notification_status"] == "delivered"
+    assert stored["notification_last_error"] is None
+    assert len(attempted_message_ids) == 1
+    assert attempted_message_ids[0]
+
+
+@pytest.mark.parametrize("stale_transition", ["confirm", "retry", "block"])
+def test_stale_mutation_worker_cannot_overwrite_replacement_confirmation(
+    tmp_path,
+    stale_transition,
+):
+    store = coworking.CoworkingBookingIntentStore(tmp_path / "intents.db")
+    intent = store.record_intent(
+        slack_user_id="U123",
+        booking_date="2026-04-22",
+        channel_id="C123",
+        thread_ts="111.222",
+    )
+    stale = store.reserve_for_processing(
+        intent["id"],
+        owner="stale-worker",
+        lease_seconds=0,
+    )
+    replacement = store.reserve_for_processing(
+        intent["id"],
+        owner="replacement-worker",
+    )
+    replacement_result = booking_result(cost=4, discount_applied=True)
+    confirmed = store.mark_confirmed(
+        intent["id"],
+        owner=replacement["locked_by"],
+        backend_result=replacement_result,
+        notification_required=True,
+    )
+    assert confirmed["status"] == "confirmed"
+
+    if stale_transition == "confirm":
+        stale_result = store.mark_confirmed(
+            intent["id"],
+            owner=stale["locked_by"],
+            backend_result=booking_result(cost=8),
+            notification_required=True,
+        )
+    elif stale_transition == "retry":
+        stale_result = store.mark_retryable_failure(
+            intent["id"],
+            owner=stale["locked_by"],
+            error="late timeout",
+            delay_seconds=0,
+        )
+    else:
+        stale_result = store.mark_blocked(
+            intent["id"],
+            owner=stale["locked_by"],
+            error="late rejection",
+        )
+
+    stored = store.get(intent["id"])
+    assert stale_result is None
+    assert stored["status"] == "confirmed"
+    assert stored["notification_status"] == "pending"
+    assert stored["last_error"] is None
+    assert stored["backend_result_json"] == confirmed["backend_result_json"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stale_outcome", ["success", "retry", "block"])
+async def test_stale_mutation_outcome_emits_no_message_and_keeps_winner(
+    tmp_path,
+    monkeypatch,
+    stale_outcome,
+):
+    store = coworking.CoworkingBookingIntentStore(tmp_path / "intents.db")
+    intent = store.record_intent(
+        slack_user_id="U123",
+        booking_date="2026-04-22",
+        channel_id="C123",
+        thread_ts="111.222",
+    )
+    stale = store.reserve_for_processing(
+        intent["id"],
+        owner="stale-worker",
+        lease_seconds=0,
+    )
+    winner_result = booking_result(cost=4, discount_applied=True)
+
+    class RacingClient(FakeClient):
+        async def book_coworking(self, slack_user_id, booking_date, channel_id):
+            replacement = store.reserve_for_processing(
+                intent["id"],
+                owner="replacement-worker",
+            )
+            store.mark_confirmed(
+                intent["id"],
+                owner=replacement["locked_by"],
+                backend_result=winner_result,
+                notification_required=True,
+            )
+            if stale_outcome == "retry":
+                raise backend_module.MLAIBackendUnavailableError("late timeout")
+            if stale_outcome == "block":
+                request = httpx.Request("POST", "https://backend.test/coworking")
+                response = httpx.Response(400, request=request)
+                raise httpx.HTTPStatusError(
+                    "late rejection",
+                    request=request,
+                    response=response,
+                )
+            return booking_result(cost=8)
+
+    direct_messages, channel_messages, ephemeral_messages = capture_delivery(
+        monkeypatch
+    )
+    result = await coworking.process_coworking_booking_intent(
+        stale,
+        store=store,
+        client=RacingClient(),
+        notify=True,
+    )
+
+    stored = store.get(intent["id"])
+    assert result == {"status": "stale", "intent_id": intent["id"]}
+    assert stored["status"] == "confirmed"
+    assert stored["notification_status"] == "pending"
+    assert stored["backend_result_json"]
+    assert direct_messages == []
+    assert channel_messages == []
+    assert ephemeral_messages == []
+
+
+def test_schema_scrubs_legacy_raw_request_text(tmp_path):
+    db_path = tmp_path / "intents.db"
+    store = coworking.CoworkingBookingIntentStore(db_path)
+    intent = store.record_intent(
+        slack_user_id="U123",
+        booking_date="2026-04-22",
+        channel_id="C123",
+        thread_ts="111.222",
+    )
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "UPDATE coworking_booking_intents SET request_text = ? WHERE id = ?",
+            ("private raw Slack message", intent["id"]),
+        )
+
+    reloaded = coworking.CoworkingBookingIntentStore(db_path)
+
+    assert reloaded.get(intent["id"])["request_text"] is None
+
+
+def test_terminal_retention_preserves_unfinished_notifications(tmp_path):
+    store = coworking.CoworkingBookingIntentStore(tmp_path / "intents.db")
+
+    delivered = store.record_intent(
+        slack_user_id="UDELIVER1",
+        booking_date="2026-04-20",
+        channel_id="C123",
+        thread_ts=None,
+    )
+    delivered_lease = store.reserve_for_processing(delivered["id"], owner="worker-1")
+    delivered_confirmation = store.mark_confirmed(
+        delivered["id"],
+        owner=delivered_lease["locked_by"],
+        backend_result=booking_result(),
+        notification_required=True,
+    )
+    notification = store.reserve_notification(
+        delivered_confirmation["id"],
+        owner="notification-worker",
+    )
+    store.mark_notification_delivered(
+        delivered_confirmation["id"],
+        owner=notification["notification_locked_by"],
+    )
+
+    blocked = store.record_intent(
+        slack_user_id="UBLOCKED1",
+        booking_date="2026-04-21",
+        channel_id="C123",
+        thread_ts=None,
+    )
+    blocked_lease = store.reserve_for_processing(blocked["id"], owner="worker-2")
+    store.mark_blocked(
+        blocked["id"],
+        owner=blocked_lease["locked_by"],
+        error="terminal rejection",
+    )
+
+    blocked_pending = store.record_intent(
+        slack_user_id="UBLOCKED2",
+        booking_date="2026-04-21",
+        channel_id="C123",
+        thread_ts=None,
+    )
+    blocked_pending_lease = store.reserve_for_processing(
+        blocked_pending["id"],
+        owner="worker-4",
+    )
+    store.mark_blocked(
+        blocked_pending["id"],
+        owner=blocked_pending_lease["locked_by"],
+        error="terminal rejection",
+        notification_required=True,
+    )
+
+    unfinished = store.record_intent(
+        slack_user_id="UPENDING1",
+        booking_date="2026-04-22",
+        channel_id="C123",
+        thread_ts=None,
+    )
+    unfinished_lease = store.reserve_for_processing(unfinished["id"], owner="worker-3")
+    store.mark_confirmed(
+        unfinished["id"],
+        owner=unfinished_lease["locked_by"],
+        backend_result=booking_result(),
+        notification_required=True,
+    )
+
+    pending_mutation = store.record_intent(
+        slack_user_id="UPENDING2",
+        booking_date="2026-04-23",
+        channel_id="C123",
+        thread_ts=None,
+    )
+
+    with sqlite3.connect(store.db_path) as conn:
+        conn.execute("UPDATE coworking_booking_intents SET updated_at = 0")
+
+    deleted = store.purge_terminal(retention_days=30)
+
+    assert deleted == 2
+    assert store.get(delivered["id"]) is None
+    assert store.get(blocked["id"]) is None
+    assert store.get(blocked_pending["id"])["notification_status"] == "pending"
+    assert store.get(unfinished["id"])["notification_status"] == "pending"
+    assert store.get(pending_mutation["id"])["status"] == "pending"
+
+
+@pytest.mark.asyncio
+async def test_retry_loop_runs_bounded_retention_cleanup(monkeypatch):
+    calls = []
+
+    class FakeStore:
+        def purge_terminal(self, *, retention_days):
+            calls.append(("purge", retention_days))
+            return 0
+
+        def claim_due(self, *, limit, owner):
+            calls.append(("mutations", limit, bool(owner)))
+            return []
+
+        def claim_due_notifications(self, *, limit, owner):
+            calls.append(("notifications", limit, bool(owner)))
+            return []
+
+    async def stop_after_first_iteration(_seconds):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(
+        coworking,
+        "get_settings",
+        lambda: SimpleNamespace(COWORKING_INTENT_RETENTION_DAYS=14),
+    )
+    monkeypatch.setattr(coworking.asyncio, "sleep", stop_after_first_iteration)
+
+    with pytest.raises(asyncio.CancelledError):
+        await coworking.coworking_booking_retry_loop(
+            store=FakeStore(),
+            poll_seconds=0,
+        )
+
+    assert calls == [
+        ("purge", 14),
+        ("mutations", 10, True),
+        ("notifications", 10, True),
+    ]
 
 
 @pytest.mark.asyncio
@@ -452,9 +906,12 @@ async def test_public_ack_failure_does_not_repeat_a_delivered_private_confirmati
 
 
 @pytest.mark.asyncio
-async def test_process_intent_keeps_retryable_backend_timeout_queued(tmp_path):
+async def test_process_intent_keeps_retryable_backend_timeout_queued(tmp_path, capsys):
     store, intent, leased = leased_intent(tmp_path)
-    client = FakeClient(error=backend_module.MLAIBackendUnavailableError("offline"))
+    sensitive_error = "offline UPRIVATE1 private@example.com\nforged"
+    client = FakeClient(
+        error=backend_module.MLAIBackendUnavailableError(sensitive_error)
+    )
 
     result = await coworking.process_coworking_booking_intent(
         leased,
@@ -466,7 +923,13 @@ async def test_process_intent_keeps_retryable_backend_timeout_queued(tmp_path):
     updated = store.get(intent["id"])
     assert result["status"] == "pending_retry"
     assert updated["status"] == "pending_retry"
-    assert "offline" in updated["last_error"]
+    assert updated["last_error"] == "backend_unavailable"
+    assert result["error"] == "backend_unavailable"
+    output = capsys.readouterr().out
+    assert "UPRIVATE1" not in output
+    assert "private@example.com" not in output
+    assert "offline" not in output
+    assert "forged" not in output
 
 
 @pytest.mark.asyncio
@@ -494,7 +957,7 @@ async def test_process_intent_treats_malformed_success_as_commit_uncertain(
     updated = store.get(intent["id"])
     assert result["status"] == "pending_retry"
     assert updated["status"] == "pending_retry"
-    assert "coworking booking result" in updated["last_error"]
+    assert updated["last_error"] == "invalid_backend_response"
 
 
 def test_retryable_exception_classifier():

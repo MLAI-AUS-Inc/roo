@@ -17,6 +17,8 @@ from .config import get_settings
 DEFAULT_COWORKING_INTENTS_DB_PATH = "data/coworking_booking_intents.db"
 DEFAULT_RETRY_POLL_SECONDS = 30.0
 DEFAULT_PROCESSING_LEASE_SECONDS = 90.0
+DEFAULT_TERMINAL_RETENTION_DAYS = 30
+TERMINAL_CLEANUP_INTERVAL_SECONDS = 24 * 60 * 60
 
 
 def build_coworking_intent_key(slack_user_id: str, booking_date: str) -> str:
@@ -43,6 +45,24 @@ def is_retryable_coworking_exception(exc: Exception) -> bool:
         status_code = exc.response.status_code
         return status_code in {408, 425, 429} or 500 <= status_code < 600
     return False
+
+
+def coworking_failure_code(exc: Exception) -> str:
+    """Return a bounded diagnostic code without persisting external error text."""
+    from .clients.mlai_backend import MLAIBackendUnavailableError
+
+    if isinstance(exc, MLAIBackendUnavailableError):
+        reason_code = str(getattr(exc, "reason_code", ""))
+        if reason_code == "invalid_backend_response":
+            return reason_code
+        return "backend_unavailable"
+    if isinstance(exc, httpx.HTTPStatusError):
+        return f"backend_http_{int(exc.response.status_code)}"
+    if isinstance(exc, httpx.TransportError):
+        return "backend_transport_error"
+    if isinstance(exc, (TypeError, ValueError, json.JSONDecodeError)):
+        return "invalid_backend_response"
+    return "unexpected_error"
 
 
 class CoworkingBookingIntentStore:
@@ -122,6 +142,12 @@ class CoworkingBookingIntentStore:
                             "ALTER TABLE coworking_booking_intents "
                             f"ADD COLUMN {column_name} {column_definition}"
                         )
+                # Raw Slack messages are not needed to replay a canonical
+                # booking intent. Clear data written by older versions.
+                conn.execute(
+                    "UPDATE coworking_booking_intents "
+                    "SET request_text = NULL WHERE request_text IS NOT NULL"
+                )
                 conn.execute(
                     """
                     CREATE INDEX IF NOT EXISTS idx_coworking_intents_due
@@ -160,7 +186,6 @@ class CoworkingBookingIntentStore:
         booking_date: str,
         channel_id: Optional[str],
         thread_ts: Optional[str],
-        request_text: Optional[str],
     ) -> dict[str, Any]:
         self._ensure_schema()
         current_time = _now()
@@ -178,18 +203,16 @@ class CoworkingBookingIntentStore:
                         booking_date,
                         channel_id,
                         thread_ts,
-                        request_text,
                         status,
                         next_attempt_at,
                         created_at,
                         updated_at
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)
                     ON CONFLICT(idempotency_key) DO UPDATE SET
                         requested_by_slack_id = excluded.requested_by_slack_id,
                         channel_id = excluded.channel_id,
                         thread_ts = excluded.thread_ts,
-                        request_text = excluded.request_text,
                         status = CASE
                             WHEN coworking_booking_intents.status = 'processing'
                                  AND coworking_booking_intents.locked_until > ?
@@ -224,7 +247,6 @@ class CoworkingBookingIntentStore:
                         str(booking_date).strip(),
                         channel_id,
                         thread_ts,
-                        request_text,
                         current_time,
                         current_time,
                         current_time,
@@ -325,16 +347,17 @@ class CoworkingBookingIntentStore:
         self,
         intent_id: int,
         *,
+        owner: str,
         backend_result: Optional[dict[str, Any]] = None,
         notification_required: bool = False,
-    ) -> dict[str, Any]:
+    ) -> Optional[dict[str, Any]]:
         self._ensure_schema()
         current_time = _now()
         backend_result = backend_result or {}
         backend_booking_id = backend_result.get("id")
         with self._lock:
             with self._connect() as conn:
-                conn.execute(
+                cursor = conn.execute(
                     """
                     UPDATE coworking_booking_intents
                     SET
@@ -353,6 +376,8 @@ class CoworkingBookingIntentStore:
                         notification_delivered_at = NULL,
                         updated_at = ?
                     WHERE id = ?
+                      AND status = 'processing'
+                      AND locked_by = ?
                     """,
                     (
                         str(backend_booking_id) if backend_booking_id else None,
@@ -362,8 +387,11 @@ class CoworkingBookingIntentStore:
                         current_time if notification_required else None,
                         current_time,
                         int(intent_id),
+                        str(owner),
                     ),
                 )
+                if cursor.rowcount != 1:
+                    return None
                 row = conn.execute(
                     "SELECT * FROM coworking_booking_intents WHERE id = ?",
                     (int(intent_id),),
@@ -393,7 +421,7 @@ class CoworkingBookingIntentStore:
                         notification_locked_by = ?,
                         updated_at = ?
                     WHERE id = ?
-                      AND status = 'confirmed'
+                      AND status IN ('confirmed', 'blocked')
                       AND (
                         notification_status IN ('pending', 'pending_retry')
                         OR (
@@ -431,7 +459,7 @@ class CoworkingBookingIntentStore:
                     """
                     SELECT id
                     FROM coworking_booking_intents
-                    WHERE status = 'confirmed'
+                    WHERE status IN ('confirmed', 'blocked')
                       AND (
                         (
                             notification_status IN ('pending', 'pending_retry')
@@ -467,12 +495,12 @@ class CoworkingBookingIntentStore:
         intent_id: int,
         *,
         owner: str,
-    ) -> dict[str, Any]:
+    ) -> Optional[dict[str, Any]]:
         self._ensure_schema()
         current_time = _now()
         with self._lock:
             with self._connect() as conn:
-                conn.execute(
+                cursor = conn.execute(
                     """
                     UPDATE coworking_booking_intents
                     SET
@@ -484,12 +512,14 @@ class CoworkingBookingIntentStore:
                         notification_delivered_at = ?,
                         updated_at = ?
                     WHERE id = ?
-                      AND status = 'confirmed'
+                      AND status IN ('confirmed', 'blocked')
                       AND notification_status = 'delivering'
                       AND notification_locked_by = ?
                     """,
                     (current_time, current_time, int(intent_id), str(owner)),
                 )
+                if cursor.rowcount != 1:
+                    return None
                 row = conn.execute(
                     "SELECT * FROM coworking_booking_intents WHERE id = ?",
                     (int(intent_id),),
@@ -503,7 +533,7 @@ class CoworkingBookingIntentStore:
         owner: str,
         error: str,
         delay_seconds: Optional[float] = None,
-    ) -> dict[str, Any]:
+    ) -> Optional[dict[str, Any]]:
         self._ensure_schema()
         current_time = _now()
         row = self.get(intent_id)
@@ -512,7 +542,7 @@ class CoworkingBookingIntentStore:
         next_attempt_at = current_time + delay
         with self._lock:
             with self._connect() as conn:
-                conn.execute(
+                cursor = conn.execute(
                     """
                     UPDATE coworking_booking_intents
                     SET
@@ -523,7 +553,7 @@ class CoworkingBookingIntentStore:
                         notification_last_error = ?,
                         updated_at = ?
                     WHERE id = ?
-                      AND status = 'confirmed'
+                      AND status IN ('confirmed', 'blocked')
                       AND notification_status = 'delivering'
                       AND notification_locked_by = ?
                     """,
@@ -535,6 +565,8 @@ class CoworkingBookingIntentStore:
                         str(owner),
                     ),
                 )
+                if cursor.rowcount != 1:
+                    return None
                 updated = conn.execute(
                     "SELECT * FROM coworking_booking_intents WHERE id = ?",
                     (int(intent_id),),
@@ -545,9 +577,10 @@ class CoworkingBookingIntentStore:
         self,
         intent_id: int,
         *,
+        owner: str,
         error: str,
         delay_seconds: Optional[float] = None,
-    ) -> dict[str, Any]:
+    ) -> Optional[dict[str, Any]]:
         self._ensure_schema()
         current_time = _now()
         row = self.get(intent_id)
@@ -556,7 +589,7 @@ class CoworkingBookingIntentStore:
         next_attempt_at = current_time + delay
         with self._lock:
             with self._connect() as conn:
-                conn.execute(
+                cursor = conn.execute(
                     """
                     UPDATE coworking_booking_intents
                     SET
@@ -567,21 +600,38 @@ class CoworkingBookingIntentStore:
                         last_error = ?,
                         updated_at = ?
                     WHERE id = ?
+                      AND status = 'processing'
+                      AND locked_by = ?
                     """,
-                    (next_attempt_at, str(error), current_time, int(intent_id)),
+                    (
+                        next_attempt_at,
+                        str(error),
+                        current_time,
+                        int(intent_id),
+                        str(owner),
+                    ),
                 )
+                if cursor.rowcount != 1:
+                    return None
                 updated = conn.execute(
                     "SELECT * FROM coworking_booking_intents WHERE id = ?",
                     (int(intent_id),),
                 ).fetchone()
                 return dict(updated)
 
-    def mark_blocked(self, intent_id: int, *, error: str) -> dict[str, Any]:
+    def mark_blocked(
+        self,
+        intent_id: int,
+        *,
+        owner: str,
+        error: str,
+        notification_required: bool = False,
+    ) -> Optional[dict[str, Any]]:
         self._ensure_schema()
         current_time = _now()
         with self._lock:
             with self._connect() as conn:
-                conn.execute(
+                cursor = conn.execute(
                     """
                     UPDATE coworking_booking_intents
                     SET
@@ -589,16 +639,59 @@ class CoworkingBookingIntentStore:
                         locked_until = NULL,
                         locked_by = NULL,
                         last_error = ?,
+                        notification_status = ?,
+                        notification_next_attempt_at = ?,
+                        notification_locked_until = NULL,
+                        notification_locked_by = NULL,
+                        notification_last_error = NULL,
+                        notification_delivered_at = NULL,
                         updated_at = ?
                     WHERE id = ?
+                      AND status = 'processing'
+                      AND locked_by = ?
                     """,
-                    (str(error), current_time, int(intent_id)),
+                    (
+                        str(error),
+                        "pending" if notification_required else "not_required",
+                        current_time if notification_required else None,
+                        current_time,
+                        int(intent_id),
+                        str(owner),
+                    ),
                 )
+                if cursor.rowcount != 1:
+                    return None
                 row = conn.execute(
                     "SELECT * FROM coworking_booking_intents WHERE id = ?",
                     (int(intent_id),),
                 ).fetchone()
                 return dict(row)
+
+    def purge_terminal(
+        self,
+        *,
+        retention_days: int = DEFAULT_TERMINAL_RETENTION_DAYS,
+    ) -> int:
+        """Delete old intents only after mutation and notification are terminal."""
+        self._ensure_schema()
+        days = int(retention_days)
+        if days < 1:
+            raise ValueError("retention_days must be at least 1")
+        cutoff = _now() - (days * 24 * 60 * 60)
+        with self._lock:
+            with self._connect() as conn:
+                cursor = conn.execute(
+                    """
+                    DELETE FROM coworking_booking_intents
+                    WHERE updated_at < ?
+                      AND (
+                        status IN ('blocked', 'confirmed')
+                        AND notification_status IN ('delivered', 'not_required')
+                      )
+                    """,
+                    (cutoff,),
+                )
+                return max(0, int(cursor.rowcount))
 
     def get(self, intent_id: int) -> Optional[dict[str, Any]]:
         self._ensure_schema()
@@ -746,6 +839,12 @@ async def _deliver_coworking_retry_confirmation(
                 channel_id=channel_id,
                 thread_ts=thread_ts,
                 text=str(delivery.get("message") or ""),
+                client_msg_id=str(
+                    uuid5(
+                        NAMESPACE_URL,
+                        f"roo:coworking-public-confirmation:{backend_result['id']}",
+                    )
+                ),
             )
         except Exception as exc:
             # The target's private confirmation is the durable obligation.
@@ -778,47 +877,76 @@ async def deliver_coworking_booking_notification(
     slack_user_id = str(intent["slack_user_id"])
     requested_by_slack_id = str(intent.get("requested_by_slack_id") or slack_user_id)
 
+    mutation_status = str(intent.get("status") or "")
     delivery = None
     try:
-        backend_result = json.loads(str(intent.get("backend_result_json") or ""))
-        from .clients.mlai_backend import validate_coworking_booking_result
-
-        backend_result = validate_coworking_booking_result(
-            backend_result,
-            expected_date=booking_date,
-        )
-        private_client_msg_id = str(
-            uuid5(
-                NAMESPACE_URL,
-                f"roo:coworking-confirmation:{backend_result['id']}",
+        if mutation_status == "blocked":
+            error_code = str(intent.get("last_error") or "unexpected_error")
+            delivered = _safe_post_message(
+                channel_id=intent.get("channel_id"),
+                thread_ts=intent.get("thread_ts"),
+                text=_coworking_retry_blocked_message(
+                    slack_user_id=slack_user_id,
+                    requested_by_slack_id=requested_by_slack_id,
+                    error=error_code,
+                ),
+                client_msg_id=str(
+                    uuid5(
+                        NAMESPACE_URL,
+                        f"roo:coworking-rejection:{intent_id}:{error_code}",
+                    )
+                ),
             )
-        )
-        should_post_public = (
-            int(intent.get("notification_attempt_count") or 0) <= 1
-            if post_public_message is None
-            else bool(post_public_message)
-        )
-        delivery = await _deliver_coworking_retry_confirmation(
-            client=client,
-            backend_result=backend_result,
-            slack_user_id=slack_user_id,
-            requested_by_slack_id=requested_by_slack_id,
-            booking_date=booking_date,
-            channel_id=intent.get("channel_id"),
-            thread_ts=intent.get("thread_ts"),
-            executor=executor,
-            post_public_message=should_post_public,
-            private_client_msg_id=private_client_msg_id,
-        )
-        if delivery.get("private_delivery_confirmed") is not True:
-            raise RuntimeError("Slack did not confirm private coworking notification")
+            if not delivered:
+                raise RuntimeError("Slack did not confirm coworking rejection delivery")
+            delivery = {"mode": "original_context"}
+            backend_result = None
+        else:
+            backend_result = json.loads(str(intent.get("backend_result_json") or ""))
+            from .clients.mlai_backend import validate_coworking_booking_result
+
+            backend_result = validate_coworking_booking_result(
+                backend_result,
+                expected_date=booking_date,
+            )
+            private_client_msg_id = str(
+                uuid5(
+                    NAMESPACE_URL,
+                    f"roo:coworking-confirmation:{backend_result['id']}",
+                )
+            )
+            should_post_public = (
+                int(intent.get("notification_attempt_count") or 0) <= 1
+                if post_public_message is None
+                else bool(post_public_message)
+            )
+            delivery = await _deliver_coworking_retry_confirmation(
+                client=client,
+                backend_result=backend_result,
+                slack_user_id=slack_user_id,
+                requested_by_slack_id=requested_by_slack_id,
+                booking_date=booking_date,
+                channel_id=intent.get("channel_id"),
+                thread_ts=intent.get("thread_ts"),
+                executor=executor,
+                post_public_message=should_post_public,
+                private_client_msg_id=private_client_msg_id,
+            )
+            if delivery.get("private_delivery_confirmed") is not True:
+                raise RuntimeError("Slack did not confirm private coworking notification")
     except Exception as exc:
-        error = f"{exc.__class__.__name__}: {exc}"
+        error = coworking_failure_code(exc)
         updated = store.mark_notification_retryable_failure(
             intent_id,
             owner=notification_owner,
             error=error,
         )
+        if updated is None:
+            return {
+                "status": "stale",
+                "notification_status": "stale",
+                "intent_id": intent_id,
+            }
         print(
             "🏢 coworking_notification_retryable_failure "
             f"intent_id={intent_id} attempts={updated.get('notification_attempt_count')} "
@@ -826,7 +954,7 @@ async def deliver_coworking_booking_notification(
             f"exc_type={exc.__class__.__name__}"
         )
         return {
-            "status": "confirmed",
+            "status": mutation_status,
             "notification_status": updated.get("notification_status"),
             "delivery": delivery,
             "error": error,
@@ -837,8 +965,14 @@ async def deliver_coworking_booking_notification(
         intent_id,
         owner=notification_owner,
     )
+    if delivered is None:
+        return {
+            "status": "stale",
+            "notification_status": "stale",
+            "intent_id": intent_id,
+        }
     return {
-        "status": "confirmed",
+        "status": mutation_status,
         "notification_status": delivered.get("notification_status"),
         "backend_result": backend_result,
         "delivery": delivery,
@@ -855,11 +989,12 @@ def _coworking_retry_blocked_message(
     if requested_by_slack_id and requested_by_slack_id != slack_user_id:
         return (
             "I retried the coworking check-in for "
-            f"<@{slack_user_id}>, but I still can't process it. Reason: {error}"
+            f"<@{slack_user_id}>, but I still couldn't process it. "
+            "No new booking was created. Please try again or contact an MLAI admin."
         )
     return (
-        "I retried your coworking booking request, but I still can't process it. "
-        f"Reason: {error}"
+        "I retried your coworking booking request, but I still couldn't process it. "
+        "No new booking was created. Please try again or contact an MLAI admin."
     )
 
 
@@ -876,6 +1011,9 @@ async def process_coworking_booking_intent(
     booking_date = str(intent["booking_date"])
     slack_user_id = str(intent["slack_user_id"])
     requested_by_slack_id = str(intent.get("requested_by_slack_id") or slack_user_id)
+    mutation_owner = str(intent.get("locked_by") or "")
+    if not mutation_owner:
+        return {"status": "stale", "intent_id": intent_id}
     channel_id = intent.get("channel_id")
     thread_ts = intent.get("thread_ts")
 
@@ -892,35 +1030,58 @@ async def process_coworking_booking_intent(
             expected_date=booking_date,
         )
     except Exception as exc:
-        error = f"{exc.__class__.__name__}: {exc}"
+        error = coworking_failure_code(exc)
         if is_retryable_coworking_exception(exc):
-            updated = store.mark_retryable_failure(intent_id, error=error)
+            updated = store.mark_retryable_failure(
+                intent_id,
+                owner=mutation_owner,
+                error=error,
+            )
+            if updated is None:
+                return {"status": "stale", "intent_id": intent_id}
             print(
                 "🏢 coworking_intent_retryable_failure "
-                f"intent_id={intent_id} slack_user_id={slack_user_id} "
-                f"booking_date={booking_date} attempts={updated.get('attempt_count')} "
-                f"next_attempt_at={updated.get('next_attempt_at')} error={error}"
+                f"intent_id={intent_id} attempts={updated.get('attempt_count')} "
+                f"next_attempt_at={updated.get('next_attempt_at')} "
+                f"exc_type={exc.__class__.__name__}"
             )
             return {"status": "pending_retry", "error": error, "intent_id": intent_id}
 
-        store.mark_blocked(intent_id, error=error)
-        if notify:
-            _safe_post_message(
-                channel_id=channel_id,
-                thread_ts=thread_ts,
-                text=_coworking_retry_blocked_message(
-                    slack_user_id=slack_user_id,
-                    requested_by_slack_id=requested_by_slack_id,
-                    error=error,
-                ),
-            )
-        return {"status": "blocked", "error": error, "intent_id": intent_id}
+        blocked = store.mark_blocked(
+            intent_id,
+            owner=mutation_owner,
+            error=error,
+            notification_required=notify,
+        )
+        if blocked is None:
+            return {"status": "stale", "intent_id": intent_id}
+        if not notify:
+            return {"status": "blocked", "error": error, "intent_id": intent_id}
+        notification = store.reserve_notification(
+            intent_id,
+            owner=f"roo-booking-rejection-{uuid4().hex}",
+        )
+        if notification is None:
+            return {
+                "status": "blocked",
+                "notification_status": blocked.get("notification_status"),
+                "error": error,
+                "intent_id": intent_id,
+            }
+        return await deliver_coworking_booking_notification(
+            notification,
+            store=store,
+            client=client,
+        )
 
     confirmed = store.mark_confirmed(
         intent_id,
+        owner=mutation_owner,
         backend_result=backend_result,
         notification_required=notify,
     )
+    if confirmed is None:
+        return {"status": "stale", "intent_id": intent_id}
     if not notify:
         return {
             "status": "confirmed",
@@ -960,10 +1121,28 @@ async def coworking_booking_retry_loop(
         else getattr(settings, "COWORKING_RETRY_POLL_SECONDS", DEFAULT_RETRY_POLL_SECONDS)
     )
     owner = f"roo-retry-worker-{uuid4().hex}"
+    last_cleanup_at = 0.0
     print(f"🏢 Coworking booking retry worker started owner={owner} poll_seconds={poll_interval}")
 
     while True:
         try:
+            current_time = _now()
+            if current_time - last_cleanup_at >= TERMINAL_CLEANUP_INTERVAL_SECONDS:
+                deleted = store.purge_terminal(
+                    retention_days=int(
+                        getattr(
+                            settings,
+                            "COWORKING_INTENT_RETENTION_DAYS",
+                            DEFAULT_TERMINAL_RETENTION_DAYS,
+                        )
+                    )
+                )
+                if deleted:
+                    print(
+                        "🏢 coworking_intent_retention_completed "
+                        f"deleted_count={deleted}"
+                    )
+                last_cleanup_at = current_time
             due = store.claim_due(limit=10, owner=owner)
             for intent in due:
                 await process_coworking_booking_intent(intent, store=store, notify=True)
@@ -979,5 +1158,8 @@ async def coworking_booking_retry_loop(
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            print(f"🏢 coworking_retry_worker_error exc_type={exc.__class__.__name__} exc={exc}")
+            print(
+                "🏢 coworking_retry_worker_error "
+                f"exc_type={exc.__class__.__name__}"
+            )
         await asyncio.sleep(poll_interval)

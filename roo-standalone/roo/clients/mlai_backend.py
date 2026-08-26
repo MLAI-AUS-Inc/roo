@@ -33,6 +33,15 @@ FULL_POINTS_ADMIN_ROLES = {"admin", "committee", "portfolio_lead"}
 class MLAIBackendUnavailableError(RuntimeError):
     """Raised when Roo cannot reach mlai-backend reliably."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        reason_code: str = "backend_unavailable",
+    ) -> None:
+        super().__init__(message)
+        self.reason_code = reason_code
+
 
 def validate_coworking_booking_result(
     payload: Any,
@@ -42,7 +51,8 @@ def validate_coworking_booking_result(
     """Validate a successful booking response before treating it as committed."""
     if not isinstance(payload, dict):
         raise MLAIBackendUnavailableError(
-            "MLAI backend returned an invalid coworking booking result"
+            "MLAI backend returned an invalid coworking booking result",
+            reason_code="invalid_backend_response",
         )
 
     booking_id = payload.get("id")
@@ -72,7 +82,8 @@ def validate_coworking_booking_result(
         complete = complete and booking_date == str(expected_date)
     if not complete:
         raise MLAIBackendUnavailableError(
-            "MLAI backend returned an incomplete coworking booking result"
+            "MLAI backend returned an incomplete coworking booking result",
+            reason_code="invalid_backend_response",
         )
     return payload
 
@@ -2324,7 +2335,8 @@ class MLAIBackendClient:
             result = response.json()
         except ValueError as exc:
             raise MLAIBackendUnavailableError(
-                "MLAI backend returned invalid JSON after coworking booking"
+                "MLAI backend returned invalid JSON after coworking booking",
+                reason_code="invalid_backend_response",
             ) from exc
         return validate_coworking_booking_result(
             result,

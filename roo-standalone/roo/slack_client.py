@@ -60,6 +60,7 @@ def post_message(
     channel: str,
     text: str,
     thread_ts: Optional[str] = None,
+    _redact_destination: bool = False,
     **kwargs
 ) -> SlackApiResponse:
     """
@@ -87,15 +88,27 @@ def post_message(
         )
         
         if response.get("ok"):
-            suffix = f" (thread: {thread_ts})" if thread_ts else ""
-            print(f"✅ Message posted to {channel}{suffix}")
+            if _redact_destination:
+                print("✅ Private Slack message posted")
+            else:
+                suffix = f" (thread: {thread_ts})" if thread_ts else ""
+                print(f"✅ Message posted to {channel}{suffix}")
         else:
-            print(f"❌ Failed to post message: {response}")
+            if _redact_destination:
+                print("❌ Private Slack message failed reason_code=slack_api_error")
+            else:
+                print(f"❌ Failed to post message: {response}")
         
         return response
         
     except Exception as e:
-        print(f"❌ Slack post error: {e}")
+        if _redact_destination:
+            print(
+                "❌ Private Slack message failed "
+                f"error_type={e.__class__.__name__}"
+            )
+        else:
+            print(f"❌ Slack post error: {e}")
         raise
 
 
@@ -529,7 +542,7 @@ def open_dm(user_id: str, *, raise_on_error: bool = False) -> Optional[str]:
             print("❌ Slack conversations.open returned a non-DM channel")
         return None
     except Exception as e:
-        print(f"❌ Failed to open DM with {user_id}: {e}")
+        print(f"❌ Slack DM channel open failed error_type={e.__class__.__name__}")
         if raise_on_error:
             raise
         return None
@@ -545,7 +558,12 @@ def send_dm(
     """Send a direct message to a user."""
     dm_channel = open_dm(user_id, raise_on_error=raise_on_error)
     if dm_channel:
-        return post_message(dm_channel, text, **kwargs)
+        return post_message(
+            dm_channel,
+            text,
+            _redact_destination=True,
+            **kwargs,
+        )
     if raise_on_error:
         raise RuntimeError("Slack did not return a direct-message channel")
     return None

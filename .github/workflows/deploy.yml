@@ -59,6 +59,8 @@ jobs:
             roo/tests/test_mlai_backend_client.py \
             roo/tests/test_founder_account_link.py \
             roo/tests/test_coworking_booking_intents.py \
+            roo/tests/test_points_requests.py::test_book_coworking_persists_intent_and_queues_backend_timeout \
+            roo/tests/test_points_requests.py::test_immediate_coworking_stale_worker_cannot_overwrite_winner \
             roo/tests/test_points_requests.py::test_book_coworking_nudges_founder_when_charged_standard_price \
             roo/tests/test_points_requests.py::test_book_coworking_treats_missing_link_state_as_commit_uncertain \
             roo/tests/test_points_requests.py::test_book_coworking_omits_nudge_when_discount_applied \

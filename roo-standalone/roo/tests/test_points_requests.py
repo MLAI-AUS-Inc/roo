@@ -3560,7 +3560,79 @@ async def test_book_coworking_persists_intent_and_queues_backend_timeout(tmp_pat
     assert intent["booking_date"] == "2026-04-22"
     assert intent["channel_id"] == "C123"
     assert intent["thread_ts"] == "111.222"
-    assert "backend unavailable" in intent["last_error"]
+    assert intent["last_error"] == "backend_unavailable"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stale_outcome", ["success", "retry", "block"])
+async def test_immediate_coworking_stale_worker_cannot_overwrite_winner(
+    tmp_path,
+    monkeypatch,
+    stale_outcome,
+):
+    store = coworking_module.CoworkingBookingIntentStore(tmp_path / "intents.db")
+    original_reserve = store.reserve_for_processing
+
+    def reserve_with_expired_sync_lease(intent_id, *, owner=None, lease_seconds=90):
+        if str(owner or "").startswith("roo-sync-"):
+            lease_seconds = 0
+        return original_reserve(
+            intent_id,
+            owner=owner,
+            lease_seconds=lease_seconds,
+        )
+
+    monkeypatch.setattr(store, "reserve_for_processing", reserve_with_expired_sync_lease)
+    monkeypatch.setattr(executor_module, "get_coworking_intent_store", lambda: store)
+
+    winner_result = complete_coworking_booking_result(
+        "2026-04-22",
+        cost=4,
+        discount_applied=True,
+    )
+
+    class RacingCoworkingClient:
+        async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None):
+            intent = store.get_by_key(f"coworking:{slack_user_id}:{booking_date}")
+            replacement = original_reserve(
+                intent["id"],
+                owner="replacement-worker",
+            )
+            confirmed = store.mark_confirmed(
+                intent["id"],
+                owner=replacement["locked_by"],
+                backend_result=winner_result,
+                notification_required=True,
+            )
+            assert confirmed is not None
+            if stale_outcome == "retry":
+                raise backend_module.MLAIBackendUnavailableError("late timeout")
+            if stale_outcome == "block":
+                request = httpx.Request("POST", "https://backend.test/coworking")
+                response = httpx.Response(400, request=request)
+                raise httpx.HTTPStatusError(
+                    "late rejection",
+                    request=request,
+                    response=response,
+                )
+            return complete_coworking_booking_result("2026-04-22", cost=8)
+
+    result = await SkillExecutor()._book_coworking_with_intent(
+        client=RacingCoworkingClient(),
+        target_user_id="U123",
+        requested_by_user_id="U123",
+        booking_date="2026-04-22",
+        channel_id="C123",
+        thread_ts="111.222",
+        admin_checkin=False,
+    )
+
+    stored = store.get_by_key("coworking:U123:2026-04-22")
+    assert "queued, processing, or completed" in result
+    assert stored["status"] == "confirmed"
+    assert stored["notification_status"] == "pending"
+    assert stored["last_error"] is None
+    assert stored["backend_result_json"]
 
 
 @pytest.mark.asyncio

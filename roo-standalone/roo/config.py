@@ -158,6 +158,7 @@ class Settings(BaseSettings):
     LINEAR_CONTEXTUAL_AUTO_CREATE_ENABLED: bool = True
     COWORKING_INTENTS_DB_PATH: str = "data/coworking_booking_intents.db"
     COWORKING_RETRY_POLL_SECONDS: float = 30.0
+    COWORKING_INTENT_RETENTION_DAYS: int = 30
     ROO_POINTS_TOPUP_ENABLED: bool = False
     ROO_POINTS_TOPUP_BUTTONS_ENABLED: bool = False
     ROO_POINTS_STRIPE_CHECKOUT_HOSTS: str = "checkout.stripe.com"
@@ -318,6 +319,10 @@ class Settings(BaseSettings):
             raise ValueError("SLACK_RECEIPTS_DB_PATH is required")
         if not str(self.SLACK_CONTEXTUAL_STATE_DB_PATH or "").strip():
             raise ValueError("SLACK_CONTEXTUAL_STATE_DB_PATH is required")
+        if not 1 <= self.COWORKING_INTENT_RETENTION_DAYS <= 365:
+            raise ValueError(
+                "COWORKING_INTENT_RETENTION_DAYS must be between 1 and 365"
+            )
         if not 0.5 <= self.ROO_CONTEXTUAL_MIN_CONFIDENCE <= 1.0:
             raise ValueError("ROO_CONTEXTUAL_MIN_CONFIDENCE must be between 0.5 and 1.0")
         if not 0.5 <= self.ROO_CONTEXTUAL_INDIRECT_MENTION_CONFIDENCE <= 1.0:

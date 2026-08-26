@@ -320,4 +320,61 @@ def test_send_dm_posts_only_after_validating_a_dm_channel(monkeypatch):
     result = slack_client_module.send_dm("U123", "private", blocks=[])
 
     assert result == {"ok": True}
-    assert posted == [(('DPRIVATE123', 'private'), {"blocks": []})]
+    assert posted == [
+        (
+            ("DPRIVATE123", "private"),
+            {"_redact_destination": True, "blocks": []},
+        )
+    ]
+
+
+def test_send_dm_open_failure_logs_no_identity_or_external_error(monkeypatch, capsys):
+    class FakeSlackClient:
+        def conversations_open(self, **kwargs):
+            raise RuntimeError("Slack failed for UPRIVATE1 private@example.com\nforged")
+
+    monkeypatch.setattr(
+        slack_client_module,
+        "get_slack_client",
+        lambda: FakeSlackClient(),
+    )
+
+    assert slack_client_module.send_dm("UPRIVATE1", "private") is None
+
+    output = capsys.readouterr().out
+    assert "UPRIVATE1" not in output
+    assert "private@example.com" not in output
+    assert "forged" not in output
+    assert "error_type=RuntimeError" in output
+
+
+def test_send_dm_post_failure_logs_no_dm_channel_or_error_payload(
+    monkeypatch,
+    capsys,
+):
+    class FakeSlackClient:
+        def conversations_open(self, **kwargs):
+            return {"ok": True, "channel": {"id": "DPRIVATE123"}}
+
+        def chat_postMessage(self, **kwargs):
+            return {
+                "ok": False,
+                "error": "ratelimited UPRIVATE1 private@example.com\nforged",
+            }
+
+    monkeypatch.setattr(
+        slack_client_module,
+        "get_slack_client",
+        lambda: FakeSlackClient(),
+    )
+
+    response = slack_client_module.send_dm("UPRIVATE1", "private")
+
+    assert response["ok"] is False
+    output = capsys.readouterr().out
+    assert "DPRIVATE123" not in output
+    assert "UPRIVATE1" not in output
+    assert "private@example.com" not in output
+    assert "ratelimited" not in output
+    assert "forged" not in output
+    assert "reason_code=slack_api_error" in output
