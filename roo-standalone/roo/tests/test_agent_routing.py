@@ -8,6 +8,7 @@ that used to live here were ported to roo/routing_eval/cases/ when the
 regex/keyword funnel was deleted (Phase 3 of the routing redesign).
 """
 import asyncio
+import json
 import sys
 import types
 from pathlib import Path
@@ -104,6 +105,71 @@ def test_founder_account_link_fast_path_executes_with_event_context(monkeypatch)
         "channel_id": "C123",
         "thread_ts": "111.222",
     }
+
+
+def test_account_link_routing_logs_redact_ingress_identity_and_token_sentinels(
+    monkeypatch,
+    capsys,
+):
+    agent = _make_agent()
+    captured = {}
+    agent.skill_executor = _CaptureExecutor(captured)
+    token = "AUniqueAccountLinkToken_12345678901234567890"
+    email = "private-link@example.com"
+    slack_user_id = "UACCOUNT123"
+    channel_id = "CSECRET123"
+    thread_ts = "1758000000.123456"
+    text = (
+        "link https://mlai.au/founder-tools/link-roo?token="
+        f"{token} for {email} <@{slack_user_id}>"
+    )
+
+    _patch_route(
+        monkeypatch,
+        RouteDecision(
+            skill="mlai-points",
+            action="link_founder_account",
+            params={
+                "token": token,
+                "email": email,
+                "slack_user_id": slack_user_id,
+            },
+        ),
+        captured,
+    )
+    def fail_thread_history(**kwargs):
+        del kwargs
+        raise RuntimeError(
+            f"thread failed {token} {email} {slack_user_id} {channel_id} {thread_ts}"
+        )
+
+    monkeypatch.setattr("roo.agent.get_thread_messages", fail_thread_history)
+
+    result = asyncio.run(
+        agent.handle_mention(
+            text=text,
+            user_id=slack_user_id,
+            channel_id=channel_id,
+            thread_ts=thread_ts,
+        )
+    )
+
+    assert result["skill_used"] == "mlai-points"
+    output = capsys.readouterr().out
+    for sentinel in (token, email, slack_user_id, channel_id, thread_ts):
+        assert sentinel not in output
+    routing_line = next(
+        line.removeprefix("ROUTING_DECISION ")
+        for line in output.splitlines()
+        if line.startswith("ROUTING_DECISION ")
+    )
+    routing_payload = json.loads(routing_line)
+    assert routing_payload["text"] == "[account-link request]"
+    assert routing_payload["params"] == {}
+    assert routing_payload["destination_type"] == "channel"
+    assert routing_payload["in_thread"] is True
+    assert "channel_id" not in routing_payload
+    assert "thread_ts" not in routing_payload
 
 
 def test_bare_link_in_roo_dm_uses_secure_implicit_action(monkeypatch):

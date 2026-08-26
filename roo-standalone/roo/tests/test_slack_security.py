@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from roo import main as main_module
 from roo import slack_client as slack_client_module
 from roo.config import Settings, get_settings
+from roo.logging_safety import sanitize_log_value
 from roo.slack_security import (
     SlackRequestReceiptStore,
     SlackRequestVerificationError,
@@ -49,6 +50,25 @@ def _settings(tmp_path, **overrides):
     }
     values.update(overrides)
     return Settings(**values)
+
+
+def test_recursive_log_sanitizer_redacts_keys_values_and_workspace_ids():
+    email = "private-link@example.com"
+    token = "AUniqueAccountLinkToken_12345678901234567890"
+    workspace_id = "TWORKSPACE123"
+
+    sanitized = json.dumps(
+        sanitize_log_value(
+            {
+                email: {
+                    token: [workspace_id],
+                }
+            }
+        )
+    )
+
+    for sentinel in (email, token, workspace_id):
+        assert sentinel not in sanitized
 
 
 @pytest.fixture(autouse=True)
@@ -267,6 +287,52 @@ def test_internal_mention_endpoint_is_disabled_or_bearer_authenticated(tmp_path,
     assert admin_response.status_code == 404
 
 
+@pytest.mark.asyncio
+async def test_account_link_mention_ingress_logs_no_identity_or_token_sentinels(
+    monkeypatch,
+    capsys,
+):
+    token = "AUniqueAccountLinkToken_12345678901234567890"
+    email = "private-link@example.com"
+    slack_user_id = "UACCOUNT123"
+    channel_id = "CSECRET123"
+    thread_ts = "1758000000.123456"
+    text = (
+        "<@UROOBOT123> link https://mlai.au/founder-tools/link-roo?token="
+        f"{token} for {email} <@{slack_user_id}>"
+    )
+
+    class FakeAgent:
+        async def handle_mention(self, **kwargs):
+            assert kwargs["user_id"] == slack_user_id
+            assert kwargs["channel_id"] == channel_id
+            return {
+                "message": "",
+                "skill_used": "mlai-points",
+                "data": {"action": "link_founder_account"},
+                "suppress_post": True,
+            }
+
+    monkeypatch.setattr(main_module, "get_agent", lambda: FakeAgent())
+
+    result = await main_module._handle_mention(
+        {
+            "user": slack_user_id,
+            "channel": channel_id,
+            "thread_ts": thread_ts,
+            "ts": thread_ts,
+            "text": text,
+        }
+    )
+
+    assert result["result"]["data"]["action"] == "link_founder_account"
+    output = capsys.readouterr().out
+    for sentinel in (token, email, slack_user_id, channel_id, thread_ts):
+        assert sentinel not in output
+    assert "destination_type=channel" in output
+    assert "[url]" in output
+
+
 @pytest.mark.parametrize(
     "channel_payload",
     [
@@ -378,3 +444,120 @@ def test_send_dm_post_failure_logs_no_dm_channel_or_error_payload(
     assert "ratelimited" not in output
     assert "forged" not in output
     assert "reason_code=slack_api_error" in output
+
+
+@pytest.mark.parametrize("outcome", ["success", "api_error", "exception"])
+def test_shared_message_logging_never_exposes_destination_or_transport_payload(
+    monkeypatch,
+    capsys,
+    outcome,
+):
+    channel_id = "CSECRET123"
+    thread_ts = "1758000000.123456"
+    slack_user_id = "UACCOUNT123"
+    email = "private-link@example.com"
+    token = "AUniqueAccountLinkToken_12345678901234567890"
+
+    class FakeSlackClient:
+        def chat_postMessage(self, **kwargs):
+            if outcome == "success":
+                return {"ok": True}
+            if outcome == "api_error":
+                return {
+                    "ok": False,
+                    "error": f"failed {slack_user_id} {email} {token}",
+                }
+            raise RuntimeError(f"failed {slack_user_id} {email} {token}")
+
+    monkeypatch.setattr(
+        slack_client_module,
+        "get_slack_client",
+        lambda: FakeSlackClient(),
+    )
+
+    if outcome == "exception":
+        with pytest.raises(RuntimeError):
+            slack_client_module.post_message(
+                channel_id,
+                "sensitive body",
+                thread_ts=thread_ts,
+            )
+    else:
+        slack_client_module.post_message(
+            channel_id,
+            "sensitive body",
+            thread_ts=thread_ts,
+        )
+
+    output = capsys.readouterr().out
+    for sentinel in (
+        channel_id,
+        thread_ts,
+        slack_user_id,
+        email,
+        token,
+    ):
+        assert sentinel not in output
+    assert "destination_type=channel" in output or "Slack message failed" in output
+
+
+def test_shared_ephemeral_logging_never_exposes_identity_or_error_payload(
+    monkeypatch,
+    capsys,
+):
+    channel_id = "CSECRET123"
+    slack_user_id = "UACCOUNT123"
+    thread_ts = "1758000000.123456"
+    token = "AUniqueAccountLinkToken_12345678901234567890"
+
+    class FakeSlackClient:
+        def chat_postEphemeral(self, **kwargs):
+            return {
+                "ok": False,
+                "error": f"failed {slack_user_id} {token}",
+            }
+
+    monkeypatch.setattr(
+        slack_client_module,
+        "get_slack_client",
+        lambda: FakeSlackClient(),
+    )
+
+    slack_client_module.post_ephemeral(
+        channel_id,
+        slack_user_id,
+        "private text",
+        thread_ts=thread_ts,
+    )
+
+    output = capsys.readouterr().out
+    for sentinel in (channel_id, slack_user_id, thread_ts, token):
+        assert sentinel not in output
+    assert "reason_code=slack_api_error" in output
+
+
+def test_channel_context_failure_logs_no_destination_or_error_payload(
+    monkeypatch,
+    capsys,
+):
+    channel_id = "CSECRETCONTEXT123"
+    slack_user_id = "UACCOUNT123"
+    token = "AUniqueAccountLinkToken_12345678901234567890"
+
+    class FakeSlackClient:
+        def conversations_info(self, **kwargs):
+            raise RuntimeError(f"failed {slack_user_id} {token}")
+
+    slack_client_module._channel_context_cache.clear()
+    monkeypatch.setattr(
+        slack_client_module,
+        "get_slack_client",
+        lambda: FakeSlackClient(),
+    )
+
+    assert slack_client_module.get_channel_context(channel_id) == {}
+
+    output = capsys.readouterr().out
+    for sentinel in (channel_id, slack_user_id, token):
+        assert sentinel not in output
+    assert "error_type=RuntimeError" in output

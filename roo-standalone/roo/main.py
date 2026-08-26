@@ -79,6 +79,7 @@ from .boost_moderation import (
     mark_boost_root_removed,
 )
 from .link_love import handle_link_love_reply, link_love_retry_loop
+from .logging_safety import redact_log_text, slack_destination_type
 from .slack_moderation import validate_slack_moderator_configuration
 from .start_here_introductions import (
     handle_start_here_intro,
@@ -3073,7 +3074,7 @@ async def slack_events(
                 has_files=bool(event_files),
             ):
                 return JSONResponse(status_code=200, content={})
-            print(f"📨 Received DM from {event.get('user')}")
+            print("📨 Received Slack DM")
             asyncio.create_task(
                 _handle_mention(_with_slack_delivery_context(event, payload))
             )
@@ -3150,8 +3151,11 @@ async def _handle_mention_with_context(event: dict):
         param_overrides = event.get("param_overrides")
         event_files = event.get("files") if isinstance(event.get("files"), list) else None
         
-        print(f"\n🦘 ROO MENTION: from {user_id} in {channel_id}")
-        print(f"   Text: {text[:100]}...")
+        print(
+            "\n🦘 ROO MENTION: "
+            f"destination_type={slack_destination_type(channel_id)}"
+        )
+        print(f"   Text: {redact_log_text(text, max_length=100)}...")
 
         settings = get_settings()
         if (
@@ -3206,9 +3210,7 @@ async def _handle_mention_with_context(event: dict):
         }
         
     except Exception as e:
-        print(f"❌ Error handling mention: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"❌ Error handling mention error_type={e.__class__.__name__}")
         
         try:
             post_message(
@@ -3218,7 +3220,10 @@ async def _handle_mention_with_context(event: dict):
             )
         except Exception:
             pass
-        return {"error": str(e), "thread_ts": event.get("thread_ts") or event.get("ts")}
+        return {
+            "error": e.__class__.__name__,
+            "thread_ts": event.get("thread_ts") or event.get("ts"),
+        }
 
 
 async def _resume_intent(user_id: str, intent: dict):
@@ -3228,7 +3233,11 @@ async def _resume_intent(user_id: str, intent: dict):
         channel_id = intent.get("channel")
         thread_ts = intent.get("ts")
         
-        print(f"🔄 Resuming intent for {user_id}: {text[:50]}...")
+        print(
+            "🔄 Resuming intent "
+            f"destination_type={slack_destination_type(channel_id)} "
+            f"text={redact_log_text(text, max_length=50)}"
+        )
         
         if channel_id:
             post_message(channel_id, "✅ You're connected! Resuming your request...", thread_ts)
@@ -3258,7 +3267,7 @@ async def _resume_intent(user_id: str, intent: dict):
             )
 
     except Exception as e:
-        print(f"❌ Error resuming intent: {e}")
+        print(f"❌ Error resuming intent error_type={e.__class__.__name__}")
         if intent.get("channel"):
             post_message(intent["channel"], "Sorry, I had trouble resuming your request.", intent.get("ts"))
 
