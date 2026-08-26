@@ -59,6 +59,7 @@ This skill turns pasted Slack meeting transcripts, summaries, supported Slack fi
 - Use the latest Linear project update and recent project issues as context for concise PDF/transcript-derived project updates.
 - Download and parse `.pdf`, `.docx`, `.txt`, `.md`, `.csv`, `.png`, `.jpg`, `.jpeg`, `.webp`, and non-animated `.gif` files from the current Slack thread.
 - Inspect Linear teams, users, active projects, project members, labels, and recent open issues.
+- Treat the complete accessible team catalogue as an authorization boundary; the production Linear API key must use **All teams you have access to** so newly created teams are included automatically.
 - Resolve an explicitly named destination against the full Linear project catalogue when it is absent from the active-project snapshot.
 - Assign new issues to the best matching Linear user.
 - Attach new issues to the best matching Linear project and team.
@@ -96,26 +97,28 @@ This skill turns pasted Slack meeting transcripts, summaries, supported Slack fi
 6. If no concrete action item is found but the user asked to add the thread context to Linear, draft one contextual issue and require Slack approval before creation.
 7. Match owners by explicit requester/self-reference and Slack mention/email first, then unique Linear name/email-prefix match, then display/name similarity.
 8. Match projects by explicit project hint, exact name/slug, linked Slack channel, project description/content/update/recent issues, and true project membership as a tie-breaker. If an explicit name is not an exact active-snapshot match, resolve it against the full live project catalogue before extraction; use a unique exact/strong match and fail closed on ambiguity or absence.
-9. Resolve relative dates from the evidence message in the configured workspace timezone.
-10. Suppress candidates that are already completed, cancelled, or duplicates.
-11. For each resolved project, read its bounded project updates, active work, terminal references, related issues, label registry, and labelled precedents. Estimate candidates in bounded groups of three with structured `gpt-5.6-sol` Responses API calls.
-12. Estimate remaining work rather than original scope: XS is up to 15 minutes, S is up to 1 hour, M is up to 2 hours, L is up to 3 hours, and XL is up to 5 hours or has substantial uncertainty. Work over 5 hours is XL and should be split.
-13. Start direct cleanup at `low`, ordinary extraction and source summaries at `medium`, and contextual inference, project synthesis, and effort sizing at `high`. Increase to `xhigh` when deterministic complexity signals warrant it.
-14. Treat each extracted source chunk as one inference source; track total batch chunks separately so a long PDF does not artificially increase every chunk's reasoning effort.
-15. Retry a structured parsing or workflow-contract failure at most once. For a missing effort-sizing structured response, lower reasoning effort and increase the output allowance so the model can emit the full schema; for other validation failures, use the next reasoning level.
-16. If meeting-action inference times out, keep that worker slot and retry only the failed chunk at progressively smaller paragraph/page-aligned scope. Cancel queued work immediately when bounded recovery is exhausted. Finish extraction and deduplication before any issue write; if recovery or the total extraction deadline fails, create nothing and say so explicitly.
-17. Discard duplicate or unrecognized optional evidence references without rejecting an otherwise valid effort assessment. Normalize its rationale to one sentence and, when duration-based, add the rubric's canonical time anchor if the model omitted one.
-18. If an effort-sizing batch still fails its required candidate or rubric fields, retry its candidates individually and preserve successful assessments. Add the exact effort label and normalized one-sentence rationale to each new issue description and Slack preview. Never create an eligible project issue without exactly one valid effort label.
-19. Send an idempotency fingerprint and preserve a Slack permalink in the Linear issue.
-20. Present uncertain candidates in Slack with Approve and Reject buttons.
-21. Report created project updates, created issues, skipped duplicates, and unresolved items clearly.
-22. For `size_project_issues`, resolve exactly one active project, verify the requester maps to an authorized Linear user, page every issue and project update, and stop without writes if pagination, context, model output, or the five-label preflight is incomplete.
-23. Exclude completed, cancelled, and duplicate work. In `missing_only`, skip issues carrying exactly one valid size label but correct issues carrying multiple size labels. In `replace_existing`, rescore all active issues.
-24. Persist the complete preview in the backend. Apply only through requester-bound Slack confirmation; re-read each live issue, skip terminal races, reject stale project/team/content changes, preserve all unrelated labels, and make retries idempotent.
+9. Select only a team that is both attached to the resolved project and present in Roo's complete accessible-team catalogue. If the project team is absent, stop that item and report that Roo's Linear API key cannot access the team; never substitute the configured default team.
+10. Resolve relative dates from the evidence message in the configured workspace timezone.
+11. Suppress candidates that are already completed, cancelled, or duplicates.
+12. For each resolved project, read its bounded project updates, active work, terminal references, related issues, label registry, and labelled precedents. Estimate candidates in bounded groups of three with structured `gpt-5.6-sol` Responses API calls.
+13. Estimate remaining work rather than original scope: XS is up to 15 minutes, S is up to 1 hour, M is up to 2 hours, L is up to 3 hours, and XL is up to 5 hours or has substantial uncertainty. Work over 5 hours is XL and should be split.
+14. Start direct cleanup at `low`, ordinary extraction and source summaries at `medium`, and contextual inference, project synthesis, and effort sizing at `high`. Increase to `xhigh` when deterministic complexity signals warrant it.
+15. Treat each extracted source chunk as one inference source; track total batch chunks separately so a long PDF does not artificially increase every chunk's reasoning effort.
+16. Retry a structured parsing or workflow-contract failure at most once. For a missing effort-sizing structured response, lower reasoning effort and increase the output allowance so the model can emit the full schema; for other validation failures, use the next reasoning level.
+17. If meeting-action inference times out, keep that worker slot and retry only the failed chunk at progressively smaller paragraph/page-aligned scope. Cancel queued work immediately when bounded recovery is exhausted. Finish extraction and deduplication before any issue write; if recovery or the total extraction deadline fails, create nothing and say so explicitly.
+18. Discard duplicate or unrecognized optional evidence references without rejecting an otherwise valid effort assessment. Normalize its rationale to one sentence and, when duration-based, add the rubric's canonical time anchor if the model omitted one.
+19. If an effort-sizing batch still fails its required candidate or rubric fields, retry its candidates individually and preserve successful assessments. Add the exact effort label and normalized one-sentence rationale to each new issue description and Slack preview. Never create an eligible project issue without exactly one valid effort label.
+20. Send an idempotency fingerprint and preserve a Slack permalink in the Linear issue.
+21. Present uncertain candidates in Slack with Approve and Reject buttons.
+22. Report created project updates, created issues, skipped duplicates, and unresolved items clearly.
+23. For `size_project_issues`, resolve exactly one active project, verify the requester maps to an authorized Linear user, page every issue and project update, and stop without writes if pagination, context, model output, or the five-label preflight is incomplete.
+24. Exclude completed, cancelled, and duplicate work. In `missing_only`, skip issues carrying exactly one valid size label but correct issues carrying multiple size labels. In `replace_existing`, rescore all active issues.
+25. Persist the complete preview in the backend. Apply only through requester-bound Slack confirmation; re-read each live issue, skip terminal races, reject stale project/team/content changes, preserve all unrelated labels, and make retries idempotent.
 
 ## Creation Rules
 
 - Do not create an issue without a matched Linear team.
+- Do not use a project team that is missing from Roo's accessible-team catalogue, and do not fall back to an unrelated default team when a project already declares its team.
 - Do not auto-create an issue without a high-confidence assignee and project.
 - A contextual command can auto-create only when its source contains an explicit assignment/commitment and the assignee, project, team, and due date are unambiguous.
 - Do not auto-create contextual discussion-thread issues; always request Slack approval first.
