@@ -254,6 +254,131 @@ async def _get_addressing_history(event: dict[str, Any]) -> list[dict]:
     )
 
 
+def _linear_meeting_followup_decision(text: str) -> Optional[str]:
+    """Recognise only explicit, low-ambiguity decisions for a pending batch."""
+
+    normalized = re.sub(r"[^a-z0-9 ]+", " ", str(text or "").lower())
+    normalized = " ".join(normalized.split())
+    if normalized in {
+        "yes",
+        "approve",
+        "approve all",
+        "go ahead",
+        "create them",
+        "create all",
+        "do it",
+    }:
+        return "approve"
+    if normalized in {
+        "no",
+        "reject",
+        "reject all",
+        "skip them",
+        "cancel",
+        "cancel them",
+    }:
+        return "reject"
+    return None
+
+
+def _linear_meeting_batch_summary(batch: dict[str, Any]) -> str:
+    counts = batch.get("counts") if isinstance(batch.get("counts"), dict) else {}
+    approved = int(counts.get("approved") or 0)
+    rejected = int(counts.get("rejected") or 0)
+    failed = int(counts.get("failed") or 0)
+    message = (
+        f"Linear meeting actions updated: {approved} created, "
+        f"{rejected} rejected, {failed} failed."
+    )
+    for item in batch.get("items") or []:
+        if not isinstance(item, dict) or item.get("status") != "approved":
+            continue
+        issue = item.get("issue") if isinstance(item.get("issue"), dict) else {}
+        display = item.get("display") if isinstance(item.get("display"), dict) else {}
+        label = issue.get("identifier") or issue.get("title") or display.get("title")
+        if issue.get("url"):
+            message += f"\n- <{issue['url']}|{label}>"
+    for item in batch.get("items") or []:
+        if not isinstance(item, dict) or item.get("status") != "failed":
+            continue
+        display = item.get("display") if isinstance(item.get("display"), dict) else {}
+        message += (
+            f"\n- {display.get('title') or 'Action item'}: "
+            f"{item.get('error') or 'creation failed'}"
+        )
+    return message
+
+
+async def _maybe_handle_linear_meeting_followup(
+    event: dict[str, Any],
+    *,
+    session: Any,
+    explicit_mention: bool,
+) -> Optional[dict[str, Any]]:
+    """Apply an untagged decision only inside the requester's pending thread."""
+
+    if explicit_mention or session is None:
+        return None
+    if (
+        getattr(session, "workflow", "") != "linear-meeting-actions"
+        or getattr(session, "state", "") != "awaiting_linear_approval"
+        or not getattr(session, "reference_id", None)
+        or str(getattr(session, "requester_user_id", "") or "")
+        != str(event.get("user") or "")
+    ):
+        return None
+    decision = _linear_meeting_followup_decision(str(event.get("text") or ""))
+    if decision is None:
+        return None
+
+    skill = get_agent()._get_skill_by_name("linear-meeting-actions")
+    ClientClass = skill.get_client_class("LinearMeetingActionsClient") if skill else None
+    if ClientClass is None:
+        raise RuntimeError("Linear meeting actions client is unavailable")
+    try:
+        batch = await ClientClass().decide_action_batch(
+            batch_id=session.reference_id,
+            requested_by_slack_user_id=str(event.get("user") or ""),
+            decision=decision,
+            item_ids=None,
+        )
+        message = _linear_meeting_batch_summary(batch)
+        session_state = (
+            "completed"
+            if str(batch.get("status") or "")
+            in {"completed", "rejected", "expired"}
+            else "awaiting_linear_approval"
+        )
+    except Exception as exc:
+        print(
+            "LINEAR_MEETING_UNTAGGED_DECISION_FAILED "
+            f"batch_id={session.reference_id} reason={exc.__class__.__name__}"
+        )
+        message = (
+            "I couldn't finish that saved Linear review just now. "
+            "It is still available, so please try again."
+        )
+        session_state = "awaiting_linear_approval"
+    thread_ts = str(event.get("thread_ts") or event.get("ts") or "")
+    response = post_message(
+        channel=str(event.get("channel") or ""),
+        thread_ts=thread_ts,
+        text=message,
+    )
+    return {
+        "result": {
+            "message": message,
+            "skill_used": "linear-meeting-actions",
+            "data": {
+                "review_batch_id": session.reference_id,
+                "contextual_session_state": session_state,
+            },
+        },
+        "post_response": response,
+        "thread_ts": thread_ts,
+    }
+
+
 async def _handle_contextual_slack_message(
     event: dict[str, Any],
     *,
@@ -364,13 +489,42 @@ async def _handle_contextual_slack_message(
             )
         return None
 
-    routed_event = dict(event)
-    routed_event["implicit_addressing"] = not explicit_mention
-    routed_event["contextual_candidate_reason"] = candidate_reason
-    outcome = await _handle_mention(routed_event)
+    followup_outcome = await _maybe_handle_linear_meeting_followup(
+        event,
+        session=session,
+        explicit_mention=explicit_mention,
+    )
+    if followup_outcome is not None:
+        outcome = followup_outcome
+    else:
+        routed_event = dict(event)
+        routed_event["implicit_addressing"] = not explicit_mention
+        routed_event["contextual_candidate_reason"] = candidate_reason
+        routed_event["contextual_session_workflow"] = (
+            getattr(session, "workflow", "") if session is not None else ""
+        )
+        routed_event["contextual_session_state"] = (
+            getattr(session, "state", "") if session is not None else ""
+        )
+        routed_event["contextual_session_reference_id"] = (
+            getattr(session, "reference_id", None) if session is not None else None
+        )
+        outcome = await _handle_mention(routed_event)
+
     post_response = (outcome or {}).get("post_response") or {}
     bot_message_ts = str(post_response.get("ts") or "").strip()
     if bot_message_ts:
+        result = (outcome or {}).get("result") or {}
+        result_data = result.get("data") if isinstance(result.get("data"), dict) else {}
+        workflow = str(result.get("skill_used") or "")
+        reference_id = str(result_data.get("review_batch_id") or "").strip() or None
+        session_state = str(result_data.get("contextual_session_state") or "").strip()
+        if not session_state:
+            session_state = (
+                "awaiting_linear_approval"
+                if workflow == "linear-meeting-actions" and reference_id
+                else "active"
+            )
         await asyncio.to_thread(
             store.record_roo_response,
             team_id=team_id,
@@ -380,6 +534,9 @@ async def _handle_contextual_slack_message(
             bot_message_ts=bot_message_ts,
             adjacency_seconds=settings.ROO_CONTEXTUAL_ADJACENCY_SECONDS,
             thread_ttl_seconds=settings.ROO_CONTEXTUAL_THREAD_TTL_SECONDS,
+            state=session_state,
+            workflow=workflow,
+            reference_id=reference_id,
         )
     elif not thread_ts:
         await asyncio.to_thread(
@@ -3015,6 +3172,11 @@ async def _handle_mention_with_context(event: dict):
             event_files=event_files,
             implicit_addressing=bool(event.get("implicit_addressing")),
             contextual_candidate_reason=event.get("contextual_candidate_reason"),
+            contextual_session_workflow=event.get("contextual_session_workflow"),
+            contextual_session_state=event.get("contextual_session_state"),
+            contextual_session_reference_id=event.get(
+                "contextual_session_reference_id"
+            ),
             slack_team_id=get_backend_actor_context().slack_team_id,
             event_id=get_backend_actor_context().event_id,
         )
@@ -6517,53 +6679,48 @@ async def slack_actions(
         asyncio.create_task(process_project_sizing_action())
         return JSONResponse(status_code=200, content={})
 
-    if action_id in {"linear_meeting_approve", "linear_meeting_reject"}:
+    if action_id in {
+        "linear_meeting_approve",
+        "linear_meeting_reject",
+        "linear_meeting_approve_all",
+        "linear_meeting_reject_all",
+    }:
+        from .slack_client import get_slack_client
+
         value = actions[0].get("value", "")
         try:
             value_data = json.loads(value) if value else {}
         except json.JSONDecodeError:
             value_data = {}
 
-        pending_id = str(value_data.get("pending_id") or "").strip()
+        batch_id = str(value_data.get("batch_id") or "").strip()
+        item_ids = [
+            str(item_id).strip()
+            for item_id in value_data.get("item_ids") or []
+            if str(item_id).strip()
+        ]
         requested_by = str(value_data.get("requested_by") or "").strip()
         reply_channel = channel_id
         reply_thread_ts = thread_ts
-
-        from .skills.executor import (
-            get_pending_linear_meeting_action,
-            pop_pending_linear_meeting_action,
-        )
-
-        pending = get_pending_linear_meeting_action(pending_id)
-        if not pending:
+        reply_message_ts = str(message.get("ts") or "").strip()
+        action_team_id = str((payload.get("team") or {}).get("id") or "").strip()
+        if not batch_id:
+            return JSONResponse(status_code=200, content={})
+        is_batch_action = action_id.endswith("_all")
+        if not is_batch_action and not item_ids:
             if reply_channel:
                 post_message(
                     channel=reply_channel,
                     thread_ts=reply_thread_ts,
-                    text="That Linear meeting action is no longer available. Re-run the meeting notes request if you still need it.",
+                    text="That Linear review item is incomplete. Please rerun the original request.",
                 )
             return JSONResponse(status_code=200, content={})
-
-        pending_requested_by = str(pending.get("requested_by") or requested_by).strip()
-        if pending_requested_by and user_id != pending_requested_by:
+        if requested_by and user_id != requested_by:
             if reply_channel:
                 post_message(
                     channel=reply_channel,
                     thread_ts=reply_thread_ts,
                     text="Only the person who requested this Linear meeting action can approve or reject it.",
-                )
-            return JSONResponse(status_code=200, content={})
-
-        display = pending.get("display") or {}
-        title = display.get("title") or "that action item"
-
-        if action_id == "linear_meeting_reject":
-            pop_pending_linear_meeting_action(pending_id)
-            if reply_channel:
-                post_message(
-                    channel=reply_channel,
-                    thread_ts=reply_thread_ts,
-                    text=f"Skipped Linear issue creation for: {title}",
                 )
             return JSONResponse(status_code=200, content={})
 
@@ -6578,30 +6735,139 @@ async def slack_actions(
                 )
             return JSONResponse(status_code=200, content={})
 
-        try:
-            issue = await ClientClass().create_issue(**pending["issue_input"])
-            pop_pending_linear_meeting_action(pending_id)
-        except Exception as exc:
+        decision = "reject" if "reject" in action_id else "approve"
+        selected_ids = None if is_batch_action else item_ids
+        remaining_blocks: list[dict[str, Any]] = []
+        original_blocks = message.get("blocks")
+        clicked_block_id = str(actions[0].get("block_id") or "")
+        if not is_batch_action and isinstance(original_blocks, list):
+            for block in original_blocks:
+                if not isinstance(block, dict):
+                    continue
+                if clicked_block_id and str(block.get("block_id") or "") == clicked_block_id:
+                    if (
+                        remaining_blocks
+                        and remaining_blocks[-1].get("type") == "section"
+                        and len(remaining_blocks) > 2
+                    ):
+                        remaining_blocks.pop()
+                    continue
+                remaining_blocks.append(block)
+        progress_text = (
+            "Applying the selected Linear meeting actions now..."
+            if decision == "approve"
+            else "Rejecting the selected Linear meeting actions..."
+        )
+        if reply_channel and reply_message_ts:
+            try:
+                get_slack_client().chat_update(
+                    channel=reply_channel,
+                    ts=reply_message_ts,
+                    text=progress_text,
+                    blocks=remaining_blocks,
+                )
+            except Exception as exc:
+                print(f"⚠️ Failed to disable Linear meeting-action buttons: {exc}")
+
+        async def process_linear_meeting_action_batch():
+            final_blocks = remaining_blocks
+            try:
+                batch = await ClientClass().decide_action_batch(
+                    batch_id=batch_id,
+                    requested_by_slack_user_id=str(user_id or ""),
+                    decision=decision,
+                    item_ids=selected_ids,
+                )
+                result_text = _linear_meeting_batch_summary(batch)
+                batch_status = str(batch.get("status") or "")
+                if is_batch_action and batch_status not in {
+                    "completed",
+                    "rejected",
+                    "expired",
+                }:
+                    retry_value = json.dumps(
+                        {"batch_id": batch_id, "requested_by": requested_by or user_id}
+                    )
+                    final_blocks = [
+                        {
+                            "type": "section",
+                            "text": {"type": "mrkdwn", "text": result_text[:3000]},
+                        },
+                        {
+                            "type": "actions",
+                            "block_id": f"linear_meeting_retry_{batch_id[:8]}",
+                            "elements": [
+                                {
+                                    "type": "button",
+                                    "text": {"type": "plain_text", "text": "Retry remaining"},
+                                    "style": "primary",
+                                    "action_id": "linear_meeting_approve_all",
+                                    "value": retry_value,
+                                },
+                                {
+                                    "type": "button",
+                                    "text": {"type": "plain_text", "text": "Reject remaining"},
+                                    "style": "danger",
+                                    "action_id": "linear_meeting_reject_all",
+                                    "value": retry_value,
+                                },
+                            ],
+                        },
+                    ]
+                if (
+                    action_team_id
+                    and reply_channel
+                    and reply_message_ts
+                    and str(batch.get("status") or "")
+                    in {"completed", "rejected", "expired"}
+                ):
+                    settings = get_settings()
+                    store = get_contextual_conversation_store(
+                        settings.SLACK_CONTEXTUAL_STATE_DB_PATH
+                    )
+                    await asyncio.to_thread(
+                        store.record_roo_response,
+                        team_id=action_team_id,
+                        channel_id=reply_channel,
+                        requester_user_id=str(user_id or ""),
+                        thread_ts=reply_thread_ts,
+                        bot_message_ts=reply_message_ts,
+                        adjacency_seconds=settings.ROO_CONTEXTUAL_ADJACENCY_SECONDS,
+                        thread_ttl_seconds=settings.ROO_CONTEXTUAL_THREAD_TTL_SECONDS,
+                        state="completed",
+                        workflow="linear-meeting-actions",
+                        reference_id=batch_id,
+                    )
+            except Exception as exc:
+                result_text = (
+                    "I couldn't finish that Linear meeting-action batch: "
+                    f"{exc.__class__.__name__}: {exc}"
+                )
+                final_blocks = (
+                    [block for block in original_blocks if isinstance(block, dict)]
+                    if isinstance(original_blocks, list)
+                    else []
+                )
+
+            if reply_channel and reply_message_ts:
+                try:
+                    get_slack_client().chat_update(
+                        channel=reply_channel,
+                        ts=reply_message_ts,
+                        text=result_text,
+                        blocks=final_blocks,
+                    )
+                    return
+                except Exception as exc:
+                    print(f"⚠️ Failed to update Linear meeting-action result: {exc}")
             if reply_channel:
                 post_message(
                     channel=reply_channel,
                     thread_ts=reply_thread_ts,
-                    text=f"I couldn't create that Linear issue yet: {exc.__class__.__name__}: {exc}",
+                    text=result_text,
                 )
-            return JSONResponse(status_code=200, content={})
 
-        issue_label = issue.get("identifier") or issue.get("title") or title
-        if issue.get("url"):
-            created_text = f"Created <{issue['url']}|{issue_label}> from: {title}"
-        else:
-            created_text = f"Created {issue_label} from: {title}"
-        if display.get("effort_label"):
-            created_text += (
-                f"\nEffort: {display['effort_label']} — "
-                f"{display.get('effort_rationale', '')}"
-            )
-        if reply_channel:
-            post_message(channel=reply_channel, thread_ts=reply_thread_ts, text=created_text)
+        asyncio.create_task(process_linear_meeting_action_batch())
         return JSONResponse(status_code=200, content={})
     
     if action_id == "resume_scan":

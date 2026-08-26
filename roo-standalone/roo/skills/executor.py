@@ -123,7 +123,6 @@ COWORKING_REPORT_ROLES = {*FULL_POINTS_ADMIN_ROLES, "partner"}
 VICTOR_AI_ACCESS_UNAVAILABLE_MESSAGE = (
     "Victor application data is not available in this conversation."
 )
-LINEAR_MEETING_PENDING_ACTIONS: dict[str, dict[str, Any]] = {}
 LINEAR_MEETING_TIMEOUT_RECOVERY_OVERLAP_CHARS = 300
 
 
@@ -165,14 +164,6 @@ class SkillResult:
     error: Optional[str] = None
     blocks: Optional[list] = None
     suppress_post: bool = False
-
-
-def get_pending_linear_meeting_action(pending_id: str) -> Optional[dict[str, Any]]:
-    return LINEAR_MEETING_PENDING_ACTIONS.get(pending_id)
-
-
-def pop_pending_linear_meeting_action(pending_id: str) -> Optional[dict[str, Any]]:
-    return LINEAR_MEETING_PENDING_ACTIONS.pop(pending_id, None)
 
 
 def _linear_task_sizing_setting(
@@ -3632,6 +3623,25 @@ Keep the response concise but informative."""
                 )
             }
 
+        request_project_match = self._resolve_linear_meeting_request_project(
+            sources=source_result.sources,
+            candidates=candidates,
+            projects=projects,
+            explicit_project_hint=params.get("project_hint"),
+            channel_id=channel_id,
+            channel_context=(slack_context or {}).get("channel"),
+        )
+        request_project = request_project_match.get("project") or {}
+        request_project_hint = (
+            str(request_project.get("name") or "").strip()
+            if float(request_project_match.get("confidence") or 0.0) >= 0.78
+            else ""
+        )
+        explicit_bulk_create = bool(
+            has_document_sources
+            and self._linear_meeting_explicit_creation_authorized(text, params)
+        )
+
         auto_threshold = float(
             getattr(settings, "LINEAR_MEETING_AUTO_CREATE_MIN_CONFIDENCE", 0.85) or 0.85
         )
@@ -3670,11 +3680,7 @@ Keep the response concise but informative."""
             if source_result.files_seen and not source_result.files_parsed and len(transcript.split()) < 80:
                 project_update_error = "Skipped project update because the attached file content could not be parsed."
             else:
-                project_update_match = self._match_linear_meeting_project_from_sources(
-                    source_result.sources,
-                    projects,
-                    params.get("project_hint"),
-                )
+                project_update_match = request_project_match
                 project = project_update_match.get("project")
                 if not project or float(project_update_match.get("confidence") or 0.0) < uncertain_threshold:
                     project_update_error = "Skipped project update because Roo could not confidently match the Linear project."
@@ -3742,11 +3748,16 @@ Keep the response concise but informative."""
                     "confidence": float(default_assignee_match.get("confidence") or 0.9),
                     "reason": "Fallback assignee",
                 }
+            effective_project_hint = (
+                params.get("project_hint")
+                or request_project_hint
+                or candidate.get("project_hint")
+            )
             project_match = self._match_linear_meeting_project(
                 candidate,
                 projects,
                 owner_match.get("user"),
-                params.get("project_hint"),
+                effective_project_hint,
                 channel_id=channel_id,
                 channel_context=(slack_context or {}).get("channel"),
             )
@@ -3772,9 +3783,9 @@ Keep the response concise but informative."""
             )
             if candidate.get("contextual_review_only") and decision == "create":
                 decision = "review"
-            # Contextual commands may auto-create only when the source contains an
-            # explicit commitment. Discussion-derived and bulk extraction remain
-            # review-first.
+            # A document request that explicitly asks Roo to create tasks is itself
+            # write authorisation. Keep genuinely inferred discussion work and
+            # contextual thread harvesting review-first.
             if not use_direct_issue_path and decision != "duplicate":
                 contextual_explicit_create = bool(
                     contextual_auto_create_enabled
@@ -3783,7 +3794,13 @@ Keep the response concise but informative."""
                     and not candidate.get("contextual_review_only")
                     and decision == "create"
                 )
-                if contextual_explicit_create:
+                authorised_bulk_create = bool(
+                    explicit_bulk_create
+                    and candidate.get("explicit_commitment")
+                    and not candidate.get("contextual_review_only")
+                    and decision == "create"
+                )
+                if contextual_explicit_create or authorised_bulk_create:
                     decision = "create"
                 elif owner_match.get("user") and team_match.get("team"):
                     decision = "review"
@@ -3939,22 +3956,96 @@ Keep the response concise but informative."""
                     issue = await client.create_issue(**issue_input)
                     created.append({**display, "issue": issue})
                 except Exception as exc:
-                    pending_id = self._remember_linear_meeting_pending_action(
-                        requested_by=user_id,
-                        issue_input=issue_input,
-                        display=display,
-                        reason=f"Linear create failed: {exc.__class__.__name__}: {exc}",
+                    review_needed.append(
+                        {
+                            **display,
+                            "issue_input": issue_input,
+                            "review_reason": (
+                                f"Linear create failed: {exc.__class__.__name__}: {exc}"
+                            ),
+                        }
                     )
-                    review_needed.append({**display, "pending_id": pending_id})
                 continue
 
-            pending_id = self._remember_linear_meeting_pending_action(
-                requested_by=user_id,
-                issue_input=issue_input,
-                display=display,
-                reason="Needs approval",
+            review_needed.append(
+                {
+                    **display,
+                    "issue_input": issue_input,
+                    "review_reason": "Needs approval",
+                }
             )
-            review_needed.append({**display, "pending_id": pending_id})
+
+        review_batch: Optional[dict[str, Any]] = None
+        if review_needed:
+            source_fingerprint = hashlib.sha256(
+                json.dumps(
+                    {
+                        "source": base_source,
+                        "items": [
+                            item.get("issue_input", {}).get("idempotency_key")
+                            or item.get("title")
+                            for item in review_needed
+                        ],
+                    },
+                    ensure_ascii=True,
+                    sort_keys=True,
+                ).encode("utf-8")
+            ).hexdigest()
+            try:
+                review_batch = await client.create_action_batch(
+                    requested_by_slack_user_id=user_id,
+                    slack_channel_id=channel_id,
+                    slack_thread_ts=thread_ts,
+                    source_fingerprint=source_fingerprint,
+                    items=[
+                        {
+                            "issue_input": item["issue_input"],
+                            "display": {
+                                key: value
+                                for key, value in item.items()
+                                if key not in {"issue_input", "review_reason"}
+                            },
+                            "reason": item.get("review_reason") or "Needs approval",
+                        }
+                        for item in review_needed
+                    ],
+                )
+                persisted_by_position = {
+                    int(item.get("position") or 0): item
+                    for item in review_batch.get("items") or []
+                    if isinstance(item, dict)
+                }
+                batch_id = str(review_batch.get("id") or "")
+                if not batch_id:
+                    raise RuntimeError("Approval storage returned no batch id")
+                missing_positions = [
+                    position
+                    for position in range(len(review_needed))
+                    if not str(
+                        (persisted_by_position.get(position) or {}).get("id") or ""
+                    )
+                ]
+                if missing_positions:
+                    raise RuntimeError(
+                        "Approval storage returned no item id for position(s) "
+                        + ", ".join(str(position) for position in missing_positions)
+                    )
+                for position, item in enumerate(review_needed):
+                    persisted = persisted_by_position.get(position) or {}
+                    item["batch_id"] = batch_id
+                    item["item_id"] = str(persisted.get("id") or "")
+                    item.pop("issue_input", None)
+                    item.pop("review_reason", None)
+            except Exception as exc:
+                staging_error = (
+                    "Approval storage was unavailable; no review buttons were created. "
+                    f"Retry the original request. ({exc.__class__.__name__}: {exc})"
+                )
+                skipped.extend(
+                    {**item, "reason": staging_error}
+                    for item in review_needed
+                )
+                review_needed = []
 
         message = self._format_linear_meeting_result_message(
             created,
@@ -3966,7 +4057,12 @@ Keep the response concise but informative."""
         )
         message += self._format_linear_meeting_source_warnings(source_result.warnings)
         blocks = (
-            self._build_linear_meeting_review_blocks(message, review_needed, user_id)
+            self._build_linear_meeting_review_blocks(
+                message,
+                review_needed,
+                user_id,
+                batch_id=str((review_batch or {}).get("id") or ""),
+            )
             if review_needed
             else None
         )
@@ -3977,6 +4073,7 @@ Keep the response concise but informative."""
                 "created_count": len(created),
                 "review_count": len(review_needed),
                 "skipped_count": len(skipped),
+                "review_batch_id": str((review_batch or {}).get("id") or "") or None,
                 "effort_sizing_results": sizing_shadow,
             },
         }
@@ -5315,7 +5412,66 @@ Return the structured action_items list."""
             owners_match = not owner or not existing_owner or owner == existing_owner
             if overlap >= 0.86 or (owners_match and (overlap >= 0.74 or (overlap >= 0.68 and similarity >= 0.68))):
                 return key
+            if owners_match and self._linear_meeting_candidates_share_outcome(
+                candidate,
+                existing,
+                candidate_tokens=candidate_tokens,
+                existing_tokens=existing_tokens,
+            ):
+                return key
         return None
+
+    def _linear_meeting_candidates_share_outcome(
+        self,
+        candidate: dict[str, Any],
+        existing: dict[str, Any],
+        *,
+        candidate_tokens: set[str],
+        existing_tokens: set[str],
+    ) -> bool:
+        """Merge chunk-level paraphrases that describe the same deliverable.
+
+        The family check prevents account setup from being merged into an Apollo
+        comparison merely because both titles mention the same providers.
+        """
+
+        candidate_family = self._linear_meeting_action_family(
+            candidate.get("title") or candidate.get("task")
+        )
+        existing_family = self._linear_meeting_action_family(
+            existing.get("title") or existing.get("task")
+        )
+        if not candidate_family or candidate_family != existing_family:
+            return False
+        candidate_project = self._normalize_match_text(
+            candidate.get("project_hint") or candidate.get("project")
+        )
+        existing_project = self._normalize_match_text(
+            existing.get("project_hint") or existing.get("project")
+        )
+        if candidate_project and existing_project and candidate_project != existing_project:
+            return False
+        shared = candidate_tokens & existing_tokens
+        if len(shared) < 2:
+            return False
+        coverage = len(shared) / min(len(candidate_tokens), len(existing_tokens))
+        return coverage >= 0.4
+
+    @staticmethod
+    def _linear_meeting_action_family(value: Any) -> str:
+        text = str(value or "").lower()
+        families = (
+            ("evaluation", r"\b(?:compare|evaluate|assess|test|benchmark|validate)\b"),
+            ("implementation", r"\b(?:build|implement|develop|integrate|prototype)\b"),
+            ("documentation", r"\b(?:document|write|draft|specify)\b|\brequirements?\b"),
+            ("account_setup", r"\b(?:account|register|registration|sign\s*up|access)\b"),
+            ("outreach", r"\b(?:recruit|secure|contact|outreach|invite)\b"),
+            ("scheduling", r"\b(?:schedule|coordinate|book|calendar)\b"),
+        )
+        for family, pattern in families:
+            if re.search(pattern, text):
+                return family
+        return ""
 
     def _merge_linear_meeting_candidate(self, existing: dict[str, Any], candidate: dict[str, Any]) -> None:
         try:
@@ -5469,6 +5625,117 @@ Return the structured action_items list."""
             )
         )
 
+    def _linear_meeting_explicit_creation_authorized(
+        self,
+        text: str,
+        params: dict[str, Any],
+    ) -> bool:
+        """Return true when the requester clearly authorised task creation.
+
+        This is intentionally narrower than merely mentioning Linear or asking Roo
+        to inspect a transcript. Preview/extract-only language never grants writes.
+        """
+
+        action = self._normalize_match_text(params.get("action"))
+        if action in {"extract", "preview", "review", "draft"}:
+            return False
+        normalized = re.sub(r"\s+", " ", str(text or "").lower()).strip()
+        if re.search(
+            r"\b(?:only\s+)?(?:extract|preview|review|draft|show|list)\b[^.!?]{0,80}"
+            r"\b(?:tasks?|issues?|tickets?|to-?dos?|action\s+items?)\b",
+            normalized,
+        ) and not re.search(
+            r"\b(?:create|add|write|send|sync|put|file|open)\b[^.!?]{0,100}"
+            r"\b(?:tasks?|issues?|tickets?|to-?dos?|action\s+items?)\b",
+            normalized,
+        ):
+            return False
+        if action in {"create", "write", "sync", "add"}:
+            return True
+        has_write_verb = bool(
+            re.search(r"\b(?:create|add|write|send|sync|put|file|open)\b", normalized)
+        )
+        has_task_noun = bool(
+            re.search(r"\b(?:tasks?|issues?|tickets?|to-?dos?|todos?|action\s+items?)\b", normalized)
+        )
+        return has_write_verb and has_task_noun and "linear" in normalized
+
+    def _resolve_linear_meeting_request_project(
+        self,
+        *,
+        sources: list[ParsedSource],
+        candidates: list[dict[str, Any]],
+        projects: list[dict[str, Any]],
+        explicit_project_hint: Optional[str],
+        channel_id: Optional[str],
+        channel_context: Optional[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Resolve one canonical destination shared by updates and task creation."""
+
+        if explicit_project_hint:
+            return self._match_linear_meeting_project(
+                {"project_hint": explicit_project_hint},
+                projects,
+                owner_user=None,
+                explicit_project_hint=explicit_project_hint,
+                channel_id=channel_id,
+                channel_context=channel_context,
+            )
+
+        source_match = self._match_linear_meeting_project_from_sources(
+            sources,
+            projects,
+            None,
+        )
+        source_project = source_match.get("project") or {}
+        if source_project and float(source_match.get("confidence") or 0.0) >= 0.86:
+            return source_match
+
+        matches_by_project: dict[str, list[dict[str, Any]]] = {}
+        for candidate in candidates:
+            hint = str(candidate.get("project_hint") or candidate.get("project") or "").strip()
+            if not hint:
+                continue
+            match = self._match_linear_meeting_project(
+                candidate,
+                projects,
+                owner_user=None,
+                explicit_project_hint=hint,
+            )
+            project = match.get("project") or {}
+            project_id = str(project.get("id") or "").strip()
+            if project_id and float(match.get("confidence") or 0.0) >= 0.78:
+                matches_by_project.setdefault(project_id, []).append(match)
+
+        if matches_by_project:
+            ranked = sorted(
+                matches_by_project.values(),
+                key=lambda values: (len(values), max(float(value.get("confidence") or 0.0) for value in values)),
+                reverse=True,
+            )
+            best = ranked[0]
+            second_count = len(ranked[1]) if len(ranked) > 1 else 0
+            if len(best) > second_count and len(best) >= max(1, len(candidates) // 2):
+                strongest = max(best, key=lambda value: float(value.get("confidence") or 0.0))
+                return {
+                    **strongest,
+                    "confidence": min(
+                        0.96,
+                        max(float(strongest.get("confidence") or 0.0), 0.9),
+                    ),
+                    "reason": "Matched project by action-item consensus",
+                }
+
+        if source_project:
+            return source_match
+        return self._match_linear_meeting_project(
+            {},
+            projects,
+            owner_user=None,
+            channel_id=channel_id,
+            channel_context=channel_context,
+        )
+
     def _match_linear_meeting_project_from_sources(
         self,
         sources: list[ParsedSource],
@@ -5495,13 +5762,15 @@ Return the structured action_items list."""
         best_project = None
         best_score = 0.0
         for project in projects:
+            project_name = str(project.get("name") or "")
+            core_project_name = self._linear_project_core_name(project_name)
             project_text = " ".join(
                 str(value or "")
-                for value in (project.get("name"), project.get("slugId"))
+                for value in (core_project_name, project.get("slugId"))
                 if value
             )
             project_tokens = self._linear_meeting_project_tokens(project_text)
-            if len(project_tokens) >= 2:
+            if project_tokens:
                 label_overlap = len(project_tokens & source_label_tokens) / len(project_tokens)
                 source_overlap = len(project_tokens & source_tokens) / len(project_tokens)
                 token_score = max(label_overlap, source_overlap)
@@ -5513,7 +5782,7 @@ Return the structured action_items list."""
                         best_project = project
                         best_score = min(score, 0.94)
 
-            for value in (project.get("name"), project.get("slugId")):
+            for value in (core_project_name, project.get("name"), project.get("slugId")):
                 normalized_project = self._normalize_match_text(value)
                 if not normalized_project:
                     continue
@@ -5534,6 +5803,12 @@ Return the structured action_items list."""
                 "reason": "Matched project by source similarity",
             }
         return {"project": None, "confidence": 0.0, "reason": "No project match"}
+
+    @staticmethod
+    def _linear_project_core_name(value: Any) -> str:
+        """Remove organisational namespace prefixes such as ``[Studio]``."""
+
+        return re.sub(r"^(?:\s*\[[^\]]+\]\s*)+", "", str(value or "")).strip()
 
     async def _build_linear_meeting_project_update_input(
         self,
@@ -6272,16 +6547,32 @@ Chunk {index} source: {label}
 
         if hint:
             normalized_hint = self._normalize_match_text(hint)
+            normalized_core_hint = self._normalize_match_text(
+                self._linear_project_core_name(hint)
+            )
             for project in projects:
                 project_name = project.get("name")
                 project_slug = project.get("slugId")
                 normalized_project_name = self._normalize_match_text(project_name)
                 if normalized_project_name and normalized_hint == normalized_project_name:
                     record(project, 0.98, "Matched project by exact name")
+                normalized_core_project_name = self._normalize_match_text(
+                    self._linear_project_core_name(project_name)
+                )
+                if (
+                    normalized_core_hint
+                    and normalized_core_project_name
+                    and normalized_core_hint == normalized_core_project_name
+                ):
+                    record(project, 0.97, "Matched project by namespace-independent name")
                 normalized_slug = self._normalize_match_text(project_slug)
                 if normalized_slug and normalized_hint == normalized_slug:
                     record(project, 0.96, "Matched project by exact slug")
-                for value in (project_name, project_slug):
+                for value in (
+                    project_name,
+                    self._linear_project_core_name(project_name),
+                    project_slug,
+                ):
                     normalized_value = self._normalize_match_text(value)
                     if not normalized_value:
                         continue
@@ -7134,24 +7425,6 @@ Chunk {index} source: {label}
             "team_reason": team_match.get("reason"),
         }
 
-    def _remember_linear_meeting_pending_action(
-        self,
-        *,
-        requested_by: str,
-        issue_input: dict[str, Any],
-        display: dict[str, Any],
-        reason: str,
-    ) -> str:
-        pending_id = str(uuid4())
-        LINEAR_MEETING_PENDING_ACTIONS[pending_id] = {
-            "requested_by": requested_by,
-            "issue_input": issue_input,
-            "display": display,
-            "reason": reason,
-            "created_at": datetime.utcnow().isoformat(),
-        }
-        return pending_id
-
     def _format_linear_meeting_result_message(
         self,
         created: list[dict[str, Any]],
@@ -7199,8 +7472,6 @@ Chunk {index} source: {label}
                         f"- <{issue['url']}|{issue_label}> - {item['title']} "
                         f"({detail}{replay})"
                     )
-                    if item.get("effort_rationale"):
-                        lines.append(f"  Effort: {item['effort_rationale']}")
                 else:
                     lines.append(f"- {issue_label} - {item['title']}")
         if review_needed:
@@ -7210,10 +7481,10 @@ Chunk {index} source: {label}
             for item in review_needed[:20]:
                 review_line = (
                     f"- {item['title']} -> {item['project']} / {item['assignee']} "
-                    f"({item['confidence']:.0%}, {item.get('source', 'Slack thread')})"
+                    f"({item['confidence']:.0%})"
                 )
                 if item.get("effort_label"):
-                    review_line += f" · {item['effort_label']}: {item.get('effort_rationale', '')}"
+                    review_line += f" · {item['effort_label']}"
                 lines.append(review_line)
         if skipped:
             if lines:
@@ -7233,30 +7504,58 @@ Chunk {index} source: {label}
         message: str,
         review_needed: list[dict[str, Any]],
         user_id: str,
+        *,
+        batch_id: str,
     ) -> list[dict[str, Any]]:
         blocks: list[dict[str, Any]] = [
             {"type": "section", "text": {"type": "mrkdwn", "text": message[:3000]}}
         ]
+        batch_value = json.dumps(
+            {"batch_id": batch_id, "requested_by": user_id}
+        )
+        blocks.append(
+            {
+                "type": "actions",
+                "block_id": f"linear_meeting_batch_{batch_id[:8]}",
+                "elements": [
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "Approve all"},
+                        "style": "primary",
+                        "action_id": "linear_meeting_approve_all",
+                        "value": batch_value,
+                    },
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "Reject all"},
+                        "style": "danger",
+                        "action_id": "linear_meeting_reject_all",
+                        "value": batch_value,
+                    },
+                ],
+            }
+        )
         for item in review_needed[:20]:
-            pending_id = item["pending_id"]
+            item_id = str(item.get("item_id") or "")
             summary = (
                 f"*{item['title']}*\n"
                 f"Project: `{item['project']}` | Assignee: `{item['assignee']}` | "
-                f"Confidence: `{item['confidence']:.0%}` | Source: `{item.get('source', 'Slack thread')}`"
+                f"Confidence: `{item['confidence']:.0%}`"
             )
             if item.get("effort_label"):
-                summary += (
-                    f"\nEffort: `{item['effort_label']}` — "
-                    f"{item.get('effort_rationale', '')}"
-                )
-            if item.get("evidence"):
-                summary += f"\nEvidence: “{item['evidence']}”"
-            value = json.dumps({"pending_id": pending_id, "requested_by": user_id})
+                summary += f" | Effort: `{item['effort_label']}`"
+            value = json.dumps(
+                {
+                    "batch_id": batch_id,
+                    "item_ids": [item_id],
+                    "requested_by": user_id,
+                }
+            )
             blocks.extend([
                 {"type": "section", "text": {"type": "mrkdwn", "text": summary[:2500]}},
                 {
                     "type": "actions",
-                    "block_id": f"linear_meeting_{pending_id[:8]}",
+                    "block_id": f"linear_meeting_{item_id[:8]}",
                     "elements": [
                         {
                             "type": "button",
