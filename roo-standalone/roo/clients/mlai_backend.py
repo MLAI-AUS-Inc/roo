@@ -906,8 +906,15 @@ class MLAIBackendClient:
         detail = str(exc).strip()
         return detail or exc.__class__.__name__
 
-    def _raise_for_status_or_backend_unavailable(self, response: httpx.Response) -> None:
-        if response.status_code == 503:
+    def _raise_for_status_or_backend_unavailable(
+        self,
+        response: httpx.Response,
+        *,
+        all_server_errors: bool = False,
+    ) -> None:
+        if response.status_code == 503 or (
+            all_server_errors and 500 <= response.status_code < 600
+        ):
             try:
                 payload = response.json()
             except ValueError:
@@ -2326,7 +2333,10 @@ class MLAIBackendClient:
             circuit_breaker=True,
             use_admin_headers=False,
         )
-        self._raise_for_status_or_backend_unavailable(response)
+        self._raise_for_status_or_backend_unavailable(
+            response,
+            all_server_errors=True,
+        )
         try:
             payload = response.json()
         except ValueError as exc:

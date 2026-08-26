@@ -14190,6 +14190,72 @@ Chunk {index} source: {label}
 
         return message
 
+    async def _deliver_coworking_booking_success(
+        self,
+        *,
+        client,
+        backend_result: dict,
+        booking_date: str,
+        target_user_id: str,
+        requested_by_user_id: str,
+        channel_id: Optional[str],
+        thread_ts: Optional[str],
+        admin_checkin: bool,
+    ) -> dict:
+        """Render and privately deliver the backend's complete booking result."""
+        cost = backend_result.get("points_cost", 1)
+        discount_applied = bool(
+            backend_result.get("monthly_update_discount_applied", False)
+        )
+        raw_explicit_link_state = backend_result.get(
+            "founder_tools_explicitly_linked"
+        )
+        founder_tools_explicitly_linked = (
+            raw_explicit_link_state
+            if isinstance(raw_explicit_link_state, bool)
+            else None
+        )
+
+        new_balance = None
+        try:
+            balance_data = await client.get_balance(target_user_id)
+            new_balance = balance_data.get("balance", 0)
+        except Exception as exc:
+            print(
+                "🏢 coworking_confirmation_balance_lookup_failed "
+                f"exc_type={exc.__class__.__name__}"
+            )
+
+        private_message = self._format_coworking_booking_success(
+            booking_date=booking_date,
+            target_user_id=target_user_id,
+            cost=cost,
+            new_balance=new_balance,
+            admin_checkin=False,
+            discount_applied=discount_applied,
+            founder_tools_explicitly_linked=founder_tools_explicitly_linked,
+        )
+        public_message = self._format_coworking_booking_success(
+            booking_date=booking_date,
+            target_user_id=target_user_id,
+            cost=cost,
+            new_balance=None,
+            admin_checkin=admin_checkin,
+            discount_applied=discount_applied,
+            include_balance=False,
+            # Cross-account guidance belongs in the member's private DM.
+            founder_tools_explicitly_linked=None,
+        )
+        return self._deliver_personal_points_message(
+            recipient_user_id=target_user_id,
+            requester_user_id=requested_by_user_id,
+            channel_id=channel_id,
+            thread_ts=thread_ts,
+            private_message=private_message,
+            public_message=public_message,
+            action="book_coworking",
+        )
+
     async def _format_admin_coworking_bad_request(
         self,
         *,
@@ -14467,53 +14533,15 @@ Chunk {index} source: {label}
                 )
             raise
 
-        cost = result.get("points_cost", 1)
-        # The backend is the single source of truth for whether the
-        # monthly-update discount applied; we only render the nudge off this.
-        discount_applied = bool(result.get("monthly_update_discount_applied", False))
-        raw_explicit_link_state = result.get("founder_tools_explicitly_linked")
-        founder_tools_explicitly_linked = (
-            raw_explicit_link_state
-            if isinstance(raw_explicit_link_state, bool)
-            else None
-        )
-        from roo.clients.mlai_backend import MLAIBackendUnavailableError
-
-        new_balance = None
-        try:
-            balance_data = await client.get_balance(target_user_id)
-            new_balance = balance_data.get("balance", 0)
-        except MLAIBackendUnavailableError:
-            pass
-
-        private_message = self._format_coworking_booking_success(
+        return await self._deliver_coworking_booking_success(
+            client=client,
+            backend_result=result,
             booking_date=booking_date,
             target_user_id=target_user_id,
-            cost=cost,
-            new_balance=new_balance,
-            admin_checkin=False,
-            discount_applied=discount_applied,
-            founder_tools_explicitly_linked=founder_tools_explicitly_linked,
-        )
-        public_message = self._format_coworking_booking_success(
-            booking_date=booking_date,
-            target_user_id=target_user_id,
-            cost=cost,
-            new_balance=None,
-            admin_checkin=admin_checkin,
-            discount_applied=discount_applied,
-            include_balance=False,
-            # Cross-account guidance belongs in the member's private DM.
-            founder_tools_explicitly_linked=None,
-        )
-        return self._deliver_personal_points_message(
-            recipient_user_id=target_user_id,
-            requester_user_id=requested_by_user_id,
+            requested_by_user_id=requested_by_user_id,
             channel_id=channel_id,
             thread_ts=thread_ts,
-            private_message=private_message,
-            public_message=public_message,
-            action="book_coworking",
+            admin_checkin=admin_checkin,
         )
 
     async def _handle_points_action(
@@ -14544,6 +14572,12 @@ Chunk {index} source: {label}
                     "safely replaces any incomplete link."
                 )
             except httpx.HTTPStatusError as exc:
+                if 500 <= exc.response.status_code < 600:
+                    return (
+                        "I couldn't confirm whether a Founder Tools account link was "
+                        "created right now. Please try `link` again; a fresh request "
+                        "safely replaces any incomplete link."
+                    )
                 try:
                     error_code = str(exc.response.json().get("code") or "")
                 except (AttributeError, ValueError):
@@ -14553,8 +14587,27 @@ Chunk {index} source: {label}
                     and error_code == "slack_user_not_found"
                 ):
                     return (
-                        "I couldn't find your Roo Points account yet. "
-                        "Please try a points command first, then send `link` again."
+                        "I couldn't verify your Slack account for Founder Tools linking. "
+                        "Please try `link` again; if this continues, contact the MLAI team."
+                    )
+                if (
+                    exc.response.status_code == 429
+                    and error_code == "link_rate_limited"
+                ):
+                    try:
+                        retry_after = int(
+                            exc.response.json().get("retry_after_seconds") or 0
+                        )
+                    except (AttributeError, TypeError, ValueError):
+                        retry_after = 0
+                    wait_copy = (
+                        f" Wait about {retry_after} seconds"
+                        if retry_after > 0
+                        else " Wait a few minutes"
+                    )
+                    return (
+                        "You've requested several Founder Tools account links recently."
+                        f"{wait_copy}, then try `link` again. Your latest link remains valid."
                     )
                 return (
                     "I couldn't create a Founder Tools account link right now. "

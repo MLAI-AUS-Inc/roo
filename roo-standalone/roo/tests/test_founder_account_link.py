@@ -410,7 +410,7 @@ def test_localhost_link_requires_explicit_development_origin():
 
 
 @pytest.mark.asyncio
-async def test_unknown_slack_user_returns_registration_guidance():
+async def test_unknown_slack_user_does_not_send_member_into_points_loop():
     request = httpx.Request(
         "POST",
         "https://backend.test/api/v1/users/slack-founder-link/start/",
@@ -420,7 +420,59 @@ async def test_unknown_slack_user_returns_registration_guidance():
 
     result = await execute_link(client)
 
-    assert "points command first" in result
+    assert "points command first" not in result
+    assert "couldn't verify your Slack account" in result
+    assert "contact the MLAI team" in result
+
+
+@pytest.mark.asyncio
+async def test_rate_limited_link_request_preserves_latest_link_guidance():
+    request = httpx.Request(
+        "POST",
+        "https://backend.test/api/v1/users/slack-founder-link/start/",
+    )
+    response = httpx.Response(
+        429,
+        request=request,
+        json={
+            "code": "link_rate_limited",
+            "retry_after_seconds": 90,
+        },
+    )
+    client = FakeLinkClient(
+        error=httpx.HTTPStatusError(
+            "rate limited",
+            request=request,
+            response=response,
+        )
+    )
+
+    result = await execute_link(client)
+
+    assert "Wait about 90 seconds" in result
+    assert "latest link remains valid" in result
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status_code", [500, 502, 503, 504])
+async def test_server_errors_are_described_as_commit_uncertain(status_code):
+    request = httpx.Request(
+        "POST",
+        "https://backend.test/api/v1/users/slack-founder-link/start/",
+    )
+    response = httpx.Response(status_code, request=request)
+    client = FakeLinkClient(
+        error=httpx.HTTPStatusError(
+            "server error",
+            request=request,
+            response=response,
+        )
+    )
+
+    result = await execute_link(client)
+
+    assert "couldn't confirm whether" in result
+    assert "fresh request safely replaces" in result
 
 
 @pytest.mark.asyncio

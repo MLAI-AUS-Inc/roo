@@ -32,16 +32,6 @@ def retry_delay_seconds(attempt_count: int) -> float:
     return min(15 * 60, 30 * (2 ** (attempt_number - 1)))
 
 
-def has_active_booking(bookings: list[dict[str, Any]], booking_date: str) -> bool:
-    for booking in bookings:
-        if (
-            str(booking.get("date") or "") == str(booking_date)
-            and str(booking.get("status") or "booked") == "booked"
-        ):
-            return True
-    return False
-
-
 def is_retryable_coworking_exception(exc: Exception) -> bool:
     from .clients.mlai_backend import MLAIBackendUnavailableError
 
@@ -460,29 +450,50 @@ def _build_backend_client():
     )
 
 
-def _safe_post_thread_message(*, channel_id: Optional[str], thread_ts: Optional[str], text: str) -> None:
-    if not channel_id or not thread_ts:
+def _safe_post_message(
+    *,
+    channel_id: Optional[str],
+    thread_ts: Optional[str],
+    text: str,
+) -> None:
+    if not channel_id or not text:
         return
     from .slack_client import post_message
 
     post_message(channel=channel_id, thread_ts=thread_ts, text=text)
 
 
-def _coworking_retry_confirmed_message(
+async def _deliver_coworking_retry_confirmation(
     *,
+    client: Any,
+    backend_result: dict[str, Any],
     slack_user_id: str,
     requested_by_slack_id: str,
     booking_date: str,
-) -> str:
-    if requested_by_slack_id and requested_by_slack_id != slack_user_id:
-        return (
-            "I retried the queued coworking check-in for "
-            f"<@{slack_user_id}> and confirmed {booking_date}. They're booked."
-        )
-    return (
-        "I retried your queued coworking booking and confirmed "
-        f"{booking_date}. You're booked."
+    channel_id: Optional[str],
+    thread_ts: Optional[str],
+) -> dict[str, Any]:
+    # Import lazily because SkillExecutor owns the immediate delivery path and
+    # imports this module for intent persistence.
+    from .skills.executor import SkillExecutor
+
+    delivery = await SkillExecutor()._deliver_coworking_booking_success(
+        client=client,
+        backend_result=backend_result,
+        booking_date=booking_date,
+        target_user_id=slack_user_id,
+        requested_by_user_id=requested_by_slack_id,
+        channel_id=channel_id,
+        thread_ts=thread_ts,
+        admin_checkin=(requested_by_slack_id != slack_user_id),
     )
+    if not delivery.get("suppress_post"):
+        _safe_post_message(
+            channel_id=channel_id,
+            thread_ts=thread_ts,
+            text=str(delivery.get("message") or ""),
+        )
+    return delivery
 
 
 def _coworking_retry_blocked_message(
@@ -519,36 +530,31 @@ async def process_coworking_booking_intent(
     thread_ts = intent.get("thread_ts")
 
     try:
-        bookings = await client.get_my_bookings(slack_user_id)
-        if has_active_booking(bookings, booking_date):
-            backend_result = {"already_booked": True, "date": booking_date}
-            store.mark_confirmed(intent_id, backend_result=backend_result)
-            if notify:
-                _safe_post_thread_message(
-                    channel_id=channel_id,
-                    thread_ts=thread_ts,
-                    text=_coworking_retry_confirmed_message(
-                        slack_user_id=slack_user_id,
-                        requested_by_slack_id=requested_by_slack_id,
-                        booking_date=booking_date,
-                    ),
-                )
-            return {"status": "confirmed", "already_booked": True, "intent_id": intent_id}
-
-        backend_result = await client.book_coworking(slack_user_id, booking_date, channel_id)
-        store.mark_confirmed(intent_id, backend_result=backend_result)
-        if notify:
-            _safe_post_thread_message(
-                channel_id=channel_id,
-                thread_ts=thread_ts,
-                text=_coworking_retry_confirmed_message(
-                    slack_user_id=slack_user_id,
-                    requested_by_slack_id=requested_by_slack_id,
-                    booking_date=booking_date,
-                ),
+        backend_result = await client.book_coworking(
+            slack_user_id,
+            booking_date,
+            channel_id,
+        )
+        complete_result = (
+            isinstance(backend_result, dict)
+            and isinstance(backend_result.get("date"), str)
+            and isinstance(backend_result.get("points_cost"), int)
+            and not isinstance(backend_result.get("points_cost"), bool)
+            and isinstance(
+                backend_result.get("monthly_update_discount_applied"),
+                bool,
             )
-        return {"status": "confirmed", "backend_result": backend_result, "intent_id": intent_id}
+            and isinstance(
+                backend_result.get("founder_tools_explicitly_linked"),
+                bool,
+            )
+        )
+        if not complete_result:
+            from .clients.mlai_backend import MLAIBackendUnavailableError
 
+            raise MLAIBackendUnavailableError(
+                "MLAI backend returned an incomplete coworking booking result"
+            )
     except Exception as exc:
         error = f"{exc.__class__.__name__}: {exc}"
         if is_retryable_coworking_exception(exc):
@@ -563,7 +569,7 @@ async def process_coworking_booking_intent(
 
         store.mark_blocked(intent_id, error=error)
         if notify:
-            _safe_post_thread_message(
+            _safe_post_message(
                 channel_id=channel_id,
                 thread_ts=thread_ts,
                 text=_coworking_retry_blocked_message(
@@ -573,6 +579,34 @@ async def process_coworking_booking_intent(
                 ),
             )
         return {"status": "blocked", "error": error, "intent_id": intent_id}
+
+    store.mark_confirmed(intent_id, backend_result=backend_result)
+    delivery = None
+    delivery_error = None
+    if notify:
+        try:
+            delivery = await _deliver_coworking_retry_confirmation(
+                client=client,
+                backend_result=backend_result,
+                slack_user_id=slack_user_id,
+                requested_by_slack_id=requested_by_slack_id,
+                booking_date=str(backend_result.get("date") or booking_date),
+                channel_id=channel_id,
+                thread_ts=thread_ts,
+            )
+        except Exception as exc:
+            delivery_error = exc.__class__.__name__
+            print(
+                "🏢 coworking_retry_confirmation_delivery_failed "
+                f"intent_id={intent_id} exc_type={delivery_error}"
+            )
+    return {
+        "status": "confirmed",
+        "backend_result": backend_result,
+        "delivery": delivery,
+        "delivery_error": delivery_error,
+        "intent_id": intent_id,
+    }
 
 
 async def coworking_booking_retry_loop(

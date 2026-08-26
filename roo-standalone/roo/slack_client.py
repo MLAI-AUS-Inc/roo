@@ -5,13 +5,20 @@ Handles Slack API interactions including posting messages and user lookups.
 """
 import re
 from functools import lru_cache
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Protocol
 
 import httpx
 
 from .config import get_settings
 
 SLACK_FILES_READ_SCOPE = "files:read"
+
+
+class SlackApiResponse(Protocol):
+    """Common response surface implemented by SlackResponse and test doubles."""
+
+    def get(self, key: str, default: Any = None) -> Any:
+        ...
 
 
 # Lazy-loaded Slack client
@@ -54,7 +61,7 @@ def post_message(
     text: str,
     thread_ts: Optional[str] = None,
     **kwargs
-) -> Dict[str, Any]:
+) -> SlackApiResponse:
     """
     Post a message to a Slack channel or thread.
     
@@ -98,7 +105,7 @@ def post_ephemeral(
     text: str,
     thread_ts: Optional[str] = None,
     **kwargs,
-) -> Dict[str, Any]:
+) -> SlackApiResponse:
     """Post a private message visible only to one member in a Slack channel."""
     client = get_slack_client()
 
@@ -534,7 +541,7 @@ def send_dm(
     *,
     raise_on_error: bool = False,
     **kwargs,
-) -> Optional[Dict[str, Any]]:
+) -> Optional[SlackApiResponse]:
     """Send a direct message to a user."""
     dm_channel = open_dm(user_id, raise_on_error=raise_on_error)
     if dm_channel:

@@ -307,6 +307,54 @@ async def test_start_founder_account_link_rejects_malformed_success_payloads(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("status_code", [500, 502, 503, 504])
+async def test_start_founder_account_link_treats_all_server_errors_as_uncertain(
+    monkeypatch,
+    status_code,
+):
+    async def fake_request(method, endpoint, **kwargs):
+        request = httpx.Request(method, f"https://backend.test{endpoint}")
+        return httpx.Response(
+            status_code,
+            request=request,
+            json={"error": "backend failed"},
+        )
+
+    client = MLAIBackendClient(
+        base_url="https://backend.test",
+        api_key="roo-api-key",
+        internal_api_key="roo-api-key",
+    )
+    monkeypatch.setattr(client, "_request", fake_request)
+
+    with pytest.raises(MLAIBackendUnavailableError):
+        await client.start_founder_account_link("U123")
+
+
+@pytest.mark.asyncio
+async def test_start_founder_account_link_keeps_client_errors_definite(monkeypatch):
+    async def fake_request(method, endpoint, **kwargs):
+        request = httpx.Request(method, f"https://backend.test{endpoint}")
+        return httpx.Response(
+            429,
+            request=request,
+            json={"code": "link_rate_limited"},
+        )
+
+    client = MLAIBackendClient(
+        base_url="https://backend.test",
+        api_key="roo-api-key",
+        internal_api_key="roo-api-key",
+    )
+    monkeypatch.setattr(client, "_request", fake_request)
+
+    with pytest.raises(httpx.HTTPStatusError) as exc_info:
+        await client.start_founder_account_link("U123")
+
+    assert exc_info.value.response.status_code == 429
+
+
+@pytest.mark.asyncio
 async def test_legacy_slack_link_client_only_treats_not_found_as_no_match(monkeypatch):
     request = httpx.Request("POST", "https://backend.test/api/v1/users/link-slack/")
     responses = [
