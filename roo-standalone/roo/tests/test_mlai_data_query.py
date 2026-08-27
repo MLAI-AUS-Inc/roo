@@ -37,6 +37,46 @@ class FakeDataBackendClient:
     }
     catalog_requesters = []
     queries = []
+    linear_list_calls = []
+    linear_detail_calls = []
+    linear_list_response = {
+        "list": {"displayName": "MLAI_TECH · Todo"},
+        "issues": [
+            {
+                "identifier": "TECH-16",
+                "title": "[TECH_TEAM] Refresh volunteer onboarding",
+                "url": "https://linear.app/mlai-aus/issue/TECH-16/refresh-volunteer-onboarding",
+            },
+            {
+                "identifier": "TECH-19",
+                "title": "[TECH_TEAM] Repair the deployment alerts",
+                "url": "https://linear.app/mlai-aus/issue/TECH-19/repair-the-deployment-alerts",
+            },
+        ],
+        "pageInfo": {"hasNextPage": False, "endCursor": None},
+    }
+    linear_detail_response = {
+        "issue": {
+            "identifier": "TECH-16",
+            "title": "[TECH_TEAM] Refresh volunteer onboarding",
+            "description": "Document the <new> onboarding path & owners.",
+            "url": "https://linear.app/mlai-aus/issue/TECH-16/refresh-volunteer-onboarding",
+            "state": {"name": "Todo"},
+            "assignee": {"displayName": "Alex"},
+            "priorityLabel": "High",
+            "attachments": [
+                {"title": "Current guide", "url": "https://example.com/guide"}
+            ],
+        },
+        "comments": [
+            {
+                "body": "Please include the Slack welcome flow.",
+                "createdAt": "2026-08-27T01:02:03Z",
+                "user": {"displayName": "Morgan"},
+            }
+        ],
+        "commentsTruncated": False,
+    }
     last_init = None
 
     def __init__(self, *args, **kwargs):
@@ -49,6 +89,14 @@ class FakeDataBackendClient:
     async def query_data(self, payload):
         self.__class__.queries.append(payload)
         return self.query_response
+
+    async def list_linear_channel_issues(self, **kwargs):
+        self.__class__.linear_list_calls.append(kwargs)
+        return self.linear_list_response
+
+    async def get_linear_channel_issue(self, **kwargs):
+        self.__class__.linear_detail_calls.append(kwargs)
+        return self.linear_detail_response
 
 
 def _reset_fake_client():
@@ -71,7 +119,155 @@ def _reset_fake_client():
     }
     FakeDataBackendClient.catalog_requesters = []
     FakeDataBackendClient.queries = []
+    FakeDataBackendClient.linear_list_calls = []
+    FakeDataBackendClient.linear_detail_calls = []
     FakeDataBackendClient.last_init = None
+
+
+@pytest.mark.asyncio
+async def test_linear_channel_issue_list_returns_titles_first(monkeypatch):
+    _reset_fake_client()
+    executor = SkillExecutor()
+    monkeypatch.setattr(executor_module, "get_settings", lambda: _settings())
+    monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeDataBackendClient)
+
+    result = await executor._execute_mlai_data_query(
+        skill=SimpleNamespace(name="mlai-data-query"),
+        text="what Linear issues are in the MLAI_TECH Todo list at the moment?",
+        params={"action": "list_linear_channel_issues"},
+        user_id="U123",
+        channel_id="CTECH",
+        slack_team_id="TMLAI",
+    )
+
+    assert FakeDataBackendClient.linear_list_calls == [
+        {
+            "slack_workspace_id": "TMLAI",
+            "slack_channel_id": "CTECH",
+            "requester_slack_id": "U123",
+            "limit": 50,
+        }
+    ]
+    assert FakeDataBackendClient.linear_detail_calls == []
+    assert "*2 issues in MLAI_TECH · Todo*" in result["message"]
+    assert "1. <https://linear.app/mlai-aus/issue/TECH-16/" in result["message"]
+    assert "Refresh volunteer onboarding" in result["message"]
+    assert "[TECH_TEAM]" not in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_linear_channel_issue_detail_by_identifier(monkeypatch):
+    _reset_fake_client()
+    executor = SkillExecutor()
+    monkeypatch.setattr(executor_module, "get_settings", lambda: _settings())
+    monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeDataBackendClient)
+
+    result = await executor._execute_mlai_data_query(
+        skill=SimpleNamespace(name="mlai-data-query"),
+        text="tell me more about TECH-16",
+        params={"action": "get_linear_channel_issue"},
+        user_id="U123",
+        channel_id="CTECH",
+        slack_team_id="TMLAI",
+    )
+
+    assert FakeDataBackendClient.linear_list_calls == []
+    assert FakeDataBackendClient.linear_detail_calls == [
+        {
+            "slack_workspace_id": "TMLAI",
+            "slack_channel_id": "CTECH",
+            "requester_slack_id": "U123",
+            "issue_identifier": "TECH-16",
+            "include_comments": True,
+        }
+    ]
+    assert "*Status:* Todo" in result["message"]
+    assert "Document the &lt;new&gt; onboarding path &amp; owners." in result["message"]
+    assert "*Comments — 1*" in result["message"]
+    assert "Please include the Slack welcome flow." in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_linear_channel_issue_detail_resolves_number_from_thread(monkeypatch):
+    _reset_fake_client()
+    executor = SkillExecutor()
+    monkeypatch.setattr(executor_module, "get_settings", lambda: _settings())
+    monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeDataBackendClient)
+
+    await executor._execute_mlai_data_query(
+        skill=SimpleNamespace(name="mlai-data-query"),
+        text="show me number 2",
+        params={"action": "get_linear_channel_issue"},
+        user_id="U123",
+        channel_id="CTECH",
+        slack_team_id="TMLAI",
+        thread_history=[
+            {
+                "is_bot": True,
+                "text": "1. <https://linear.app/x|TECH-16> — First\n"
+                "2. <https://linear.app/y|TECH-19> — Second",
+            }
+        ],
+    )
+
+    assert FakeDataBackendClient.linear_detail_calls[0]["issue_identifier"] == "TECH-19"
+    assert FakeDataBackendClient.linear_list_calls == []
+
+
+def test_linear_channel_issue_pronoun_uses_detail_heading_not_relation():
+    executor = SkillExecutor()
+
+    reference = executor._resolve_linear_channel_issue_reference(
+        text="show me its comments",
+        params={},
+        thread_history=[
+            {
+                "bot_id": "BROO",
+                "text": "*<https://linear.app/x|TECH-16> — Main issue*\n"
+                "*Relations — 1*\n• blocks: `TECH-19` — Related issue",
+            }
+        ],
+    )
+
+    assert reference == "TECH-16"
+
+
+@pytest.mark.asyncio
+async def test_linear_channel_issue_detail_resolves_unique_title(monkeypatch):
+    _reset_fake_client()
+    executor = SkillExecutor()
+    monkeypatch.setattr(executor_module, "get_settings", lambda: _settings())
+    monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeDataBackendClient)
+
+    await executor._execute_mlai_data_query(
+        skill=SimpleNamespace(name="mlai-data-query"),
+        text="details on deployment alerts",
+        params={"action": "get_linear_channel_issue", "issue_reference": "deployment alerts"},
+        user_id="U123",
+        channel_id="CTECH",
+        slack_team_id="TMLAI",
+    )
+
+    assert len(FakeDataBackendClient.linear_list_calls) == 1
+    assert FakeDataBackendClient.linear_detail_calls[0]["issue_identifier"] == "TECH-19"
+
+
+@pytest.mark.asyncio
+async def test_linear_channel_issue_actions_require_slack_context(monkeypatch):
+    _reset_fake_client()
+    executor = SkillExecutor()
+    monkeypatch.setattr(executor_module, "get_settings", lambda: _settings())
+    monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeDataBackendClient)
+
+    result = await executor._execute_mlai_data_query(
+        skill=SimpleNamespace(name="mlai-data-query"),
+        text="show the MLAI_TECH Todo issues",
+        params={"action": "list_linear_channel_issues"},
+        user_id="U123",
+    )
+
+    assert "only available from its connected Slack channel" in result
+    assert FakeDataBackendClient.linear_list_calls == []
 
 
 @pytest.mark.asyncio

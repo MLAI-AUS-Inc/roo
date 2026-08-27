@@ -120,6 +120,9 @@ Linear features require the appropriate channel history/read scopes plus
 application may rotate credentials, so coordinate manifest changes with the
 runtime owner.
 
+For the local, channel-bound Linear issue reader workflow, see
+[`roo-standalone/docs/linear-channel-issues.md`](roo-standalone/docs/linear-channel-issues.md).
+
 ## Scheduled jobs
 
 The recommended production arrangement keeps `JOBS_SCHEDULER_ENABLED=false` in
