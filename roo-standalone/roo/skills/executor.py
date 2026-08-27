@@ -11185,7 +11185,11 @@ Chunk {index} source: {label}
         )
 
         try:
-            action = self._linear_channel_issue_action(text, params)
+            action = self._linear_channel_issue_action(
+                text,
+                params,
+                thread_history=thread_history,
+            )
             if action:
                 if not channel_id or not slack_team_id:
                     return "This Linear issue list is only available from its connected Slack channel."
@@ -11284,14 +11288,31 @@ Chunk {index} source: {label}
                 return f"The data query was rejected: {detail or 'invalid query'}"
             return detail or "The data query failed. Please try again in a moment."
 
-    def _linear_channel_issue_action(self, text: str, params: dict) -> str:
+    def _linear_channel_issue_action(
+        self,
+        text: str,
+        params: dict,
+        *,
+        thread_history: Optional[List[dict]] = None,
+    ) -> str:
         action = str(params.get("action") or "").strip().lower()
         if action in {"list_linear_channel_issues", "get_linear_channel_issue"}:
             return action
         text_lower = str(text or "").lower()
-        if self._linear_issue_identifier(text_lower) or re.search(
+        explicit_reference = str(
+            params.get("issue_reference")
+            or params.get("issue_identifier")
+            or ""
+        )
+        if self._linear_issue_identifier(explicit_reference) or self._linear_issue_identifier(text_lower):
+            return "get_linear_channel_issue"
+        detail_requested = bool(re.search(
             r"\b(?:more\s+(?:info|information)|details?|description|comments?|who\s+(?:owns|is\s+assigned)|number\s+\d+)\b",
             text_lower,
+        ))
+        if detail_requested and (
+            "linear" in text_lower
+            or self._linear_channel_issue_thread_context(thread_history)
         ):
             return "get_linear_channel_issue"
         if "linear" in text_lower and re.search(
@@ -11300,6 +11321,19 @@ Chunk {index} source: {label}
         ):
             return "list_linear_channel_issues"
         return ""
+
+    def _linear_channel_issue_thread_context(
+        self,
+        thread_history: Optional[List[dict]],
+    ) -> bool:
+        for message in reversed(thread_history or []):
+            if not isinstance(message, dict):
+                continue
+            if not (message.get("is_bot") or message.get("bot_id")):
+                continue
+            if "linear.app/" in str(message.get("text") or "").lower():
+                return True
+        return False
 
     def _resolve_linear_channel_issue_reference(
         self,

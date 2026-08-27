@@ -197,7 +197,7 @@ async def test_linear_channel_issue_detail_resolves_number_from_thread(monkeypat
     await executor._execute_mlai_data_query(
         skill=SimpleNamespace(name="mlai-data-query"),
         text="show me number 2",
-        params={"action": "get_linear_channel_issue"},
+        params={"action": "query"},
         user_id="U123",
         channel_id="CTECH",
         slack_team_id="TMLAI",
@@ -212,6 +212,35 @@ async def test_linear_channel_issue_detail_resolves_number_from_thread(monkeypat
 
     assert FakeDataBackendClient.linear_detail_calls[0]["issue_identifier"] == "TECH-19"
     assert FakeDataBackendClient.linear_list_calls == []
+
+
+@pytest.mark.asyncio
+async def test_generic_detail_query_is_not_reclassified_as_linear(monkeypatch):
+    _reset_fake_client()
+    FakeDataBackendClient.query_response = {
+        "resource": "content_factory_jobs",
+        "rows": [{"job_id": "job-1", "status": "error"}],
+        "returned_count": 1,
+        "limit": 20,
+        "offset": 0,
+        "has_more": False,
+    }
+    executor = SkillExecutor()
+    monkeypatch.setattr(executor_module, "get_settings", lambda: _settings())
+    monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeDataBackendClient)
+
+    await executor._execute_mlai_data_query(
+        skill=SimpleNamespace(name="mlai-data-query"),
+        text="show details for failed Content Factory jobs",
+        params={"action": "query"},
+        user_id="UADMIN",
+        channel_id="CTECH",
+        slack_team_id="TMLAI",
+    )
+
+    assert FakeDataBackendClient.linear_list_calls == []
+    assert FakeDataBackendClient.linear_detail_calls == []
+    assert FakeDataBackendClient.queries[0]["resource"] == "content_factory_jobs"
 
 
 def test_linear_channel_issue_pronoun_uses_detail_heading_not_relation():
