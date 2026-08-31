@@ -238,6 +238,7 @@ async def test_linear_channel_issue_detail_resolves_number_from_thread(monkeypat
         "labels?",
         "due date",
         "relations",
+        "tell me more about it",
     ],
 )
 async def test_linear_channel_issue_bare_detail_followup_executes_for_current_issue(
@@ -287,11 +288,20 @@ async def test_generic_detail_query_is_not_reclassified_as_linear(monkeypatch):
 
     await executor._execute_mlai_data_query(
         skill=SimpleNamespace(name="mlai-data-query"),
-        text="show details for failed Content Factory jobs",
-        params={"action": "query"},
+        text="show the status of failed Content Factory jobs",
+        params={"action": "query", "resource": "content_factory_jobs"},
         user_id="UADMIN",
         channel_id="CTECH",
         slack_team_id="TMLAI",
+        thread_history=[
+            {
+                "bot_id": "BROO",
+                "user": "UROO",
+                "text": "*2 issues in MLAI_TECH · Todo*\n"
+                "1. <https://linear.app/x|TECH-16> — First\n"
+                "2. <https://linear.app/y|TECH-19> — Second",
+            }
+        ],
     )
 
     assert FakeDataBackendClient.linear_list_calls == []
@@ -366,6 +376,7 @@ def test_linear_channel_issue_pronoun_uses_detail_heading_not_relation():
         "labels?",
         "due date",
         "relations",
+        "tell me more about it",
     ],
 )
 def test_linear_channel_issue_bare_detail_followup_uses_current_issue(text):

@@ -11356,6 +11356,9 @@ Chunk {index} source: {label}
             text_lower,
         ):
             return "list_linear_channel_issues"
+        query_resource = self._infer_data_query_resource(text_lower, params)
+        if action == "query" and query_resource and query_resource != "linear_issues":
+            return ""
         if action == "query" and not thread_context:
             return ""
         explicit_reference = str(
@@ -11381,7 +11384,7 @@ Chunk {index} source: {label}
 
     def _linear_contextual_detail_request(self, text: Any) -> bool:
         return bool(re.search(
-            r"\b(?:more\s+(?:info|information)|details?|descriptions?|comments?|"
+            r"\b(?:more\s+(?:info|information|about)|details?|descriptions?|comments?|"
             r"status|state|assignees?|owners?|ownership|owns|"
             r"who\s+(?:owns|is\s+assigned)|projects?|cycles?|priorit(?:y|ies)|"
             r"estimates?|due(?:\s+date)?|deadlines?|created(?:\s+by)?|updated|"
