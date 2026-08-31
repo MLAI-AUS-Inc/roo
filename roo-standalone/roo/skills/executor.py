@@ -11358,9 +11358,12 @@ Chunk {index} source: {label}
         )
         if ordinal_match:
             ordinal = int(ordinal_match.group(1))
-            identifiers = self._linear_issue_identifiers_from_thread(thread_history)
-            if 1 <= ordinal <= len(identifiers):
-                return identifiers[ordinal - 1]
+            numbered_identifier = self._linear_numbered_issue_identifier_from_thread(
+                thread_history,
+                ordinal=ordinal,
+            )
+            if numbered_identifier:
+                return numbered_identifier
 
         if re.search(
             r"\b(?:it|its|that|this|the\s+issue|the\s+ticket)\b",
@@ -11382,6 +11385,30 @@ Chunk {index} source: {label}
             re.IGNORECASE,
         )
         return match.group(0).upper() if match else ""
+
+    def _linear_numbered_issue_identifier_from_thread(
+        self,
+        thread_history: Optional[List[dict]],
+        *,
+        ordinal: int,
+    ) -> str:
+        numbered_issue = re.compile(
+            r"^\s*(\d{1,3})\.\s+(?:"
+            r"<https://linear\.app/[^|>]+\|([A-Z][A-Z0-9]{1,15}-\d+)>"
+            r"|`([A-Z][A-Z0-9]{1,15}-\d+)`)\s+—",
+            re.IGNORECASE,
+        )
+        for message in reversed(thread_history or []):
+            if not isinstance(message, dict):
+                continue
+            if not (message.get("is_bot") or message.get("bot_id")):
+                continue
+            for line in str(message.get("text") or "").splitlines():
+                match = numbered_issue.match(line)
+                if not match or int(match.group(1)) != ordinal:
+                    continue
+                return str(match.group(2) or match.group(3) or "").upper()
+        return ""
 
     def _linear_issue_identifiers_from_thread(
         self,

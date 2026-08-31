@@ -261,6 +261,52 @@ def test_linear_channel_issue_pronoun_uses_detail_heading_not_relation():
     assert reference == "TECH-16"
 
 
+def test_linear_channel_issue_ordinal_uses_older_numbered_list_not_newer_detail():
+    executor = SkillExecutor()
+
+    reference = executor._resolve_linear_channel_issue_reference(
+        text="show me number 2",
+        params={},
+        thread_history=[
+            {
+                "bot_id": "BROO",
+                "text": "*2 issues in MLAI_TECH · Todo*\n"
+                "1. <https://linear.app/x|TECH-16> — First\n"
+                "2. <https://linear.app/y|TECH-19> — Second",
+            },
+            {
+                "bot_id": "BROO",
+                "text": "*<https://linear.app/x|TECH-16> — Main issue*\n"
+                "*Relations — 1*\n• blocks: `TECH-99` — Related issue",
+            },
+        ],
+    )
+
+    assert reference == "TECH-19"
+
+
+def test_linear_channel_issue_ordinal_continues_past_newer_partial_list():
+    executor = SkillExecutor()
+
+    reference = executor._resolve_linear_channel_issue_reference(
+        text="show me number 2",
+        params={},
+        thread_history=[
+            {
+                "bot_id": "BROO",
+                "text": "1. <https://linear.app/x|TECH-16> — First\n"
+                "2. <https://linear.app/y|TECH-19> — Second",
+            },
+            {
+                "bot_id": "BROO",
+                "text": "1. <https://linear.app/z|TECH-42> — New single result",
+            },
+        ],
+    )
+
+    assert reference == "TECH-19"
+
+
 @pytest.mark.asyncio
 async def test_linear_channel_issue_detail_resolves_unique_title(monkeypatch):
     _reset_fake_client()
