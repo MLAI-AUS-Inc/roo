@@ -226,6 +226,38 @@ async def test_linear_channel_issue_detail_resolves_number_from_thread(monkeypat
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("text", ["show comments", "description", "who owns?"])
+async def test_linear_channel_issue_bare_detail_followup_executes_for_current_issue(
+    monkeypatch,
+    text,
+):
+    _reset_fake_client()
+    executor = SkillExecutor()
+    monkeypatch.setattr(executor_module, "get_settings", lambda: _settings())
+    monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeDataBackendClient)
+
+    await executor._execute_mlai_data_query(
+        skill=SimpleNamespace(name="mlai-data-query"),
+        text=text,
+        params={"action": "query"},
+        user_id="U123",
+        channel_id="CTECH",
+        slack_team_id="TMLAI",
+        thread_history=[
+            {
+                "bot_id": "BROO",
+                "user": "UROO",
+                "text": "*<https://linear.app/x|TECH-16> — Main issue*\n"
+                "*Relations — 1*\n• blocks: `TECH-19` — Related issue",
+            }
+        ],
+    )
+
+    assert FakeDataBackendClient.linear_detail_calls[0]["issue_identifier"] == "TECH-16"
+    assert FakeDataBackendClient.linear_list_calls == []
+
+
+@pytest.mark.asyncio
 async def test_generic_detail_query_is_not_reclassified_as_linear(monkeypatch):
     _reset_fake_client()
     FakeDataBackendClient.query_response = {
@@ -296,6 +328,26 @@ def test_linear_channel_issue_pronoun_uses_detail_heading_not_relation():
     reference = executor._resolve_linear_channel_issue_reference(
         text="show me its comments",
         params={},
+        thread_history=[
+            {
+                "bot_id": "BROO",
+                "user": "UROO",
+                "text": "*<https://linear.app/x|TECH-16> — Main issue*\n"
+                "*Relations — 1*\n• blocks: `TECH-19` — Related issue",
+            }
+        ],
+    )
+
+    assert reference == "TECH-16"
+
+
+@pytest.mark.parametrize("text", ["show comments", "description", "who owns?"])
+def test_linear_channel_issue_bare_detail_followup_uses_current_issue(text):
+    executor = SkillExecutor()
+
+    reference = executor._resolve_linear_channel_issue_reference(
+        text=text,
+        params={"action": "query"},
         thread_history=[
             {
                 "bot_id": "BROO",

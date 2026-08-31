@@ -11464,10 +11464,18 @@ Chunk {index} source: {label}
             if numbered_identifier:
                 return numbered_identifier
 
+        contextual_detail_request = bool(re.search(
+            r"\b(?:more\s+(?:info|information)|details?|description|comments?|who\s+(?:owns|is\s+assigned))\b",
+            str(text or ""),
+            re.IGNORECASE,
+        ))
         if re.search(
             r"\b(?:it|its|that|this|the\s+issue|the\s+ticket)\b",
             str(text or ""),
             re.IGNORECASE,
+        ) or (
+            contextual_detail_request
+            and not self._linear_issue_reference_tokens(text)
         ):
             identifiers = self._linear_issue_identifiers_from_thread(
                 thread_history,
@@ -11560,7 +11568,8 @@ Chunk {index} source: {label}
             "about", "all", "comments", "description", "detail", "details",
             "give", "info", "information", "issue", "linear", "me", "more",
             "on", "one", "please", "show", "tell", "that", "the", "this",
-            "ticket", "todo", "what", "whats", "with",
+            "ticket", "todo", "what", "whats", "who", "with", "owns",
+            "assigned", "is",
         }
         cleaned = re.sub(r"\[tech_team\]", " ", str(value or ""), flags=re.IGNORECASE)
         return {
