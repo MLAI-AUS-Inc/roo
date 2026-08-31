@@ -11545,6 +11545,10 @@ Chunk {index} source: {label}
                 heading_identifier = self._linear_issue_identifier(first_line)
                 if heading_identifier:
                     return [heading_identifier]
+                # A newer multi-issue list is an ambiguity boundary. Do not
+                # skip past it and silently reuse an older detail response.
+                if len(identifiers) > 1:
+                    return []
             if identifiers and (not prefer_single or len(identifiers) == 1):
                 return identifiers
         return []

@@ -387,6 +387,33 @@ def test_linear_channel_issue_bare_detail_followup_uses_current_issue(text):
     assert reference == "TECH-16"
 
 
+@pytest.mark.parametrize("text", ["status?", "tell me more about it"])
+def test_linear_channel_issue_context_stops_at_newer_ambiguous_list(text):
+    executor = SkillExecutor()
+
+    reference = executor._resolve_linear_channel_issue_reference(
+        text=text,
+        params={"action": "query"},
+        thread_history=[
+            {
+                "bot_id": "BROO",
+                "user": "UROO",
+                "text": "*<https://linear.app/x|TECH-16> — Older detail*\n"
+                "*Status:* Todo",
+            },
+            {
+                "bot_id": "BROO",
+                "user": "UROO",
+                "text": "*2 issues in MLAI_TECH · Todo*\n"
+                "1. <https://linear.app/y|TECH-19> — First\n"
+                "2. <https://linear.app/z|TECH-42> — Second",
+            },
+        ],
+    )
+
+    assert reference == text
+
+
 def test_linear_channel_issue_ordinal_uses_older_numbered_list_not_newer_detail():
     executor = SkillExecutor()
 
