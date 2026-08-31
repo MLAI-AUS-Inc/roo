@@ -11369,10 +11369,13 @@ Chunk {index} source: {label}
             r"\b(?:more\s+(?:info|information)|details?|description|comments?|who\s+(?:owns|is\s+assigned)|number\s+\d+)\b",
             text_lower,
         ))
+        bare_list_number = bool(re.fullmatch(r"\s*#?\d{1,3}\s*", text_lower))
         if detail_requested and (
             "linear" in text_lower
             or thread_context
         ):
+            return "get_linear_channel_issue"
+        if bare_list_number and thread_context:
             return "get_linear_channel_issue"
         return ""
 
@@ -11446,6 +11449,12 @@ Chunk {index} source: {label}
             str(text or ""),
             re.IGNORECASE,
         )
+        if not ordinal_match:
+            ordinal_match = re.fullmatch(
+                r"\s*#?(\d{1,3})\s*",
+                str(text or ""),
+                re.IGNORECASE,
+            )
         if ordinal_match:
             ordinal = int(ordinal_match.group(1))
             numbered_identifier = self._linear_numbered_issue_identifier_from_thread(

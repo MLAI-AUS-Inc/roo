@@ -197,7 +197,8 @@ async def test_linear_channel_issue_detail_by_identifier(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_linear_channel_issue_detail_resolves_number_from_thread(monkeypatch):
+@pytest.mark.parametrize("text", ["show me number 2", "2", "#2"])
+async def test_linear_channel_issue_detail_resolves_number_from_thread(monkeypatch, text):
     _reset_fake_client()
     executor = SkillExecutor()
     monkeypatch.setattr(executor_module, "get_settings", lambda: _settings())
@@ -205,7 +206,7 @@ async def test_linear_channel_issue_detail_resolves_number_from_thread(monkeypat
 
     await executor._execute_mlai_data_query(
         skill=SimpleNamespace(name="mlai-data-query"),
-        text="show me number 2",
+        text=text,
         params={"action": "query"},
         user_id="U123",
         channel_id="CTECH",
