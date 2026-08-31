@@ -163,9 +163,10 @@ class RooAgent:
         )
         if channel_id and thread_ts and not admin_thread:
             try:
-                fetched_thread_history = get_thread_messages(
-                    channel=channel_id,
-                    thread_ts=thread_ts,
+                fetched_thread_history = await asyncio.to_thread(
+                    get_thread_messages,
+                    channel_id,
+                    thread_ts,
                 )
                 if getattr(fetched_thread_history, "complete", True):
                     raw_thread_history = fetched_thread_history

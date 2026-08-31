@@ -190,7 +190,12 @@ class ThreadMessages(list[dict]):
         self.complete = complete
 
 
-def get_thread_messages(channel: str, thread_ts: str) -> list[dict]:
+def get_thread_messages(
+    channel: str,
+    thread_ts: str,
+    *,
+    max_pages: int = 10,
+) -> list[dict]:
     """
     Retrieve all messages in a Slack thread for context.
     
@@ -207,7 +212,7 @@ def get_thread_messages(channel: str, thread_ts: str) -> list[dict]:
         messages = []
         cursor = ""
         seen_cursors: set[str] = set()
-        while True:
+        for _page_number in range(max(1, max_pages)):
             request = {
                 "channel": channel,
                 "ts": thread_ts,
@@ -248,12 +253,16 @@ def get_thread_messages(channel: str, thread_ts: str) -> list[dict]:
                 else ""
             ).strip()
             if not next_cursor or next_cursor in seen_cursors:
-                break
+                print(f"📜 Retrieved {len(messages)} messages from thread")
+                return ThreadMessages(messages, complete=True)
             seen_cursors.add(next_cursor)
             cursor = next_cursor
 
-        print(f"📜 Retrieved {len(messages)} messages from thread")
-        return ThreadMessages(messages, complete=True)
+        print(
+            f"⚠️ Thread history exceeded {max_pages} pages; "
+            f"keeping {len(messages)} messages as incomplete"
+        )
+        return ThreadMessages(messages, complete=False)
         
     except Exception as e:
         print(f"❌ Thread history error: {e}")
