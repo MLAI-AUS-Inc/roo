@@ -687,6 +687,34 @@ async def test_data_query_catalog_calls_backend_catalog(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_explicit_catalog_action_survives_linear_thread_context(monkeypatch):
+    _reset_fake_client()
+    executor = SkillExecutor()
+    monkeypatch.setattr(executor_module, "get_settings", lambda: _settings())
+    monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeDataBackendClient)
+
+    result = await executor._execute_mlai_data_query(
+        skill=SimpleNamespace(name="mlai-data-query"),
+        text="show details about the available data resources",
+        params={"action": "catalog"},
+        user_id="U123",
+        channel_id="CTECH",
+        slack_team_id="TMLAI",
+        thread_history=[
+            {
+                "bot_id": "BROO",
+                "user": "UROO",
+                "text": "1. <https://linear.app/x|TECH-16> — First",
+            }
+        ],
+    )
+
+    assert FakeDataBackendClient.catalog_requesters == ["U123"]
+    assert FakeDataBackendClient.linear_detail_calls == []
+    assert "Available data resources" in result["message"]
+
+
+@pytest.mark.asyncio
 async def test_data_query_vibe_raising_count_payload(monkeypatch):
     _reset_fake_client()
     executor = SkillExecutor()

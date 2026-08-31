@@ -11350,6 +11350,13 @@ Chunk {index} source: {label}
         if action in {"list_linear_channel_issues", "get_linear_channel_issue"}:
             return action
         text_lower = str(text or "").lower()
+        explicit_identifier = (
+            self._linear_issue_identifier(params.get("issue_reference"))
+            or self._linear_issue_identifier(params.get("issue_identifier"))
+            or self._linear_issue_identifier(text_lower)
+        )
+        if action in {"catalog", "list_resources", "schema"} and not explicit_identifier:
+            return ""
         thread_context = self._linear_channel_issue_thread_context(thread_history)
         if "linear" in text_lower and re.search(
             r"\b(?:mlai[_ -]?tech|tech)\b.*\b(?:todo|issues?|tickets?|tasks?)\b",
@@ -11366,7 +11373,7 @@ Chunk {index} source: {label}
             or params.get("issue_identifier")
             or ""
         )
-        if self._linear_issue_identifier(explicit_reference) or self._linear_issue_identifier(text_lower):
+        if explicit_identifier or self._linear_issue_identifier(explicit_reference):
             return "get_linear_channel_issue"
         detail_requested = (
             self._linear_contextual_detail_request(text_lower)

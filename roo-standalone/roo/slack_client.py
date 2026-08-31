@@ -207,9 +207,21 @@ def get_thread_messages(channel: str, thread_ts: str) -> list[dict]:
             }
             if cursor:
                 request["cursor"] = cursor
-            response = client.conversations_replies(**request)
+            response = {}
+            page_error = None
+            for _attempt in range(2):
+                try:
+                    response = client.conversations_replies(**request)
+                    page_error = None
+                except Exception as exc:
+                    page_error = exc
+                    continue
+                if response.get("ok"):
+                    break
             if not response.get("ok"):
-                return []
+                reason = page_error or response.get("error") or "non-OK response"
+                print(f"⚠️ Thread history page failed; keeping {len(messages)} messages: {reason}")
+                return messages
             for msg in response.get("messages", []):
                 messages.append({
                     "user": msg.get("user", ""),
