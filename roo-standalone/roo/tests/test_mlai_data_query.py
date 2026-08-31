@@ -14,6 +14,11 @@ backend_module = importlib.import_module("roo.clients.mlai_backend")
 SkillExecutor = executor_module.SkillExecutor
 
 
+@pytest.fixture(autouse=True)
+def _roo_bot_identity(monkeypatch):
+    monkeypatch.setattr(executor_module, "get_bot_user_id", lambda: "UROO")
+
+
 def _settings(**overrides):
     values = {
         "MLAI_BACKEND_URL": "https://backend.test",
@@ -208,6 +213,7 @@ async def test_linear_channel_issue_detail_resolves_number_from_thread(monkeypat
         thread_history=[
             {
                 "is_bot": True,
+                "user": "UROO",
                 "text": "1. <https://linear.app/x|TECH-16> — First\n"
                 "2. <https://linear.app/y|TECH-19> — Second",
             }
@@ -285,6 +291,7 @@ def test_linear_channel_issue_pronoun_uses_detail_heading_not_relation():
         thread_history=[
             {
                 "bot_id": "BROO",
+                "user": "UROO",
                 "text": "*<https://linear.app/x|TECH-16> — Main issue*\n"
                 "*Relations — 1*\n• blocks: `TECH-19` — Related issue",
             }
@@ -303,12 +310,14 @@ def test_linear_channel_issue_ordinal_uses_older_numbered_list_not_newer_detail(
         thread_history=[
             {
                 "bot_id": "BROO",
+                "user": "UROO",
                 "text": "*2 issues in MLAI_TECH · Todo*\n"
                 "1. <https://linear.app/x|TECH-16> — First\n"
                 "2. <https://linear.app/y|TECH-19> — Second",
             },
             {
                 "bot_id": "BROO",
+                "user": "UROO",
                 "text": "*<https://linear.app/x|TECH-16> — Main issue*\n"
                 "*Relations — 1*\n• blocks: `TECH-99` — Related issue",
             },
@@ -327,17 +336,58 @@ def test_linear_channel_issue_ordinal_continues_past_newer_partial_list():
         thread_history=[
             {
                 "bot_id": "BROO",
+                "user": "UROO",
                 "text": "1. <https://linear.app/x|TECH-16> — First\n"
                 "2. <https://linear.app/y|TECH-19> — Second",
             },
             {
                 "bot_id": "BROO",
+                "user": "UROO",
                 "text": "1. <https://linear.app/z|TECH-42> — New single result",
             },
         ],
     )
 
     assert reference == "TECH-19"
+
+
+def test_linear_channel_issue_ordinal_ignores_newer_foreign_bot_list():
+    executor = SkillExecutor()
+
+    reference = executor._resolve_linear_channel_issue_reference(
+        text="show me number 2",
+        params={},
+        thread_history=[
+            {
+                "bot_id": "BROO",
+                "user": "UROO",
+                "text": "1. <https://linear.app/x|TECH-16> — First\n"
+                "2. <https://linear.app/y|TECH-19> — Second",
+            },
+            {
+                "bot_id": "BOTHER",
+                "user": "UOTHER",
+                "text": "1. <https://linear.app/a|TECH-98> — Foreign first\n"
+                "2. <https://linear.app/b|TECH-99> — Foreign second",
+            },
+        ],
+    )
+
+    assert reference == "TECH-19"
+
+
+def test_linear_channel_issue_context_ignores_foreign_bot_links():
+    executor = SkillExecutor()
+
+    assert not executor._linear_channel_issue_thread_context(
+        [
+            {
+                "bot_id": "BOTHER",
+                "user": "UOTHER",
+                "text": "1. <https://linear.app/a|TECH-98> — Foreign issue",
+            }
+        ]
+    )
 
 
 @pytest.mark.asyncio

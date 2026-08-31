@@ -228,6 +228,36 @@ def test_linear_skill_receives_bounded_slack_context_after_routing(monkeypatch):
     assert captured["slack_context"] == context
 
 
+def test_handle_mention_preserves_full_bounded_thread_history(monkeypatch):
+    agent = _make_agent()
+    captured = {}
+    agent.skill_executor = _CaptureExecutor(captured)
+    _patch_route(
+        monkeypatch,
+        RouteDecision(skill="content-factory", action="scan", params={"domain": "example.com"}),
+        captured,
+    )
+    history = [
+        {"user": "UROO" if index == 0 else "U123", "text": f"message {index}", "ts": str(index)}
+        for index in range(15)
+    ]
+    monkeypatch.setattr(
+        "roo.agent.get_thread_messages",
+        lambda channel, thread_ts: history,
+    )
+
+    asyncio.run(
+        agent.handle_mention(
+            text="scan example.com",
+            user_id="U123",
+            channel_id="C123",
+            thread_ts="1.1",
+        )
+    )
+
+    assert captured["thread_history"] == history
+
+
 def test_handle_mention_keeps_delegated_target_sticky_within_thread(monkeypatch):
     agent = _make_agent()
     agent.remember_thread_context(

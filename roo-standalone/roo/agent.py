@@ -162,12 +162,14 @@ class RooAgent:
         )
         if channel_id and thread_ts and not admin_thread:
             try:
-                # Fetch last 10 messages for context
+                # Slack bounds this helper to 50 thread messages. Preserve the
+                # complete result so a Roo-authored numbered Linear list remains
+                # available after a longer follow-up discussion; prompt builders
+                # apply their own smaller context windows where appropriate.
                 raw_history = get_thread_messages(channel=channel_id, thread_ts=thread_ts)
-                # Filter to recent ones and simple format
                 # We exclude the current message generally, but get_thread_messages returns all.
                 # Let's just pass the raw list to the executor/selector to handle filtering if needed.
-                thread_history = raw_history[-10:] if raw_history else []
+                thread_history = raw_history if raw_history else []
             except Exception as e:
                 print(f"⚠️ Failed to fetch thread history: {e}")
 

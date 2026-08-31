@@ -75,6 +75,7 @@ from ..points_flex import (
     parse_lifetime_earned,
 )
 from ..slack_client import (
+    get_bot_user_id,
     get_channel_id,
     get_channel_name,
     post_ephemeral,
@@ -11375,14 +11376,32 @@ Chunk {index} source: {label}
         self,
         thread_history: Optional[List[dict]],
     ) -> bool:
-        for message in reversed(thread_history or []):
-            if not isinstance(message, dict):
-                continue
-            if not (message.get("is_bot") or message.get("bot_id")):
-                continue
+        for message in reversed(
+            self._roo_authored_thread_messages(thread_history)
+        ):
             if "linear.app/" in str(message.get("text") or "").lower():
                 return True
         return False
+
+    def _roo_authored_thread_messages(
+        self,
+        thread_history: Optional[List[dict]],
+    ) -> list[dict]:
+        if not thread_history:
+            return []
+        try:
+            roo_user_id = str(get_bot_user_id() or "").strip()
+        except Exception:
+            return []
+        if not roo_user_id:
+            return []
+        return [
+            message
+            for message in thread_history
+            if isinstance(message, dict)
+            and (message.get("is_bot") or message.get("bot_id"))
+            and str(message.get("user") or "").strip() == roo_user_id
+        ]
 
     def _resolve_linear_channel_issue_reference(
         self,
@@ -11447,11 +11466,9 @@ Chunk {index} source: {label}
             r"|`([A-Z][A-Z0-9]{1,15}-\d+)`)\s+—",
             re.IGNORECASE,
         )
-        for message in reversed(thread_history or []):
-            if not isinstance(message, dict):
-                continue
-            if not (message.get("is_bot") or message.get("bot_id")):
-                continue
+        for message in reversed(
+            self._roo_authored_thread_messages(thread_history)
+        ):
             for line in str(message.get("text") or "").splitlines():
                 match = numbered_issue.match(line)
                 if not match or int(match.group(1)) != ordinal:
@@ -11465,11 +11482,9 @@ Chunk {index} source: {label}
         *,
         prefer_single: bool = False,
     ) -> list[str]:
-        for message in reversed(thread_history or []):
-            if not isinstance(message, dict):
-                continue
-            if not (message.get("is_bot") or message.get("bot_id")):
-                continue
+        for message in reversed(
+            self._roo_authored_thread_messages(thread_history)
+        ):
             identifiers = []
             for match in re.findall(
                 r"\b[A-Z][A-Z0-9]{1,15}-\d+\b",
