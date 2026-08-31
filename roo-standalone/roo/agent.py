@@ -163,10 +163,17 @@ class RooAgent:
         )
         if channel_id and thread_ts and not admin_thread:
             try:
-                raw_thread_history = get_thread_messages(
+                fetched_thread_history = get_thread_messages(
                     channel=channel_id,
                     thread_ts=thread_ts,
                 )
+                if getattr(fetched_thread_history, "complete", True):
+                    raw_thread_history = fetched_thread_history
+                else:
+                    # Cursor pages are oldest-to-newest. An incomplete prefix
+                    # cannot safely represent recent context or the latest
+                    # Linear list boundary, so fail closed for routing.
+                    print("⚠️ Ignoring incomplete Slack thread history")
                 # We exclude the current message generally, but get_thread_messages returns all.
                 # Let's just pass the raw list to the executor/selector to handle filtering if needed.
                 thread_history = raw_thread_history[-10:] if raw_thread_history else []

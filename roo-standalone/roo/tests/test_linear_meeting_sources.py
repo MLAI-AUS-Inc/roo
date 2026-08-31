@@ -100,6 +100,7 @@ def test_get_thread_messages_keeps_completed_pages_after_retry_failure(monkeypat
     messages = slack_client.get_thread_messages(channel="C1", thread_ts="1.1")
 
     assert [message["text"] for message in messages] == ["first"]
+    assert messages.complete is False
     assert len(requests) == 3
 
 

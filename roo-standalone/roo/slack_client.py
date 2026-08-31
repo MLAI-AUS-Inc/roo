@@ -182,6 +182,14 @@ def upload_file(
         raise
 
 
+class ThreadMessages(list[dict]):
+    """Slack thread messages with pagination completeness metadata."""
+
+    def __init__(self, messages=(), *, complete: bool = True):
+        super().__init__(messages)
+        self.complete = complete
+
+
 def get_thread_messages(channel: str, thread_ts: str) -> list[dict]:
     """
     Retrieve all messages in a Slack thread for context.
@@ -221,7 +229,7 @@ def get_thread_messages(channel: str, thread_ts: str) -> list[dict]:
             if not response.get("ok"):
                 reason = page_error or response.get("error") or "non-OK response"
                 print(f"⚠️ Thread history page failed; keeping {len(messages)} messages: {reason}")
-                return messages
+                return ThreadMessages(messages, complete=False)
             for msg in response.get("messages", []):
                 messages.append({
                     "user": msg.get("user", ""),
@@ -245,11 +253,11 @@ def get_thread_messages(channel: str, thread_ts: str) -> list[dict]:
             cursor = next_cursor
 
         print(f"📜 Retrieved {len(messages)} messages from thread")
-        return messages
+        return ThreadMessages(messages, complete=True)
         
     except Exception as e:
         print(f"❌ Thread history error: {e}")
-        return []
+        return ThreadMessages(complete=False)
 
 
 def get_recent_channel_messages(

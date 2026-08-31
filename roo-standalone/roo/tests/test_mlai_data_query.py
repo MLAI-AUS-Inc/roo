@@ -476,7 +476,7 @@ def test_linear_channel_issue_ordinal_uses_older_numbered_list_not_newer_detail(
     assert reference == "TECH-19"
 
 
-def test_linear_channel_issue_ordinal_continues_past_newer_partial_list():
+def test_linear_channel_issue_ordinal_stops_at_newer_shorter_list():
     executor = SkillExecutor()
 
     reference = executor._resolve_linear_channel_issue_reference(
@@ -497,7 +497,7 @@ def test_linear_channel_issue_ordinal_continues_past_newer_partial_list():
         ],
     )
 
-    assert reference == "TECH-19"
+    assert reference == "show me number 2"
 
 
 def test_linear_channel_issue_ordinal_ignores_newer_foreign_bot_list():

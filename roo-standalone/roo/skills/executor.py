@@ -11535,11 +11535,16 @@ Chunk {index} source: {label}
         ):
             if self._linear_channel_issue_empty_response(message.get("text")):
                 return ""
+            numbered_list_found = False
             for line in str(message.get("text") or "").splitlines():
                 match = numbered_issue.match(line)
-                if not match or int(match.group(1)) != ordinal:
+                if not match:
                     continue
-                return str(match.group(2) or match.group(3) or "").upper()
+                numbered_list_found = True
+                if int(match.group(1)) == ordinal:
+                    return str(match.group(2) or match.group(3) or "").upper()
+            if numbered_list_found:
+                return ""
         return ""
 
     def _linear_issue_identifiers_from_thread(
