@@ -285,7 +285,11 @@ class SkillExecutor:
                     user_id,
                     channel_id=channel_id,
                     thread_ts=thread_ts,
-                    thread_history=thread_history,
+                    thread_history=(
+                        kwargs.get("linear_thread_history")
+                        if kwargs.get("linear_thread_history") is not None
+                        else thread_history
+                    ),
                     slack_team_id=kwargs.get("slack_team_id"),
                 )
             elif skill.name == "github-integration":
@@ -11376,12 +11380,30 @@ Chunk {index} source: {label}
         self,
         thread_history: Optional[List[dict]],
     ) -> bool:
-        for message in reversed(
-            self._roo_authored_thread_messages(thread_history)
-        ):
-            if "linear.app/" in str(message.get("text") or "").lower():
-                return True
-        return False
+        return bool(self._linear_channel_issue_response_messages(thread_history))
+
+    def _linear_channel_issue_response_messages(
+        self,
+        thread_history: Optional[List[dict]],
+    ) -> list[dict]:
+        numbered_issue = re.compile(
+            r"^\s*\d{1,3}\.\s+(?:"
+            r"<https://linear\.app/[^|>]+\|[A-Z][A-Z0-9]{1,15}-\d+>"
+            r"|`[A-Z][A-Z0-9]{1,15}-\d+`)\s+—",
+            re.IGNORECASE | re.MULTILINE,
+        )
+        detail_heading = re.compile(
+            r"^\s*\*(?:"
+            r"<https://linear\.app/[^|>]+\|[A-Z][A-Z0-9]{1,15}-\d+>"
+            r"|`[A-Z][A-Z0-9]{1,15}-\d+`)\s+—[^\n]+\*\s*$",
+            re.IGNORECASE | re.MULTILINE,
+        )
+        return [
+            message
+            for message in self._roo_authored_thread_messages(thread_history)
+            if numbered_issue.search(str(message.get("text") or ""))
+            or detail_heading.search(str(message.get("text") or ""))
+        ]
 
     def _roo_authored_thread_messages(
         self,
@@ -11467,7 +11489,7 @@ Chunk {index} source: {label}
             re.IGNORECASE,
         )
         for message in reversed(
-            self._roo_authored_thread_messages(thread_history)
+            self._linear_channel_issue_response_messages(thread_history)
         ):
             for line in str(message.get("text") or "").splitlines():
                 match = numbered_issue.match(line)
@@ -11483,7 +11505,7 @@ Chunk {index} source: {label}
         prefer_single: bool = False,
     ) -> list[str]:
         for message in reversed(
-            self._roo_authored_thread_messages(thread_history)
+            self._linear_channel_issue_response_messages(thread_history)
         ):
             identifiers = []
             for match in re.findall(

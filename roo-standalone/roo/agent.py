@@ -156,20 +156,20 @@ class RooAgent:
         
         # 0. Fetch Thread Context (if available)
         thread_history = []
+        raw_thread_history = []
         admin_thread = bool(
             thread_context
             and thread_context.get("skill_name") == "admin-brain"
         )
         if channel_id and thread_ts and not admin_thread:
             try:
-                # Slack bounds this helper to 50 thread messages. Preserve the
-                # complete result so a Roo-authored numbered Linear list remains
-                # available after a longer follow-up discussion; prompt builders
-                # apply their own smaller context windows where appropriate.
-                raw_history = get_thread_messages(channel=channel_id, thread_ts=thread_ts)
+                raw_thread_history = get_thread_messages(
+                    channel=channel_id,
+                    thread_ts=thread_ts,
+                )
                 # We exclude the current message generally, but get_thread_messages returns all.
                 # Let's just pass the raw list to the executor/selector to handle filtering if needed.
-                thread_history = raw_history if raw_history else []
+                thread_history = raw_thread_history[-10:] if raw_thread_history else []
             except Exception as e:
                 print(f"⚠️ Failed to fetch thread history: {e}")
 
@@ -303,6 +303,12 @@ class RooAgent:
                     }
             execution_kwargs = dict(kwargs)
             execution_thread_history = thread_history
+            if skill.name == "mlai-data-query":
+                # Slack already bounds this history to 50 messages. Only the
+                # Linear channel reader needs the older messages to resolve a
+                # numbered follow-up after a long thread; all other consumers
+                # retain the established ten-message prompt window.
+                execution_kwargs["linear_thread_history"] = raw_thread_history
             if skill.name == "linear-meeting-actions":
                 from .linear_context import build_linear_slack_context
 

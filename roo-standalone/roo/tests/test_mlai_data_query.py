@@ -275,6 +275,13 @@ async def test_explicit_synced_linear_detail_query_is_not_reclassified_as_live(m
         user_id="UADMIN",
         channel_id="CTECH",
         slack_team_id="TMLAI",
+        thread_history=[
+            {
+                "bot_id": "BROO",
+                "user": "UROO",
+                "text": "Created <https://linear.app/mlai/issue/TECH-99|TECH-99> from the meeting.",
+            }
+        ],
     )
 
     assert FakeDataBackendClient.linear_list_calls == []
@@ -385,6 +392,20 @@ def test_linear_channel_issue_context_ignores_foreign_bot_links():
                 "bot_id": "BOTHER",
                 "user": "UOTHER",
                 "text": "1. <https://linear.app/a|TECH-98> — Foreign issue",
+            }
+        ]
+    )
+
+
+def test_linear_channel_issue_context_ignores_other_roo_linear_outputs():
+    executor = SkillExecutor()
+
+    assert not executor._linear_channel_issue_thread_context(
+        [
+            {
+                "bot_id": "BROO",
+                "user": "UROO",
+                "text": "Created <https://linear.app/mlai/issue/TECH-99|TECH-99> from the meeting.",
             }
         ]
     )
