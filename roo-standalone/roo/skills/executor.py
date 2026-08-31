@@ -11345,6 +11345,14 @@ Chunk {index} source: {label}
         if action in {"list_linear_channel_issues", "get_linear_channel_issue"}:
             return action
         text_lower = str(text or "").lower()
+        thread_context = self._linear_channel_issue_thread_context(thread_history)
+        if "linear" in text_lower and re.search(
+            r"\b(?:mlai[_ -]?tech|tech)\b.*\b(?:todo|issues?|tickets?|tasks?)\b",
+            text_lower,
+        ):
+            return "list_linear_channel_issues"
+        if action == "query" and not thread_context:
+            return ""
         explicit_reference = str(
             params.get("issue_reference")
             or params.get("issue_identifier")
@@ -11358,14 +11366,9 @@ Chunk {index} source: {label}
         ))
         if detail_requested and (
             "linear" in text_lower
-            or self._linear_channel_issue_thread_context(thread_history)
+            or thread_context
         ):
             return "get_linear_channel_issue"
-        if "linear" in text_lower and re.search(
-            r"\b(?:mlai[_ -]?tech|tech)\b.*\b(?:todo|issues?|tickets?|tasks?)\b",
-            text_lower,
-        ):
-            return "list_linear_channel_issues"
         return ""
 
     def _linear_channel_issue_thread_context(

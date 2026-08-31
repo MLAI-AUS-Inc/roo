@@ -247,6 +247,35 @@ async def test_generic_detail_query_is_not_reclassified_as_linear(monkeypatch):
     assert FakeDataBackendClient.queries[0]["resource"] == "content_factory_jobs"
 
 
+@pytest.mark.asyncio
+async def test_explicit_synced_linear_detail_query_is_not_reclassified_as_live(monkeypatch):
+    _reset_fake_client()
+    FakeDataBackendClient.query_response = {
+        "resource": "linear_issues",
+        "rows": [{"identifier": "TECH-16", "title": "Synced issue"}],
+        "returned_count": 1,
+        "limit": 20,
+        "offset": 0,
+        "has_more": False,
+    }
+    executor = SkillExecutor()
+    monkeypatch.setattr(executor_module, "get_settings", lambda: _settings())
+    monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeDataBackendClient)
+
+    await executor._execute_mlai_data_query(
+        skill=SimpleNamespace(name="mlai-data-query"),
+        text="show details for Linear issues synced for Studynash",
+        params={"action": "query", "resource": "linear_issues"},
+        user_id="UADMIN",
+        channel_id="CTECH",
+        slack_team_id="TMLAI",
+    )
+
+    assert FakeDataBackendClient.linear_list_calls == []
+    assert FakeDataBackendClient.linear_detail_calls == []
+    assert FakeDataBackendClient.queries[0]["resource"] == "linear_issues"
+
+
 def test_linear_channel_issue_pronoun_uses_detail_heading_not_relation():
     executor = SkillExecutor()
 
