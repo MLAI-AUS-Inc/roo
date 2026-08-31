@@ -11220,15 +11220,22 @@ Chunk {index} source: {label}
                 )
                 issue_identifier = self._linear_issue_identifier(issue_reference)
                 if not issue_identifier:
-                    issue_list = await client.list_linear_channel_issues(
-                        slack_workspace_id=slack_team_id,
-                        slack_channel_id=channel_id,
-                        requester_slack_id=user_id,
-                        limit=100,
+                    issue_candidates, pagination_complete = (
+                        await self._list_all_linear_channel_issues(
+                            client,
+                            slack_workspace_id=slack_team_id,
+                            slack_channel_id=channel_id,
+                            requester_slack_id=user_id,
+                        )
                     )
+                    if not pagination_complete:
+                        return (
+                            "I couldn't finish searching the complete Linear issue list. "
+                            "Please try again or reply with the issue key."
+                        )
                     resolution = self._match_linear_channel_issue(
                         issue_reference,
-                        issue_list.get("issues") or [],
+                        issue_candidates,
                     )
                     if resolution.get("ambiguous"):
                         return self._format_linear_issue_choices(resolution["matches"])
@@ -11287,6 +11294,45 @@ Chunk {index} source: {label}
             if exc.response.status_code == 400:
                 return f"The data query was rejected: {detail or 'invalid query'}"
             return detail or "The data query failed. Please try again in a moment."
+
+    async def _list_all_linear_channel_issues(
+        self,
+        client: Any,
+        *,
+        slack_workspace_id: str,
+        slack_channel_id: str,
+        requester_slack_id: str,
+    ) -> tuple[list[dict], bool]:
+        issues: list[dict] = []
+        cursor = ""
+        seen_cursors: set[str] = set()
+        while True:
+            request = {
+                "slack_workspace_id": slack_workspace_id,
+                "slack_channel_id": slack_channel_id,
+                "requester_slack_id": requester_slack_id,
+                "limit": 100,
+            }
+            if cursor:
+                request["after"] = cursor
+            page = await client.list_linear_channel_issues(**request)
+            issues.extend(
+                issue
+                for issue in (page.get("issues") or [])
+                if isinstance(issue, dict)
+            )
+            page_info = (
+                page.get("pageInfo")
+                if isinstance(page.get("pageInfo"), dict)
+                else {}
+            )
+            if not page_info.get("hasNextPage"):
+                return issues, True
+            next_cursor = str(page_info.get("endCursor") or "").strip()
+            if not next_cursor or next_cursor in seen_cursors:
+                return issues, False
+            seen_cursors.add(next_cursor)
+            cursor = next_cursor
 
     def _linear_channel_issue_action(
         self,

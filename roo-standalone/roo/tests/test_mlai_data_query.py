@@ -38,6 +38,7 @@ class FakeDataBackendClient:
     catalog_requesters = []
     queries = []
     linear_list_calls = []
+    linear_list_responses = []
     linear_detail_calls = []
     linear_list_response = {
         "list": {"displayName": "MLAI_TECH · Todo"},
@@ -92,6 +93,8 @@ class FakeDataBackendClient:
 
     async def list_linear_channel_issues(self, **kwargs):
         self.__class__.linear_list_calls.append(kwargs)
+        if self.__class__.linear_list_responses:
+            return self.__class__.linear_list_responses.pop(0)
         return self.linear_list_response
 
     async def get_linear_channel_issue(self, **kwargs):
@@ -120,6 +123,7 @@ def _reset_fake_client():
     FakeDataBackendClient.catalog_requesters = []
     FakeDataBackendClient.queries = []
     FakeDataBackendClient.linear_list_calls = []
+    FakeDataBackendClient.linear_list_responses = []
     FakeDataBackendClient.linear_detail_calls = []
     FakeDataBackendClient.last_init = None
 
@@ -325,6 +329,81 @@ async def test_linear_channel_issue_detail_resolves_unique_title(monkeypatch):
 
     assert len(FakeDataBackendClient.linear_list_calls) == 1
     assert FakeDataBackendClient.linear_detail_calls[0]["issue_identifier"] == "TECH-19"
+
+
+@pytest.mark.asyncio
+async def test_linear_channel_issue_title_resolution_follows_page_cursor(monkeypatch):
+    _reset_fake_client()
+    FakeDataBackendClient.linear_list_responses = [
+        {
+            "issues": [{"identifier": "TECH-16", "title": "First page issue"}],
+            "pageInfo": {"hasNextPage": True, "endCursor": "cursor-1"},
+        },
+        {
+            "issues": [{"identifier": "TECH-42", "title": "Repair deployment alerts"}],
+            "pageInfo": {"hasNextPage": False, "endCursor": None},
+        },
+    ]
+    executor = SkillExecutor()
+    monkeypatch.setattr(executor_module, "get_settings", lambda: _settings())
+    monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeDataBackendClient)
+
+    await executor._execute_mlai_data_query(
+        skill=SimpleNamespace(name="mlai-data-query"),
+        text="details on deployment alerts",
+        params={"action": "get_linear_channel_issue", "issue_reference": "deployment alerts"},
+        user_id="U123",
+        channel_id="CTECH",
+        slack_team_id="TMLAI",
+    )
+
+    assert FakeDataBackendClient.linear_list_calls == [
+        {
+            "slack_workspace_id": "TMLAI",
+            "slack_channel_id": "CTECH",
+            "requester_slack_id": "U123",
+            "limit": 100,
+        },
+        {
+            "slack_workspace_id": "TMLAI",
+            "slack_channel_id": "CTECH",
+            "requester_slack_id": "U123",
+            "limit": 100,
+            "after": "cursor-1",
+        },
+    ]
+    assert FakeDataBackendClient.linear_detail_calls[0]["issue_identifier"] == "TECH-42"
+
+
+@pytest.mark.asyncio
+async def test_linear_channel_issue_title_resolution_detects_cross_page_ambiguity(monkeypatch):
+    _reset_fake_client()
+    FakeDataBackendClient.linear_list_responses = [
+        {
+            "issues": [{"identifier": "TECH-19", "title": "Repair deployment alerts"}],
+            "pageInfo": {"hasNextPage": True, "endCursor": "cursor-1"},
+        },
+        {
+            "issues": [{"identifier": "TECH-42", "title": "Deployment alerts cleanup"}],
+            "pageInfo": {"hasNextPage": False, "endCursor": None},
+        },
+    ]
+    executor = SkillExecutor()
+    monkeypatch.setattr(executor_module, "get_settings", lambda: _settings())
+    monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeDataBackendClient)
+
+    result = await executor._execute_mlai_data_query(
+        skill=SimpleNamespace(name="mlai-data-query"),
+        text="details on deployment alerts",
+        params={"action": "get_linear_channel_issue", "issue_reference": "deployment alerts"},
+        user_id="U123",
+        channel_id="CTECH",
+        slack_team_id="TMLAI",
+    )
+
+    assert "TECH-19" in result
+    assert "TECH-42" in result
+    assert FakeDataBackendClient.linear_detail_calls == []
 
 
 @pytest.mark.asyncio
