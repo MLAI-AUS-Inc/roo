@@ -11365,10 +11365,10 @@ Chunk {index} source: {label}
         )
         if self._linear_issue_identifier(explicit_reference) or self._linear_issue_identifier(text_lower):
             return "get_linear_channel_issue"
-        detail_requested = bool(re.search(
-            r"\b(?:more\s+(?:info|information)|details?|description|comments?|who\s+(?:owns|is\s+assigned)|number\s+\d+)\b",
-            text_lower,
-        ))
+        detail_requested = (
+            self._linear_contextual_detail_request(text_lower)
+            or bool(re.search(r"\bnumber\s+\d+\b", text_lower))
+        )
         bare_list_number = bool(re.fullmatch(r"\s*#?\d{1,3}\s*", text_lower))
         if detail_requested and (
             "linear" in text_lower
@@ -11378,6 +11378,17 @@ Chunk {index} source: {label}
         if bare_list_number and thread_context:
             return "get_linear_channel_issue"
         return ""
+
+    def _linear_contextual_detail_request(self, text: Any) -> bool:
+        return bool(re.search(
+            r"\b(?:more\s+(?:info|information)|details?|descriptions?|comments?|"
+            r"status|state|assignees?|owners?|ownership|owns|"
+            r"who\s+(?:owns|is\s+assigned)|projects?|cycles?|priorit(?:y|ies)|"
+            r"estimates?|due(?:\s+date)?|deadlines?|created(?:\s+by)?|updated|"
+            r"labels?|attachments?|relations?|metadata)\b",
+            str(text or ""),
+            re.IGNORECASE,
+        ))
 
     def _linear_channel_issue_thread_context(
         self,
@@ -11464,11 +11475,7 @@ Chunk {index} source: {label}
             if numbered_identifier:
                 return numbered_identifier
 
-        contextual_detail_request = bool(re.search(
-            r"\b(?:more\s+(?:info|information)|details?|description|comments?|who\s+(?:owns|is\s+assigned))\b",
-            str(text or ""),
-            re.IGNORECASE,
-        ))
+        contextual_detail_request = self._linear_contextual_detail_request(text)
         if re.search(
             r"\b(?:it|its|that|this|the\s+issue|the\s+ticket)\b",
             str(text or ""),
@@ -11569,7 +11576,12 @@ Chunk {index} source: {label}
             "give", "info", "information", "issue", "linear", "me", "more",
             "on", "one", "please", "show", "tell", "that", "the", "this",
             "ticket", "todo", "what", "whats", "who", "with", "owns",
-            "assigned", "is",
+            "assigned", "is", "status", "state", "assignee", "assignees",
+            "owner", "owners", "ownership", "project", "projects", "cycle",
+            "cycles", "priority", "priorities", "estimate", "estimates",
+            "due", "date", "deadline", "deadlines", "created", "by",
+            "updated", "label", "labels", "attachment", "attachments",
+            "relation", "relations", "metadata",
         }
         cleaned = re.sub(r"\[tech_team\]", " ", str(value or ""), flags=re.IGNORECASE)
         return {

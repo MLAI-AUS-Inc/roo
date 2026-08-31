@@ -226,7 +226,20 @@ async def test_linear_channel_issue_detail_resolves_number_from_thread(monkeypat
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("text", ["show comments", "description", "who owns?"])
+@pytest.mark.parametrize(
+    "text",
+    [
+        "show comments",
+        "description",
+        "who owns?",
+        "status?",
+        "show priority",
+        "attachments?",
+        "labels?",
+        "due date",
+        "relations",
+    ],
+)
 async def test_linear_channel_issue_bare_detail_followup_executes_for_current_issue(
     monkeypatch,
     text,
@@ -341,7 +354,20 @@ def test_linear_channel_issue_pronoun_uses_detail_heading_not_relation():
     assert reference == "TECH-16"
 
 
-@pytest.mark.parametrize("text", ["show comments", "description", "who owns?"])
+@pytest.mark.parametrize(
+    "text",
+    [
+        "show comments",
+        "description",
+        "who owns?",
+        "status?",
+        "show priority",
+        "attachments?",
+        "labels?",
+        "due date",
+        "relations",
+    ],
+)
 def test_linear_channel_issue_bare_detail_followup_uses_current_issue(text):
     executor = SkillExecutor()
 
