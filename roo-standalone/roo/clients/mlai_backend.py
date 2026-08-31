@@ -2188,6 +2188,64 @@ class MLAIBackendClient:
         self._raise_for_status_or_backend_unavailable(response)
         return response.json()
 
+    async def list_linear_channel_issues(
+        self,
+        *,
+        slack_workspace_id: str,
+        slack_channel_id: str,
+        requester_slack_id: str,
+        limit: int = 50,
+        after: Optional[str] = None,
+    ) -> dict:
+        """List the live Linear queue bound to the invoking Slack channel."""
+        payload: Dict[str, Any] = {
+            "slack_workspace_id": str(slack_workspace_id or "").strip(),
+            "slack_channel_id": str(slack_channel_id or "").strip(),
+            "requester_slack_id": self._clean_slack_id(requester_slack_id),
+            "limit": max(1, min(int(limit or 50), 100)),
+        }
+        if after:
+            payload["after"] = str(after).strip()
+        response = await self._request(
+            "POST",
+            "/api/v1/integrations/linear/channel-issues/list",
+            json=payload,
+            timeout=30.0,
+            transport_retries=1,
+            retry_backoff_seconds=0.25,
+            circuit_breaker=True,
+        )
+        self._raise_for_status_or_backend_unavailable(response)
+        return response.json()
+
+    async def get_linear_channel_issue(
+        self,
+        *,
+        slack_workspace_id: str,
+        slack_channel_id: str,
+        requester_slack_id: str,
+        issue_identifier: str,
+        include_comments: bool = True,
+    ) -> dict:
+        """Get one approved Linear issue and its bounded comment history."""
+        response = await self._request(
+            "POST",
+            "/api/v1/integrations/linear/channel-issues/detail",
+            json={
+                "slack_workspace_id": str(slack_workspace_id or "").strip(),
+                "slack_channel_id": str(slack_channel_id or "").strip(),
+                "requester_slack_id": self._clean_slack_id(requester_slack_id),
+                "issue_identifier": str(issue_identifier or "").strip(),
+                "include_comments": bool(include_comments),
+            },
+            timeout=45.0,
+            transport_retries=1,
+            retry_backoff_seconds=0.25,
+            circuit_breaker=True,
+        )
+        self._raise_for_status_or_backend_unavailable(response)
+        return response.json()
+
     async def book_coworking(self, slack_user_id: str, booking_date: str, slack_channel_id: Optional[str] = None) -> dict:
         """Book a coworking day."""
         try:

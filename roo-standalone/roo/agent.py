@@ -156,18 +156,28 @@ class RooAgent:
         
         # 0. Fetch Thread Context (if available)
         thread_history = []
+        raw_thread_history = []
         admin_thread = bool(
             thread_context
             and thread_context.get("skill_name") == "admin-brain"
         )
         if channel_id and thread_ts and not admin_thread:
             try:
-                # Fetch last 10 messages for context
-                raw_history = get_thread_messages(channel=channel_id, thread_ts=thread_ts)
-                # Filter to recent ones and simple format
+                fetched_thread_history = await asyncio.to_thread(
+                    get_thread_messages,
+                    channel_id,
+                    thread_ts,
+                )
+                if getattr(fetched_thread_history, "complete", True):
+                    raw_thread_history = fetched_thread_history
+                else:
+                    # Cursor pages are oldest-to-newest. An incomplete prefix
+                    # cannot safely represent recent context or the latest
+                    # Linear list boundary, so fail closed for routing.
+                    print("⚠️ Ignoring incomplete Slack thread history")
                 # We exclude the current message generally, but get_thread_messages returns all.
                 # Let's just pass the raw list to the executor/selector to handle filtering if needed.
-                thread_history = raw_history[-10:] if raw_history else []
+                thread_history = raw_thread_history[-10:] if raw_thread_history else []
             except Exception as e:
                 print(f"⚠️ Failed to fetch thread history: {e}")
 
@@ -301,6 +311,13 @@ class RooAgent:
                     }
             execution_kwargs = dict(kwargs)
             execution_thread_history = thread_history
+            if skill.name == "mlai-data-query":
+                # Only the Linear channel reader needs paginated history to
+                # resolve a numbered follow-up after a long thread. It scans
+                # deterministic Roo output rather than adding the history to a
+                # model prompt; all other consumers retain the established
+                # ten-message prompt window.
+                execution_kwargs["linear_thread_history"] = raw_thread_history
             if skill.name == "linear-meeting-actions":
                 from .linear_context import build_linear_slack_context
 

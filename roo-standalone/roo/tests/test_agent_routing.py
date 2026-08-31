@@ -42,6 +42,12 @@ def _add_linear_skill(agent: RooAgent) -> None:
     )
 
 
+def _add_mlai_data_query_skill(agent: RooAgent) -> None:
+    agent.skills.append(
+        Skill(name="mlai-data-query", description="data", content="", path=Path("."))
+    )
+
+
 class _CaptureExecutor:
     def __init__(self, captured: dict):
         self._captured = captured
@@ -226,6 +232,103 @@ def test_linear_skill_receives_bounded_slack_context_after_routing(monkeypatch):
     assert result["skill_used"] == "linear-meeting-actions"
     assert captured["thread_history"] == context["messages"]
     assert captured["slack_context"] == context
+
+
+def test_handle_mention_scopes_full_history_to_mlai_data_query(monkeypatch):
+    agent = _make_agent()
+    _add_mlai_data_query_skill(agent)
+    captured = {}
+    agent.skill_executor = _CaptureExecutor(captured)
+    _patch_route(
+        monkeypatch,
+        RouteDecision(skill="mlai-data-query", action="query", params={}),
+        captured,
+    )
+    history = [
+        {"user": "UROO" if index == 0 else "U123", "text": f"message {index}", "ts": str(index)}
+        for index in range(15)
+    ]
+    monkeypatch.setattr(
+        "roo.agent.get_thread_messages",
+        lambda channel, thread_ts: history,
+    )
+
+    asyncio.run(
+        agent.handle_mention(
+            text="show me number 2",
+            user_id="U123",
+            channel_id="C123",
+            thread_ts="1.1",
+        )
+    )
+
+    assert captured["thread_history"] == history[-10:]
+    assert captured["linear_thread_history"] == history
+
+
+def test_handle_mention_keeps_non_linear_execution_history_recent(monkeypatch):
+    agent = _make_agent()
+    captured = {}
+    agent.skill_executor = _CaptureExecutor(captured)
+    _patch_route(
+        monkeypatch,
+        RouteDecision(skill="content-factory", action="scan", params={"domain": "example.com"}),
+        captured,
+    )
+    history = [
+        {"user": "U123", "text": f"message {index}", "ts": str(index)}
+        for index in range(15)
+    ]
+    monkeypatch.setattr(
+        "roo.agent.get_thread_messages",
+        lambda channel, thread_ts: history,
+    )
+
+    asyncio.run(
+        agent.handle_mention(
+            text="scan example.com",
+            user_id="U123",
+            channel_id="C123",
+            thread_ts="1.1",
+        )
+    )
+
+    assert captured["thread_history"] == history[-10:]
+    assert "linear_thread_history" not in captured
+
+
+def test_handle_mention_ignores_incomplete_thread_prefix(monkeypatch):
+    agent = _make_agent()
+    _add_mlai_data_query_skill(agent)
+    captured = {}
+    agent.skill_executor = _CaptureExecutor(captured)
+    _patch_route(
+        monkeypatch,
+        RouteDecision(skill="mlai-data-query", action="query", params={}),
+        captured,
+    )
+
+    class IncompleteHistory(list):
+        complete = False
+
+    monkeypatch.setattr(
+        "roo.agent.get_thread_messages",
+        lambda channel, thread_ts: IncompleteHistory(
+            [{"user": "UROO", "text": "stale list", "ts": "1"}]
+        ),
+    )
+
+    asyncio.run(
+        agent.handle_mention(
+            text="show me number 2",
+            user_id="U123",
+            channel_id="C123",
+            thread_ts="1.1",
+        )
+    )
+
+    assert captured["thread_history"] == []
+    assert captured["linear_thread_history"] == []
 
 
 def test_handle_mention_keeps_delegated_target_sticky_within_thread(monkeypatch):

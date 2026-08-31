@@ -182,7 +182,20 @@ def upload_file(
         raise
 
 
-def get_thread_messages(channel: str, thread_ts: str) -> list[dict]:
+class ThreadMessages(list[dict]):
+    """Slack thread messages with pagination completeness metadata."""
+
+    def __init__(self, messages=(), *, complete: bool = True):
+        super().__init__(messages)
+        self.complete = complete
+
+
+def get_thread_messages(
+    channel: str,
+    thread_ts: str,
+    *,
+    max_pages: int = 10,
+) -> list[dict]:
     """
     Retrieve all messages in a Slack thread for context.
     
@@ -196,14 +209,32 @@ def get_thread_messages(channel: str, thread_ts: str) -> list[dict]:
     client = get_slack_client()
     
     try:
-        response = client.conversations_replies(
-            channel=channel,
-            ts=thread_ts,
-            limit=50
-        )
-        
-        if response.get("ok"):
-            messages = []
+        messages = []
+        cursor = ""
+        seen_cursors: set[str] = set()
+        for _page_number in range(max(1, max_pages)):
+            request = {
+                "channel": channel,
+                "ts": thread_ts,
+                "limit": 50,
+            }
+            if cursor:
+                request["cursor"] = cursor
+            response = {}
+            page_error = None
+            for _attempt in range(2):
+                try:
+                    response = client.conversations_replies(**request)
+                    page_error = None
+                except Exception as exc:
+                    page_error = exc
+                    continue
+                if response.get("ok"):
+                    break
+            if not response.get("ok"):
+                reason = page_error or response.get("error") or "non-OK response"
+                print(f"⚠️ Thread history page failed; keeping {len(messages)} messages: {reason}")
+                return ThreadMessages(messages, complete=False)
             for msg in response.get("messages", []):
                 messages.append({
                     "user": msg.get("user", ""),
@@ -215,14 +246,27 @@ def get_thread_messages(channel: str, thread_ts: str) -> list[dict]:
                     "is_bot": bool(msg.get("bot_id")),
                     "files": msg.get("files", []),
                 })
-            print(f"📜 Retrieved {len(messages)} messages from thread")
-            return messages
-        
-        return []
+            response_metadata = response.get("response_metadata")
+            next_cursor = str(
+                response_metadata.get("next_cursor")
+                if isinstance(response_metadata, dict)
+                else ""
+            ).strip()
+            if not next_cursor or next_cursor in seen_cursors:
+                print(f"📜 Retrieved {len(messages)} messages from thread")
+                return ThreadMessages(messages, complete=True)
+            seen_cursors.add(next_cursor)
+            cursor = next_cursor
+
+        print(
+            f"⚠️ Thread history exceeded {max_pages} pages; "
+            f"keeping {len(messages)} messages as incomplete"
+        )
+        return ThreadMessages(messages, complete=False)
         
     except Exception as e:
         print(f"❌ Thread history error: {e}")
-        return []
+        return ThreadMessages(complete=False)
 
 
 def get_recent_channel_messages(

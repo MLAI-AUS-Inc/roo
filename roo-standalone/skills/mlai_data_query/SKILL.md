@@ -4,19 +4,16 @@ description: Query curated read-only MLAI backend data resources through the per
 requires_auth: true
 routing:
   use_when: >
-    The user wants to READ curated MLAI backend data: counts, lists, or
-    aggregates over Vibe Raising companies, startup/monthly update drafts,
-    Content Factory jobs/runs, synced Linear issues/projects, Gmail/Slack sync
-    metadata, GitHub integration status, financial records, organizations, or
-    coworking booking records — or asks what data/tables/resources Roo can query.
+    Read curated MLAI backend counts, lists, or aggregates, including the live
+    Linear queue bound to the current Slack channel, or list queryable resources.
   avoid_when: >
-    CREATING Linear issues (linear-meeting-actions). Luma event attendance
-    (luma-events). Personal points/coworking bookings (mlai-points). Questions
-    about files the user uploaded (chat). Roo never writes data or runs SQL.
+    Creating Linear issues, Luma attendance, personal points/bookings, uploaded
+    files, or any write/SQL request.
   examples:
     - {text: "How many Vibe Raising companies do we have?", action: query}
     - {text: "Which Content Factory jobs failed this week?", action: query}
-    - {text: "Show Linear issues synced for this startup", action: query}
+    - {text: "What issues are in the MLAI_TECH Todo list?", action: list_linear_channel_issues}
+    - {text: "Tell me more about TECH-16", action: get_linear_channel_issue}
     - {text: "What data resources can Roo query?", action: catalog}
   negative_examples:
     - {text: "create a linear ticket from this thread", instead: linear-meeting-actions}
@@ -29,8 +26,16 @@ actions:
     description: Run a read-only list/count/aggregate query against one resource.
     params:
       resource: {type: string, description: "Exact resource key if known (e.g. vibe_raising_companies, content_factory_jobs, linear_issues)."}
-      operation: {type: string, enum: [list, count, aggregate], description: "Query type."}
-      limit: {type: integer, description: "Max rows if the user asked for a specific number."}
+      operation: {type: string, enum: [list, count, aggregate]}
+      limit: {type: integer, description: "Maximum rows."}
+  - name: list_linear_channel_issues
+    description: List the channel's approved live Linear issue titles.
+    params:
+      limit: {type: integer, description: "Maximum titles."}
+  - name: get_linear_channel_issue
+    description: Get one approved issue with its comments.
+    params:
+      issue_reference: {type: string, description: "Key, list number, URL, or title words."}
 ---
 
 # MLAI Data Query Skill
@@ -41,6 +46,14 @@ Roo must not write data and must not send SQL. It calls the backend's read-only 
 
 - `GET /api/v1/data/catalog/?requester_slack_id=<actual Slack user ID>`
 - `POST /api/v1/data/query/`
+- `POST /api/v1/integrations/linear/channel-issues/list`
+- `POST /api/v1/integrations/linear/channel-issues/detail`
+
+For a channel-bound Linear queue, return identifiers and titles first. Resolve
+follow-ups by exact issue identifier, Linear URL, numbered item in the current
+Slack thread, or a unique title match. The backend remains authoritative for
+the Slack-channel-to-Linear-team binding and must reject issues from other
+teams before descriptions or comments are returned.
 
 The backend registry is the security contract. Each resource has explicit allow-listed fields, supported operations, filters, ordering, pagination limits, and role-scoped policies. There is no "admin bypass all" mode.
 The catalog uses the same requester identity and policies, so it only includes

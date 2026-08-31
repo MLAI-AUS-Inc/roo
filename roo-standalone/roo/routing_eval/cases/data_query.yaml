@@ -35,6 +35,23 @@
   expect: {skill: mlai-data-query}
   tags: [data-query, hard]
 
+- id: dq-linear-tech-todo-live
+  text: "what linear issues are in the mlai_tech todo list at the moment?"
+  channel: tech_volunteers
+  expect: {skill: mlai-data-query, action: list_linear_channel_issues}
+  tags: [data-query, linear, live]
+- id: dq-linear-tech-details-key
+  text: "tell me more about TECH-16"
+  channel: tech_volunteers
+  expect: {skill: mlai-data-query, action: get_linear_channel_issue}
+  tags: [data-query, linear, follow-up]
+- id: dq-linear-tech-details-number
+  text: "show me number 7 from that Linear list"
+  channel: tech_volunteers
+  thread: {skill: mlai-data-query}
+  expect: {skill: mlai-data-query, action: get_linear_channel_issue}
+  tags: [data-query, linear, follow-up]
+
 # harvested from upstream funnel tests before Phase 3 deleted the heuristics
 - id: linear-thread-to-project
   text: "add this thread to Linear project BITGET EVENT"
