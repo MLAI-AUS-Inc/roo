@@ -304,10 +304,11 @@ class RooAgent:
             execution_kwargs = dict(kwargs)
             execution_thread_history = thread_history
             if skill.name == "mlai-data-query":
-                # Slack already bounds this history to 50 messages. Only the
-                # Linear channel reader needs the older messages to resolve a
-                # numbered follow-up after a long thread; all other consumers
-                # retain the established ten-message prompt window.
+                # Only the Linear channel reader needs paginated history to
+                # resolve a numbered follow-up after a long thread. It scans
+                # deterministic Roo output rather than adding the history to a
+                # model prompt; all other consumers retain the established
+                # ten-message prompt window.
                 execution_kwargs["linear_thread_history"] = raw_thread_history
             if skill.name == "linear-meeting-actions":
                 from .linear_context import build_linear_slack_context

@@ -11420,7 +11420,15 @@ Chunk {index} source: {label}
             for message in self._roo_authored_thread_messages(thread_history)
             if numbered_issue.search(str(message.get("text") or ""))
             or detail_heading.search(str(message.get("text") or ""))
+            or self._linear_channel_issue_empty_response(message.get("text"))
         ]
+
+    def _linear_channel_issue_empty_response(self, text: Any) -> bool:
+        return bool(re.fullmatch(
+            r"\s*\*[^\n*]+\*\s+is empty at the moment\.\s*",
+            str(text or ""),
+            re.IGNORECASE,
+        ))
 
     def _roo_authored_thread_messages(
         self,
@@ -11518,6 +11526,8 @@ Chunk {index} source: {label}
         for message in reversed(
             self._linear_channel_issue_response_messages(thread_history)
         ):
+            if self._linear_channel_issue_empty_response(message.get("text")):
+                return ""
             for line in str(message.get("text") or "").splitlines():
                 match = numbered_issue.match(line)
                 if not match or int(match.group(1)) != ordinal:
@@ -11534,6 +11544,8 @@ Chunk {index} source: {label}
         for message in reversed(
             self._linear_channel_issue_response_messages(thread_history)
         ):
+            if self._linear_channel_issue_empty_response(message.get("text")):
+                return []
             identifiers = []
             for match in re.findall(
                 r"\b[A-Z][A-Z0-9]{1,15}-\d+\b",

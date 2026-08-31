@@ -196,14 +196,20 @@ def get_thread_messages(channel: str, thread_ts: str) -> list[dict]:
     client = get_slack_client()
     
     try:
-        response = client.conversations_replies(
-            channel=channel,
-            ts=thread_ts,
-            limit=50
-        )
-        
-        if response.get("ok"):
-            messages = []
+        messages = []
+        cursor = ""
+        seen_cursors: set[str] = set()
+        while True:
+            request = {
+                "channel": channel,
+                "ts": thread_ts,
+                "limit": 50,
+            }
+            if cursor:
+                request["cursor"] = cursor
+            response = client.conversations_replies(**request)
+            if not response.get("ok"):
+                return []
             for msg in response.get("messages", []):
                 messages.append({
                     "user": msg.get("user", ""),
@@ -215,10 +221,19 @@ def get_thread_messages(channel: str, thread_ts: str) -> list[dict]:
                     "is_bot": bool(msg.get("bot_id")),
                     "files": msg.get("files", []),
                 })
-            print(f"📜 Retrieved {len(messages)} messages from thread")
-            return messages
-        
-        return []
+            response_metadata = response.get("response_metadata")
+            next_cursor = str(
+                response_metadata.get("next_cursor")
+                if isinstance(response_metadata, dict)
+                else ""
+            ).strip()
+            if not next_cursor or next_cursor in seen_cursors:
+                break
+            seen_cursors.add(next_cursor)
+            cursor = next_cursor
+
+        print(f"📜 Retrieved {len(messages)} messages from thread")
+        return messages
         
     except Exception as e:
         print(f"❌ Thread history error: {e}")

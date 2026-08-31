@@ -52,6 +52,35 @@ def test_get_thread_messages_preserves_file_metadata(monkeypatch):
     assert messages[0]["files"] == [{"id": "F1", "name": "notes.pdf"}]
 
 
+def test_get_thread_messages_follows_cursor_pagination(monkeypatch):
+    requests = []
+
+    class FakeSlackClient:
+        def conversations_replies(self, **kwargs):
+            requests.append(kwargs)
+            if not kwargs.get("cursor"):
+                return {
+                    "ok": True,
+                    "messages": [{"user": "U1", "text": "first", "ts": "1.1"}],
+                    "response_metadata": {"next_cursor": "page-2"},
+                }
+            return {
+                "ok": True,
+                "messages": [{"user": "U2", "text": "latest", "ts": "1.2"}],
+                "response_metadata": {"next_cursor": ""},
+            }
+
+    monkeypatch.setattr(slack_client, "get_slack_client", lambda: FakeSlackClient())
+
+    messages = slack_client.get_thread_messages(channel="C1", thread_ts="1.1")
+
+    assert [message["text"] for message in messages] == ["first", "latest"]
+    assert requests == [
+        {"channel": "C1", "ts": "1.1", "limit": 50},
+        {"channel": "C1", "ts": "1.1", "limit": 50, "cursor": "page-2"},
+    ]
+
+
 def test_slack_file_info_and_download(monkeypatch):
     class FakeSlackClient:
         def files_info(self, file):

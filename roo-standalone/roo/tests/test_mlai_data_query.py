@@ -425,6 +425,31 @@ def test_linear_channel_issue_context_stops_at_newer_ambiguous_list(text):
     assert reference == text
 
 
+@pytest.mark.parametrize("text", ["status?", "show me number 2"])
+def test_linear_channel_issue_context_stops_at_newer_empty_list(text):
+    executor = SkillExecutor()
+
+    reference = executor._resolve_linear_channel_issue_reference(
+        text=text,
+        params={"action": "query"},
+        thread_history=[
+            {
+                "bot_id": "BROO",
+                "user": "UROO",
+                "text": "*<https://linear.app/x|TECH-16> — Older detail*\n"
+                "*Status:* Todo",
+            },
+            {
+                "bot_id": "BROO",
+                "user": "UROO",
+                "text": "*MLAI_TECH · Todo* is empty at the moment.",
+            },
+        ],
+    )
+
+    assert reference == text
+
+
 def test_linear_channel_issue_ordinal_uses_older_numbered_list_not_newer_detail():
     executor = SkillExecutor()
 
