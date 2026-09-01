@@ -11927,12 +11927,18 @@ Chunk {index} source: {label}
             r"[a-z_ ]+\s+completed\s+in\s+Linear\.\s*$",
             re.IGNORECASE,
         )
+        ambiguous_choices = re.compile(
+            r"^\s*I found a few matching MLAI_TECH issues\. Which one do you mean\?\s*$"
+            r"[\s\S]*^\s*[•*-]\s+`[A-Z][A-Z0-9]{1,15}-\d+`\s+—",
+            re.IGNORECASE | re.MULTILINE,
+        )
         return [
             message
             for message in self._roo_authored_thread_messages(thread_history)
             if numbered_issue.search(str(message.get("text") or ""))
             or detail_heading.search(str(message.get("text") or ""))
             or write_confirmation.search(str(message.get("text") or ""))
+            or ambiguous_choices.search(str(message.get("text") or ""))
             or self._linear_channel_issue_empty_response(message.get("text"))
         ]
 

@@ -418,6 +418,33 @@ def test_successful_write_confirmation_becomes_latest_pronoun_context(monkeypatc
     ) == "TECH-30"
 
 
+def test_ambiguous_choices_block_older_pronoun_context(monkeypatch):
+    monkeypatch.setattr(executor_module, "get_bot_user_id", lambda: "UROO")
+    executor = SkillExecutor()
+    thread_history = [
+        {
+            "is_bot": True,
+            "user": "UROO",
+            "text": "*`TECH-29` — Older issue*",
+        },
+        {
+            "is_bot": True,
+            "user": "UROO",
+            "text": (
+                "I found a few matching MLAI_TECH issues. Which one do you mean?\n"
+                "• `TECH-30` — First match\n"
+                "• `TECH-31` — Second match"
+            ),
+        },
+    ]
+
+    assert executor._resolve_linear_channel_issue_reference(
+        text="move it to Done",
+        params={},
+        thread_history=thread_history,
+    ) == "move it to Done"
+
+
 @pytest.mark.asyncio
 async def test_comment_without_body_cannot_use_hallucinated_router_value(monkeypatch):
     FakeClient.writes = []
