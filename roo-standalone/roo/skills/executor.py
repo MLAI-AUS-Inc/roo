@@ -5858,6 +5858,7 @@ Chunk {index} source: {label}
                 "project": None,
                 "confidence": 0.0,
                 "reason": exc.__class__.__name__,
+                "lookupDetail": str(exc).strip(),
             }
             self._log_linear_project_resolution(
                 hint=hint,
@@ -5926,6 +5927,7 @@ Chunk {index} source: {label}
                     "is_inactive": payload.get("isInactive"),
                     "candidate_count": payload.get("candidateCount"),
                     "lookup_error": payload.get("lookupError"),
+                    "lookup_detail": payload.get("lookupDetail"),
                 },
                 ensure_ascii=True,
                 separators=(",", ":"),
@@ -5954,6 +5956,15 @@ Chunk {index} source: {label}
             return (
                 f"I couldn't find a Linear project matching {hint!r} in the full "
                 "workspace. Check the exact title or Roo's access. Nothing was changed."
+            )
+        lookup_detail = str(payload.get("lookupDetail") or "").strip()
+        if "linear_team_access_incomplete" in lookup_detail or (
+            "incomplete workspace access" in lookup_detail.lower()
+        ):
+            return (
+                "Roo's Linear connection cannot access every required workspace team. "
+                "A Linear admin needs to replace or re-authorize its read/write API key "
+                "for all teams. Nothing was changed."
             )
         return (
             f"I couldn't verify the Linear project {hint!r} because the full project "

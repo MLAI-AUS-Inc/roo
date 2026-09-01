@@ -940,6 +940,51 @@ async def test_linear_client_backend_error_surfaces_detail(monkeypatch, capsys):
 
 
 @pytest.mark.asyncio
+async def test_linear_client_raises_specific_incomplete_team_access_error(monkeypatch):
+    module_path = (
+        Path(__file__).resolve().parents[2]
+        / "skills"
+        / "linear_meeting_actions"
+        / "client.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "linear_meeting_actions_client_access_error_test",
+        module_path,
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+
+    class FakeResponse:
+        status_code = 503
+
+        def json(self):
+            return {
+                "detail": (
+                    "Roo's Linear credential has incomplete workspace access. "
+                    "Missing required team keys: MLA, STU; currently visible: MLAI_TECH."
+                ),
+                "code": "linear_team_access_incomplete",
+            }
+
+    class FakeBackend:
+        def __init__(self, **kwargs):
+            pass
+
+        async def _request(self, method, endpoint, **kwargs):
+            return FakeResponse()
+
+    monkeypatch.setattr(module, "MLAIBackendClient", FakeBackend)
+
+    client = module.LinearMeetingActionsClient()
+    with pytest.raises(
+        module.LinearMeetingTeamAccessError,
+        match="Missing required team keys: MLA, STU",
+    ):
+        await client.list_teams()
+
+
+@pytest.mark.asyncio
 async def test_linear_meeting_executor_surfaces_backend_context_detail(monkeypatch):
     executor = SkillExecutor()
 
@@ -1003,6 +1048,24 @@ async def test_linear_meeting_executor_surfaces_backend_context_detail(monkeypat
     assert 'Cannot query field "state"' in result["message"]
     assert "LinearProjects" in result["message"]
     assert "RuntimeError:" not in result["message"]
+
+
+def test_linear_project_resolution_reports_access_failure_not_not_found():
+    message = SkillExecutor._linear_explicit_project_resolution_error_message(
+        "[Studio] Sansoni Master App",
+        {
+            "status": "unavailable",
+            "lookupDetail": (
+                "Roo's Linear credential has incomplete workspace access "
+                "(linear_team_access_incomplete)"
+            ),
+        },
+    )
+
+    assert "cannot access every required workspace team" in message
+    assert "Linear admin" in message
+    assert "not find" not in message
+    assert "Nothing was changed" in message
 
 
 @pytest.mark.asyncio
