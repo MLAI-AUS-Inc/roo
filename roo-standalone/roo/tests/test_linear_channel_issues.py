@@ -111,6 +111,13 @@ def test_comment_body_is_opaque_when_it_contains_another_edit_command():
     ) == {"operation": "add_comment", "value": "move TECH-30 to Done"}
 
 
+def test_comment_with_separator_and_second_edit_is_rejected():
+    assert SkillExecutor()._linear_channel_write_request(
+        "add a comment to TECH-29 saying looks good, then move TECH-30 to Done",
+        {"field": "comment", "value": "looks good, then move TECH-30 to Done"},
+    ) is None
+
+
 def test_optional_mode_is_inferred_from_explicit_text():
     executor = SkillExecutor()
 
@@ -176,6 +183,10 @@ def test_explicit_create_request_is_parsed_from_user_text(text, params, expected
         (
             "create a Linear issue for Fix alerts. Delete TECH-29",
             {"title": "Fix alerts"},
+        ),
+        (
+            "create a Linear issue titled Fix alerts with description Add logs, then archive TECH-29",
+            {"title": "Fix alerts", "description": "Add logs"},
         ),
     ],
 )

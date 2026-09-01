@@ -11461,18 +11461,19 @@ Chunk {index} source: {label}
         title = value_text.strip(" \t\"'")
         if not title or len(title) > 255 or len(description) > 10000:
             return None
-        if re.search(
-            r"(?:\band\b|\bthen\b|[,;.!?]|\n)\s*(?:please\s+)?"
-            r"(?:delete|archive|trash|restore)\s+(?:issue\s+)?"
-            r"(?:[A-Z][A-Z0-9]+-\d+|it|this|that)\b",
-            title,
-            re.IGNORECASE,
-        ):
-            return None
-        if self._linear_channel_has_additional_write_command(
-            title, outer_operation="create_issue"
-        ):
-            return None
+        for explicit_field in (title, description, status):
+            if re.search(
+                r"(?:\band\b|\bthen\b|[,;.!?]|\n)\s*(?:please\s+)?"
+                r"(?:delete|archive|trash|restore)\s+(?:issue\s+)?"
+                r"(?:[A-Z][A-Z0-9]+-\d+|it|this|that)\b",
+                explicit_field,
+                re.IGNORECASE,
+            ):
+                return None
+            if self._linear_channel_has_additional_write_command(
+                explicit_field, outer_operation="create_issue"
+            ):
+                return None
         routed_values = {
             "title": str(params.get("title") or "").strip(),
             "description": str(params.get("description") or "").strip(),
@@ -11723,11 +11724,6 @@ Chunk {index} source: {label}
             "set_cycle": rf"(?:set|change|update|clear|remove)\s+(?:the\s+)?cycle(?:\s+(?:of|from)\s+{target})\b",
             "mark_duplicate": rf"(?:mark|set)\s+(?:issue\s+)?{target}\s+as\s+(?:a\s+)?duplicate\s+of\b",
         }
-        opaque_families = {
-            "add_comment": {"add_comment"},
-            "append_description": {"append_description", "replace_description"},
-            "replace_description": {"append_description", "replace_description"},
-        }
         unsupported_command_pattern = (
             rf"(?:delete|archive|trash|restore)\s+(?:issue\s+)?{target}\b|"
             rf"move\s+(?:issue\s+)?{target}\s+to\s+(?:another|the)\s+team\b|"
@@ -11745,12 +11741,6 @@ Chunk {index} source: {label}
                 return True
             for operation, pattern in command_patterns.items():
                 if not re.match(pattern, candidate, re.IGNORECASE):
-                    continue
-                allowed_opaque_operations = opaque_families.get(outer_operation)
-                if (
-                    allowed_opaque_operations is not None
-                    and operation not in allowed_opaque_operations
-                ):
                     continue
                 return True
         return False
