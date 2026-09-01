@@ -99,6 +99,19 @@ def test_comment_body_is_opaque_when_it_contains_another_edit_command():
     ) == {"operation": "add_comment", "value": "move TECH-30 to Done"}
 
 
+def test_optional_mode_is_inferred_from_explicit_text():
+    executor = SkillExecutor()
+
+    assert executor._linear_channel_write_request(
+        "append this update to the description of TECH-29",
+        {"field": "description", "value": "this update"},
+    ) == {"operation": "append_description", "value": "this update"}
+    assert executor._linear_channel_write_request(
+        "remove label Bug from TECH-29",
+        {"field": "label", "value": "Bug"},
+    ) == {"operation": "remove_label", "value": "Bug"}
+
+
 def test_write_target_extraction_does_not_scan_comment_body():
     executor = SkillExecutor()
 
@@ -151,6 +164,18 @@ def test_negation_inside_explicit_comment_body_is_preserved():
         "add a comment to TECH-29 saying don't deploy this yet",
         {"field": "comment", "value": "don't deploy this yet"},
     ) == {"operation": "add_comment", "value": "don't deploy this yet"}
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "mark TECH-29 as duplicate of TECH-30 but don't do that",
+        "move TECH-29 to Done, actually cancel that",
+        "change the title of TECH-29 to Safer; never mind",
+    ],
+)
+def test_trailing_command_retractions_are_rejected(text):
+    assert SkillExecutor()._linear_channel_write_request(text, {}) is None
 
 
 @pytest.mark.parametrize(

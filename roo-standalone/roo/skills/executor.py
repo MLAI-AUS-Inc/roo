@@ -11366,22 +11366,45 @@ Chunk {index} source: {label}
     def _linear_channel_write_request(self, text: str, params: dict) -> Optional[dict[str, Any]]:
         raw = str(text or "").strip()
         field = str(params.get("field") or "").strip().lower().replace("-", "_")
-        mode = str(params.get("mode") or "set").strip().lower()
+        mode = str(params.get("mode") or "").strip().lower()
         value = params.get("value")
         operation_by_field = {
             "comment": "add_comment",
             "title": "set_title",
-            "description": "append_description" if mode == "append" else "replace_description",
             "priority": "set_priority",
             "estimate": "set_estimate",
             "due_date": "set_due_date",
             "assignee": "set_assignee",
-            "label": "remove_label" if mode == "remove" else "add_label",
             "project": "set_project",
             "cycle": "set_cycle",
             "status": "set_status",
             "duplicate": "mark_duplicate",
         }
+        allowed_routed_operations: Optional[set[str]] = None
+        routed_operation = operation_by_field.get(field)
+        if routed_operation:
+            allowed_routed_operations = {routed_operation}
+        elif field == "description":
+            if not mode:
+                allowed_routed_operations = {
+                    "append_description",
+                    "replace_description",
+                }
+            elif mode == "append":
+                allowed_routed_operations = {"append_description"}
+            elif mode in {"replace", "set"}:
+                allowed_routed_operations = {"replace_description"}
+            else:
+                return None
+        elif field == "label":
+            if not mode:
+                allowed_routed_operations = {"add_label", "remove_label"}
+            elif mode in {"add", "set"}:
+                allowed_routed_operations = {"add_label"}
+            elif mode == "remove":
+                allowed_routed_operations = {"remove_label"}
+            else:
+                return None
         value_patterns = [
             ("set_status", r"\b(?:move|set)\s+(?:issue\s+)?(?:[A-Z][A-Z0-9]+-\d+|it|this|that)(?:\s+status)?\s+to\s+(.+)$"),
             ("set_status", r"\b(?:set|change|update)\s+(?:the\s+)?status(?:\s+of\s+(?:[A-Z][A-Z0-9]+-\d+|it|this|that))?\s+to\s+(.+)$"),
@@ -11466,10 +11489,19 @@ Chunk {index} source: {label}
             )
         ):
             return None
-        routed_operation = operation_by_field.get(field)
-        if routed_operation and routed_operation != detected_operation:
+        if (
+            allowed_routed_operations is not None
+            and detected_operation not in allowed_routed_operations
+        ):
             return None
         match = next(match for operation, match in matches if operation == detected_operation)
+        if re.search(
+            r"\b(?:but|actually|wait)\b[^\n]*?\b(?:do\s+not|don['’]?t|cancel|ignore|stop)\b|"
+            r"\b(?:never\s+mind|cancel\s+that|ignore\s+that|stop\s+that)\b",
+            raw[match.start():],
+            re.IGNORECASE,
+        ):
+            return None
         captured = next((group for group in match.groups() if group), "clear")
         captured_value = captured.strip()
         remaining_text = raw[match.end():]
