@@ -22,6 +22,7 @@ class Settings(BaseSettings):
             "github-integration",
             "healthhack",
             "linear-meeting-actions",
+            "linear-channel-issues",
             "luma-events",
             "medhack",
             "mlai-data-query",
@@ -88,6 +89,7 @@ class Settings(BaseSettings):
     RECONCILIATION_AGENT_URL: Optional[str] = None
     RECONCILIATION_AGENT_TIMEOUT_SECONDS: float = 30.0
     LINEAR_DEFAULT_TEAM: Optional[str] = None
+    LINEAR_CHANNEL_ISSUE_WRITES_ENABLED: bool = False
 
     # Public/Admin trust boundary. Admin starts with no skills and no private
     # memory access until an explicit allowlist and scoped credential exist.
@@ -370,6 +372,17 @@ class Settings(BaseSettings):
             if not 1 <= self.VICTOR_AI_BACKEND_TIMEOUT_SECONDS <= 60:
                 raise ValueError(
                     "VICTOR_AI_BACKEND_TIMEOUT_SECONDS must be between 1 and 60"
+                )
+        if self.LINEAR_CHANNEL_ISSUE_WRITES_ENABLED:
+            if self.ROO_SURFACE != "public":
+                raise ValueError("Linear channel issue writes are available only on Public Roo")
+            if not str(self.MLAI_BACKEND_URL or "").strip():
+                raise ValueError(
+                    "MLAI_BACKEND_URL is required when Linear channel issue writes are enabled"
+                )
+            if not str(self.ROO_API_KEY or "").strip():
+                raise ValueError(
+                    "ROO_API_KEY is required when Linear channel issue writes are enabled"
                 )
 
         boost_channel_id = str(self.BOOST_LINK_LOVE_CHANNEL_ID or "").strip()
