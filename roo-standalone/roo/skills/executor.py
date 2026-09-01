@@ -12094,6 +12094,11 @@ Chunk {index} source: {label}
             r"[a-z_ ]+\s+completed\s+in\s+Linear\.\s*$",
             re.IGNORECASE,
         )
+        create_confirmation = re.compile(
+            r"^\s*Created\s+`[A-Z][A-Z0-9]{1,15}-\d+`\s+—\s+.+?\s+"
+            r"in\s+MLAI_TECH\.(?:\s+<https://linear\.app/[^>]+\|Open in Linear>)?\s*$",
+            re.IGNORECASE,
+        )
         ambiguous_choices = re.compile(
             r"^\s*I found a few matching MLAI_TECH issues\. Which one do you mean\?\s*$"
             r"[\s\S]*^\s*[•*-]\s+`[A-Z][A-Z0-9]{1,15}-\d+`\s+—",
@@ -12105,6 +12110,7 @@ Chunk {index} source: {label}
             if numbered_issue.search(str(message.get("text") or ""))
             or detail_heading.search(str(message.get("text") or ""))
             or write_confirmation.search(str(message.get("text") or ""))
+            or create_confirmation.search(str(message.get("text") or ""))
             or ambiguous_choices.search(str(message.get("text") or ""))
             or self._linear_channel_issue_empty_response(message.get("text"))
         ]

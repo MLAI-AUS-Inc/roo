@@ -562,6 +562,32 @@ def test_successful_write_confirmation_becomes_latest_pronoun_context(monkeypatc
     ) == "TECH-30"
 
 
+def test_successful_create_confirmation_becomes_latest_pronoun_context(monkeypatch):
+    monkeypatch.setattr(executor_module, "get_bot_user_id", lambda: "UROO")
+    executor = SkillExecutor()
+    thread_history = [
+        {
+            "is_bot": True,
+            "user": "UROO",
+            "text": "*`TECH-29` — Older issue*",
+        },
+        {
+            "is_bot": True,
+            "user": "UROO",
+            "text": (
+                "Created `TECH-30` — New issue in MLAI_TECH. "
+                "<https://linear.app/issue/TECH-30|Open in Linear>"
+            ),
+        },
+    ]
+
+    assert executor._resolve_linear_channel_issue_reference(
+        text="move it to Done",
+        params={},
+        thread_history=thread_history,
+    ) == "TECH-30"
+
+
 def test_ambiguous_choices_block_older_pronoun_context(monkeypatch):
     monkeypatch.setattr(executor_module, "get_bot_user_id", lambda: "UROO")
     executor = SkillExecutor()
