@@ -86,6 +86,10 @@ def test_value_text_can_name_another_linear_field_without_becoming_second_edit()
         "change the title of TECH-29 to Improve priority handling",
         {"field": "title", "value": "Improve priority handling"},
     ) == {"operation": "set_title", "value": "Improve priority handling"}
+    assert SkillExecutor()._linear_channel_write_request(
+        "change the title of TECH-29 to Update title parsing docs",
+        {"field": "title", "value": "Update title parsing docs"},
+    ) == {"operation": "set_title", "value": "Update title parsing docs"}
 
 
 def test_comment_body_is_opaque_when_it_contains_another_edit_command():
@@ -421,6 +425,16 @@ async def test_multiple_edits_are_rejected_as_ambiguous(monkeypatch):
 )
 def test_repeated_same_operation_commands_are_rejected(text, params):
     assert SkillExecutor()._linear_channel_write_request(text, params) is None
+
+
+def test_mixed_scalar_write_with_full_routed_suffix_is_rejected():
+    assert SkillExecutor()._linear_channel_write_request(
+        "change the title of TECH-29 to Safer edits and move TECH-30 to Done",
+        {
+            "field": "title",
+            "value": "Safer edits and move TECH-30 to Done",
+        },
+    ) is None
 
 
 @pytest.mark.asyncio

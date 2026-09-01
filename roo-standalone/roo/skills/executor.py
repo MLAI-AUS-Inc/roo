@@ -11441,25 +11441,6 @@ Chunk {index} source: {label}
         if len(detected_operations) != 1:
             return None
         detected_operation = next(iter(detected_operations))
-        repeated_operation_patterns = {
-            "set_status": r"\b(?:(?:move|set)\s+(?:issue\s+)?(?:[A-Z][A-Z0-9]+-\d+|it|this|that)(?:\s+status)?\s+to|(?:set|change|update)\s+(?:the\s+)?status(?:\s+of\s+(?:[A-Z][A-Z0-9]+-\d+|it|this|that))?\s+to)\b",
-            "add_comment": r"\b(?:(?:add|post|leave)\s+(?:a\s+)?comment(?:\s+(?:to|on)\s+(?:[A-Z][A-Z0-9]+-\d+|it|this|that))?\s*(?:saying|that\s+says|:)|comment\s+on\s+(?:[A-Z][A-Z0-9]+-\d+|it|this|that)\s*:)" ,
-            "set_title": r"\b(?:set|change|update|rename)\s+(?:the\s+)?title\b",
-            "append_description": r"\bappend\b[^\n]*?\bdescription\b",
-            "replace_description": r"\b(?:set|replace|update)\s+(?:the\s+)?description\b",
-            "set_priority": r"\b(?:set|change|update)\s+(?:the\s+)?priority\b",
-            "set_estimate": r"\b(?:set|change|update|clear|remove)\s+(?:the\s+)?estimate\b",
-            "set_due_date": r"\b(?:set|change|update|clear|remove)\s+(?:the\s+)?due\s+date\b",
-            "set_assignee": r"\b(?:(?:assign)\s+(?:issue\s+)?(?:[A-Z][A-Z0-9]+-\d+|it|this|that)\s+to|(?:set|change|update|clear|remove)\s+(?:the\s+)?assignee)\b",
-            "add_label": r"\badd\s+(?:the\s+)?label\b",
-            "remove_label": r"\bremove\s+(?:the\s+)?label\b",
-            "set_project": r"\b(?:set|change|update|clear|remove)\s+(?:the\s+)?project\b",
-            "set_cycle": r"\b(?:set|change|update|clear|remove)\s+(?:the\s+)?cycle\b",
-            "mark_duplicate": r"\b(?:mark|set)\s+(?:issue\s+)?(?:[A-Z][A-Z0-9]+-\d+|it|this|that)\s+as\s+(?:a\s+)?duplicate\s+of\b",
-        }
-        repeated_pattern = repeated_operation_patterns[detected_operation]
-        if len(re.findall(repeated_pattern, raw, re.IGNORECASE)) > 1:
-            return None
         command_start = min(
             match.start()
             for operation, match in matches
@@ -11491,9 +11472,61 @@ Chunk {index} source: {label}
         match = next(match for operation, match in matches if operation == detected_operation)
         captured = next((group for group in match.groups() if group), "clear")
         captured_value = captured.strip()
+        remaining_text = raw[match.end():]
+        if self._linear_channel_has_additional_write_command(
+            f"{captured_value}{remaining_text}",
+            outer_operation=detected_operation,
+        ):
+            return None
         if value is not None and str(value).strip().casefold() != captured_value.casefold():
             return None
         return {"operation": detected_operation, "value": captured_value}
+
+    def _linear_channel_has_additional_write_command(
+        self,
+        value_and_tail: Any,
+        *,
+        outer_operation: str,
+    ) -> bool:
+        """Reject conjunction-separated extra commands outside opaque values."""
+
+        target = r"(?:[A-Z][A-Z0-9]+-\d+|it|this|that)"
+        command_patterns = {
+            "set_status": rf"(?:(?:move|set)\s+(?:issue\s+)?{target}(?:\s+status)?\s+to|(?:set|change|update)\s+(?:the\s+)?status\s+of\s+{target}\s+to)\b",
+            "add_comment": rf"(?:(?:add|post|leave)\s+(?:a\s+)?comment\s+(?:to|on)\s+{target}\s*(?:saying|that\s+says|:)|comment\s+on\s+{target}\s*:)",
+            "set_title": rf"(?:set|change|update|rename)\s+(?:the\s+)?title\s+of\s+{target}\s+to\b",
+            "append_description": rf"append\b.+\bdescription\s+of\s+{target}\b|append\s+(?:to\s+)?(?:the\s+)?description\s+of\s+{target}\b",
+            "replace_description": rf"(?:set|replace|update)\s+(?:the\s+)?description\s+of\s+{target}\b",
+            "set_priority": rf"(?:set|change|update)\s+(?:the\s+)?priority\s+of\s+{target}\s+to\b",
+            "set_estimate": rf"(?:set|change|update|clear|remove)\s+(?:the\s+)?estimate(?:\s+(?:of|from)\s+{target})\b",
+            "set_due_date": rf"(?:set|change|update|clear|remove)\s+(?:the\s+)?due\s+date(?:\s+(?:of|from)\s+{target})\b",
+            "set_assignee": rf"assign\s+(?:issue\s+)?{target}\s+to\b|(?:set|change|update|clear|remove)\s+(?:the\s+)?assignee(?:\s+(?:of|from)\s+{target})\b",
+            "add_label": rf"add\s+(?:the\s+)?label\b.+\s+to\s+{target}\b",
+            "remove_label": rf"remove\s+(?:the\s+)?label\b.+\s+from\s+{target}\b",
+            "set_project": rf"(?:set|change|update|clear|remove)\s+(?:the\s+)?project(?:\s+(?:of|from)\s+{target})\b",
+            "set_cycle": rf"(?:set|change|update|clear|remove)\s+(?:the\s+)?cycle(?:\s+(?:of|from)\s+{target})\b",
+            "mark_duplicate": rf"(?:mark|set)\s+(?:issue\s+)?{target}\s+as\s+(?:a\s+)?duplicate\s+of\b",
+        }
+        opaque_families = {
+            "add_comment": {"add_comment"},
+            "append_description": {"append_description", "replace_description"},
+            "replace_description": {"append_description", "replace_description"},
+        }
+        text = str(value_and_tail or "")
+        for separator in re.finditer(r"(?:\band\b|;)\s+", text, re.IGNORECASE):
+            candidate = text[separator.end():].strip()
+            candidate = re.sub(r"^(?:please\s+)", "", candidate, flags=re.IGNORECASE)
+            for operation, pattern in command_patterns.items():
+                if not re.match(pattern, candidate, re.IGNORECASE):
+                    continue
+                allowed_opaque_operations = opaque_families.get(outer_operation)
+                if (
+                    allowed_opaque_operations is not None
+                    and operation not in allowed_opaque_operations
+                ):
+                    continue
+                return True
+        return False
 
     def _linear_channel_write_target_reference(self, text: Any) -> str:
         """Extract only the issue target clause, never an edit's new value."""
