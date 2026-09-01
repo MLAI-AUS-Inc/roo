@@ -11402,7 +11402,8 @@ Chunk {index} source: {label}
             return None
         if re.search(
             r"\b(?:but|actually|wait)\b[^\n]*?\b(?:do\s+not|don['’]?t|cancel|ignore|stop)\b|"
-            r"\b(?:never\s+mind|cancel\s+that|ignore\s+that|stop\s+that)\b",
+            r"\b(?:never\s+mind|cancel\s+that|ignore\s+that|stop\s+that)\b|"
+            r"(?:[.!?;]\s+|\n+\s*)(?:please\s+)?(?:do\s+not|don['’]?t)\s+(?:do\s+)?that\b",
             command,
             re.IGNORECASE,
         ):
@@ -11414,7 +11415,7 @@ Chunk {index} source: {label}
         if len(re.findall(create_pattern, command, re.IGNORECASE)) != 1:
             return None
         if re.search(
-            r"(?:\band\b|\bthen\b|[,;]|\n)\s*(?:please\s+)?"
+            r"(?:\band\b|\bthen\b|[,;.!?]|\n)\s*(?:please\s+)?"
             r"(?:create|open|add)\s+(?:a|an|one)?\s*(?:new\s+)?"
             r"(?:linear\s+)?(?:issue|ticket|task)\b",
             command,
@@ -11459,6 +11460,14 @@ Chunk {index} source: {label}
             value_text = value_text[:description_match.start()].rstrip()
         title = value_text.strip(" \t\"'")
         if not title or len(title) > 255 or len(description) > 10000:
+            return None
+        if re.search(
+            r"(?:\band\b|\bthen\b|[,;.!?]|\n)\s*(?:please\s+)?"
+            r"(?:delete|archive|trash|restore)\s+(?:issue\s+)?"
+            r"(?:[A-Z][A-Z0-9]+-\d+|it|this|that)\b",
+            title,
+            re.IGNORECASE,
+        ):
             return None
         if self._linear_channel_has_additional_write_command(
             title, outer_operation="create_issue"

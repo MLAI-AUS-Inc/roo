@@ -159,13 +159,22 @@ def test_explicit_create_request_is_parsed_from_user_text(text, params, expected
     [
         ("don't create a Linear issue for Fix alerts", {"title": "Fix alerts"}),
         ("create a Linear issue for Fix alerts, actually cancel that", {"title": "Fix alerts"}),
+        ("create a Linear issue for Fix alerts. Don't do that", {"title": "Fix alerts"}),
         ("create a Linear issue for Fix alerts", {"title": "Invented title"}),
         (
             "create a Linear issue for First and create a Linear issue for Second",
             {"title": "First"},
         ),
         (
+            "create a Linear issue for First. Create a Linear issue for Second",
+            {"title": "First"},
+        ),
+        (
             "create a Linear issue for Fix alerts and delete TECH-29",
+            {"title": "Fix alerts"},
+        ),
+        (
+            "create a Linear issue for Fix alerts. Delete TECH-29",
             {"title": "Fix alerts"},
         ),
     ],
