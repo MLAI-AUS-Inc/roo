@@ -23,7 +23,6 @@ class Settings(BaseSettings):
             "healthhack",
             "linear-meeting-actions",
             "luma-events",
-            "medhack",
             "mlai-data-query",
             "mlai-points",
             "reconciliation-report",

@@ -3,7 +3,7 @@ Simulated Patient endpoint logic — Slack-free.
 
 Powers the health-hack 3D ward "Guess the Diagnosis" interaction: a player walks
 up to a patient in the game world, asks a question, and this module produces an
-in-character reply using the medhack skill's clinical case files.
+in-character reply using the clinical case file bundled beside this module.
 
 Three personas share the endpoint via ``role``:
   - "patient" (default): the patient in cubicle 3, speaking first person.
@@ -19,12 +19,13 @@ mlai-backend before revealing anything. Chat must never return a verdict —
 otherwise the patient is a free correctness oracle players can probe before
 banking a guaranteed win on their single clerk guess.
 
-This module is deliberately independent of the Slack executor (whose patient
-simulator is currently DISABLED — see roo/skills/executor.py) and of the medhack
-game state. It reuses ONLY pure, local logic:
+This module is deliberately independent of the Slack executor and of any game
+state. (It began life alongside the retired Slack MedHack skill, whose backend
+tables and endpoints were removed in 2026-09; only this web-ward flow remains.)
+It reuses ONLY pure, local logic:
 
   - the case YAML load (copied ~10 lines to avoid touching backend init)
-  - the fuzzy-match verdict (copied from MedHackClient._fuzzy_match)
+  - the fuzzy-match verdict (copied from the retired MedHackClient._fuzzy_match)
   - the verbatim PQM system prompt (recovered from
     `git show 2427ff6^:roo-standalone/roo/skills/executor.py`)
 The conversational path never mutates contest state. The separate diagnosis
@@ -46,9 +47,10 @@ from .config import get_settings
 from .ai_security import make_safety_identifier
 from .llm import get_llm_client
 
-# cases.yaml lives alongside the medhack skill. Resolve relative to this file so
-# the load works regardless of the process cwd.
-CASES_FILE = Path(__file__).resolve().parent.parent / "skills" / "medhack" / "cases.yaml"
+# The clinical case file lives beside this module (moved here from the retired
+# medhack skill). Resolve relative to this file so the load works regardless of
+# the process cwd.
+CASES_FILE = Path(__file__).resolve().parent / "sim_patient_cases.yaml"
 
 # Defensive caps (also enforced at the HTTP layer, belt-and-braces here).
 MAX_HISTORY_TURNS = 12
@@ -71,7 +73,7 @@ _PATIENT_CONTEXT_FIELDS: dict[str, frozenset[str]] = {
 
 
 # ---------------------------------------------------------------------------
-# Case loading (copied from MedHackClient._load_cases — pure, no backend init)
+# Case loading (originally MedHackClient._load_cases — pure, no backend init)
 # ---------------------------------------------------------------------------
 
 def _load_all_cases() -> list[dict]:
@@ -84,10 +86,10 @@ def _load_all_cases() -> list[dict]:
 def load_case(case_id: Optional[int]) -> dict:
     """Return the full case dict (INCLUDING secrets) for a given case_id.
 
-    When ``case_id`` is None, fall back to the first case in cases.yaml. We do
-    NOT read medhack's active-case game state — the web game is stateless and
-    must never disturb the Slack game. The first case (id 1, "Salt & Static")
-    is a stable, sensible default.
+    When ``case_id`` is None, fall back to the first case in the case file.
+    The web game is stateless — there is no server-side active-case state to
+    consult. The first case (id 1, "Salt & Static") is a stable, sensible
+    default.
 
     Raises KeyError when a specific case_id is requested but not found (the HTTP
     layer maps this to 404).
@@ -167,7 +169,7 @@ def _safety_identifier(player_id: str, settings=None) -> Optional[str]:
 def check_guess(guess: str, case: dict) -> bool:
     """Whether ``guess`` matches the case diagnosis.
 
-    Self-contained copy of MedHackClient._fuzzy_match: exact match against
+    Self-contained copy of the retired MedHackClient._fuzzy_match: exact match against
     acceptable_answers, then 0.75 SequenceMatcher against the primary diagnosis
     and each acceptable answer. We do NOT import the executor or the client.
     """
@@ -406,8 +408,8 @@ async def record_web_guess(
 
 # First-person patient persona. Unlike the old third-person PQM narrator, the
 # patient speaks AS themselves — the in-game dialogue box shows spoken words only,
-# so the prompt forbids stage directions and narration. Adapted from the medhack
-# case rules (git show 2427ff6^:roo-standalone/roo/skills/executor.py); the
+# so the prompt forbids stage directions and narration. Adapted from the retired
+# medhack case rules (git show 2427ff6^:roo-standalone/roo/skills/executor.py); the
 # _speech_only sanitizer is a belt-and-braces net over this instruction.
 _PATIENT_SYSTEM_PROMPT = """You ARE a patient in one of the bed cubicles of a fast-paced emergency department roleplay game. Players (participants acting as clinicians) come to your bedside and ask you questions. You answer in the FIRST PERSON, as yourself. You are not giving real medical advice. This is a fictional case simulation.
 
