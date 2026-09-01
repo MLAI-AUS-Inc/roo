@@ -6512,10 +6512,20 @@ async def _process_office_manager_action_record(
     store: OfficeManagerActionStore,
 ) -> None:
     try:
+        booking_date = date.fromisoformat(str(action["booking_date"]))
+    except (KeyError, TypeError, ValueError):
+        booking_date = None
+    if booking_date != get_current_date():
+        print(
+            "OFFICE_MANAGER_ACTION_EXPIRED "
+            f"action_id={action.get('id')} booking_date={action.get('booking_date')}"
+        )
+        return
+    try:
         await _claim_office_manager_from_action(
             user_id=str(action["slack_user_id"]),
             channel_id=str(action["channel_id"]),
-            booking_date=str(action["booking_date"]),
+            booking_date=booking_date.isoformat(),
             action=action,
             store=store,
         )

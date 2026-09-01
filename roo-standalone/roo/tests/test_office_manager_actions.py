@@ -126,10 +126,15 @@ def _signed_headers(settings, body):
 
 
 @pytest.fixture(autouse=True)
-def clear_app_state():
+def clear_app_state(monkeypatch):
     slack_action_tasks._tasks.clear()
     action_module.get_office_manager_action_store.cache_clear()
     get_slack_receipt_store.cache_clear()
+    monkeypatch.setattr(
+        main_module,
+        "get_current_date",
+        lambda: date(2026, 8, 3),
+    )
     yield
     slack_action_tasks._tasks.clear()
     action_module.get_office_manager_action_store.cache_clear()
@@ -1467,6 +1472,42 @@ async def test_prior_date_action_survives_disabled_interval_and_recovers(tmp_pat
     ) == 1
     assert processed_dates == ["2026-08-03"]
     assert reenabled_store.get(action["id"])["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_prior_date_office_manager_result_expires_without_user_output(
+    tmp_path,
+    monkeypatch,
+):
+    store = action_module.OfficeManagerActionStore(tmp_path / "actions.db")
+    action, _ = store.record_action(
+        slack_user_id="UVERIFIED",
+        channel_id="CCOWORK",
+        booking_date="2026-08-03",
+    )
+    monkeypatch.setattr(
+        main_module,
+        "get_current_date",
+        lambda: date(2026, 8, 4),
+    )
+
+    class UnexpectedClient:
+        async def claim_office_manager_day(self, *_args, **_kwargs):
+            pytest.fail("expired action reached the backend")
+
+    monkeypatch.setattr(backend_module, "MLAIBackendClient", UnexpectedClient)
+    monkeypatch.setattr(
+        main_module,
+        "send_dm",
+        lambda *_args, **_kwargs: pytest.fail("expired action notified Slack"),
+    )
+
+    assert await action_module.process_office_manager_action(
+        action["id"],
+        store=store,
+        processor=main_module._process_office_manager_action_record,
+    )
+    assert store.get(action["id"])["status"] == "completed"
 
 
 def test_retry_delay_is_exponential_and_capped():
