@@ -11261,6 +11261,11 @@ Chunk {index} source: {label}
                     "I couldn't identify one explicit Linear edit. Include the field and exact new value; "
                     "for example, `move TECH-29 to In Progress`. Nothing was changed."
                 )
+            raw_issue_target = self._linear_channel_write_target_reference(
+                text,
+                operation=write["operation"],
+            )
+            issue_in_text = self._linear_issue_identifier(raw_issue_target)
             if not raw_issue_target:
                 return (
                     "Which Linear issue do you mean? Explicitly name the issue or say `it` "
@@ -11575,24 +11580,44 @@ Chunk {index} source: {label}
                 return True
         return False
 
-    def _linear_channel_write_target_reference(self, text: Any) -> str:
+    def _linear_channel_write_target_reference(
+        self,
+        text: Any,
+        *,
+        operation: Optional[str] = None,
+    ) -> str:
         """Extract only the issue target clause, never an edit's new value."""
 
         raw = str(text or "")
         target = r"(?P<target>[A-Z][A-Z0-9]{1,15}-\d+|it|this|that)"
         patterns = [
-            rf"\bappend\s+.+\s+to\s+(?:the\s+)?description\s+of\s+{target}\s*$",
-            rf"\b(?:move|set)\s+(?:issue\s+)?{target}(?:\s+status)?\s+to\b",
-            rf"\b(?:add|post|leave)\s+(?:a\s+)?comment\s+(?:to|on)\s+{target}\b",
-            rf"\bcomment\s+on\s+{target}\b",
-            rf"\b(?:set|change|update|rename|replace|append|clear|remove)\b"
-            rf".*?\b(?:status|title|description|priority|estimate|due\s+date|assignee|project|cycle)\b"
-            rf"\s+(?:of|from)\s+{target}\b",
-            rf"\bassign\s+(?:issue\s+)?{target}\s+to\b",
-            rf"\b(?:add|remove)\s+(?:the\s+)?label\b.*?\s+(?:to|from)\s+{target}\s*$",
-            rf"\b(?:mark|set)\s+(?:issue\s+)?{target}\s+as\s+(?:a\s+)?duplicate\s+of\b",
+            ("set_status", rf"\b(?:move|set)\s+(?:issue\s+)?{target}(?:\s+status)?\s+to\b"),
+            ("set_status", rf"\b(?:set|change|update)\s+(?:the\s+)?status\s+of\s+{target}\s+to\b"),
+            ("add_comment", rf"\b(?:add|post|leave)\s+(?:a\s+)?comment\s+(?:to|on)\s+{target}\b"),
+            ("add_comment", rf"\bcomment\s+on\s+{target}\b"),
+            ("set_title", rf"\b(?:set|change|update|rename)\s+(?:the\s+)?title\s+of\s+{target}\s+to\b"),
+            ("append_description", rf"\bappend\s+.+\s+to\s+(?:the\s+)?description\s+of\s+{target}\s*$"),
+            ("append_description", rf"\bappend\s+(?:to\s+)?(?:the\s+)?description\s+of\s+{target}\b"),
+            ("replace_description", rf"\b(?:set|replace|update)\s+(?:the\s+)?description\s+of\s+{target}\b"),
+            ("set_priority", rf"\b(?:set|change|update)\s+(?:the\s+)?priority\s+of\s+{target}\s+to\b"),
+            ("set_estimate", rf"\b(?:set|change|update)\s+(?:the\s+)?estimate\s+of\s+{target}\s+to\b"),
+            ("set_estimate", rf"\b(?:clear|remove)\s+(?:the\s+)?estimate\s+(?:of|from)\s+{target}\b"),
+            ("set_due_date", rf"\b(?:set|change|update)\s+(?:the\s+)?due\s+date\s+of\s+{target}\s+to\b"),
+            ("set_due_date", rf"\b(?:clear|remove)\s+(?:the\s+)?due\s+date\s+(?:of|from)\s+{target}\b"),
+            ("set_assignee", rf"\bassign\s+(?:issue\s+)?{target}\s+to\b"),
+            ("set_assignee", rf"\b(?:set|change|update)\s+(?:the\s+)?assignee\s+of\s+{target}\s+to\b"),
+            ("set_assignee", rf"\b(?:clear|remove)\s+(?:the\s+)?assignee\s+(?:of|from)\s+{target}\b"),
+            ("add_label", rf"\badd\s+(?:the\s+)?label\b.*?\s+to\s+{target}\s*$"),
+            ("remove_label", rf"\bremove\s+(?:the\s+)?label\b.*?\s+from\s+{target}\s*$"),
+            ("set_project", rf"\b(?:set|change|update)\s+(?:the\s+)?project\s+of\s+{target}\s+to\b"),
+            ("set_project", rf"\b(?:clear|remove)\s+(?:the\s+)?project\s+(?:of|from)\s+{target}\b"),
+            ("set_cycle", rf"\b(?:set|change|update)\s+(?:the\s+)?cycle\s+of\s+{target}\s+to\b"),
+            ("set_cycle", rf"\b(?:clear|remove)\s+(?:the\s+)?cycle\s+(?:of|from)\s+{target}\b"),
+            ("mark_duplicate", rf"\b(?:mark|set)\s+(?:issue\s+)?{target}\s+as\s+(?:a\s+)?duplicate\s+of\b"),
         ]
-        for pattern in patterns:
+        for pattern_operation, pattern in patterns:
+            if operation and pattern_operation != operation:
+                continue
             match = re.search(pattern, raw, re.IGNORECASE)
             if match:
                 return str(match.group("target") or "").strip()

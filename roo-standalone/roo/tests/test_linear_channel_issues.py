@@ -127,6 +127,10 @@ def test_write_target_extraction_does_not_scan_comment_body():
     assert executor._linear_channel_write_target_reference(
         "mark issue TECH-29 as duplicate of TECH-30"
     ) == "TECH-29"
+    assert executor._linear_channel_write_target_reference(
+        "change the title to Improve description of TECH-30",
+        operation="set_title",
+    ) == ""
 
 
 def test_destructive_detection_does_not_scan_edit_value():
@@ -327,6 +331,30 @@ async def test_targetless_write_does_not_inherit_thread_issue(monkeypatch):
         }],
         slack_team_id="TMLAI",
         request_id="Ev-targetless",
+    )
+
+    assert "Explicitly name the issue" in result
+    assert FakeClient.writes == []
+
+
+@pytest.mark.asyncio
+async def test_target_cannot_come_from_another_field_inside_value(monkeypatch):
+    FakeClient.writes = []
+    monkeypatch.setattr(executor_module, "get_settings", lambda: settings())
+    monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeClient)
+
+    result = await SkillExecutor()._execute_linear_channel_issues(
+        text="change the title to Improve description of TECH-30",
+        params={
+            "action": "update_issue",
+            "field": "title",
+            "value": "Improve description of TECH-30",
+        },
+        user_id="U123",
+        channel_id="CTECH",
+        thread_history=None,
+        slack_team_id="TMLAI",
+        request_id="Ev-cross-field-target",
     )
 
     assert "Explicitly name the issue" in result
