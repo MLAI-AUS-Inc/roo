@@ -437,6 +437,26 @@ def test_mixed_scalar_write_with_full_routed_suffix_is_rejected():
     ) is None
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        (
+            "mark TECH-29 as duplicate of TECH-30, then "
+            "mark TECH-31 as duplicate of TECH-32"
+        ),
+        (
+            "mark TECH-29 as duplicate of TECH-30\n"
+            "mark TECH-31 as duplicate of TECH-32"
+        ),
+    ],
+)
+def test_additional_edits_with_non_conjunction_separators_are_rejected(text):
+    assert SkillExecutor()._linear_channel_write_request(
+        text,
+        {"field": "duplicate", "value": "TECH-30"},
+    ) is None
+
+
 @pytest.mark.asyncio
 async def test_explicit_status_change_uses_current_issue_version(monkeypatch):
     FakeClient.writes = []

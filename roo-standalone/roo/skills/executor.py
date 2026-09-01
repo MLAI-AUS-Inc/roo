@@ -11513,7 +11513,11 @@ Chunk {index} source: {label}
             "replace_description": {"append_description", "replace_description"},
         }
         text = str(value_and_tail or "")
-        for separator in re.finditer(r"(?:\band\b|;)\s+", text, re.IGNORECASE):
+        for separator in re.finditer(
+            r"(?:(?:\band\b|\bthen\b|;|,)\s+|\n+\s*)",
+            text,
+            re.IGNORECASE,
+        ):
             candidate = text[separator.end():].strip()
             candidate = re.sub(r"^(?:please\s+)", "", candidate, flags=re.IGNORECASE)
             for operation, pattern in command_patterns.items():
