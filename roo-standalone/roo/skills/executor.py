@@ -11347,33 +11347,14 @@ Chunk {index} source: {label}
 
     def _linear_channel_write_request(self, text: str, params: dict) -> Optional[dict[str, Any]]:
         raw = str(text or "").strip()
-        intent_patterns = {
-            "add_comment": [r"\b(?:add|post|leave)\s+(?:a\s+)?comment\b", r"\bcomment\s+on\b"],
-            "set_title": [r"\b(?:set|change|update|rename)\b[^.\n]*\btitle\b"],
-            "append_description": [r"\bappend\b[^.\n]*\bdescription\b"],
-            "replace_description": [r"\b(?:set|replace|update)\b[^.\n]*\bdescription\b"],
-            "set_priority": [r"\b(?:set|change|update)\b[^.\n]*\bpriority\b"],
-            "set_estimate": [r"\b(?:set|change|update|clear|remove)\b[^.\n]*\bestimate\b"],
-            "set_due_date": [r"\b(?:set|change|update|clear|remove)\b[^.\n]*\bdue\s+date\b"],
-            "set_assignee": [r"\bassign\b", r"\b(?:set|change|update|clear|remove)\b[^.\n]*\bassignee\b"],
-            "add_label": [r"\badd\b[^.\n]*\blabel\b"],
-            "remove_label": [r"\bremove\b[^.\n]*\blabel\b"],
-            "set_project": [r"\b(?:set|change|update|clear|remove|move)\b[^.\n]*\bproject\b"],
-            "set_cycle": [r"\b(?:set|change|update|clear|remove|move)\b[^.\n]*\bcycle\b"],
-            "set_status": [
-                r"\b(?:set|change|update)\b[^.\n]*\bstatus\b",
-                r"\bmove\s+(?:issue\s+)?(?:[A-Z][A-Z0-9]+-\d+|it|this|that)\s+to\b",
-            ],
-            "mark_duplicate": [r"\b(?:mark|set)\b[^.\n]*\bduplicate\s+of\b"],
-        }
-        detected = {
-            operation
-            for operation, patterns in intent_patterns.items()
-            if any(re.search(pattern, raw, re.IGNORECASE) for pattern in patterns)
-        }
-        if len(detected) != 1:
+        if re.search(
+            r"\b(?:do\s+not|don't|dont|never)\s+(?:please\s+)?"
+            r"(?:move|set|change|update|rename|add|post|leave|comment|append|replace|"
+            r"clear|remove|assign|mark)\b",
+            raw,
+            re.IGNORECASE,
+        ):
             return None
-        detected_operation = next(iter(detected))
 
         field = str(params.get("field") or "").strip().lower().replace("-", "_")
         mode = str(params.get("mode") or "set").strip().lower()
@@ -11392,10 +11373,6 @@ Chunk {index} source: {label}
             "status": "set_status",
             "duplicate": "mark_duplicate",
         }
-        routed_operation = operation_by_field.get(field)
-        if routed_operation and routed_operation != detected_operation:
-            return None
-
         value_patterns = [
             ("set_status", r"\b(?:move|set)\s+(?:issue\s+)?(?:[A-Z][A-Z0-9]+-\d+|it|this|that)(?:\s+status)?\s+to\s+(.+)$"),
             ("set_status", r"\b(?:set|change|update)\s+(?:the\s+)?status(?:\s+of\s+(?:[A-Z][A-Z0-9]+-\d+|it|this|that))?\s+to\s+(.+)$"),
@@ -11420,17 +11397,24 @@ Chunk {index} source: {label}
             ("set_cycle", r"\b(?:clear|remove)\s+(?:the\s+)?cycle(?:\s+(?:of|from)\s+(?:[A-Z][A-Z0-9]+-\d+|it|this|that))?\s*$"),
             ("mark_duplicate", r"\b(?:mark|set)\b.*?\bduplicate\s+of\s+([A-Z][A-Z0-9]+-\d+)\b"),
         ]
-        for operation, pattern in value_patterns:
-            if operation != detected_operation:
-                continue
-            match = re.search(pattern, raw, re.IGNORECASE)
-            if match:
-                captured = next((group for group in match.groups() if group), "clear")
-                captured_value = captured.strip()
-                if value is not None and str(value).strip().casefold() != captured_value.casefold():
-                    return None
-                return {"operation": operation, "value": captured_value}
-        return None
+        matches = [
+            (operation, match)
+            for operation, pattern in value_patterns
+            if (match := re.search(pattern, raw, re.IGNORECASE))
+        ]
+        detected_operations = {operation for operation, _match in matches}
+        if len(detected_operations) != 1:
+            return None
+        detected_operation = next(iter(detected_operations))
+        routed_operation = operation_by_field.get(field)
+        if routed_operation and routed_operation != detected_operation:
+            return None
+        match = next(match for operation, match in matches if operation == detected_operation)
+        captured = next((group for group in match.groups() if group), "clear")
+        captured_value = captured.strip()
+        if value is not None and str(value).strip().casefold() != captured_value.casefold():
+            return None
+        return {"operation": detected_operation, "value": captured_value}
 
     def _linear_channel_write_error(self, exc: Exception) -> str:
         if isinstance(exc, httpx.HTTPStatusError):

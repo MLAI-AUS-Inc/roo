@@ -80,6 +80,28 @@ def test_each_typed_write_requires_matching_explicit_text(text, params, operatio
     }
 
 
+def test_value_text_can_name_another_linear_field_without_becoming_second_edit():
+    assert SkillExecutor()._linear_channel_write_request(
+        "change the title of TECH-29 to Improve priority handling",
+        {"field": "title", "value": "Improve priority handling"},
+    ) == {"operation": "set_title", "value": "Improve priority handling"}
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "do not move TECH-29 to Done",
+        "please don't change the status of TECH-29 to Done",
+        "never add a comment to TECH-29 saying shipped",
+    ],
+)
+def test_negated_edit_commands_are_rejected(text):
+    assert SkillExecutor()._linear_channel_write_request(
+        text,
+        {"field": "status", "value": "Done"},
+    ) is None
+
+
 @pytest.mark.asyncio
 async def test_lists_live_statuses(monkeypatch):
     FakeClient.status_calls = 0
