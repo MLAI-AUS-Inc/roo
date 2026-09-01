@@ -1129,6 +1129,50 @@ def test_existing_outbox_schema_adds_uncertainty_notice_column(tmp_path):
     assert action["feedback_prepared_at"] is None
 
 
+def test_concurrent_processes_serialize_legacy_schema_upgrade(tmp_path):
+    database_path = tmp_path / "legacy-actions.db"
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE office_manager_action_outbox (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                idempotency_key TEXT NOT NULL UNIQUE,
+                slack_user_id TEXT NOT NULL,
+                channel_id TEXT NOT NULL,
+                booking_date TEXT NOT NULL,
+                status TEXT NOT NULL,
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                next_attempt_at REAL NOT NULL,
+                locked_until REAL,
+                locked_by TEXT,
+                last_error TEXT,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                completed_at REAL
+            )
+            """
+        )
+
+    stores = [
+        action_module.OfficeManagerActionStore(database_path),
+        action_module.OfficeManagerActionStore(database_path),
+    ]
+
+    def upgrade(index):
+        return stores[index].record_action(
+            slack_user_id=f"UCONCURRENT{index}",
+            channel_id="CCOWORK",
+            booking_date="2026-08-03",
+        )[0]
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        upgraded = list(executor.map(upgrade, range(2)))
+
+    assert len(upgraded) == 2
+    assert all(row["feedback_text"] is None for row in upgraded)
+    assert all(row["feedback_client_msg_id"] is None for row in upgraded)
+
+
 @pytest.mark.asyncio
 async def test_terminal_feedback_is_staged_and_retried_with_same_message_id(
     tmp_path,

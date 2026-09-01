@@ -72,6 +72,11 @@ class OfficeManagerActionStore:
             if self._initialized:
                 return
             with self._connect() as connection:
+                # Schema discovery and additive upgrades must be one
+                # cross-process critical section. Otherwise two freshly
+                # started workers can both observe a missing column and race
+                # the same ALTER TABLE statement.
+                connection.execute("BEGIN IMMEDIATE")
                 connection.execute(
                     """
                     CREATE TABLE IF NOT EXISTS office_manager_action_outbox (
