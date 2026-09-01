@@ -124,6 +124,9 @@ def test_write_target_extraction_does_not_scan_comment_body():
     assert executor._linear_channel_write_target_reference(
         "append description of TECH-30 is stale to the description of TECH-29"
     ) == "TECH-29"
+    assert executor._linear_channel_write_target_reference(
+        "mark issue TECH-29 as duplicate of TECH-30"
+    ) == "TECH-29"
 
 
 def test_destructive_detection_does_not_scan_edit_value():

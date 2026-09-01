@@ -11579,7 +11579,7 @@ Chunk {index} source: {label}
             rf"\s+(?:of|from)\s+{target}\b",
             rf"\bassign\s+(?:issue\s+)?{target}\s+to\b",
             rf"\b(?:add|remove)\s+(?:the\s+)?label\b.*?\s+(?:to|from)\s+{target}\s*$",
-            rf"\b(?:mark|set)\s+{target}\s+as\s+(?:a\s+)?duplicate\s+of\b",
+            rf"\b(?:mark|set)\s+(?:issue\s+)?{target}\s+as\s+(?:a\s+)?duplicate\s+of\b",
         ]
         for pattern in patterns:
             match = re.search(pattern, raw, re.IGNORECASE)
