@@ -17,6 +17,13 @@ MELBOURNE_TZ = ZoneInfo("Australia/Melbourne")
 BOOK_ACTION_ID = "meeting_room_confirm_booking"
 CANCEL_ACTION_ID = "meeting_room_cancel_booking"
 CHOOSE_ROOM_ACTION_ID = "meeting_room_choose_room"
+CHOOSE_ROOM_ACTION_IDS_BY_ROOM = {
+    "big-meeting-room": f"{CHOOSE_ROOM_ACTION_ID}_big",
+    "small-meeting-room": f"{CHOOSE_ROOM_ACTION_ID}_small",
+}
+CHOOSE_ROOM_ACTION_IDS = frozenset(
+    {CHOOSE_ROOM_ACTION_ID, *CHOOSE_ROOM_ACTION_IDS_BY_ROOM.values()}
+)
 CONFIRMATION_TTL = timedelta(minutes=10)
 MIN_BOOKING_HALF_HOURS = 2
 MAX_BOOKING_HALF_HOURS = 4
@@ -36,6 +43,23 @@ WEEKDAYS = {
     "saturday": 5,
     "sunday": 6,
 }
+TOMORROW_ALIASES = frozenset(
+    {
+        "tomorrow",
+        "tomorow",
+        "tommorow",
+        "tommorrow",
+    }
+)
+TOMORROW_REFERENCE_RE = re.compile(
+    r"\b(?:tomorrow|tomorow|tommorow|tommorrow)\b",
+    re.IGNORECASE,
+)
+UNRESOLVED_DATE_REFERENCE_RE = re.compile(
+    r"\b(?:yesterday|tonight|next\s+(?:week|month|year)|this\s+(?:week|month|year)|"
+    r"someday|tomorrow\w+|tomorow\w+|tommorow\w+|tommorrow\w+)\b",
+    re.IGNORECASE,
+)
 
 
 class MeetingRoomInputError(ValueError):
@@ -54,6 +78,15 @@ def room_slug_from_text(text: str) -> Optional[str]:
     if small == big:
         return None
     return "small-meeting-room" if small else "big-meeting-room"
+
+
+def room_choice_action_id(room_slug: str) -> str:
+    """Return the unique Slack action ID for a generated private room button."""
+
+    try:
+        return CHOOSE_ROOM_ACTION_IDS_BY_ROOM[str(room_slug)]
+    except KeyError as exc:
+        raise ValueError("room_slug is not supported for private buttons") from exc
 
 
 def supported_active_rooms(rooms: list[dict]) -> list[dict]:
@@ -99,6 +132,22 @@ def _parse_date_value(value: Any) -> Optional[date]:
         return None
 
 
+def has_date_reference(text: str, params: Optional[dict] = None) -> bool:
+    params = params or {}
+    if params.get("date") or params.get("starts_at") or params.get("start"):
+        return True
+    normalized = str(text or "").lower()
+    return bool(
+        re.search(
+            r"\b(?:today|next\s+)?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b",
+            normalized,
+        )
+        or re.search(r"\b\d{4}-\d{2}-\d{2}\b", normalized)
+        or re.search(r"\btoday\b", normalized)
+        or TOMORROW_REFERENCE_RE.search(normalized)
+    )
+
+
 def resolve_local_date(
     text: str,
     params: Optional[dict] = None,
@@ -114,7 +163,7 @@ def resolve_local_date(
         return direct
     if raw_param_date == "today":
         return current.date()
-    if raw_param_date == "tomorrow":
+    if raw_param_date in TOMORROW_ALIASES:
         return current.date() + timedelta(days=1)
     normalized_param_date = raw_param_date.removeprefix("next ")
     if normalized_param_date in WEEKDAYS:
@@ -139,7 +188,7 @@ def resolve_local_date(
                 "invalid_date",
                 "That date is not valid. Use a date like 2026-08-14.",
             )
-    if re.search(r"\btomorrow\b", normalized):
+    if TOMORROW_REFERENCE_RE.search(normalized):
         return current.date() + timedelta(days=1)
     if re.search(r"\btoday\b", normalized):
         return current.date()
@@ -155,10 +204,13 @@ def resolve_local_date(
             offset = offset + 7 if offset else 7
         return current.date() + timedelta(days=offset)
 
-    raise MeetingRoomInputError(
-        "missing_date",
-        "What date should I check? Try `tomorrow` or `2026-08-14`.",
-    )
+    if raw_param_date or UNRESOLVED_DATE_REFERENCE_RE.search(normalized):
+        raise MeetingRoomInputError(
+            "invalid_date",
+            "I could not understand that date. Try `tomorrow` or `2026-08-14`.",
+        )
+
+    return current.date() + timedelta(days=1)
 
 
 def _parse_time_value(value: Any, field_label: str) -> Optional[time]:
@@ -416,6 +468,7 @@ def resolve_interval(
     maximum_half_hours: int = MAX_BOOKING_HALF_HOURS,
 ) -> tuple[datetime, datetime]:
     params = params or {}
+    reference_now = now or get_current_datetime()
     exact_start = _parse_iso_timestamp(params.get("starts_at"))
     exact_end = _parse_iso_timestamp(params.get("ends_at"))
     if exact_start or exact_end:
@@ -425,7 +478,7 @@ def resolve_interval(
             return _validate_resolved_interval(
                 exact_start,
                 exact_end,
-                now=now,
+                now=reference_now,
                 minimum_half_hours=minimum_half_hours,
                 maximum_half_hours=maximum_half_hours,
             )
@@ -441,12 +494,12 @@ def resolve_interval(
         return _validate_resolved_interval(
             exact_start,
             ends_at,
-            now=now,
+            now=reference_now,
             minimum_half_hours=minimum_half_hours,
             maximum_half_hours=maximum_half_hours,
         )
 
-    local_date = resolve_local_date(text, params, now=now)
+    local_date = resolve_local_date(text, params, now=reference_now)
     natural_start, natural_end = _natural_time_tokens(text)
     start_value = params.get("start_time") or natural_start
     end_value = params.get("end_time") or natural_end
@@ -454,7 +507,16 @@ def resolve_interval(
     if start_time is None:
         raise MeetingRoomInputError(
             "missing_start_time",
-            "What time should the booking start? Try `tomorrow at 2pm`.",
+            "What time should the booking start? Try `2pm`.",
+        )
+
+    if not has_date_reference(text, params):
+        current = reference_now.astimezone(MELBOURNE_TZ)
+        same_day_start = _local_datetime(current.date(), start_time)
+        local_date = (
+            current.date()
+            if _as_utc(same_day_start) > _as_utc(current)
+            else current.date() + timedelta(days=1)
         )
 
     starts_at = _local_datetime(local_date, start_time)
@@ -480,7 +542,7 @@ def resolve_interval(
         params,
         local_date=local_date,
         starts_at=starts_at,
-        now=now,
+        now=reference_now,
     ):
         starts_at = _local_datetime(
             starts_at.date() + timedelta(days=7),
@@ -493,7 +555,7 @@ def resolve_interval(
     return _validate_resolved_interval(
         starts_at,
         ends_at,
-        now=now,
+        now=reference_now,
         minimum_half_hours=minimum_half_hours,
         maximum_half_hours=maximum_half_hours,
     )
@@ -716,6 +778,85 @@ def room_choice_expired(payload: dict, *, now: Optional[datetime] = None) -> boo
     return expires_at.astimezone(timezone.utc) <= current
 
 
+def validate_room_selection_prompt(message: str, blocks: list[dict]) -> None:
+    """Fail closed before Slack sees a malformed private room-choice card."""
+
+    def invalid_prompt() -> MeetingRoomInputError:
+        return MeetingRoomInputError(
+            "invalid_response",
+            "I couldn't build a safe room-choice card. Ask Roo to start again.",
+        )
+
+    fallback_text = str(message or "").strip()
+    if (
+        not fallback_text
+        or len(fallback_text) > 40_000
+        or not isinstance(blocks, list)
+        or len(blocks) > 50
+        or any(not isinstance(block, dict) for block in blocks)
+    ):
+        raise invalid_prompt()
+
+    actions_blocks = [block for block in blocks if block.get("type") == "actions"]
+    if len(actions_blocks) != 1:
+        raise invalid_prompt()
+    section_blocks = [block for block in blocks if block.get("type") == "section"]
+    if len(section_blocks) != 1:
+        raise invalid_prompt()
+    section_text_payload = section_blocks[0].get("text")
+    if not isinstance(section_text_payload, dict):
+        raise invalid_prompt()
+    section_text = section_text_payload.get("text")
+    if (
+        section_text_payload.get("type") not in {"mrkdwn", "plain_text"}
+        or not isinstance(section_text, str)
+        or not section_text.strip()
+        or len(section_text) > 3_000
+    ):
+        raise invalid_prompt()
+    block_id = str(actions_blocks[0].get("block_id") or "")
+    if not block_id or len(block_id) > 255:
+        raise invalid_prompt()
+    elements = actions_blocks[0].get("elements")
+    if not isinstance(elements, list) or not elements or len(elements) > 25:
+        raise invalid_prompt()
+
+    seen_action_ids: set[str] = set()
+    for element in elements:
+        if not isinstance(element, dict) or element.get("type") != "button":
+            raise invalid_prompt()
+        action_id = str(element.get("action_id") or "")
+        label_payload = element.get("text")
+        if not isinstance(label_payload, dict):
+            raise invalid_prompt()
+        label = label_payload.get("text")
+        raw_value = str(element.get("value") or "")
+        if (
+            not action_id
+            or len(action_id) > 255
+            or action_id in seen_action_ids
+            or action_id not in CHOOSE_ROOM_ACTION_IDS_BY_ROOM.values()
+            or label_payload.get("type") != "plain_text"
+            or not isinstance(label, str)
+            or not label.strip()
+            or len(label) > 75
+            or not raw_value
+            or len(raw_value) > 2_000
+        ):
+            raise invalid_prompt()
+        seen_action_ids.add(action_id)
+        try:
+            value = parse_action_value(
+                raw_value,
+                expected_action=CHOOSE_ROOM_ACTION_ID,
+            )
+            expected_action_id = room_choice_action_id(value["room_slug"])
+        except (KeyError, MeetingRoomInputError, ValueError) as exc:
+            raise invalid_prompt() from exc
+        if action_id != expected_action_id:
+            raise invalid_prompt()
+
+
 def room_selection_prompt(
     rooms: list[dict],
     *,
@@ -752,7 +893,7 @@ def room_selection_prompt(
         buttons.append(
             {
                 "type": "button",
-                "action_id": CHOOSE_ROOM_ACTION_ID,
+                "action_id": room_choice_action_id(room["slug"]),
                 "text": {"type": "plain_text", "text": room["name"]},
                 "value": build_room_choice_action_value(
                     owner_slack_user_id=owner_slack_user_id,
@@ -766,17 +907,16 @@ def room_selection_prompt(
                 ),
             }
         )
-    return {
-        "message": message,
-        "blocks": [
-            {"type": "section", "text": {"type": "mrkdwn", "text": message}},
-            {
-                "type": "actions",
-                "block_id": f"meeting_room_choice_{selection_id}",
-                "elements": buttons,
-            },
-        ],
-    }
+    blocks = [
+        {"type": "section", "text": {"type": "mrkdwn", "text": message}},
+        {
+            "type": "actions",
+            "block_id": f"meeting_room_choice_{selection_id}",
+            "elements": buttons,
+        },
+    ]
+    validate_room_selection_prompt(message, blocks)
+    return {"message": message, "blocks": blocks}
 
 
 def room_choice_already_selected_message(payload: dict) -> str:

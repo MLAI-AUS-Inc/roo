@@ -2188,6 +2188,64 @@ class MLAIBackendClient:
         self._raise_for_status_or_backend_unavailable(response)
         return response.json()
 
+    async def list_linear_channel_issues(
+        self,
+        *,
+        slack_workspace_id: str,
+        slack_channel_id: str,
+        requester_slack_id: str,
+        limit: int = 50,
+        after: Optional[str] = None,
+    ) -> dict:
+        """List the live Linear queue bound to the invoking Slack channel."""
+        payload: Dict[str, Any] = {
+            "slack_workspace_id": str(slack_workspace_id or "").strip(),
+            "slack_channel_id": str(slack_channel_id or "").strip(),
+            "requester_slack_id": self._clean_slack_id(requester_slack_id),
+            "limit": max(1, min(int(limit or 50), 100)),
+        }
+        if after:
+            payload["after"] = str(after).strip()
+        response = await self._request(
+            "POST",
+            "/api/v1/integrations/linear/channel-issues/list",
+            json=payload,
+            timeout=30.0,
+            transport_retries=1,
+            retry_backoff_seconds=0.25,
+            circuit_breaker=True,
+        )
+        self._raise_for_status_or_backend_unavailable(response)
+        return response.json()
+
+    async def get_linear_channel_issue(
+        self,
+        *,
+        slack_workspace_id: str,
+        slack_channel_id: str,
+        requester_slack_id: str,
+        issue_identifier: str,
+        include_comments: bool = True,
+    ) -> dict:
+        """Get one approved Linear issue and its bounded comment history."""
+        response = await self._request(
+            "POST",
+            "/api/v1/integrations/linear/channel-issues/detail",
+            json={
+                "slack_workspace_id": str(slack_workspace_id or "").strip(),
+                "slack_channel_id": str(slack_channel_id or "").strip(),
+                "requester_slack_id": self._clean_slack_id(requester_slack_id),
+                "issue_identifier": str(issue_identifier or "").strip(),
+                "include_comments": bool(include_comments),
+            },
+            timeout=45.0,
+            transport_retries=1,
+            retry_backoff_seconds=0.25,
+            circuit_breaker=True,
+        )
+        self._raise_for_status_or_backend_unavailable(response)
+        return response.json()
+
     async def book_coworking(self, slack_user_id: str, booking_date: str, slack_channel_id: Optional[str] = None) -> dict:
         """Book a coworking day."""
         try:
@@ -3516,22 +3574,24 @@ class MLAIBackendClient:
 
     async def link_slack_user(self, slack_id: str, email: str) -> Optional[int]:
         """Link a Slack ID to an existing user found by email."""
-        try:
-            response = await self._request(
-                "POST",
-                "/api/v1/users/link-slack/",
-                json={"slack_id": slack_id, "email": email},
-                timeout=10.0,
-                circuit_breaker=True,
-                use_admin_headers=True,
-            )
-            if response.status_code == 404:
-                return None
-            response.raise_for_status()
-            return response.json().get("user_id")
-        except Exception as e:
-            print(f"Failed to link Slack user: {e}")
+        response = await self._request(
+            "POST",
+            "/api/v1/users/link-slack/",
+            json={"slack_id": slack_id, "email": email},
+            timeout=10.0,
+            circuit_breaker=True,
+            # Identity linking uses Roo's dedicated service credential rather
+            # than the broader legacy internal/admin credential.
+            use_admin_headers=False,
+        )
+        if response.status_code == 404:
             return None
+        self._raise_for_status_or_backend_unavailable(response)
+        payload = response.json()
+        user_id = payload.get("user_id") if isinstance(payload, dict) else None
+        if user_id is None:
+            raise ValueError("MLAI backend omitted the linked user ID")
+        return int(user_id)
 
     # --- MedHack Game State ---
 

@@ -75,6 +75,7 @@ from ..points_flex import (
     parse_lifetime_earned,
 )
 from ..slack_client import (
+    get_bot_user_id,
     get_channel_id,
     get_channel_name,
     post_ephemeral,
@@ -102,6 +103,7 @@ from ..meeting_room_booking import (
     booking_preview,
     cancellation_selection,
     format_interval as format_meeting_room_interval,
+    has_date_reference as has_meeting_room_date_reference,
     parse_backend_timestamp,
     room_selection_prompt,
     room_slug_from_text,
@@ -111,6 +113,10 @@ from ..meeting_room_booking import (
     supported_active_rooms,
 )
 from ..coworking_messages import NO_FOOD_REMINDER
+from ..meeting_room_clarifications import (
+    get_meeting_room_clarification_store,
+    public_room_choice_prompt,
+)
 
 
 POINTS_SUPER_ADMIN_SLACK_ID = "U05QPB483K9"
@@ -119,12 +125,7 @@ COWORKING_REPORT_ROLES = {*FULL_POINTS_ADMIN_ROLES, "partner"}
 VICTOR_AI_ACCESS_UNAVAILABLE_MESSAGE = (
     "Victor application data is not available in this conversation."
 )
-LINEAR_MEETING_PENDING_ACTIONS: dict[str, dict[str, Any]] = {}
-LINEAR_MEETING_EXTRACTION_CONCURRENCY = 2
-LINEAR_MEETING_EXTRACTION_TOTAL_TIMEOUT_SECONDS = 240.0
-LINEAR_MEETING_TIMEOUT_RECOVERY_MAX_CHARS = 5_000
 LINEAR_MEETING_TIMEOUT_RECOVERY_OVERLAP_CHARS = 300
-LINEAR_MEETING_TIMEOUT_RECOVERY_DEPTH = 1
 
 
 class LinearMeetingExtractionDeadlineError(RuntimeError):
@@ -165,14 +166,6 @@ class SkillResult:
     error: Optional[str] = None
     blocks: Optional[list] = None
     suppress_post: bool = False
-
-
-def get_pending_linear_meeting_action(pending_id: str) -> Optional[dict[str, Any]]:
-    return LINEAR_MEETING_PENDING_ACTIONS.get(pending_id)
-
-
-def pop_pending_linear_meeting_action(pending_id: str) -> Optional[dict[str, Any]]:
-    return LINEAR_MEETING_PENDING_ACTIONS.pop(pending_id, None)
 
 
 def _linear_task_sizing_setting(
@@ -281,9 +274,25 @@ class SkillExecutor:
                     params=params,
                     user_id=user_id,
                     channel_id=channel_id,
+                    thread_ts=thread_ts,
+                    slack_team_id=kwargs.get("slack_team_id"),
+                    request_message_ts=kwargs.get("current_message_ts"),
                 )
             elif skill.name == "mlai-data-query":
-                result = await self._execute_mlai_data_query(skill, text, params, user_id)
+                result = await self._execute_mlai_data_query(
+                    skill,
+                    text,
+                    params,
+                    user_id,
+                    channel_id=channel_id,
+                    thread_ts=thread_ts,
+                    thread_history=(
+                        kwargs.get("linear_thread_history")
+                        if kwargs.get("linear_thread_history") is not None
+                        else thread_history
+                    ),
+                    slack_team_id=kwargs.get("slack_team_id"),
+                )
             elif skill.name == "github-integration":
                 result = await self._execute_github_integration(skill, text, params, user_id, channel_id, thread_ts)
             elif skill.name == "linear-meeting-actions":
@@ -477,6 +486,7 @@ class SkillExecutor:
         message: str,
         blocks: Optional[list] = None,
         action: Optional[str] = None,
+        client_msg_id: Optional[str] = None,
     ) -> dict:
         data = {"action": action, "delivery": "direct_message"}
         if channel_id and str(channel_id).startswith("D"):
@@ -490,10 +500,36 @@ class SkillExecutor:
                 "data": {**data, "delivery_failed": True},
             }
         try:
-            dm_response = send_dm(user_id, message, blocks=blocks) if blocks else send_dm(user_id, message)
-        except Exception:
-            dm_response = None
-        if not dm_response or not dm_response.get("ok"):
+            delivery_options = {}
+            if blocks:
+                delivery_options["blocks"] = blocks
+            if client_msg_id:
+                delivery_options["client_msg_id"] = client_msg_id
+                delivery_options["raise_on_error"] = True
+            dm_response = send_dm(user_id, message, **delivery_options)
+        except Exception as exc:
+            error_response = getattr(exc, "response", None)
+            try:
+                duplicate_message = bool(
+                    error_response is not None
+                    and error_response.get("error") == "duplicate_message"
+                )
+            except (AttributeError, TypeError):
+                duplicate_message = False
+            if duplicate_message:
+                dm_response = {"error": "duplicate_message"}
+            elif client_msg_id:
+                raise
+            else:
+                dm_response = None
+        delivered = bool(
+            dm_response
+            and (
+                dm_response.get("ok")
+                or dm_response.get("error") == "duplicate_message"
+            )
+        )
+        if not delivered:
             return {
                 "message": (
                     "I could not open a private Slack DM. DM Roo `meeting room` "
@@ -508,14 +544,7 @@ class SkillExecutor:
 
     @staticmethod
     def _meeting_room_date_is_present(text: str, params: dict) -> bool:
-        if params.get("date") or params.get("starts_at"):
-            return True
-        lowered = str(text or "").lower()
-        return bool(
-            re.search(r"\b(?:today|tomorrow|next\s+)?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b", lowered)
-            or re.search(r"\b\d{4}-\d{2}-\d{2}\b", lowered)
-            or re.search(r"\b(?:today|tomorrow)\b", lowered)
-        )
+        return has_meeting_room_date_reference(text, params)
 
     @staticmethod
     def _meeting_room_time_is_present(text: str, params: dict) -> bool:
@@ -558,15 +587,24 @@ class SkillExecutor:
         busy = result.get("busy_intervals") or []
         if not busy:
             return (
-                f"The *{room_name}* has no bookings currently shown for that date "
-                "(Melbourne time)."
+                f"The *{room_name}* has no bookings or blocks currently shown for "
+                "that date (Melbourne time). Ask Roo to check a specific future "
+                "time before booking."
             )
         lines = [f"The *{room_name}* is unavailable at these times (Melbourne time):"]
         for interval in busy:
             starts_at = parse_backend_timestamp(interval.get("starts_at"))
             ends_at = parse_backend_timestamp(interval.get("ends_at"))
             lines.append(f"- {format_meeting_room_interval(starts_at, ends_at)}")
-        lines.extend(["", "All other times that day are currently available."])
+        lines.extend(
+            [
+                "",
+                (
+                    "No room bookings or blocks are currently shown outside these "
+                    "periods. Ask Roo to check a specific future time before booking."
+                ),
+            ]
+        )
         return "\n".join(lines)
 
     @staticmethod
@@ -603,6 +641,9 @@ class SkillExecutor:
         params: dict,
         user_id: str,
         channel_id: Optional[str],
+        thread_ts: Optional[str] = None,
+        slack_team_id: Optional[str] = None,
+        request_message_ts: Optional[str] = None,
     ) -> dict:
         settings = get_settings()
         action = str(params.get("action") or "").strip()
@@ -651,11 +692,6 @@ class SkillExecutor:
         try:
             requested_room_slug = room_slug_from_text(text)
             if action == "check_room_availability":
-                if not self._meeting_room_date_is_present(text, params):
-                    raise MeetingRoomInputError(
-                        "missing_date",
-                        "What date should I check? Try `tomorrow` or `2026-08-14`.",
-                    )
                 rooms = supported_active_rooms(await client.list_meeting_rooms())
                 selected_rooms = (
                     [room for room in rooms if room["slug"] == requested_room_slug]
@@ -712,7 +748,61 @@ class SkillExecutor:
             if action == "book_meeting_room":
                 starts_at, ends_at = resolve_meeting_room_interval(text, params)
                 rooms = supported_active_rooms(await client.list_meeting_rooms())
+                if not rooms:
+                    raise MeetingRoomInputError(
+                        "inactive_room",
+                        "No meeting rooms are accepting bookings right now.",
+                    )
                 if requested_room_slug is None:
+                    if channel_id and not str(channel_id).startswith("D"):
+                        clarification_context = all(
+                            str(value or "").strip()
+                            for value in (
+                                slack_team_id,
+                                channel_id,
+                                thread_ts,
+                                request_message_ts,
+                                user_id,
+                            )
+                        )
+                        if not clarification_context:
+                            return {
+                                "message": (
+                                    "I couldn't safely keep track of that public room choice. "
+                                    "DM Roo `book the meeting room` and try again."
+                                ),
+                                "data": {
+                                    "action": action,
+                                    "delivery_failed": True,
+                                },
+                            }
+                        clarification = get_meeting_room_clarification_store(
+                            settings.SLACK_RECEIPTS_DB_PATH
+                        ).record_prompt(
+                            team_id=str(slack_team_id),
+                            channel_id=str(channel_id),
+                            thread_ts=str(thread_ts),
+                            request_message_ts=str(request_message_ts),
+                            owner_user_id=user_id,
+                            starts_at=starts_at.isoformat(),
+                            ends_at=ends_at.isoformat(),
+                            available_room_slugs=[room["slug"] for room in rooms],
+                            target_user_id=target_slack_user_id,
+                            choice_mode="buttons",
+                        )
+                        prompt = public_room_choice_prompt(
+                            clarification,
+                            rooms,
+                        )
+                        return {
+                            "message": prompt["message"],
+                            "blocks": prompt["blocks"],
+                            "data": {
+                                "action": action,
+                                "delivery": "public_thread_clarification",
+                                "clarification_id": clarification.get("id"),
+                            },
+                        }
                     selection = room_selection_prompt(
                         rooms,
                         owner_slack_user_id=user_id,
@@ -837,6 +927,117 @@ class SkillExecutor:
                 "message": "I could not determine which Meeting Room action to perform.",
                 "data": {"action": action},
             }
+        except MeetingRoomInputError as exc:
+            return self._deliver_meeting_room_response(
+                user_id=user_id,
+                channel_id=channel_id,
+                message=exc.message,
+                action=action,
+            )
+        except (httpx.HTTPStatusError, MLAIBackendUnavailableError) as exc:
+            return self._deliver_meeting_room_response(
+                user_id=user_id,
+                channel_id=channel_id,
+                message=meeting_room_backend_error_message(
+                    exc,
+                    target_slack_user_id=target_slack_user_id,
+                    room_slug=requested_room_slug,
+                ),
+                action=action,
+            )
+
+    async def complete_meeting_room_room_choice(
+        self,
+        *,
+        user_id: str,
+        channel_id: str,
+        room_slug: str,
+        starts_at: str,
+        ends_at: str,
+        booking_client_request_id: str,
+        target_slack_user_id: Optional[str] = None,
+    ) -> dict:
+        """Privately continue a room booking from a durable public reply."""
+
+        action = "book_meeting_room"
+        settings = get_settings()
+        if not settings.MEETING_ROOM_BOOKING_ENABLED:
+            return {
+                "message": "Meeting-room booking is not enabled right now.",
+                "data": {"action": action, "feature_disabled": True},
+            }
+        if not settings.MLAI_BACKEND_URL or not settings.ROO_API_KEY:
+            return {
+                "message": "Meeting-room booking is not configured right now.",
+                "data": {"action": action, "configuration_error": True},
+            }
+
+        requested_room_slug = str(room_slug or "").strip()
+        try:
+            parsed_start = parse_backend_timestamp(starts_at)
+            parsed_end = parse_backend_timestamp(ends_at)
+            if parsed_end <= parsed_start:
+                raise MeetingRoomInputError(
+                    "invalid_time",
+                    "That room-choice request is no longer valid. Ask Roo to start again.",
+                )
+            client = MLAIBackendClient(
+                base_url=settings.MLAI_BACKEND_URL,
+                api_key=settings.ROO_API_KEY,
+                internal_api_key=settings.ROO_API_KEY,
+            )
+            selected_room = next(
+                (
+                    room
+                    for room in supported_active_rooms(
+                        await client.list_meeting_rooms()
+                    )
+                    if room["slug"] == requested_room_slug
+                ),
+                None,
+            )
+            if selected_room is None:
+                requested_name = (
+                    "Small Meeting Room"
+                    if requested_room_slug == "small-meeting-room"
+                    else "Big Meeting Room"
+                )
+                raise MeetingRoomInputError(
+                    "inactive_room",
+                    f"The {requested_name} is not accepting bookings right now.",
+                )
+            availability = await client.check_meeting_room_availability(
+                user_id,
+                room_slug=selected_room["slug"],
+                starts_at=parsed_start.isoformat(),
+                ends_at=parsed_end.isoformat(),
+                target_slack_user_id=target_slack_user_id,
+            )
+            if not availability.get("available"):
+                message = self._format_meeting_room_availability(availability)
+                return self._deliver_meeting_room_response(
+                    user_id=user_id,
+                    channel_id=channel_id,
+                    message=f"{message} No booking was created.",
+                    action=action,
+                )
+            preview = booking_preview(
+                availability,
+                owner_slack_user_id=user_id,
+                starts_at=parsed_start,
+                ends_at=parsed_end,
+                expected_room_slug=selected_room["slug"],
+                target_slack_user_id=target_slack_user_id,
+                client_request_id=booking_client_request_id,
+            )
+            return self._deliver_meeting_room_response(
+                user_id=user_id,
+                channel_id=channel_id,
+                message=preview["message"],
+                blocks=preview["blocks"],
+                action=action,
+                client_msg_id=booking_client_request_id,
+            )
         except MeetingRoomInputError as exc:
             return self._deliver_meeting_room_response(
                 user_id=user_id,
@@ -3351,6 +3552,30 @@ Keep the response concise but informative."""
                 "message": f"I couldn't read Linear context yet: {detail}"
             }
 
+        projects, explicit_project_resolution = (
+            await self._resolve_explicit_linear_project_context(
+                client=client,
+                params=params,
+                projects=projects,
+            )
+        )
+        resolution_status = str(
+            (explicit_project_resolution or {}).get("status") or ""
+        )
+        if resolution_status in {"not_found", "ambiguous", "unavailable"}:
+            return {
+                "message": self._linear_explicit_project_resolution_error_message(
+                    str(params.get("project_hint") or ""),
+                    explicit_project_resolution or {},
+                ),
+                "data": {
+                    "created_count": 0,
+                    "review_count": 0,
+                    "skipped_count": 0,
+                    "project_resolution_status": resolution_status,
+                },
+            }
+
         project_update_requested = self._linear_meeting_project_update_requested(text, params)
         contextual_review_mode = False
         try:
@@ -3413,6 +3638,25 @@ Keep the response concise but informative."""
                 )
             }
 
+        request_project_match = self._resolve_linear_meeting_request_project(
+            sources=source_result.sources,
+            candidates=candidates,
+            projects=projects,
+            explicit_project_hint=params.get("project_hint"),
+            channel_id=channel_id,
+            channel_context=(slack_context or {}).get("channel"),
+        )
+        request_project = request_project_match.get("project") or {}
+        request_project_hint = (
+            str(request_project.get("name") or "").strip()
+            if float(request_project_match.get("confidence") or 0.0) >= 0.78
+            else ""
+        )
+        explicit_bulk_create = bool(
+            has_document_sources
+            and self._linear_meeting_explicit_creation_authorized(text, params)
+        )
+
         auto_threshold = float(
             getattr(settings, "LINEAR_MEETING_AUTO_CREATE_MIN_CONFIDENCE", 0.85) or 0.85
         )
@@ -3451,11 +3695,7 @@ Keep the response concise but informative."""
             if source_result.files_seen and not source_result.files_parsed and len(transcript.split()) < 80:
                 project_update_error = "Skipped project update because the attached file content could not be parsed."
             else:
-                project_update_match = self._match_linear_meeting_project_from_sources(
-                    source_result.sources,
-                    projects,
-                    params.get("project_hint"),
-                )
+                project_update_match = request_project_match
                 project = project_update_match.get("project")
                 if not project or float(project_update_match.get("confidence") or 0.0) < uncertain_threshold:
                     project_update_error = "Skipped project update because Roo could not confidently match the Linear project."
@@ -3523,11 +3763,16 @@ Keep the response concise but informative."""
                     "confidence": float(default_assignee_match.get("confidence") or 0.9),
                     "reason": "Fallback assignee",
                 }
+            effective_project_hint = (
+                params.get("project_hint")
+                or request_project_hint
+                or candidate.get("project_hint")
+            )
             project_match = self._match_linear_meeting_project(
                 candidate,
                 projects,
                 owner_match.get("user"),
-                params.get("project_hint"),
+                effective_project_hint,
                 channel_id=channel_id,
                 channel_context=(slack_context or {}).get("channel"),
             )
@@ -3553,9 +3798,9 @@ Keep the response concise but informative."""
             )
             if candidate.get("contextual_review_only") and decision == "create":
                 decision = "review"
-            # Contextual commands may auto-create only when the source contains an
-            # explicit commitment. Discussion-derived and bulk extraction remain
-            # review-first.
+            # A document request that explicitly asks Roo to create tasks is itself
+            # write authorisation. Keep genuinely inferred discussion work and
+            # contextual thread harvesting review-first.
             if not use_direct_issue_path and decision != "duplicate":
                 contextual_explicit_create = bool(
                     contextual_auto_create_enabled
@@ -3564,7 +3809,13 @@ Keep the response concise but informative."""
                     and not candidate.get("contextual_review_only")
                     and decision == "create"
                 )
-                if contextual_explicit_create:
+                authorised_bulk_create = bool(
+                    explicit_bulk_create
+                    and candidate.get("explicit_commitment")
+                    and not candidate.get("contextual_review_only")
+                    and decision == "create"
+                )
+                if contextual_explicit_create or authorised_bulk_create:
                     decision = "create"
                 elif owner_match.get("user") and team_match.get("team"):
                     decision = "review"
@@ -3720,22 +3971,96 @@ Keep the response concise but informative."""
                     issue = await client.create_issue(**issue_input)
                     created.append({**display, "issue": issue})
                 except Exception as exc:
-                    pending_id = self._remember_linear_meeting_pending_action(
-                        requested_by=user_id,
-                        issue_input=issue_input,
-                        display=display,
-                        reason=f"Linear create failed: {exc.__class__.__name__}: {exc}",
+                    review_needed.append(
+                        {
+                            **display,
+                            "issue_input": issue_input,
+                            "review_reason": (
+                                f"Linear create failed: {exc.__class__.__name__}: {exc}"
+                            ),
+                        }
                     )
-                    review_needed.append({**display, "pending_id": pending_id})
                 continue
 
-            pending_id = self._remember_linear_meeting_pending_action(
-                requested_by=user_id,
-                issue_input=issue_input,
-                display=display,
-                reason="Needs approval",
+            review_needed.append(
+                {
+                    **display,
+                    "issue_input": issue_input,
+                    "review_reason": "Needs approval",
+                }
             )
-            review_needed.append({**display, "pending_id": pending_id})
+
+        review_batch: Optional[dict[str, Any]] = None
+        if review_needed:
+            source_fingerprint = hashlib.sha256(
+                json.dumps(
+                    {
+                        "source": base_source,
+                        "items": [
+                            item.get("issue_input", {}).get("idempotency_key")
+                            or item.get("title")
+                            for item in review_needed
+                        ],
+                    },
+                    ensure_ascii=True,
+                    sort_keys=True,
+                ).encode("utf-8")
+            ).hexdigest()
+            try:
+                review_batch = await client.create_action_batch(
+                    requested_by_slack_user_id=user_id,
+                    slack_channel_id=channel_id,
+                    slack_thread_ts=thread_ts,
+                    source_fingerprint=source_fingerprint,
+                    items=[
+                        {
+                            "issue_input": item["issue_input"],
+                            "display": {
+                                key: value
+                                for key, value in item.items()
+                                if key not in {"issue_input", "review_reason"}
+                            },
+                            "reason": item.get("review_reason") or "Needs approval",
+                        }
+                        for item in review_needed
+                    ],
+                )
+                persisted_by_position = {
+                    int(item.get("position") or 0): item
+                    for item in review_batch.get("items") or []
+                    if isinstance(item, dict)
+                }
+                batch_id = str(review_batch.get("id") or "")
+                if not batch_id:
+                    raise RuntimeError("Approval storage returned no batch id")
+                missing_positions = [
+                    position
+                    for position in range(len(review_needed))
+                    if not str(
+                        (persisted_by_position.get(position) or {}).get("id") or ""
+                    )
+                ]
+                if missing_positions:
+                    raise RuntimeError(
+                        "Approval storage returned no item id for position(s) "
+                        + ", ".join(str(position) for position in missing_positions)
+                    )
+                for position, item in enumerate(review_needed):
+                    persisted = persisted_by_position.get(position) or {}
+                    item["batch_id"] = batch_id
+                    item["item_id"] = str(persisted.get("id") or "")
+                    item.pop("issue_input", None)
+                    item.pop("review_reason", None)
+            except Exception as exc:
+                staging_error = (
+                    "Approval storage was unavailable; no review buttons were created. "
+                    f"Retry the original request. ({exc.__class__.__name__}: {exc})"
+                )
+                skipped.extend(
+                    {**item, "reason": staging_error}
+                    for item in review_needed
+                )
+                review_needed = []
 
         message = self._format_linear_meeting_result_message(
             created,
@@ -3747,7 +4072,12 @@ Keep the response concise but informative."""
         )
         message += self._format_linear_meeting_source_warnings(source_result.warnings)
         blocks = (
-            self._build_linear_meeting_review_blocks(message, review_needed, user_id)
+            self._build_linear_meeting_review_blocks(
+                message,
+                review_needed,
+                user_id,
+                batch_id=str((review_batch or {}).get("id") or ""),
+            )
             if review_needed
             else None
         )
@@ -3758,6 +4088,7 @@ Keep the response concise but informative."""
                 "created_count": len(created),
                 "review_count": len(review_needed),
                 "skipped_count": len(skipped),
+                "review_batch_id": str((review_batch or {}).get("id") or "") or None,
                 "effort_sizing_results": sizing_shadow,
             },
         }
@@ -4326,6 +4657,7 @@ Keep the response concise but informative."""
         value = str(text or "").strip()
         person = r'(<@[A-Z0-9]+>|@?[A-Z][\w.\-]*(?:\s+[A-Z][\w.\-]*){0,3})'
         patterns = (
+            rf'\bif\b[^.!?]{{0,180}}?\b(?:can(?:not|[\'’]?t)|could(?:not|[\'’]?t))\s+find\b[^.!?]{{0,180}}?\bassign(?:ed)?\b[^.!?]*?\bto\s+{person}',
             rf'\bif\s+(?:you(?:\'re|\s+are)?\s+)?(?:not\s+sure|unsure|in\s+doubt|you\s+don\'?t\s+know)\b[^.!?]*?\bassign(?:ed)?\b[^.!?]*?\bto\s+{person}',
             rf'\bif\s+(?:it\'?s\s+)?(?:unclear|unknown|ambiguous)\b[^.!?]*?\bassign(?:ed)?\b[^.!?]*?\bto\s+{person}',
             rf'\b(?:otherwise|by\s+default|as\s+a\s+fallback|default(?:ing)?)\b[^.!?]*?\bassign(?:ed)?\b[^.!?]*?\bto\s+{person}',
@@ -4405,7 +4737,7 @@ Keep the response concise but informative."""
     def _clean_linear_meeting_owner_hint(value: str) -> Optional[str]:
         cleaned = str(value or "").strip(" \t\n\r'\"“”`")
         cleaned = re.sub(r'^(?:@|to\s+)', '', cleaned, flags=re.IGNORECASE).strip()
-        cleaned = re.sub(r'\s+', ' ', cleaned).strip(" ,;:")
+        cleaned = re.sub(r'\s+', ' ', cleaned).strip(" ,;:.!?")
         return cleaned or None
 
     def _is_linear_direct_issue_request(self, text: str, params: dict[str, Any]) -> bool:
@@ -4744,18 +5076,81 @@ Return the structured issue list. Preserve the parsed project and assignee hints
         users: list[dict[str, Any]],
         projects: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
+        settings = get_settings()
+        extraction_concurrency = max(
+            1,
+            min(
+                int(
+                    getattr(
+                        settings,
+                        "LINEAR_MEETING_EXTRACTION_CONCURRENCY",
+                        3,
+                    )
+                ),
+                6,
+            ),
+        )
+        extraction_timeout_seconds = max(
+            120.0,
+            float(
+                getattr(
+                    settings,
+                    "LINEAR_MEETING_EXTRACTION_TOTAL_TIMEOUT_SECONDS",
+                    360.0,
+                )
+            ),
+        )
+        chunk_max_chars = max(
+            2_000,
+            min(
+                int(
+                    getattr(
+                        settings,
+                        "LINEAR_MEETING_EXTRACTION_CHUNK_MAX_CHARS",
+                        8_000,
+                    )
+                ),
+                12_000,
+            ),
+        )
+        recovery_max_chars = max(
+            1_000,
+            min(
+                int(
+                    getattr(
+                        settings,
+                        "LINEAR_MEETING_EXTRACTION_RECOVERY_MAX_CHARS",
+                        4_000,
+                    )
+                ),
+                chunk_max_chars - 1,
+            ),
+        )
+        recovery_depth_limit = max(
+            0,
+            min(
+                int(
+                    getattr(
+                        settings,
+                        "LINEAR_MEETING_EXTRACTION_RECOVERY_DEPTH",
+                        2,
+                    )
+                ),
+                3,
+            ),
+        )
         source_chunks = [
             (source, chunk)
             for source in sources
-            for chunk in source_text_chunks(source)
+            for chunk in source_text_chunks(source, max_chars=chunk_max_chars)
         ]
         if not source_chunks:
             return []
 
-        semaphore = asyncio.Semaphore(LINEAR_MEETING_EXTRACTION_CONCURRENCY)
+        semaphore = asyncio.Semaphore(extraction_concurrency)
         batch_chunk_count = len(source_chunks)
 
-        async def extract_chunk(
+        async def extract_chunk_with_recovery(
             source: ParsedSource,
             chunk: str,
             *,
@@ -4763,27 +5158,28 @@ Return the structured issue list. Preserve the parsed project and assignee hints
             recovery_depth: int = 0,
         ) -> list[dict[str, Any]]:
             try:
-                async with semaphore:
-                    return await self._extract_linear_meeting_candidates(
-                        transcript=chunk,
-                        params=params,
-                        users=users,
-                        projects=projects,
-                        source_label=source.label,
-                        # This model request contains one source chunk. The total
-                        # batch size is logged separately and must not inflate
-                        # reasoning effort for every individual request.
-                        source_count=1,
-                        batch_chunk_index=batch_chunk_index,
-                        batch_chunk_count=batch_chunk_count,
-                        recovery_depth=recovery_depth,
-                    )
+                return await self._extract_linear_meeting_candidates(
+                    transcript=chunk,
+                    params=params,
+                    users=users,
+                    projects=projects,
+                    source_label=source.label,
+                    # This model request contains one source chunk. The total
+                    # batch size is logged separately and must not inflate
+                    # reasoning effort for every individual request.
+                    source_count=1,
+                    batch_chunk_index=batch_chunk_index,
+                    batch_chunk_count=batch_chunk_count,
+                    recovery_depth=recovery_depth,
+                )
             except LinearInferenceTimeoutError as exc:
-                if recovery_depth >= LINEAR_MEETING_TIMEOUT_RECOVERY_DEPTH:
+                if recovery_depth >= recovery_depth_limit:
                     raise
                 recovery_chunks = self._linear_meeting_timeout_recovery_chunks(
                     source=source,
                     chunk=chunk,
+                    recovery_depth=recovery_depth,
+                    recovery_max_chars=recovery_max_chars,
                 )
                 print(
                     "LINEAR_MEETING_EXTRACTION "
@@ -4803,53 +5199,68 @@ Return the structured issue list. Preserve the parsed project and assignee hints
                         sort_keys=True,
                     )
                 )
-                recovered = await asyncio.gather(
-                    *(
-                        extract_chunk(
+                recovered_candidates: list[dict[str, Any]] = []
+                # Keep the worker slot until its failed chunk has recovered. This
+                # prevents a retry from sitting behind the entire initial queue and
+                # makes the total deadline predictable for long PDFs.
+                for recovery_chunk in recovery_chunks:
+                    recovered_candidates.extend(
+                        await extract_chunk_with_recovery(
                             source,
                             recovery_chunk,
                             batch_chunk_index=batch_chunk_index,
                             recovery_depth=recovery_depth + 1,
                         )
-                        for recovery_chunk in recovery_chunks
-                    ),
-                    return_exceptions=True,
-                )
-                recovered_candidates: list[dict[str, Any]] = []
-                for result in recovered:
-                    if isinstance(result, BaseException):
-                        raise result
-                    recovered_candidates.extend(result)
+                    )
                 return self._dedupe_linear_meeting_candidates(recovered_candidates)
 
+        async def extract_chunk(
+            source: ParsedSource,
+            chunk: str,
+            *,
+            batch_chunk_index: int,
+        ) -> list[dict[str, Any]]:
+            async with semaphore:
+                return await extract_chunk_with_recovery(
+                    source,
+                    chunk,
+                    batch_chunk_index=batch_chunk_index,
+                )
+
         async def extract_all_chunks() -> list[list[dict[str, Any]]]:
-            extracted = await asyncio.gather(
-                *(
+            tasks = [
+                asyncio.create_task(
                     extract_chunk(
                         source,
                         chunk,
                         batch_chunk_index=index,
                     )
-                    for index, (source, chunk) in enumerate(source_chunks, start=1)
-                ),
-                return_exceptions=True,
-            )
-            for result in extracted:
-                if isinstance(result, BaseException):
-                    raise result
-            return extracted
+                )
+                for index, (source, chunk) in enumerate(source_chunks, start=1)
+            ]
+            try:
+                return await asyncio.gather(*tasks)
+            except BaseException:
+                # asyncio.gather does not cancel siblings when one raises. Stop
+                # queued/in-flight calls so a terminal chunk failure fails fast and
+                # no model work outlives the fail-closed extraction request.
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                raise
 
         try:
             extracted_batches = await asyncio.wait_for(
                 extract_all_chunks(),
-                timeout=LINEAR_MEETING_EXTRACTION_TOTAL_TIMEOUT_SECONDS,
+                timeout=extraction_timeout_seconds,
             )
         except LinearInferenceTimeoutError:
             raise
         except asyncio.TimeoutError as exc:
             raise LinearMeetingExtractionDeadlineError(
                 "Meeting-action extraction exceeded its "
-                f"{LINEAR_MEETING_EXTRACTION_TOTAL_TIMEOUT_SECONDS:g} second runtime budget."
+                f"{extraction_timeout_seconds:g} second runtime budget."
             ) from exc
 
         candidates: list[dict[str, Any]] = []
@@ -4864,6 +5275,8 @@ Return the structured issue list. Preserve the parsed project and assignee hints
         *,
         source: ParsedSource,
         chunk: str,
+        recovery_depth: int,
+        recovery_max_chars: int,
     ) -> list[str]:
         source_header = f"Source: {source.label}\n"
         source_text = (
@@ -4879,8 +5292,11 @@ Return the structured issue list. Preserve the parsed project and assignee hints
         )
         return source_text_chunks(
             recovery_source,
-            max_chars=LINEAR_MEETING_TIMEOUT_RECOVERY_MAX_CHARS,
-            hard_split_overlap_chars=LINEAR_MEETING_TIMEOUT_RECOVERY_OVERLAP_CHARS,
+            max_chars=max(1_000, recovery_max_chars // (2**recovery_depth)),
+            hard_split_overlap_chars=min(
+                LINEAR_MEETING_TIMEOUT_RECOVERY_OVERLAP_CHARS,
+                max(1_000, recovery_max_chars // (2**recovery_depth)) - 1,
+            ),
         ) or [chunk]
 
     async def _extract_linear_meeting_candidates(
@@ -5011,7 +5427,66 @@ Return the structured action_items list."""
             owners_match = not owner or not existing_owner or owner == existing_owner
             if overlap >= 0.86 or (owners_match and (overlap >= 0.74 or (overlap >= 0.68 and similarity >= 0.68))):
                 return key
+            if owners_match and self._linear_meeting_candidates_share_outcome(
+                candidate,
+                existing,
+                candidate_tokens=candidate_tokens,
+                existing_tokens=existing_tokens,
+            ):
+                return key
         return None
+
+    def _linear_meeting_candidates_share_outcome(
+        self,
+        candidate: dict[str, Any],
+        existing: dict[str, Any],
+        *,
+        candidate_tokens: set[str],
+        existing_tokens: set[str],
+    ) -> bool:
+        """Merge chunk-level paraphrases that describe the same deliverable.
+
+        The family check prevents account setup from being merged into an Apollo
+        comparison merely because both titles mention the same providers.
+        """
+
+        candidate_family = self._linear_meeting_action_family(
+            candidate.get("title") or candidate.get("task")
+        )
+        existing_family = self._linear_meeting_action_family(
+            existing.get("title") or existing.get("task")
+        )
+        if not candidate_family or candidate_family != existing_family:
+            return False
+        candidate_project = self._normalize_match_text(
+            candidate.get("project_hint") or candidate.get("project")
+        )
+        existing_project = self._normalize_match_text(
+            existing.get("project_hint") or existing.get("project")
+        )
+        if candidate_project and existing_project and candidate_project != existing_project:
+            return False
+        shared = candidate_tokens & existing_tokens
+        if len(shared) < 2:
+            return False
+        coverage = len(shared) / min(len(candidate_tokens), len(existing_tokens))
+        return coverage >= 0.4
+
+    @staticmethod
+    def _linear_meeting_action_family(value: Any) -> str:
+        text = str(value or "").lower()
+        families = (
+            ("evaluation", r"\b(?:compare|evaluate|assess|test|benchmark|validate)\b"),
+            ("implementation", r"\b(?:build|implement|develop|integrate|prototype)\b"),
+            ("documentation", r"\b(?:document|write|draft|specify)\b|\brequirements?\b"),
+            ("account_setup", r"\b(?:account|register|registration|sign\s*up|access)\b"),
+            ("outreach", r"\b(?:recruit|secure|contact|outreach|invite)\b"),
+            ("scheduling", r"\b(?:schedule|coordinate|book|calendar)\b"),
+        )
+        for family, pattern in families:
+            if re.search(pattern, text):
+                return family
+        return ""
 
     def _merge_linear_meeting_candidate(self, existing: dict[str, Any], candidate: dict[str, Any]) -> None:
         try:
@@ -5165,6 +5640,117 @@ Return the structured action_items list."""
             )
         )
 
+    def _linear_meeting_explicit_creation_authorized(
+        self,
+        text: str,
+        params: dict[str, Any],
+    ) -> bool:
+        """Return true when the requester clearly authorised task creation.
+
+        This is intentionally narrower than merely mentioning Linear or asking Roo
+        to inspect a transcript. Preview/extract-only language never grants writes.
+        """
+
+        action = self._normalize_match_text(params.get("action"))
+        if action in {"extract", "preview", "review", "draft"}:
+            return False
+        normalized = re.sub(r"\s+", " ", str(text or "").lower()).strip()
+        if re.search(
+            r"\b(?:only\s+)?(?:extract|preview|review|draft|show|list)\b[^.!?]{0,80}"
+            r"\b(?:tasks?|issues?|tickets?|to-?dos?|action\s+items?)\b",
+            normalized,
+        ) and not re.search(
+            r"\b(?:create|add|write|send|sync|put|file|open)\b[^.!?]{0,100}"
+            r"\b(?:tasks?|issues?|tickets?|to-?dos?|action\s+items?)\b",
+            normalized,
+        ):
+            return False
+        if action in {"create", "write", "sync", "add"}:
+            return True
+        has_write_verb = bool(
+            re.search(r"\b(?:create|add|write|send|sync|put|file|open)\b", normalized)
+        )
+        has_task_noun = bool(
+            re.search(r"\b(?:tasks?|issues?|tickets?|to-?dos?|todos?|action\s+items?)\b", normalized)
+        )
+        return has_write_verb and has_task_noun and "linear" in normalized
+
+    def _resolve_linear_meeting_request_project(
+        self,
+        *,
+        sources: list[ParsedSource],
+        candidates: list[dict[str, Any]],
+        projects: list[dict[str, Any]],
+        explicit_project_hint: Optional[str],
+        channel_id: Optional[str],
+        channel_context: Optional[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Resolve one canonical destination shared by updates and task creation."""
+
+        if explicit_project_hint:
+            return self._match_linear_meeting_project(
+                {"project_hint": explicit_project_hint},
+                projects,
+                owner_user=None,
+                explicit_project_hint=explicit_project_hint,
+                channel_id=channel_id,
+                channel_context=channel_context,
+            )
+
+        source_match = self._match_linear_meeting_project_from_sources(
+            sources,
+            projects,
+            None,
+        )
+        source_project = source_match.get("project") or {}
+        if source_project and float(source_match.get("confidence") or 0.0) >= 0.86:
+            return source_match
+
+        matches_by_project: dict[str, list[dict[str, Any]]] = {}
+        for candidate in candidates:
+            hint = str(candidate.get("project_hint") or candidate.get("project") or "").strip()
+            if not hint:
+                continue
+            match = self._match_linear_meeting_project(
+                candidate,
+                projects,
+                owner_user=None,
+                explicit_project_hint=hint,
+            )
+            project = match.get("project") or {}
+            project_id = str(project.get("id") or "").strip()
+            if project_id and float(match.get("confidence") or 0.0) >= 0.78:
+                matches_by_project.setdefault(project_id, []).append(match)
+
+        if matches_by_project:
+            ranked = sorted(
+                matches_by_project.values(),
+                key=lambda values: (len(values), max(float(value.get("confidence") or 0.0) for value in values)),
+                reverse=True,
+            )
+            best = ranked[0]
+            second_count = len(ranked[1]) if len(ranked) > 1 else 0
+            if len(best) > second_count and len(best) >= max(1, len(candidates) // 2):
+                strongest = max(best, key=lambda value: float(value.get("confidence") or 0.0))
+                return {
+                    **strongest,
+                    "confidence": min(
+                        0.96,
+                        max(float(strongest.get("confidence") or 0.0), 0.9),
+                    ),
+                    "reason": "Matched project by action-item consensus",
+                }
+
+        if source_project:
+            return source_match
+        return self._match_linear_meeting_project(
+            {},
+            projects,
+            owner_user=None,
+            channel_id=channel_id,
+            channel_context=channel_context,
+        )
+
     def _match_linear_meeting_project_from_sources(
         self,
         sources: list[ParsedSource],
@@ -5191,13 +5777,15 @@ Return the structured action_items list."""
         best_project = None
         best_score = 0.0
         for project in projects:
+            project_name = str(project.get("name") or "")
+            core_project_name = self._linear_project_core_name(project_name)
             project_text = " ".join(
                 str(value or "")
-                for value in (project.get("name"), project.get("slugId"))
+                for value in (core_project_name, project.get("slugId"))
                 if value
             )
             project_tokens = self._linear_meeting_project_tokens(project_text)
-            if len(project_tokens) >= 2:
+            if project_tokens:
                 label_overlap = len(project_tokens & source_label_tokens) / len(project_tokens)
                 source_overlap = len(project_tokens & source_tokens) / len(project_tokens)
                 token_score = max(label_overlap, source_overlap)
@@ -5209,7 +5797,7 @@ Return the structured action_items list."""
                         best_project = project
                         best_score = min(score, 0.94)
 
-            for value in (project.get("name"), project.get("slugId")):
+            for value in (core_project_name, project.get("name"), project.get("slugId")):
                 normalized_project = self._normalize_match_text(value)
                 if not normalized_project:
                     continue
@@ -5230,6 +5818,12 @@ Return the structured action_items list."""
                 "reason": "Matched project by source similarity",
             }
         return {"project": None, "confidence": 0.0, "reason": "No project match"}
+
+    @staticmethod
+    def _linear_project_core_name(value: Any) -> str:
+        """Remove organisational namespace prefixes such as ``[Studio]``."""
+
+        return re.sub(r"^(?:\s*\[[^\]]+\]\s*)+", "", str(value or "")).strip()
 
     async def _build_linear_meeting_project_update_input(
         self,
@@ -5784,6 +6378,167 @@ Chunk {index} source: {label}
             deduped.append(user)
         return deduped
 
+    async def _resolve_explicit_linear_project_context(
+        self,
+        *,
+        client: Any,
+        params: dict[str, Any],
+        projects: list[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], Optional[dict[str, Any]]]:
+        hint = str(params.get("project_hint") or "").strip()
+        if not hint:
+            return projects, None
+        context_project_count = len(projects)
+
+        snapshot_match = self._match_linear_meeting_project(
+            {},
+            projects,
+            None,
+            hint,
+        )
+        snapshot_confidence = float(snapshot_match.get("confidence") or 0.0)
+        if snapshot_match.get("project") and snapshot_confidence >= 0.95:
+            payload = {
+                "status": "matched_snapshot",
+                "project": snapshot_match["project"],
+                "confidence": snapshot_confidence,
+                "reason": snapshot_match.get("reason"),
+            }
+            self._log_linear_project_resolution(
+                hint=hint,
+                active_project_count=context_project_count,
+                payload=payload,
+            )
+            return projects, payload
+
+        resolver = getattr(client, "resolve_project", None)
+        if not callable(resolver):
+            return projects, None
+
+        try:
+            payload = await resolver(hint)
+        except Exception as exc:
+            if snapshot_match.get("project") and snapshot_confidence >= 0.78:
+                payload = {
+                    "status": "matched_snapshot",
+                    "project": snapshot_match["project"],
+                    "confidence": snapshot_confidence,
+                    "reason": snapshot_match.get("reason"),
+                    "lookupError": exc.__class__.__name__,
+                }
+                self._log_linear_project_resolution(
+                    hint=hint,
+                    active_project_count=context_project_count,
+                    payload=payload,
+                )
+                return projects, payload
+            payload = {
+                "status": "unavailable",
+                "project": None,
+                "confidence": 0.0,
+                "reason": exc.__class__.__name__,
+            }
+            self._log_linear_project_resolution(
+                hint=hint,
+                active_project_count=context_project_count,
+                payload=payload,
+            )
+            return projects, payload
+
+        if not isinstance(payload, dict):
+            payload = {
+                "status": "unavailable",
+                "project": None,
+                "confidence": 0.0,
+                "reason": "Invalid project resolver response",
+            }
+        status = str(payload.get("status") or "")
+        resolved_project = payload.get("project")
+        resolved_confidence = float(payload.get("confidence") or 0.0)
+        if (
+            status == "matched"
+            and isinstance(resolved_project, dict)
+            and resolved_project.get("id")
+            and resolved_confidence >= 0.82
+        ):
+            canonical_name = str(resolved_project.get("name") or "").strip()
+            if canonical_name:
+                params["project_hint"] = canonical_name
+            projects = self._dedupe_linear_projects_by_id(
+                [resolved_project, *projects]
+            )
+        elif status not in {"not_found", "ambiguous"}:
+            payload = {
+                "status": "unavailable",
+                "project": None,
+                "confidence": 0.0,
+                "reason": "Invalid project resolver response",
+            }
+        self._log_linear_project_resolution(
+            hint=hint,
+            active_project_count=context_project_count,
+            payload=payload,
+        )
+        return projects, payload
+
+    @staticmethod
+    def _log_linear_project_resolution(
+        *,
+        hint: str,
+        active_project_count: int,
+        payload: dict[str, Any],
+    ) -> None:
+        project = payload.get("project")
+        project = project if isinstance(project, dict) else {}
+        print(
+            "LINEAR_PROJECT_RESOLUTION "
+            + json.dumps(
+                {
+                    "event": "explicit_project_lookup",
+                    "hint": hint,
+                    "active_project_count": active_project_count,
+                    "status": payload.get("status"),
+                    "confidence": payload.get("confidence"),
+                    "reason": payload.get("reason"),
+                    "matched_project_id": project.get("id"),
+                    "matched_project_name": project.get("name"),
+                    "is_inactive": payload.get("isInactive"),
+                    "candidate_count": payload.get("candidateCount"),
+                    "lookup_error": payload.get("lookupError"),
+                },
+                ensure_ascii=True,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+        )
+
+    @staticmethod
+    def _linear_explicit_project_resolution_error_message(
+        hint: str,
+        payload: dict[str, Any],
+    ) -> str:
+        status = str(payload.get("status") or "")
+        if status == "ambiguous":
+            candidate_names = [
+                str(candidate.get("name") or "").strip()
+                for candidate in payload.get("candidates") or []
+                if isinstance(candidate, dict) and candidate.get("name")
+            ]
+            choices = f" Matches: {', '.join(candidate_names)}." if candidate_names else ""
+            return (
+                f"I found multiple Linear projects matching {hint!r}.{choices} "
+                "Please use the exact project title. Nothing was changed."
+            )
+        if status == "not_found":
+            return (
+                f"I couldn't find a Linear project matching {hint!r} in the full "
+                "workspace. Check the exact title or Roo's access. Nothing was changed."
+            )
+        return (
+            f"I couldn't verify the Linear project {hint!r} because the full project "
+            "lookup is temporarily unavailable. Nothing was changed. Please try again."
+        )
+
     def _match_linear_meeting_project(
         self,
         candidate: dict[str, Any],
@@ -5807,16 +6562,32 @@ Chunk {index} source: {label}
 
         if hint:
             normalized_hint = self._normalize_match_text(hint)
+            normalized_core_hint = self._normalize_match_text(
+                self._linear_project_core_name(hint)
+            )
             for project in projects:
                 project_name = project.get("name")
                 project_slug = project.get("slugId")
                 normalized_project_name = self._normalize_match_text(project_name)
                 if normalized_project_name and normalized_hint == normalized_project_name:
                     record(project, 0.98, "Matched project by exact name")
+                normalized_core_project_name = self._normalize_match_text(
+                    self._linear_project_core_name(project_name)
+                )
+                if (
+                    normalized_core_hint
+                    and normalized_core_project_name
+                    and normalized_core_hint == normalized_core_project_name
+                ):
+                    record(project, 0.97, "Matched project by namespace-independent name")
                 normalized_slug = self._normalize_match_text(project_slug)
                 if normalized_slug and normalized_hint == normalized_slug:
                     record(project, 0.96, "Matched project by exact slug")
-                for value in (project_name, project_slug):
+                for value in (
+                    project_name,
+                    self._linear_project_core_name(project_name),
+                    project_slug,
+                ):
                     normalized_value = self._normalize_match_text(value)
                     if not normalized_value:
                         continue
@@ -5964,8 +6735,41 @@ Chunk {index} source: {label}
         if project:
             project_teams = self._linear_connection_nodes(project.get("teams"))
             if project_teams:
+                accessible_project_teams: list[dict[str, Any]] = []
+                accessible_by_id = {
+                    str(team.get("id") or "").strip(): team
+                    for team in teams
+                    if str(team.get("id") or "").strip()
+                }
+                for project_team in project_teams:
+                    project_team_id = str(project_team.get("id") or "").strip()
+                    accessible_team = accessible_by_id.get(project_team_id)
+                    if accessible_team:
+                        accessible_project_teams.append(accessible_team)
+
+                if not accessible_project_teams:
+                    return {
+                        "team": None,
+                        "confidence": 0.0,
+                        "reason": (
+                            "Roo's Linear API key cannot access the matched project's team"
+                        ),
+                    }
+
+                hint = str(team_hint or "").strip()
+                if hint:
+                    hinted_team = self._find_linear_team_by_hint(
+                        accessible_project_teams,
+                        hint,
+                    )
+                    if hinted_team:
+                        return {
+                            "team": hinted_team,
+                            "confidence": 0.97,
+                            "reason": "Using hinted team from matched project",
+                        }
                 return {
-                    "team": project_teams[0],
+                    "team": accessible_project_teams[0],
                     "confidence": 0.96,
                     "reason": "Using matched project's team",
                 }
@@ -6082,6 +6886,9 @@ Chunk {index} source: {label}
                 return "Project unclear: multiple Linear projects matched"
             return "Project unclear"
         if float(team_match.get("confidence") or 0.0) < uncertain_threshold:
+            reason = str(team_match.get("reason") or "").strip()
+            if "api key cannot access" in reason.lower():
+                return reason
             return "Team unclear"
         return "Low confidence mapping"
 
@@ -6633,24 +7440,6 @@ Chunk {index} source: {label}
             "team_reason": team_match.get("reason"),
         }
 
-    def _remember_linear_meeting_pending_action(
-        self,
-        *,
-        requested_by: str,
-        issue_input: dict[str, Any],
-        display: dict[str, Any],
-        reason: str,
-    ) -> str:
-        pending_id = str(uuid4())
-        LINEAR_MEETING_PENDING_ACTIONS[pending_id] = {
-            "requested_by": requested_by,
-            "issue_input": issue_input,
-            "display": display,
-            "reason": reason,
-            "created_at": datetime.utcnow().isoformat(),
-        }
-        return pending_id
-
     def _format_linear_meeting_result_message(
         self,
         created: list[dict[str, Any]],
@@ -6698,8 +7487,6 @@ Chunk {index} source: {label}
                         f"- <{issue['url']}|{issue_label}> - {item['title']} "
                         f"({detail}{replay})"
                     )
-                    if item.get("effort_rationale"):
-                        lines.append(f"  Effort: {item['effort_rationale']}")
                 else:
                     lines.append(f"- {issue_label} - {item['title']}")
         if review_needed:
@@ -6709,10 +7496,10 @@ Chunk {index} source: {label}
             for item in review_needed[:20]:
                 review_line = (
                     f"- {item['title']} -> {item['project']} / {item['assignee']} "
-                    f"({item['confidence']:.0%}, {item.get('source', 'Slack thread')})"
+                    f"({item['confidence']:.0%})"
                 )
                 if item.get("effort_label"):
-                    review_line += f" · {item['effort_label']}: {item.get('effort_rationale', '')}"
+                    review_line += f" · {item['effort_label']}"
                 lines.append(review_line)
         if skipped:
             if lines:
@@ -6732,30 +7519,58 @@ Chunk {index} source: {label}
         message: str,
         review_needed: list[dict[str, Any]],
         user_id: str,
+        *,
+        batch_id: str,
     ) -> list[dict[str, Any]]:
         blocks: list[dict[str, Any]] = [
             {"type": "section", "text": {"type": "mrkdwn", "text": message[:3000]}}
         ]
+        batch_value = json.dumps(
+            {"batch_id": batch_id, "requested_by": user_id}
+        )
+        blocks.append(
+            {
+                "type": "actions",
+                "block_id": f"linear_meeting_batch_{batch_id[:8]}",
+                "elements": [
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "Approve all"},
+                        "style": "primary",
+                        "action_id": "linear_meeting_approve_all",
+                        "value": batch_value,
+                    },
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "Reject all"},
+                        "style": "danger",
+                        "action_id": "linear_meeting_reject_all",
+                        "value": batch_value,
+                    },
+                ],
+            }
+        )
         for item in review_needed[:20]:
-            pending_id = item["pending_id"]
+            item_id = str(item.get("item_id") or "")
             summary = (
                 f"*{item['title']}*\n"
                 f"Project: `{item['project']}` | Assignee: `{item['assignee']}` | "
-                f"Confidence: `{item['confidence']:.0%}` | Source: `{item.get('source', 'Slack thread')}`"
+                f"Confidence: `{item['confidence']:.0%}`"
             )
             if item.get("effort_label"):
-                summary += (
-                    f"\nEffort: `{item['effort_label']}` — "
-                    f"{item.get('effort_rationale', '')}"
-                )
-            if item.get("evidence"):
-                summary += f"\nEvidence: “{item['evidence']}”"
-            value = json.dumps({"pending_id": pending_id, "requested_by": user_id})
+                summary += f" | Effort: `{item['effort_label']}`"
+            value = json.dumps(
+                {
+                    "batch_id": batch_id,
+                    "item_ids": [item_id],
+                    "requested_by": user_id,
+                }
+            )
             blocks.extend([
                 {"type": "section", "text": {"type": "mrkdwn", "text": summary[:2500]}},
                 {
                     "type": "actions",
-                    "block_id": f"linear_meeting_{pending_id[:8]}",
+                    "block_id": f"linear_meeting_{item_id[:8]}",
                     "elements": [
                         {
                             "type": "button",
@@ -10357,6 +11172,10 @@ Chunk {index} source: {label}
         text: str,
         params: dict,
         user_id: str,
+        channel_id: Optional[str] = None,
+        thread_ts: Optional[str] = None,
+        thread_history: Optional[List[dict]] = None,
+        slack_team_id: Optional[str] = None,
     ) -> Any:
         """Execute curated read-only data queries through mlai-backend."""
         from roo.clients import mlai_backend as backend_module
@@ -10372,6 +11191,83 @@ Chunk {index} source: {label}
         )
 
         try:
+            action = self._linear_channel_issue_action(
+                text,
+                params,
+                thread_history=thread_history,
+            )
+            if action:
+                if not channel_id or not slack_team_id:
+                    return "This Linear issue list is only available from its connected Slack channel."
+                if action == "list_linear_channel_issues":
+                    result = await client.list_linear_channel_issues(
+                        slack_workspace_id=slack_team_id,
+                        slack_channel_id=channel_id,
+                        requester_slack_id=user_id,
+                        limit=self._coerce_data_query_limit(params.get("limit"), default=50),
+                    )
+                    return {
+                        "message": self._format_linear_channel_issue_list(result),
+                        "data": {
+                            "action": action,
+                            "issue_identifiers": [
+                                str(issue.get("identifier") or "")
+                                for issue in (result.get("issues") or [])
+                                if isinstance(issue, dict) and issue.get("identifier")
+                            ],
+                            "result": result,
+                        },
+                    }
+
+                issue_reference = self._resolve_linear_channel_issue_reference(
+                    text=text,
+                    params=params,
+                    thread_history=thread_history,
+                )
+                issue_identifier = self._linear_issue_identifier(issue_reference)
+                if not issue_identifier:
+                    issue_candidates, pagination_complete = (
+                        await self._list_all_linear_channel_issues(
+                            client,
+                            slack_workspace_id=slack_team_id,
+                            slack_channel_id=channel_id,
+                            requester_slack_id=user_id,
+                        )
+                    )
+                    if not pagination_complete:
+                        return (
+                            "I couldn't finish searching the complete Linear issue list. "
+                            "Please try again or reply with the issue key."
+                        )
+                    resolution = self._match_linear_channel_issue(
+                        issue_reference,
+                        issue_candidates,
+                    )
+                    if resolution.get("ambiguous"):
+                        return self._format_linear_issue_choices(resolution["matches"])
+                    issue_identifier = str(resolution.get("identifier") or "")
+                if not issue_identifier:
+                    return (
+                        "Which Linear issue do you mean? Reply with an issue key such as "
+                        "`TECH-16`, a list number, or a distinctive part of the title."
+                    )
+
+                result = await client.get_linear_channel_issue(
+                    slack_workspace_id=slack_team_id,
+                    slack_channel_id=channel_id,
+                    requester_slack_id=user_id,
+                    issue_identifier=issue_identifier,
+                    include_comments=True,
+                )
+                return {
+                    "message": self._format_linear_channel_issue_detail(result),
+                    "data": {
+                        "action": action,
+                        "issue_identifier": issue_identifier,
+                        "result": result,
+                    },
+                }
+
             if self._data_query_catalog_requested(text, params):
                 catalog = await client.get_data_catalog(user_id)
                 return {
@@ -10404,6 +11300,480 @@ Chunk {index} source: {label}
             if exc.response.status_code == 400:
                 return f"The data query was rejected: {detail or 'invalid query'}"
             return detail or "The data query failed. Please try again in a moment."
+
+    async def _list_all_linear_channel_issues(
+        self,
+        client: Any,
+        *,
+        slack_workspace_id: str,
+        slack_channel_id: str,
+        requester_slack_id: str,
+    ) -> tuple[list[dict], bool]:
+        issues: list[dict] = []
+        cursor = ""
+        seen_cursors: set[str] = set()
+        while True:
+            request = {
+                "slack_workspace_id": slack_workspace_id,
+                "slack_channel_id": slack_channel_id,
+                "requester_slack_id": requester_slack_id,
+                "limit": 100,
+            }
+            if cursor:
+                request["after"] = cursor
+            page = await client.list_linear_channel_issues(**request)
+            issues.extend(
+                issue
+                for issue in (page.get("issues") or [])
+                if isinstance(issue, dict)
+            )
+            page_info = (
+                page.get("pageInfo")
+                if isinstance(page.get("pageInfo"), dict)
+                else {}
+            )
+            if not page_info.get("hasNextPage"):
+                return issues, True
+            next_cursor = str(page_info.get("endCursor") or "").strip()
+            if not next_cursor or next_cursor in seen_cursors:
+                return issues, False
+            seen_cursors.add(next_cursor)
+            cursor = next_cursor
+
+    def _linear_channel_issue_action(
+        self,
+        text: str,
+        params: dict,
+        *,
+        thread_history: Optional[List[dict]] = None,
+    ) -> str:
+        action = str(params.get("action") or "").strip().lower()
+        if action in {"list_linear_channel_issues", "get_linear_channel_issue"}:
+            return action
+        text_lower = str(text or "").lower()
+        explicit_identifier = (
+            self._linear_issue_identifier(params.get("issue_reference"))
+            or self._linear_issue_identifier(params.get("issue_identifier"))
+            or self._linear_issue_identifier(text_lower)
+        )
+        if action in {"catalog", "list_resources", "schema"} and not explicit_identifier:
+            return ""
+        thread_context = self._linear_channel_issue_thread_context(thread_history)
+        if "linear" in text_lower and re.search(
+            r"\b(?:mlai[_ -]?tech|tech)\b.*\b(?:todo|issues?|tickets?|tasks?)\b",
+            text_lower,
+        ):
+            return "list_linear_channel_issues"
+        query_resource = self._infer_data_query_resource(text_lower, params)
+        if action == "query" and query_resource and query_resource != "linear_issues":
+            return ""
+        if action == "query" and not thread_context:
+            return ""
+        explicit_reference = str(
+            params.get("issue_reference")
+            or params.get("issue_identifier")
+            or ""
+        )
+        if explicit_identifier or self._linear_issue_identifier(explicit_reference):
+            return "get_linear_channel_issue"
+        detail_requested = (
+            self._linear_contextual_detail_request(text_lower)
+            or bool(re.search(r"\bnumber\s+\d+\b", text_lower))
+        )
+        bare_list_number = bool(re.fullmatch(r"\s*#?\d{1,3}\s*", text_lower))
+        if detail_requested and (
+            "linear" in text_lower
+            or thread_context
+        ):
+            return "get_linear_channel_issue"
+        if bare_list_number and thread_context:
+            return "get_linear_channel_issue"
+        return ""
+
+    def _linear_contextual_detail_request(self, text: Any) -> bool:
+        return bool(re.search(
+            r"\b(?:more\s+(?:info|information|about)|details?|descriptions?|comments?|"
+            r"status|state|assignees?|owners?|ownership|owns|"
+            r"who\s+(?:owns|is\s+assigned)|projects?|cycles?|priorit(?:y|ies)|"
+            r"estimates?|due(?:\s+date)?|deadlines?|created(?:\s+by)?|updated|"
+            r"labels?|attachments?|relations?|metadata)\b",
+            str(text or ""),
+            re.IGNORECASE,
+        ))
+
+    def _linear_channel_issue_thread_context(
+        self,
+        thread_history: Optional[List[dict]],
+    ) -> bool:
+        return bool(self._linear_channel_issue_response_messages(thread_history))
+
+    def _linear_channel_issue_response_messages(
+        self,
+        thread_history: Optional[List[dict]],
+    ) -> list[dict]:
+        numbered_issue = re.compile(
+            r"^\s*\d{1,3}\.\s+(?:"
+            r"<https://linear\.app/[^|>]+\|[A-Z][A-Z0-9]{1,15}-\d+>"
+            r"|`[A-Z][A-Z0-9]{1,15}-\d+`)\s+—",
+            re.IGNORECASE | re.MULTILINE,
+        )
+        detail_heading = re.compile(
+            r"^\s*\*(?:"
+            r"<https://linear\.app/[^|>]+\|[A-Z][A-Z0-9]{1,15}-\d+>"
+            r"|`[A-Z][A-Z0-9]{1,15}-\d+`)\s+—[^\n]+\*\s*$",
+            re.IGNORECASE | re.MULTILINE,
+        )
+        return [
+            message
+            for message in self._roo_authored_thread_messages(thread_history)
+            if numbered_issue.search(str(message.get("text") or ""))
+            or detail_heading.search(str(message.get("text") or ""))
+            or self._linear_channel_issue_empty_response(message.get("text"))
+        ]
+
+    def _linear_channel_issue_empty_response(self, text: Any) -> bool:
+        return bool(re.fullmatch(
+            r"\s*\*[^\n*]+\*\s+is empty at the moment\.\s*",
+            str(text or ""),
+            re.IGNORECASE,
+        ))
+
+    def _roo_authored_thread_messages(
+        self,
+        thread_history: Optional[List[dict]],
+    ) -> list[dict]:
+        if not thread_history:
+            return []
+        try:
+            roo_user_id = str(get_bot_user_id() or "").strip()
+        except Exception:
+            return []
+        if not roo_user_id:
+            return []
+        return [
+            message
+            for message in thread_history
+            if isinstance(message, dict)
+            and (message.get("is_bot") or message.get("bot_id"))
+            and str(message.get("user") or "").strip() == roo_user_id
+        ]
+
+    def _resolve_linear_channel_issue_reference(
+        self,
+        *,
+        text: str,
+        params: dict,
+        thread_history: Optional[List[dict]],
+    ) -> str:
+        explicit = str(
+            params.get("issue_reference")
+            or params.get("issue_identifier")
+            or ""
+        ).strip()
+        identifier = self._linear_issue_identifier(explicit) or self._linear_issue_identifier(text)
+        if identifier:
+            return identifier
+
+        ordinal_match = re.search(
+            r"\b(?:number|item|issue|ticket|task)\s*#?\s*(\d{1,3})\b",
+            str(text or ""),
+            re.IGNORECASE,
+        )
+        if not ordinal_match:
+            ordinal_match = re.fullmatch(
+                r"\s*#?(\d{1,3})\s*",
+                str(text or ""),
+                re.IGNORECASE,
+            )
+        if ordinal_match:
+            ordinal = int(ordinal_match.group(1))
+            numbered_identifier = self._linear_numbered_issue_identifier_from_thread(
+                thread_history,
+                ordinal=ordinal,
+            )
+            if numbered_identifier:
+                return numbered_identifier
+
+        contextual_detail_request = self._linear_contextual_detail_request(text)
+        if re.search(
+            r"\b(?:it|its|that|this|the\s+issue|the\s+ticket)\b",
+            str(text or ""),
+            re.IGNORECASE,
+        ) or (
+            contextual_detail_request
+            and not self._linear_issue_reference_tokens(text)
+        ):
+            identifiers = self._linear_issue_identifiers_from_thread(
+                thread_history,
+                prefer_single=True,
+            )
+            if len(identifiers) == 1:
+                return identifiers[0]
+        return explicit or str(text or "").strip()
+
+    def _linear_issue_identifier(self, value: Any) -> str:
+        match = re.search(
+            r"\b[A-Z][A-Z0-9]{1,15}-\d+\b",
+            str(value or ""),
+            re.IGNORECASE,
+        )
+        return match.group(0).upper() if match else ""
+
+    def _linear_numbered_issue_identifier_from_thread(
+        self,
+        thread_history: Optional[List[dict]],
+        *,
+        ordinal: int,
+    ) -> str:
+        numbered_issue = re.compile(
+            r"^\s*(\d{1,3})\.\s+(?:"
+            r"<https://linear\.app/[^|>]+\|([A-Z][A-Z0-9]{1,15}-\d+)>"
+            r"|`([A-Z][A-Z0-9]{1,15}-\d+)`)\s+—",
+            re.IGNORECASE,
+        )
+        for message in reversed(
+            self._linear_channel_issue_response_messages(thread_history)
+        ):
+            if self._linear_channel_issue_empty_response(message.get("text")):
+                return ""
+            numbered_list_found = False
+            for line in str(message.get("text") or "").splitlines():
+                match = numbered_issue.match(line)
+                if not match:
+                    continue
+                numbered_list_found = True
+                if int(match.group(1)) == ordinal:
+                    return str(match.group(2) or match.group(3) or "").upper()
+            if numbered_list_found:
+                return ""
+        return ""
+
+    def _linear_issue_identifiers_from_thread(
+        self,
+        thread_history: Optional[List[dict]],
+        *,
+        prefer_single: bool = False,
+    ) -> list[str]:
+        for message in reversed(
+            self._linear_channel_issue_response_messages(thread_history)
+        ):
+            if self._linear_channel_issue_empty_response(message.get("text")):
+                return []
+            identifiers = []
+            for match in re.findall(
+                r"\b[A-Z][A-Z0-9]{1,15}-\d+\b",
+                str(message.get("text") or ""),
+                re.IGNORECASE,
+            ):
+                normalized = match.upper()
+                if normalized not in identifiers:
+                    identifiers.append(normalized)
+            if prefer_single and identifiers:
+                first_line = str(message.get("text") or "").splitlines()[0]
+                heading_identifier = self._linear_issue_identifier(first_line)
+                if heading_identifier:
+                    return [heading_identifier]
+                # A newer multi-issue list is an ambiguity boundary. Do not
+                # skip past it and silently reuse an older detail response.
+                if len(identifiers) > 1:
+                    return []
+            if identifiers and (not prefer_single or len(identifiers) == 1):
+                return identifiers
+        return []
+
+    def _match_linear_channel_issue(
+        self,
+        reference: str,
+        issues: list[dict],
+    ) -> dict[str, Any]:
+        reference_tokens = self._linear_issue_reference_tokens(reference)
+        if not reference_tokens:
+            return {}
+        matches = []
+        for issue in issues:
+            if not isinstance(issue, dict):
+                continue
+            title_tokens = self._linear_issue_reference_tokens(issue.get("title"))
+            if reference_tokens.issubset(title_tokens):
+                matches.append(issue)
+        if len(matches) == 1:
+            return {"identifier": matches[0].get("identifier"), "matches": matches}
+        if len(matches) > 1:
+            return {"ambiguous": True, "matches": matches[:8]}
+        return {}
+
+    def _linear_issue_reference_tokens(self, value: Any) -> set[str]:
+        stopwords = {
+            "about", "all", "comments", "description", "detail", "details",
+            "give", "info", "information", "issue", "linear", "me", "more",
+            "on", "one", "please", "show", "tell", "that", "the", "this",
+            "ticket", "todo", "what", "whats", "who", "with", "owns",
+            "assigned", "is", "status", "state", "assignee", "assignees",
+            "owner", "owners", "ownership", "project", "projects", "cycle",
+            "cycles", "priority", "priorities", "estimate", "estimates",
+            "due", "date", "deadline", "deadlines", "created", "by",
+            "updated", "label", "labels", "attachment", "attachments",
+            "relation", "relations", "metadata",
+        }
+        cleaned = re.sub(r"\[tech_team\]", " ", str(value or ""), flags=re.IGNORECASE)
+        return {
+            token
+            for token in re.findall(r"[a-z0-9]+", cleaned.lower())
+            if len(token) > 1 and token not in stopwords
+        }
+
+    def _format_linear_issue_choices(self, matches: list[dict]) -> str:
+        lines = ["I found a few matching MLAI_TECH issues. Which one do you mean?"]
+        for issue in matches:
+            identifier = self._slack_escape(issue.get("identifier") or "Issue")
+            title = self._clean_linear_issue_title(issue.get("title"))
+            lines.append(f"• `{identifier}` — {title}")
+        return "\n".join(lines)
+
+    def _format_linear_channel_issue_list(self, result: dict) -> str:
+        metadata = result.get("list") if isinstance(result.get("list"), dict) else {}
+        display_name = self._slack_escape(metadata.get("displayName") or "Linear issues")
+        issues = [item for item in (result.get("issues") or []) if isinstance(item, dict)]
+        if not issues:
+            return f"*{display_name}* is empty at the moment."
+        lines = [f"*{len(issues)} issues in {display_name}*"]
+        for index, issue in enumerate(issues, start=1):
+            identifier = self._slack_escape(issue.get("identifier") or "Issue")
+            title = self._clean_linear_issue_title(issue.get("title"))
+            url = str(issue.get("url") or "").strip()
+            label = f"<{url}|{identifier}>" if url.startswith("https://linear.app/") else f"`{identifier}`"
+            lines.append(f"{index}. {label} — {title}")
+        if (result.get("pageInfo") or {}).get("hasNextPage"):
+            lines.append("More issues are available in Linear.")
+        lines.append(
+            "Reply in this thread and mention Roo with an issue key, list number, "
+            "or part of a title for full details."
+        )
+        return "\n".join(lines)
+
+    def _format_linear_channel_issue_detail(self, result: dict) -> str:
+        issue = result.get("issue") if isinstance(result.get("issue"), dict) else {}
+        identifier = self._slack_escape(issue.get("identifier") or "Linear issue")
+        title = self._clean_linear_issue_title(issue.get("title"))
+        url = str(issue.get("url") or "").strip()
+        heading = f"<{url}|{identifier}>" if url.startswith("https://linear.app/") else f"`{identifier}`"
+        lines = [f"*{heading} — {title}*"]
+
+        metadata = []
+        state = issue.get("state") if isinstance(issue.get("state"), dict) else {}
+        if state.get("name"):
+            metadata.append(f"*Status:* {self._slack_escape(state['name'])}")
+        assignee = issue.get("assignee") if isinstance(issue.get("assignee"), dict) else {}
+        assignee_name = assignee.get("displayName") or assignee.get("name")
+        metadata.append(f"*Assignee:* {self._slack_escape(assignee_name or 'Unassigned')}")
+        project = issue.get("project") if isinstance(issue.get("project"), dict) else {}
+        if project.get("name"):
+            metadata.append(f"*Project:* {self._slack_escape(project['name'])}")
+        cycle = issue.get("cycle") if isinstance(issue.get("cycle"), dict) else {}
+        if cycle.get("name"):
+            metadata.append(f"*Cycle:* {self._slack_escape(cycle['name'])}")
+        priority = issue.get("priorityLabel")
+        if priority:
+            metadata.append(f"*Priority:* {self._slack_escape(priority)}")
+        if issue.get("estimate") is not None:
+            metadata.append(f"*Estimate:* {self._slack_escape(issue['estimate'])}")
+        if issue.get("dueDate"):
+            metadata.append(f"*Due:* {self._slack_escape(issue['dueDate'])}")
+        if metadata:
+            lines.append(" · ".join(metadata))
+
+        provenance = []
+        creator = issue.get("creator") if isinstance(issue.get("creator"), dict) else {}
+        creator_name = creator.get("displayName") or creator.get("name")
+        if creator_name:
+            provenance.append(f"*Created by:* {self._slack_escape(creator_name)}")
+        if issue.get("createdAt"):
+            provenance.append(f"*Created:* {self._slack_escape(issue['createdAt'])}")
+        if issue.get("updatedAt"):
+            provenance.append(f"*Updated:* {self._slack_escape(issue['updatedAt'])}")
+        if provenance:
+            lines.append(" · ".join(provenance))
+
+        labels = [item for item in (issue.get("labels") or []) if isinstance(item, dict)]
+        if labels:
+            label_names = ", ".join(
+                self._slack_escape(label.get("name") or "")
+                for label in labels
+                if label.get("name")
+            )
+            if label_names:
+                lines.append(f"*Labels:* {label_names}")
+
+        description = str(issue.get("description") or "").strip()
+        lines.extend(["", "*Description*", self._slack_escape(description) if description else "No description."])
+
+        attachments = [item for item in (issue.get("attachments") or []) if isinstance(item, dict)]
+        if attachments:
+            lines.extend(["", f"*Attachments — {len(attachments)}*"])
+            for attachment in attachments:
+                attachment_title = self._slack_escape(attachment.get("title") or "Attachment")
+                attachment_url = str(attachment.get("url") or "").strip()
+                lines.append(
+                    f"• <{attachment_url}|{attachment_title}>"
+                    if attachment_url.startswith(("https://", "http://"))
+                    else f"• {attachment_title}"
+                )
+            if issue.get("attachmentsTruncated"):
+                lines.append("Additional attachments are available in Linear.")
+
+        relations = issue.get("relations") if isinstance(issue.get("relations"), dict) else {}
+        relation_edges = [
+            item for item in (relations.get("edges") or []) if isinstance(item, dict)
+        ]
+        if relation_edges:
+            lines.extend(["", f"*Relations — {len(relation_edges)}*"])
+            for relation in relation_edges:
+                related = relation.get("issue") if isinstance(relation.get("issue"), dict) else {}
+                relation_type = self._slack_escape(relation.get("type") or "related")
+                related_id = self._slack_escape(related.get("identifier") or "Issue")
+                related_title = self._clean_linear_issue_title(related.get("title"))
+                lines.append(f"• {relation_type}: `{related_id}` — {related_title}")
+            if relations.get("truncated"):
+                lines.append("Additional relations are available in Linear.")
+
+        comments = [item for item in (result.get("comments") or []) if isinstance(item, dict)]
+        lines.extend(["", f"*Comments — {len(comments)}*"])
+        if not comments:
+            lines.append("No comments yet.")
+        for comment in comments:
+            author = comment.get("user") if isinstance(comment.get("user"), dict) else {}
+            behalf = comment.get("onBehalfOf") if isinstance(comment.get("onBehalfOf"), dict) else {}
+            author_name = (
+                behalf.get("displayName") or behalf.get("name")
+                or author.get("displayName") or author.get("name") or "Unknown author"
+            )
+            created_at = str(comment.get("createdAt") or "").strip()
+            quoted = str(comment.get("quotedText") or "").strip()
+            body = str(comment.get("body") or "").strip()
+            comment_lines = [f"• *{self._slack_escape(author_name)}*{f' · {created_at}' if created_at else ''}"]
+            if quoted:
+                comment_lines.append(f"> {self._slack_escape(quoted)}")
+            comment_lines.append(self._slack_escape(body) if body else "(empty comment)")
+            lines.extend(comment_lines)
+        if result.get("commentsTruncated"):
+            lines.append("Additional comments are available in Linear.")
+
+        rendered = "\n".join(lines)
+        if len(rendered) > 35000:
+            return rendered[:34750].rstrip() + "\n\n_Response truncated; open the Linear issue for the remainder._"
+        return rendered
+
+    def _clean_linear_issue_title(self, value: Any) -> str:
+        title = re.sub(r"^\s*\[TECH_TEAM\]\s*", "", str(value or ""), flags=re.IGNORECASE)
+        return self._slack_escape(title.strip() or "Untitled issue")
+
+    def _slack_escape(self, value: Any) -> str:
+        return (
+            str(value or "")
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+        )
 
     def _data_query_catalog_requested(self, text: str, params: dict) -> bool:
         text_lower = str(text or "").lower()
@@ -11549,6 +12919,9 @@ Chunk {index} source: {label}
         action: str,
         public_message: Optional[str] = None,
         private_ack: str = "I've sent your Roo Points details privately.",
+        private_failure_ack: str = (
+            "I couldn't send you a DM. DM Roo `points` to view your points privately."
+        ),
     ) -> dict:
         """Deliver personal points data without a shared-channel fallback."""
         result_data = {
@@ -11598,7 +12971,7 @@ Chunk {index} source: {label}
         acknowledgement = (
             private_ack
             if dm_delivered
-            else "I couldn't send you a DM. DM Roo `points` to view your points privately."
+            else private_failure_ack
         )
         result_data["ephemeral_delivered"] = self._post_private_points_ack(
             channel_id=channel_id,
@@ -12575,6 +13948,71 @@ Chunk {index} source: {label}
         )
         return f"🛑 I couldn't check <@{target_user_id}> in: {error_detail}"
 
+    async def _format_coworking_booking_rejection(
+        self,
+        *,
+        client,
+        target_user_id: str,
+        requested_by_user_id: str,
+        booking_date: str,
+        channel_id: Optional[str],
+        thread_ts: Optional[str],
+        admin_checkin: bool,
+        exc: httpx.HTTPStatusError,
+    ) -> Any:
+        """Render a terminal backend rejection without calling it an outage."""
+        status_code = exc.response.status_code
+        fallback_by_status = {
+            400: "The booking request was rejected.",
+            401: "That booking isn't allowed for your account.",
+            403: "That booking isn't allowed for your account.",
+            404: "I couldn't find the MLAI account needed for that booking.",
+        }
+        if status_code in {401, 403}:
+            # These statuses normally describe Roo's service credential, not a
+            # member action. Do not expose backend authentication details.
+            error_detail = fallback_by_status[status_code]
+        else:
+            error_detail = self._extract_http_error_detail(exc) or fallback_by_status.get(
+                status_code,
+                "The booking request was rejected.",
+            )
+        safe_detail = self._redact_points_balance_error(error_detail)
+
+        if admin_checkin:
+            return f"🛑 I couldn't check <@{target_user_id}> in: {safe_detail}"
+
+        public_message = (
+            f"🛑 I couldn't book you in for **{booking_date}**: {safe_detail}"
+        )
+        if not self._is_points_balance_error(error_detail):
+            return public_message
+
+        private_message = public_message
+        try:
+            balance_data = await client.get_balance(target_user_id)
+            current_balance = balance_data.get("balance")
+            if current_balance is not None:
+                private_message += (
+                    f"\n\nYour current balance is **{current_balance} Roo Points**."
+                )
+        except Exception as balance_exc:
+            print(
+                "🏢 coworking_rejection_balance_lookup_failed "
+                f"exc_type={balance_exc.__class__.__name__}"
+            )
+
+        return self._deliver_personal_points_message(
+            recipient_user_id=target_user_id,
+            requester_user_id=requested_by_user_id,
+            channel_id=channel_id,
+            thread_ts=thread_ts,
+            private_message=private_message,
+            public_message=public_message,
+            action="book_coworking_error",
+            private_ack=public_message,
+        )
+
     def _format_admin_coworking_batch_success(
         self,
         *,
@@ -12709,7 +14147,7 @@ Chunk {index} source: {label}
         channel_id: Optional[str],
         thread_ts: Optional[str],
         admin_checkin: bool,
-    ) -> str:
+    ) -> Any:
         print(
             "🏢 coworking_booking_execute "
             f"requested_by_user_id={requested_by_user_id} target_user_id={target_user_id} "
@@ -12760,6 +14198,21 @@ Chunk {index} source: {label}
                     admin_checkin=admin_checkin,
                 )
             store.mark_blocked(int(leased_intent["id"]), error=error)
+            if isinstance(exc, httpx.HTTPStatusError):
+                print(
+                    "🏢 coworking_booking_terminal_rejection "
+                    f"status={exc.response.status_code}"
+                )
+                return await self._format_coworking_booking_rejection(
+                    client=client,
+                    target_user_id=target_user_id,
+                    requested_by_user_id=requested_by_user_id,
+                    booking_date=booking_date,
+                    channel_id=channel_id,
+                    thread_ts=thread_ts,
+                    admin_checkin=admin_checkin,
+                    exc=exc,
+                )
             raise
 
         cost = result.get("points_cost", 1)
@@ -12819,6 +14272,76 @@ Chunk {index} source: {label}
         # =====================================================================
         # Member Actions
         # =====================================================================
+
+        if action == "link_account":
+            from ..slack_client import (
+                SlackIdentityLookupError,
+                get_verified_user_email,
+            )
+
+            try:
+                email = get_verified_user_email(user_id)
+            except SlackIdentityLookupError:
+                private_message = (
+                    "I couldn't verify an email for your Slack profile, so I didn't "
+                    "change any account link. Ask an MLAI admin to check your Slack "
+                    "profile email and try again."
+                )
+            else:
+                try:
+                    linked_user_id = await client.link_slack_user(user_id, email)
+                except httpx.HTTPStatusError as exc:
+                    if exc.response.status_code == 409:
+                        private_message = (
+                            "That MLAI account is already linked to another Slack "
+                            "profile, so I didn't change either account. Ask an MLAI "
+                            "admin to resolve the existing link."
+                        )
+                    else:
+                        print(
+                            "Slack account link failed "
+                            f"status={exc.response.status_code}"
+                        )
+                        private_message = (
+                            "I couldn't safely link your Slack and MLAI accounts right now. "
+                            "Nothing was confirmed—please try `link` again in a moment."
+                        )
+                except Exception as exc:
+                    print(
+                        "Slack account link failed "
+                        f"exc_type={exc.__class__.__name__}"
+                    )
+                    private_message = (
+                        "I couldn't safely link your Slack and MLAI accounts right now. "
+                        "Nothing was confirmed—please try `link` again in a moment."
+                    )
+                else:
+                    if linked_user_id is None:
+                        private_message = (
+                            "I couldn't find an existing MLAI account with the same "
+                            "email as your Slack profile. Sign in to MLAI with that "
+                            "email, or ask an MLAI admin to update your account email, "
+                            "then try `link` again."
+                        )
+                    else:
+                        private_message = (
+                            "✅ Your Slack profile is linked to your MLAI account. "
+                            "You can now try `book me in` again."
+                        )
+
+            return self._deliver_personal_points_message(
+                recipient_user_id=user_id,
+                requester_user_id=user_id,
+                channel_id=channel_id,
+                thread_ts=thread_ts,
+                private_message=private_message,
+                action="link_account",
+                private_ack="I've sent your account-link result privately.",
+                private_failure_ack=(
+                    "I couldn't send you a DM. Open Roo's direct messages and "
+                    "run `link` there to see the result privately."
+                ),
+            )
         
         if action == "topup_points":
             settings = get_settings()

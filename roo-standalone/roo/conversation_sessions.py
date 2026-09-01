@@ -25,6 +25,8 @@ class ConversationSession:
     thread_ts: Optional[str]
     last_bot_ts: str
     state: str
+    workflow: str
+    reference_id: Optional[str]
     expires_at: float
 
 
@@ -75,12 +77,30 @@ class ContextualConversationStore:
                         thread_ts TEXT,
                         last_bot_ts TEXT NOT NULL,
                         state TEXT NOT NULL,
+                        workflow TEXT NOT NULL DEFAULT '',
+                        reference_id TEXT,
                         updated_at REAL NOT NULL,
                         expires_at REAL NOT NULL,
                         PRIMARY KEY (team_id, channel_id, session_key)
                     )
                     """
                 )
+                columns = {
+                    str(row[1])
+                    for row in connection.execute(
+                        "PRAGMA table_info(contextual_conversation_sessions)"
+                    ).fetchall()
+                }
+                if "workflow" not in columns:
+                    connection.execute(
+                        "ALTER TABLE contextual_conversation_sessions "
+                        "ADD COLUMN workflow TEXT NOT NULL DEFAULT ''"
+                    )
+                if "reference_id" not in columns:
+                    connection.execute(
+                        "ALTER TABLE contextual_conversation_sessions "
+                        "ADD COLUMN reference_id TEXT"
+                    )
                 connection.execute(
                     """
                     CREATE INDEX IF NOT EXISTS contextual_sessions_expiry_idx
@@ -147,6 +167,9 @@ class ContextualConversationStore:
         bot_message_ts: str,
         adjacency_seconds: int,
         thread_ttl_seconds: int,
+        state: str = "active",
+        workflow: str = "",
+        reference_id: Optional[str] = None,
         now: Optional[float] = None,
     ) -> None:
         """Open/update thread and same-user adjacency sessions after Roo posts."""
@@ -163,7 +186,9 @@ class ContextualConversationStore:
                 requester_user_id,
                 thread_ts,
                 bot_message_ts,
-                "active",
+                state,
+                workflow,
+                reference_id,
                 current_time,
                 current_time + adjacency_seconds,
             )
@@ -177,7 +202,9 @@ class ContextualConversationStore:
                     requester_user_id,
                     thread_ts,
                     bot_message_ts,
-                    "active",
+                    state,
+                    workflow,
+                    reference_id,
                     current_time,
                     current_time + thread_ttl_seconds,
                 )
@@ -187,13 +214,16 @@ class ContextualConversationStore:
                 """
                 INSERT INTO contextual_conversation_sessions (
                     team_id, channel_id, session_key, requester_user_id,
-                    thread_ts, last_bot_ts, state, updated_at, expires_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    thread_ts, last_bot_ts, state, workflow, reference_id,
+                    updated_at, expires_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(team_id, channel_id, session_key) DO UPDATE SET
                     requester_user_id = excluded.requester_user_id,
                     thread_ts = excluded.thread_ts,
                     last_bot_ts = excluded.last_bot_ts,
                     state = excluded.state,
+                    workflow = excluded.workflow,
+                    reference_id = excluded.reference_id,
                     updated_at = excluded.updated_at,
                     expires_at = excluded.expires_at
                 """,
@@ -229,7 +259,8 @@ class ContextualConversationStore:
                 row = connection.execute(
                     """
                     SELECT team_id, channel_id, session_key, requester_user_id,
-                           thread_ts, last_bot_ts, state, expires_at
+                           thread_ts, last_bot_ts, state, workflow,
+                           reference_id, expires_at
                     FROM contextual_conversation_sessions
                     WHERE team_id = ? AND channel_id = ? AND session_key = ?
                       AND requester_user_id = ? AND expires_at > ?

@@ -336,6 +336,77 @@ async def test_query_data_uses_canonical_endpoint_and_payload(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_list_linear_channel_issues_uses_scoped_endpoint(monkeypatch):
+    captured = {}
+
+    async def fake_request(method, endpoint, **kwargs):
+        captured.update(method=method, endpoint=endpoint, **kwargs)
+        request = httpx.Request(method, f"https://backend.test{endpoint}")
+        return httpx.Response(200, request=request, json={"issues": []})
+
+    client = MLAIBackendClient(
+        base_url="https://backend.test",
+        api_key="roo-api-key",
+        internal_api_key="roo-api-key",
+    )
+    monkeypatch.setattr(client, "_request", fake_request)
+
+    result = await client.list_linear_channel_issues(
+        slack_workspace_id="TMLAI",
+        slack_channel_id="CTECH",
+        requester_slack_id="<@U123>",
+        limit=500,
+        after="cursor-1",
+    )
+
+    assert result == {"issues": []}
+    assert captured["method"] == "POST"
+    assert captured["endpoint"] == "/api/v1/integrations/linear/channel-issues/list"
+    assert captured["json"] == {
+        "slack_workspace_id": "TMLAI",
+        "slack_channel_id": "CTECH",
+        "requester_slack_id": "U123",
+        "limit": 100,
+        "after": "cursor-1",
+    }
+
+
+@pytest.mark.asyncio
+async def test_get_linear_channel_issue_requests_comments(monkeypatch):
+    captured = {}
+
+    async def fake_request(method, endpoint, **kwargs):
+        captured.update(method=method, endpoint=endpoint, **kwargs)
+        request = httpx.Request(method, f"https://backend.test{endpoint}")
+        return httpx.Response(200, request=request, json={"issue": {"identifier": "TECH-16"}})
+
+    client = MLAIBackendClient(
+        base_url="https://backend.test",
+        api_key="roo-api-key",
+        internal_api_key="roo-api-key",
+    )
+    monkeypatch.setattr(client, "_request", fake_request)
+
+    result = await client.get_linear_channel_issue(
+        slack_workspace_id="TMLAI",
+        slack_channel_id="CTECH",
+        requester_slack_id="U123",
+        issue_identifier="tech-16",
+    )
+
+    assert result["issue"]["identifier"] == "TECH-16"
+    assert captured["method"] == "POST"
+    assert captured["endpoint"] == "/api/v1/integrations/linear/channel-issues/detail"
+    assert captured["json"] == {
+        "slack_workspace_id": "TMLAI",
+        "slack_channel_id": "CTECH",
+        "requester_slack_id": "U123",
+        "issue_identifier": "tech-16",
+        "include_comments": True,
+    }
+
+
+@pytest.mark.asyncio
 async def test_healthhack_announcement_uses_canonical_endpoint_and_provenance(monkeypatch):
     captured = {}
 

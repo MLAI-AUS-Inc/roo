@@ -156,18 +156,28 @@ class RooAgent:
         
         # 0. Fetch Thread Context (if available)
         thread_history = []
+        raw_thread_history = []
         admin_thread = bool(
             thread_context
             and thread_context.get("skill_name") == "admin-brain"
         )
         if channel_id and thread_ts and not admin_thread:
             try:
-                # Fetch last 10 messages for context
-                raw_history = get_thread_messages(channel=channel_id, thread_ts=thread_ts)
-                # Filter to recent ones and simple format
+                fetched_thread_history = await asyncio.to_thread(
+                    get_thread_messages,
+                    channel_id,
+                    thread_ts,
+                )
+                if getattr(fetched_thread_history, "complete", True):
+                    raw_thread_history = fetched_thread_history
+                else:
+                    # Cursor pages are oldest-to-newest. An incomplete prefix
+                    # cannot safely represent recent context or the latest
+                    # Linear list boundary, so fail closed for routing.
+                    print("⚠️ Ignoring incomplete Slack thread history")
                 # We exclude the current message generally, but get_thread_messages returns all.
                 # Let's just pass the raw list to the executor/selector to handle filtering if needed.
-                thread_history = raw_history[-10:] if raw_history else []
+                thread_history = raw_thread_history[-10:] if raw_thread_history else []
             except Exception as e:
                 print(f"⚠️ Failed to fetch thread history: {e}")
 
@@ -301,6 +311,13 @@ class RooAgent:
                     }
             execution_kwargs = dict(kwargs)
             execution_thread_history = thread_history
+            if skill.name == "mlai-data-query":
+                # Only the Linear channel reader needs paginated history to
+                # resolve a numbered follow-up after a long thread. It scans
+                # deterministic Roo output rather than adding the history to a
+                # model prompt; all other consumers retain the established
+                # ten-message prompt window.
+                execution_kwargs["linear_thread_history"] = raw_thread_history
             if skill.name == "linear-meeting-actions":
                 from .linear_context import build_linear_slack_context
 
@@ -818,7 +835,15 @@ class RooAgent:
         """
         text_lower = text.lower().strip()
 
-        # 1. Explicit opt-in contribution total and owner-only deletion.
+        # 1. Self-only account linking. Keep the grammar exact so GitHub or
+        # other integration-link requests continue through their own skills.
+        if re.fullmatch(
+            r"(?:link|link (?:my )?(?:mlai |slack )?account|link my slack)",
+            text_lower,
+        ):
+            return "link_account"
+
+        # 2. Explicit opt-in contribution total and owner-only deletion.
         if re.match(
             r'^(?:delete my flex|remove my (?:points )?flex|delete my latest flex)$',
             text_lower,
@@ -828,11 +853,11 @@ class RooAgent:
         if re.match(r'^(?:flex my points|flex points|points flex)$', text_lower):
             return "flex_points"
 
-        # 2. Balance Check: "points", "balance", "my points"
+        # 3. Balance Check: "points", "balance", "my points"
         if re.match(r'^(?:points|balance|my points)$', text_lower):
             return "balance"
 
-        # 3. Earn/Tasks shortcuts
+        # 4. Earn/Tasks shortcuts
         if re.match(
             r'^(?:points\s+earn|earn\s+points|ways\s+to\s+earn|'
             r'tasks(?:\s+(?:all|mine|review|open))?|'
@@ -841,19 +866,70 @@ class RooAgent:
         ):
             return "list_tasks"
 
-        # 4. Rewards: "points rewards", "rewards"
+        # 5. Rewards: "points rewards", "rewards"
         if re.match(r'^(?:points\s+rewards|rewards)$', text_lower):
             return "list_rewards"
 
-        # 5. Coworking Book Today: "coworking book today"
+        # 6. A generic self-booking means coworking. Keep this grammar narrow:
+        # an explicitly named resource (for example, a meeting room) must still
+        # go through the tool-calling router for the appropriate skill.
+        if self._generic_coworking_booking_date_hint(text_lower) is not None:
+            return "book_coworking"
+
+        # 7. Coworking Book Today: "coworking book today"
         if re.match(r'^coworking\s+book\s+today$', text_lower):
             return "book_coworking"
 
-        # 6. Coworking Cancel: "coworking cancel" (assumes today/upcoming)
+        # 8. Coworking Cancel: "coworking cancel" (assumes today/upcoming)
         if re.match(r'^coworking\s+cancel$', text_lower):
             return "cancel_coworking"
 
         return None
+
+    @staticmethod
+    def _generic_coworking_booking_date_hint(text: str) -> Optional[str]:
+        """Return the date hint for a resource-free self-booking request.
+
+        ``book me in`` has historically meant a coworking booking at MLAI.
+        This parser intentionally accepts only an empty tail, a date, a time,
+        or a date/time combination. Any named object stays out of the fast path.
+        Times are ignored because coworking bookings cover the full day.
+        """
+        cleaned = str(text or "").lower().strip()
+        cleaned = re.sub(r"[.!?]+$", "", cleaned).strip()
+        cleaned = re.sub(r"^please\s+", "", cleaned)
+        cleaned = re.sub(r"\s+please$", "", cleaned)
+        cleaned = re.sub(r"^(?:can|could|would)\s+you\s+", "", cleaned)
+
+        booking_match = re.fullmatch(
+            r"book(?:\s+me(?:\s+in)?)?(?:\s+(?P<tail>.+))?",
+            cleaned,
+        )
+        if not booking_match:
+            return None
+
+        tail = str(booking_match.group("tail") or "").strip()
+        if not tail:
+            return "today"
+
+        date_token = r"(?:today|tomorrow|tomorow|tommorow|tommorrow|\d{4}-\d{2}-\d{2})"
+        time_token = r"(?:(?:[01]?\d|2[0-3])(?::[0-5]\d)?\s*(?:am|pm)?)"
+        tail_match = re.fullmatch(
+            rf"(?:(?:for|at|on)\s+)?(?:"
+            rf"(?P<date_first>{date_token})(?:\s+(?:at\s+)?{time_token})?"
+            rf"|{time_token}(?:\s+(?P<date_last>{date_token}))?"
+            rf")",
+            tail,
+        )
+        if not tail_match:
+            return None
+
+        date_hint = str(
+            tail_match.group("date_first") or tail_match.group("date_last") or "today"
+        )
+        if date_hint in {"tomorow", "tommorow", "tommorrow"}:
+            return "tomorrow"
+        return date_hint
 
     async def _try_fast_path(
         self,
@@ -872,6 +948,14 @@ class RooAgent:
             return None
 
         if action in {"flex_points", "delete_flex"}:
+            return await self._execute_fast_points(
+                user_id,
+                action,
+                channel_id=channel_id,
+                thread_ts=thread_ts,
+            )
+
+        if action == "link_account":
             return await self._execute_fast_points(
                 user_id,
                 action,
@@ -905,10 +989,17 @@ class RooAgent:
             )
 
         if action == "book_coworking":
-            today = self._get_today().isoformat()
+            date_hint = self._generic_coworking_booking_date_hint(text) or "today"
+            today = self._get_today()
+            if date_hint == "tomorrow":
+                booking_date = (today + timedelta(days=1)).isoformat()
+            elif re.fullmatch(r"\d{4}-\d{2}-\d{2}", date_hint):
+                booking_date = date_hint
+            else:
+                booking_date = today.isoformat()
             return await self._execute_fast_points(
                 user_id, "book_coworking",
-                date=today, channel_id=channel_id, thread_ts=thread_ts
+                date=booking_date, channel_id=channel_id, thread_ts=thread_ts
             )
 
         if action == "cancel_coworking":
@@ -944,7 +1035,7 @@ class RooAgent:
                 internal_api_key=settings.INTERNAL_API_KEY or settings.ROO_API_KEY or settings.MLAI_API_KEY,
             )
             
-            if action in {"flex_points", "delete_flex"}:
+            if action in {"flex_points", "delete_flex", "link_account"}:
                 msg = await self.skill_executor._handle_points_action(
                     client=client,
                     action=action,
@@ -952,7 +1043,11 @@ class RooAgent:
                     text=(
                         "flex my points"
                         if action == "flex_points"
-                        else "delete my flex"
+                        else (
+                            "delete my flex"
+                            if action == "delete_flex"
+                            else "link"
+                        )
                     ),
                     user_id=user_id,
                     channel_id=kwargs.get("channel_id"),

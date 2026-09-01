@@ -1,4 +1,5 @@
 import asyncio
+import sqlite3
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -170,6 +171,9 @@ def test_contextual_store_dedupes_and_tracks_same_user_sessions(tmp_path):
         bot_message_ts="1.1",
         adjacency_seconds=180,
         thread_ttl_seconds=1800,
+        state="awaiting_linear_approval",
+        workflow="linear-meeting-actions",
+        reference_id="batch-1",
         now=200,
     )
     thread = store.find_session(
@@ -181,6 +185,9 @@ def test_contextual_store_dedupes_and_tracks_same_user_sessions(tmp_path):
     )
     assert thread is not None
     assert thread.session_key == "thread:1.0"
+    assert thread.state == "awaiting_linear_approval"
+    assert thread.workflow == "linear-meeting-actions"
+    assert thread.reference_id == "batch-1"
     assert store.find_session(
         team_id="T1",
         channel_id="C1",
@@ -200,6 +207,52 @@ def test_contextual_store_dedupes_and_tracks_same_user_sessions(tmp_path):
     ) is not None
 
 
+def test_contextual_store_upgrades_existing_session_schema(tmp_path):
+    database_path = tmp_path / "legacy-context.db"
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE contextual_conversation_sessions (
+                team_id TEXT NOT NULL,
+                channel_id TEXT NOT NULL,
+                session_key TEXT NOT NULL,
+                requester_user_id TEXT NOT NULL,
+                thread_ts TEXT,
+                last_bot_ts TEXT NOT NULL,
+                state TEXT NOT NULL,
+                updated_at REAL NOT NULL,
+                expires_at REAL NOT NULL,
+                PRIMARY KEY (team_id, channel_id, session_key)
+            )
+            """
+        )
+
+    store = ContextualConversationStore(database_path)
+    store.record_roo_response(
+        team_id="T1",
+        channel_id="C1",
+        requester_user_id="USAM",
+        thread_ts="1.0",
+        bot_message_ts="1.1",
+        adjacency_seconds=180,
+        thread_ttl_seconds=1800,
+        workflow="linear-meeting-actions",
+        reference_id="batch-legacy",
+        now=200,
+    )
+
+    session = store.find_session(
+        team_id="T1",
+        channel_id="C1",
+        requester_user_id="USAM",
+        thread_ts="1.0",
+        now=201,
+    )
+    assert session is not None
+    assert session.workflow == "linear-meeting-actions"
+    assert session.reference_id == "batch-legacy"
+
+
 class FakeContextualStore:
     def __init__(self, session):
         self.session = session
@@ -217,6 +270,104 @@ class FakeContextualStore:
 
     def break_channel_adjacency(self, **kwargs):
         self.broken.append(kwargs)
+
+
+@pytest.mark.asyncio
+async def test_contextual_handler_accepts_requester_untagged_batch_approval(monkeypatch):
+    session = SimpleNamespace(
+        session_key="thread:1.0",
+        requester_user_id="USAM",
+        workflow="linear-meeting-actions",
+        state="awaiting_linear_approval",
+        reference_id="batch-1",
+    )
+    store = FakeContextualStore(session)
+    decisions = []
+    posts = []
+
+    async def fake_history(event):
+        return [{"user": "UROO", "text": "Review these tasks", "is_bot": True}]
+
+    async def fake_decision(**kwargs):
+        return AddressDecision(
+            should_respond=True,
+            confidence=0.99,
+            reason="answer_to_roo",
+            source="llm",
+            candidate_reason=kwargs["candidate_reason"],
+        )
+
+    class FakeClient:
+        async def decide_action_batch(self, **kwargs):
+            decisions.append(kwargs)
+            return {
+                "status": "completed",
+                "counts": {"approved": 2, "rejected": 0, "failed": 0},
+                "items": [],
+            }
+
+    skill = SimpleNamespace(
+        get_client_class=lambda name: FakeClient,
+    )
+    agent = SimpleNamespace(
+        _get_skill_by_name=lambda name: skill,
+    )
+
+    monkeypatch.setattr(main_module, "get_settings", contextual_settings)
+    monkeypatch.setattr(main_module, "get_contextual_conversation_store", lambda path: store)
+    monkeypatch.setattr(main_module, "get_bot_user_id", lambda: "UROO")
+    monkeypatch.setattr(main_module, "_get_addressing_history", fake_history)
+    monkeypatch.setattr(main_module, "decide_addressing", fake_decision)
+    monkeypatch.setattr(main_module, "get_agent", lambda: agent)
+    monkeypatch.setattr(
+        main_module,
+        "post_message",
+        lambda **kwargs: posts.append(kwargs) or {"ts": "2.1"},
+    )
+
+    await main_module._handle_contextual_slack_message(
+        {
+            "type": "message",
+            "user": "USAM",
+            "channel": "C1",
+            "thread_ts": "1.0",
+            "ts": "2.0",
+            "text": "approve all",
+        },
+        slack_team_id="T1",
+        trigger_source="channel_message",
+    )
+
+    assert decisions == [{
+        "batch_id": "batch-1",
+        "requested_by_slack_user_id": "USAM",
+        "decision": "approve",
+        "item_ids": None,
+    }]
+    assert "2 created" in posts[0]["text"]
+    assert store.recorded[0]["state"] == "completed"
+    assert store.recorded[0]["workflow"] == "linear-meeting-actions"
+    assert store.recorded[0]["reference_id"] == "batch-1"
+
+
+@pytest.mark.asyncio
+async def test_linear_batch_followup_rejects_cross_user_and_ambiguous_text():
+    session = SimpleNamespace(
+        requester_user_id="USAM",
+        workflow="linear-meeting-actions",
+        state="awaiting_linear_approval",
+        reference_id="batch-1",
+    )
+    assert await main_module._maybe_handle_linear_meeting_followup(
+        {"user": "UOTHER", "text": "approve all"},
+        session=session,
+        explicit_mention=False,
+    ) is None
+    assert await main_module._maybe_handle_linear_meeting_followup(
+        {"user": "USAM", "text": "looks good but change the owner"},
+        session=session,
+        explicit_mention=False,
+    ) is None
 
 
 def contextual_settings(**overrides):

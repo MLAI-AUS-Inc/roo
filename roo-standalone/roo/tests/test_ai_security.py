@@ -425,7 +425,8 @@ def test_deploy_workflow_requires_and_secretly_upserts_security_values():
     assert "envs: SIM_PATIENT_API_KEY,SIM_PATIENT_SAFETY_SALT" in workflow
     assert (
         "envs: SIM_PATIENT_API_KEY,SIM_PATIENT_SAFETY_SALT,ROO_API_KEY,"
-        "VICTOR_AI_ROO_SIGNING_SECRET,ROO_PRIVATE_BASE_URL"
+        "VICTOR_AI_ROO_SIGNING_SECRET,ROO_PRIVATE_BASE_URL,"
+        "MEETING_ROOM_BOOKING_ENABLED"
     ) in workflow
     assert 'upsert_env "ROO_ENVIRONMENT" "production"' in workflow
     assert 'upsert_env "SIM_PATIENT_API_KEY" "$SIM_PATIENT_API_KEY"' in workflow
@@ -437,12 +438,28 @@ def test_deploy_workflow_requires_and_secretly_upserts_security_values():
     ) in workflow
     assert 'upsert_env "VICTOR_AI_SKILL_ENABLED" "true"' in workflow
     assert 'upsert_env "VICTOR_AI_SLACK_CHANNEL_NAME" "exp-victor-ai"' in workflow
+    assert (
+        "MEETING_ROOM_BOOKING_ENABLED: "
+        "${{ vars.MEETING_ROOM_BOOKING_ENABLED || 'false' }}"
+    ) in workflow
+    assert (
+        'upsert_env "MEETING_ROOM_BOOKING_ENABLED" '
+        '"$MEETING_ROOM_BOOKING_ENABLED"'
+    ) in workflow
+    assert 'assert settings.MEETING_ROOM_BOOKING_ENABLED is True' in workflow
+    assert (
+        "python -c 'from roo.config import get_settings; settings = get_settings();"
+    ) in workflow
+    assert 'assert "meeting-room-booking" in settings.enabled_skill_names' in workflow
     assert 'if [ "${#ROO_API_KEY}" -lt 32 ]' in workflow
     assert 'if [ "${#VICTOR_AI_ROO_SIGNING_SECRET}" -lt 32 ]' in workflow
     assert workflow.index('upsert_env "ROO_API_KEY"') < workflow.index("docker compose up")
     assert workflow.index('upsert_env "VICTOR_AI_SKILL_ENABLED"') < workflow.index(
         "docker compose up"
     )
+    assert workflow.index(
+        'upsert_env "MEETING_ROOM_BOOKING_ENABLED"'
+    ) < workflow.index("docker compose up")
     assert "systemctl restart slack-bridge.service" in workflow
     assert "docker compose -f docker-compose.bridge.yml up -d --build" in workflow
     assert "Slack bridge readiness check timed out" in workflow

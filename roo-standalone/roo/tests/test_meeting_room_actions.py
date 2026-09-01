@@ -27,9 +27,17 @@ from roo.config import Settings, get_settings
 from roo.meeting_room_booking import (
     BOOK_ACTION_ID,
     CHOOSE_ROOM_ACTION_ID,
+    CHOOSE_ROOM_ACTION_IDS_BY_ROOM,
+    MeetingRoomInputError,
     build_booking_action_value,
     parse_action_value,
     room_selection_prompt,
+)
+from roo.meeting_room_clarifications import (
+    PUBLIC_ROOM_CHOICE_ACTION_ID,
+    PUBLIC_ROOM_CHOICE_ACTION_IDS_BY_ROOM,
+    get_meeting_room_clarification_store,
+    public_room_choice_prompt,
 )
 from roo.slack_security import get_slack_receipt_store
 
@@ -85,6 +93,32 @@ def _room_choice_values(*, now=None):
     return [button["value"] for button in prompt["blocks"][1]["elements"]]
 
 
+def _public_room_choice_values(database_path):
+    clarification_store = get_meeting_room_clarification_store(str(database_path))
+    starts_at = datetime(2026, 8, 26, 14, tzinfo=MELBOURNE)
+    clarification = clarification_store.record_prompt(
+        team_id="TMLAI",
+        channel_id="CROOMS",
+        thread_ts="111.000",
+        request_message_ts="111.000",
+        owner_user_id="UOWNER",
+        starts_at=starts_at.isoformat(),
+        ends_at=(starts_at + timedelta(hours=1)).isoformat(),
+        available_room_slugs=["small-meeting-room", "big-meeting-room"],
+        choice_mode="buttons",
+    )
+    prompt = public_room_choice_prompt(
+        clarification,
+        [
+            {"slug": "small-meeting-room", "name": "Small Meeting Room"},
+            {"slug": "big-meeting-room", "name": "Big Meeting Room"},
+        ],
+    )
+    return clarification, [
+        button["value"] for button in prompt["blocks"][1]["elements"]
+    ]
+
+
 def _record(store, action_value=None):
     return store.record_action(
         action_id=BOOK_ACTION_ID,
@@ -127,6 +161,7 @@ def _signature(secret, timestamp, body):
 def reset_action_state():
     slack_action_tasks._tasks.clear()
     action_module.get_meeting_room_action_store.cache_clear()
+    get_meeting_room_clarification_store.cache_clear()
     get_slack_receipt_store.cache_clear()
     main_module.app.dependency_overrides.clear()
     yield
@@ -134,6 +169,7 @@ def reset_action_state():
         task.cancel()
     slack_action_tasks._tasks.clear()
     action_module.get_meeting_room_action_store.cache_clear()
+    get_meeting_room_clarification_store.cache_clear()
     get_slack_receipt_store.cache_clear()
     main_module.app.dependency_overrides.clear()
 
@@ -435,6 +471,135 @@ async def test_competing_room_click_does_not_overwrite_first_choice(
             ),
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_room_specific_private_callback_is_normalized_before_persistence(
+    tmp_path,
+    monkeypatch,
+):
+    configured = _settings(tmp_path)
+    store = action_module.MeetingRoomActionStore(configured.SLACK_RECEIPTS_DB_PATH)
+    small_value, _ = _room_choice_values()
+    scheduled = []
+    monkeypatch.setattr(main_module, "get_meeting_room_action_store", lambda path: store)
+    monkeypatch.setattr(
+        main_module,
+        "start_slack_action",
+        lambda task: scheduled.append(task),
+    )
+
+    await main_module._persist_and_start_meeting_room_action(
+        settings=configured,
+        action_id=CHOOSE_ROOM_ACTION_IDS_BY_ROOM["small-meeting-room"],
+        action_value=small_value,
+        actor_user_id="UOWNER",
+        channel_id="DOWNER",
+        message_ts="123.456",
+    )
+
+    with sqlite3.connect(configured.SLACK_RECEIPTS_DB_PATH) as connection:
+        persisted_action_id = connection.execute(
+            "SELECT action_id FROM meeting_room_action_outbox"
+        ).fetchone()[0]
+    assert persisted_action_id == CHOOSE_ROOM_ACTION_ID
+    assert len(scheduled) == 1
+    scheduled[0].close()
+
+
+@pytest.mark.asyncio
+async def test_room_specific_private_callback_rejects_value_mismatch(
+    tmp_path,
+    monkeypatch,
+):
+    configured = _settings(tmp_path)
+    _, big_value = _room_choice_values()
+    delivered = []
+    monkeypatch.setattr(
+        main_module,
+        "start_slack_action",
+        lambda task: delivered.append(task),
+    )
+
+    await main_module._persist_and_start_meeting_room_action(
+        settings=configured,
+        action_id=CHOOSE_ROOM_ACTION_IDS_BY_ROOM["small-meeting-room"],
+        action_value=big_value,
+        actor_user_id="UOWNER",
+        channel_id="DOWNER",
+        message_ts="123.456",
+    )
+
+    assert len(delivered) == 1
+    with sqlite3.connect(configured.SLACK_RECEIPTS_DB_PATH) as connection:
+        exists = connection.execute(
+            "SELECT 1 FROM sqlite_master "
+            "WHERE type='table' AND name='meeting_room_action_outbox'"
+        ).fetchone()
+        count = (
+            connection.execute(
+                "SELECT COUNT(*) FROM meeting_room_action_outbox"
+            ).fetchone()[0]
+            if exists
+            else 0
+        )
+    assert count == 0
+    delivered[0].close()
+
+
+@pytest.mark.parametrize(
+    "action_id",
+    [
+        CHOOSE_ROOM_ACTION_ID,
+        CHOOSE_ROOM_ACTION_IDS_BY_ROOM["small-meeting-room"],
+    ],
+)
+def test_slack_action_ingress_accepts_new_and_legacy_private_callbacks(
+    action_id,
+    tmp_path,
+    monkeypatch,
+):
+    configured = _settings(tmp_path)
+    main_module.app.dependency_overrides[get_settings] = lambda: configured
+    small_value, _ = _room_choice_values()
+    payload = {
+        "type": "block_actions",
+        "team": {"id": "TMLAI"},
+        "user": {"id": "UOWNER"},
+        "channel": {"id": "DOWNER"},
+        "container": {"message_ts": "123.456"},
+        "message": {"ts": "123.456"},
+        "actions": [{"action_id": action_id, "value": small_value}],
+    }
+    body = urlencode({"payload": json.dumps(payload)}).encode()
+    timestamp = int(time.time())
+    headers = {
+        "X-Slack-Request-Timestamp": str(timestamp),
+        "X-Slack-Signature": _signature(
+            configured.SLACK_SIGNING_SECRET,
+            timestamp,
+            body,
+        ),
+        "Content-Type": "application/x-www-form-urlencoded",
+    }
+    persisted = []
+
+    async def persist(**kwargs):
+        persisted.append(kwargs)
+
+    monkeypatch.setattr(
+        main_module,
+        "_persist_and_start_meeting_room_action",
+        persist,
+    )
+    client = TestClient(main_module.app)
+
+    response = client.post("/slack/actions", content=body, headers=headers)
+
+    assert response.status_code == 200
+    assert len(persisted) == 1
+    assert persisted[0]["action_id"] == action_id
+    assert persisted[0]["action_value"] == small_value
 
 
 @pytest.mark.asyncio
@@ -1368,6 +1533,339 @@ def test_duplicate_slack_retry_retries_failed_outbox_persistence(
     assert len(calls) == 2
     assert len(scheduled) == 1
     scheduled[0].close()
+
+
+def test_public_room_buttons_share_one_durable_first_choice_key(tmp_path):
+    database_path = tmp_path / "state.db"
+    _, (big_value, small_value) = _public_room_choice_values(database_path)
+    store = action_module.MeetingRoomActionStore(database_path)
+
+    first = store.record_action(
+        action_id=PUBLIC_ROOM_CHOICE_ACTION_ID,
+        action_value=big_value,
+        actor_user_id="UOWNER",
+        channel_id="CROOMS",
+        message_ts="112.000",
+    )
+
+    assert first["action_key"].startswith("public_choose:")
+    with pytest.raises(MeetingRoomInputError) as raised:
+        store.record_action(
+            action_id=PUBLIC_ROOM_CHOICE_ACTION_ID,
+            action_value=small_value,
+            actor_user_id="UOWNER",
+            channel_id="CROOMS",
+            message_ts="112.000",
+        )
+    assert raised.value.code == "room_already_selected"
+    assert "Big Meeting Room" in raised.value.message
+
+
+def test_public_button_retry_recovers_failed_outbox_handoff(tmp_path, monkeypatch):
+    configured = _settings(tmp_path)
+    main_module.app.dependency_overrides[get_settings] = lambda: configured
+    _, (big_value, _) = _public_room_choice_values(
+        configured.SLACK_RECEIPTS_DB_PATH
+    )
+    payload = {
+        "type": "block_actions",
+        "team": {"id": "TMLAI"},
+        "user": {"id": "UOWNER"},
+        "channel": {"id": "CROOMS"},
+        "container": {"message_ts": "112.000"},
+        "message": {"ts": "112.000", "thread_ts": "111.000"},
+        "actions": [
+            {
+                "action_id": PUBLIC_ROOM_CHOICE_ACTION_IDS_BY_ROOM[
+                    "big-meeting-room"
+                ],
+                "value": big_value,
+            }
+        ],
+    }
+    body = urlencode({"payload": json.dumps(payload)}).encode()
+    timestamp = int(time.time())
+    headers = {
+        "X-Slack-Request-Timestamp": str(timestamp),
+        "X-Slack-Signature": _signature(
+            configured.SLACK_SIGNING_SECRET,
+            timestamp,
+            body,
+        ),
+        "Content-Type": "application/x-www-form-urlencoded",
+    }
+    calls = []
+    scheduled = []
+
+    class Store:
+        def record_action(self, **kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                raise RuntimeError("temporary disk failure")
+            return {"id": 1}
+
+    monkeypatch.setattr(main_module, "get_meeting_room_action_store", lambda path: Store())
+    monkeypatch.setattr(main_module, "start_slack_action", scheduled.append)
+    client = TestClient(main_module.app, raise_server_exceptions=False)
+
+    first = client.post("/slack/actions", content=body, headers=headers)
+    retry = client.post("/slack/actions", content=body, headers=headers)
+
+    assert first.status_code == 503
+    assert retry.status_code == 200
+    assert len(calls) == 2
+    assert len(scheduled) == 1
+    scheduled[0].close()
+
+
+def test_duplicate_public_button_delivery_processes_one_durable_choice(
+    tmp_path,
+    monkeypatch,
+):
+    configured = _settings(tmp_path)
+    main_module.app.dependency_overrides[get_settings] = lambda: configured
+    _, (big_value, _) = _public_room_choice_values(
+        configured.SLACK_RECEIPTS_DB_PATH
+    )
+    payload = {
+        "type": "block_actions",
+        "team": {"id": "TMLAI"},
+        "user": {"id": "UOWNER"},
+        "channel": {"id": "CROOMS"},
+        "container": {"message_ts": "112.000"},
+        "message": {"ts": "112.000", "thread_ts": "111.000"},
+        "actions": [
+            {
+                "action_id": PUBLIC_ROOM_CHOICE_ACTION_IDS_BY_ROOM[
+                    "big-meeting-room"
+                ],
+                "value": big_value,
+            }
+        ],
+    }
+    body = urlencode({"payload": json.dumps(payload)}).encode()
+    timestamp = int(time.time())
+    headers = {
+        "X-Slack-Request-Timestamp": str(timestamp),
+        "X-Slack-Signature": _signature(
+            configured.SLACK_SIGNING_SECRET,
+            timestamp,
+            body,
+        ),
+        "Content-Type": "application/x-www-form-urlencoded",
+    }
+    scheduled = []
+    processed = []
+
+    async def processor(action):
+        processed.append(action["action_key"])
+
+    monkeypatch.setattr(main_module, "_process_meeting_room_action_record", processor)
+    monkeypatch.setattr(main_module, "start_slack_action", scheduled.append)
+    client = TestClient(main_module.app)
+
+    first = client.post("/slack/actions", content=body, headers=headers)
+    duplicate = client.post("/slack/actions", content=body, headers=headers)
+
+    assert first.status_code == 200
+    assert duplicate.status_code == 200
+    assert len(scheduled) == 2
+
+    async def process_scheduled():
+        await asyncio.gather(*scheduled)
+
+    asyncio.run(process_scheduled())
+    assert len(processed) == 1
+
+    completed_retry = client.post("/slack/actions", content=body, headers=headers)
+    assert completed_retry.status_code == 200
+    assert len(scheduled) == 2
+
+
+def test_public_button_rejects_another_member_without_persisting(tmp_path, monkeypatch):
+    configured = _settings(tmp_path)
+    main_module.app.dependency_overrides[get_settings] = lambda: configured
+    _, (big_value, _) = _public_room_choice_values(
+        configured.SLACK_RECEIPTS_DB_PATH
+    )
+    payload = {
+        "type": "block_actions",
+        "team": {"id": "TMLAI"},
+        "user": {"id": "UOTHER"},
+        "channel": {"id": "CROOMS"},
+        "container": {"message_ts": "112.000"},
+        "message": {"ts": "112.000", "thread_ts": "111.000"},
+        "actions": [
+            {"action_id": PUBLIC_ROOM_CHOICE_ACTION_ID, "value": big_value}
+        ],
+    }
+    body = urlencode({"payload": json.dumps(payload)}).encode()
+    timestamp = int(time.time())
+    headers = {
+        "X-Slack-Request-Timestamp": str(timestamp),
+        "X-Slack-Signature": _signature(
+            configured.SLACK_SIGNING_SECRET,
+            timestamp,
+            body,
+        ),
+        "Content-Type": "application/x-www-form-urlencoded",
+    }
+    scheduled = []
+    ephemeral = []
+    monkeypatch.setattr(
+        main_module,
+        "get_meeting_room_action_store",
+        lambda path: (_ for _ in ()).throw(AssertionError("must not persist")),
+    )
+    monkeypatch.setattr(main_module, "start_slack_action", scheduled.append)
+    monkeypatch.setattr(
+        main_module,
+        "post_ephemeral",
+        lambda **kwargs: ephemeral.append(kwargs) or {"ok": True},
+    )
+    client = TestClient(main_module.app)
+
+    response = client.post("/slack/actions", content=body, headers=headers)
+
+    assert response.status_code == 200
+    assert len(scheduled) == 1
+    asyncio.run(scheduled[0])
+    assert ephemeral[0]["user"] == "UOTHER"
+    assert "Only the person" in ephemeral[0]["text"]
+
+
+def test_public_button_rejects_action_id_room_mismatch(tmp_path, monkeypatch):
+    configured = _settings(tmp_path)
+    main_module.app.dependency_overrides[get_settings] = lambda: configured
+    _, (big_value, _) = _public_room_choice_values(
+        configured.SLACK_RECEIPTS_DB_PATH
+    )
+    payload = {
+        "type": "block_actions",
+        "team": {"id": "TMLAI"},
+        "user": {"id": "UOWNER"},
+        "channel": {"id": "CROOMS"},
+        "container": {"message_ts": "112.000"},
+        "message": {"ts": "112.000", "thread_ts": "111.000"},
+        "actions": [
+            {
+                "action_id": PUBLIC_ROOM_CHOICE_ACTION_IDS_BY_ROOM[
+                    "small-meeting-room"
+                ],
+                "value": big_value,
+            }
+        ],
+    }
+    body = urlencode({"payload": json.dumps(payload)}).encode()
+    timestamp = int(time.time())
+    headers = {
+        "X-Slack-Request-Timestamp": str(timestamp),
+        "X-Slack-Signature": _signature(
+            configured.SLACK_SIGNING_SECRET,
+            timestamp,
+            body,
+        ),
+        "Content-Type": "application/x-www-form-urlencoded",
+    }
+    scheduled = []
+    ephemeral = []
+    monkeypatch.setattr(
+        main_module,
+        "get_meeting_room_action_store",
+        lambda path: (_ for _ in ()).throw(AssertionError("must not persist")),
+    )
+    monkeypatch.setattr(main_module, "start_slack_action", scheduled.append)
+    monkeypatch.setattr(
+        main_module,
+        "post_ephemeral",
+        lambda **kwargs: ephemeral.append(kwargs) or {"ok": True},
+    )
+    client = TestClient(main_module.app)
+
+    response = client.post("/slack/actions", content=body, headers=headers)
+
+    assert response.status_code == 200
+    assert len(scheduled) == 1
+    asyncio.run(scheduled[0])
+    assert ephemeral[0]["user"] == "UOWNER"
+    assert "not valid" in ephemeral[0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_public_button_retry_reuses_private_preview_and_updates_prompt(
+    tmp_path,
+    monkeypatch,
+):
+    configured = _settings(tmp_path)
+    clarification, (big_value, _) = _public_room_choice_values(
+        configured.SLACK_RECEIPTS_DB_PATH
+    )
+    action_store = action_module.MeetingRoomActionStore(
+        configured.SLACK_RECEIPTS_DB_PATH
+    )
+    action = action_store.record_action(
+        action_id=PUBLIC_ROOM_CHOICE_ACTION_ID,
+        action_value=big_value,
+        actor_user_id="UOWNER",
+        channel_id="CROOMS",
+        message_ts="112.000",
+    )
+    calls = []
+    updates = []
+
+    class Executor:
+        async def complete_meeting_room_room_choice(self, **kwargs):
+            calls.append(kwargs)
+            return {
+                "message": "I've sent you a private reply about the Meeting Room.",
+                "data": {"delivery": "direct_message"},
+            }
+
+    class SlackClient:
+        def chat_update(self, **kwargs):
+            updates.append(kwargs)
+            return {"ok": len(updates) > 1}
+
+    monkeypatch.setattr(main_module, "get_settings", lambda: configured)
+    monkeypatch.setattr(
+        main_module,
+        "get_agent",
+        lambda: SimpleNamespace(skill_executor=Executor()),
+    )
+    monkeypatch.setattr(
+        "roo.slack_client.get_slack_client",
+        lambda: SlackClient(),
+    )
+    monkeypatch.setattr(action_module, "_retry_delay", lambda attempts: 0)
+
+    await action_module.process_meeting_room_action(
+        action["id"],
+        store=action_store,
+        processor=main_module._process_meeting_room_action_record,
+    )
+    assert action_store.get(action["id"])["status"] == "pending"
+
+    await action_module.process_meeting_room_action(
+        action["id"],
+        store=action_store,
+        processor=main_module._process_meeting_room_action_record,
+    )
+
+    assert action_store.get(action["id"])["status"] == "completed"
+    assert len(calls) == 2
+    request_ids = {call["booking_client_request_id"] for call in calls}
+    assert len(request_ids) == 1
+    assert all("private reply" in update["text"] for update in updates)
+    assert all("2:00" not in update["text"] for update in updates)
+    stored = get_meeting_room_clarification_store(
+        configured.SLACK_RECEIPTS_DB_PATH
+    ).find(
+        team_id="TMLAI",
+        channel_id="CROOMS",
+        thread_ts="111.000",
+    )
+    assert stored["status"] == "completed"
+    assert request_ids == {stored["booking_client_request_id"]}
 
 
 @pytest.mark.asyncio

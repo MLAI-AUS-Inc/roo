@@ -83,6 +83,32 @@ def _action_body(*, value=_UNSET, channel_id="CCOWORK", action_ts=None):
     return urlencode({"payload": json.dumps(payload)}).encode("utf-8")
 
 
+def _successful_claim_payload(
+    *,
+    status="claimed",
+    points_refunded=0,
+    **overrides,
+):
+    payload = {
+        "status": status,
+        "date": "2026-08-03",
+        "office_manager_slack_user_id": "UVERIFIED",
+        "assignment_id": 42,
+        "booking": {
+            "id": "00000000-0000-0000-0000-000000000042",
+            "date": "2026-08-03",
+            "status": "booked",
+            "points_cost": 0,
+            "booking_source": "office_manager",
+        },
+        "points_charged": 0,
+        "points_refunded": points_refunded,
+        "office_manager_free_day": True,
+    }
+    payload.update(overrides)
+    return payload
+
+
 def _signed_headers(settings, body):
     timestamp = int(time.time())
     return {
@@ -540,7 +566,7 @@ async def test_claim_success_reports_zero_charge_and_refund_privately(monkeypatc
         async def claim_office_manager_day(self, slack_user_id, booking_date):
             assert slack_user_id == "UVERIFIED"
             assert booking_date == "2026-08-03"
-            return {"status": "claimed", "points_refunded": 8}
+            return _successful_claim_payload(points_refunded=8)
 
     feedback = []
 
@@ -569,7 +595,7 @@ async def test_claim_success_reports_zero_charge_and_refund_privately(monkeypatc
 async def test_already_claimed_by_member_is_the_only_idempotent_success(monkeypatch):
     class FakeClient:
         async def claim_office_manager_day(self, slack_user_id, booking_date):
-            return {"status": "already_claimed_by_you", "points_refunded": 0}
+            return _successful_claim_payload(status="already_claimed_by_you")
 
     feedback = []
 
@@ -602,7 +628,7 @@ async def test_already_claimed_by_member_is_the_only_idempotent_success(monkeypa
         {},
     ),
 )
-async def test_unexpected_success_response_never_claims_member_is_winner(
+async def test_unexpected_success_response_is_retried_without_winner_feedback(
     monkeypatch,
     result,
 ):
@@ -622,21 +648,45 @@ async def test_unexpected_success_response_never_claims_member_is_winner(
         capture_feedback,
     )
 
-    await main_module._claim_office_manager_from_action(
-        user_id="UVERIFIED",
-        channel_id="CCOWORK",
-        booking_date="2026-08-03",
-    )
+    with pytest.raises(
+        main_module.OfficeManagerClaimUncertainError,
+        match="response_invalid",
+    ):
+        await main_module._claim_office_manager_from_action(
+            user_id="UVERIFIED",
+            channel_id="CCOWORK",
+            booking_date="2026-08-03",
+        )
 
-    assert "unexpected response" in feedback[0]["text"]
-    assert "You are today's Office Manager" not in feedback[0]["text"]
+    assert feedback == []
 
 
 @pytest.mark.asyncio
-async def test_invalid_refund_value_does_not_hide_successful_claim(monkeypatch):
+@pytest.mark.parametrize(
+    "result",
+    (
+        _successful_claim_payload(date="2026-08-04"),
+        _successful_claim_payload(office_manager_slack_user_id="UOTHER"),
+        _successful_claim_payload(assignment_id=True),
+        _successful_claim_payload(
+            booking={
+                "date": "2026-08-03",
+                "status": "booked",
+                "points_cost": 0,
+                "booking_source": "points",
+            }
+        ),
+        _successful_claim_payload(points_charged=8),
+        _successful_claim_payload(office_manager_free_day=False),
+    ),
+)
+async def test_mismatched_success_contract_is_retried_without_feedback(
+    monkeypatch,
+    result,
+):
     class FakeClient:
         async def claim_office_manager_day(self, slack_user_id, booking_date):
-            return {"status": "claimed", "points_refunded": "not-a-number"}
+            return result
 
     feedback = []
 
@@ -650,15 +700,48 @@ async def test_invalid_refund_value_does_not_hide_successful_claim(monkeypatch):
         capture_feedback,
     )
 
-    await main_module._claim_office_manager_from_action(
-        user_id="UVERIFIED",
-        channel_id="CCOWORK",
-        booking_date="2026-08-03",
+    with pytest.raises(
+        main_module.OfficeManagerClaimUncertainError,
+        match="response_invalid",
+    ):
+        await main_module._claim_office_manager_from_action(
+            user_id="UVERIFIED",
+            channel_id="CCOWORK",
+            booking_date="2026-08-03",
+        )
+
+    assert feedback == []
+
+
+@pytest.mark.asyncio
+async def test_invalid_refund_value_keeps_claim_pending_for_recovery(monkeypatch):
+    class FakeClient:
+        async def claim_office_manager_day(self, slack_user_id, booking_date):
+            return _successful_claim_payload(points_refunded="not-a-number")
+
+    feedback = []
+
+    async def capture_feedback(**kwargs):
+        feedback.append(kwargs)
+
+    monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeClient)
+    monkeypatch.setattr(
+        main_module,
+        "_send_office_manager_private_feedback",
+        capture_feedback,
     )
 
-    assert "You are today's Office Manager" in feedback[0]["text"]
-    assert "could not confirm" not in feedback[0]["text"]
-    assert "returned the" not in feedback[0]["text"]
+    with pytest.raises(
+        main_module.OfficeManagerClaimUncertainError,
+        match="response_invalid",
+    ):
+        await main_module._claim_office_manager_from_action(
+            user_id="UVERIFIED",
+            channel_id="CCOWORK",
+            booking_date="2026-08-03",
+        )
+
+    assert feedback == []
 
 
 @pytest.mark.asyncio
@@ -815,7 +898,7 @@ async def test_transient_claim_failure_retries_then_recovers_idempotent_result(
                     request=request,
                     response=response,
                 )
-            return {"status": "already_claimed_by_you", "points_refunded": 0}
+            return _successful_claim_payload(status="already_claimed_by_you")
 
     delivered = []
 
@@ -1022,7 +1105,7 @@ async def test_private_feedback_failure_keeps_action_pending_until_delivered(
         async def claim_office_manager_day(self, slack_user_id, booking_date):
             backend_calls.append((slack_user_id, booking_date))
             status = "claimed" if len(backend_calls) == 1 else "already_claimed_by_you"
-            return {"status": status, "points_refunded": 0}
+            return _successful_claim_payload(status=status)
 
     dm_succeeds = [False]
     monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeClient)

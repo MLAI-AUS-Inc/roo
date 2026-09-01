@@ -1,6 +1,7 @@
 import os
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
 os.environ.setdefault("SLACK_BOT_TOKEN", "xoxb-private-points-test")
@@ -380,6 +381,73 @@ async def test_fast_balance_failure_does_not_return_raw_backend_error(monkeypatc
     assert result["data"] == {"error": "points_backend_unavailable"}
     assert "37" not in result["message"]
     assert "UVERIFIED" not in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_fast_coworking_booking_surfaces_terminal_backend_reason(
+    monkeypatch,
+    tmp_path,
+):
+    store = coworking_module.CoworkingBookingIntentStore(tmp_path / "coworking.db")
+
+    class TerminalCoworkingClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None):
+            request = httpx.Request(
+                "POST",
+                "https://backend.test/api/v1/points/coworking/book/",
+            )
+            response = httpx.Response(
+                400,
+                request=request,
+                json={"error": "Please link your Slack account first"},
+            )
+            raise httpx.HTTPStatusError(
+                "bad request",
+                request=request,
+                response=response,
+            )
+
+    class FakeSkill:
+        name = "mlai-points"
+
+        @staticmethod
+        def get_client_class(name):
+            assert name == "MLAIBackendClient"
+            return TerminalCoworkingClient
+
+    agent = object.__new__(RooAgent)
+    agent.skills = [FakeSkill()]
+    agent.skill_executor = SkillExecutor()
+    monkeypatch.setattr(executor_module, "get_coworking_intent_store", lambda: store)
+    monkeypatch.setattr("roo.slack_client.get_bot_user_id", lambda: "UROO")
+    monkeypatch.setattr(
+        agent_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            MLAI_BACKEND_URL="https://backend.test",
+            MLAI_API_KEY="api-key",
+            ROO_API_KEY="roo-key",
+            INTERNAL_API_KEY="internal-key",
+        ),
+    )
+
+    result = await agent._execute_fast_points(
+        "U123",
+        "book_coworking",
+        date="2026-08-25",
+        channel_id="C123",
+        thread_ts="111.222",
+    )
+
+    assert result["message"] == (
+        "🛑 I couldn't book you in for **2026-08-25**: "
+        "Please link your Slack account first"
+    )
+    assert result["data"] == {"action": "book_coworking"}
+    assert "connecting" not in result["message"]
 
 
 class CoworkingClient:

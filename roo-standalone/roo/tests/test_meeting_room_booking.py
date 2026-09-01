@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from roo import main as main_module
 from roo import meeting_room_booking as room_module
 from roo import meeting_room_actions as action_module
+from roo import meeting_room_clarifications as clarification_module
 from roo import slack_action_tasks
 from roo.agent import RooAgent
 from roo.clients.mlai_backend import MLAIBackendUnavailableError
@@ -29,11 +30,17 @@ from roo.meeting_room_booking import (
     BOOK_ACTION_ID,
     CANCEL_ACTION_ID,
     CHOOSE_ROOM_ACTION_ID,
+    CHOOSE_ROOM_ACTION_IDS_BY_ROOM,
     MeetingRoomInputError,
     build_booking_action_value,
     parse_action_value,
     room_slug_from_text,
     resolve_interval,
+    validate_room_selection_prompt,
+)
+from roo.meeting_room_clarifications import (
+    PUBLIC_ROOM_CHOICE_ACTION_IDS_BY_ROOM,
+    parse_public_room_choice_action_value,
 )
 from roo.skills.executor import SkillExecutor
 from roo.skills.loader import load_skill_from_directory
@@ -153,11 +160,13 @@ def reset_test_state():
     FakeMeetingRoomClient.instances.clear()
     slack_action_tasks._tasks.clear()
     action_module.get_meeting_room_action_store.cache_clear()
+    clarification_module.get_meeting_room_clarification_store.cache_clear()
     get_slack_receipt_store.cache_clear()
     main_module.app.dependency_overrides.clear()
     yield
     slack_action_tasks._tasks.clear()
     action_module.get_meeting_room_action_store.cache_clear()
+    clarification_module.get_meeting_room_clarification_store.cache_clear()
     get_slack_receipt_store.cache_clear()
     main_module.app.dependency_overrides.clear()
 
@@ -169,6 +178,113 @@ def test_interval_parser_uses_melbourne_time_and_one_hour_default():
 
     assert starts_at == datetime(2026, 8, 12, 14, tzinfo=MELBOURNE)
     assert ends_at == datetime(2026, 8, 12, 15, tzinfo=MELBOURNE)
+
+
+@pytest.mark.parametrize("alias", ("tomorow", "tommorow", "tommorrow"))
+def test_interval_parser_accepts_common_tomorrow_misspellings(alias):
+    now = datetime(2026, 8, 11, 9, tzinfo=MELBOURNE)
+
+    starts_at, ends_at = resolve_interval(f"{alias} at 1pm", now=now)
+
+    assert starts_at == datetime(2026, 8, 12, 13, tzinfo=MELBOURNE)
+    assert ends_at == datetime(2026, 8, 12, 14, tzinfo=MELBOURNE)
+
+
+def test_interval_parser_accepts_misspelled_tomorrow_model_parameter():
+    now = datetime(2026, 8, 11, 9, tzinfo=MELBOURNE)
+
+    starts_at, ends_at = resolve_interval(
+        "at 1pm",
+        {"date": "tommorrow"},
+        now=now,
+    )
+
+    assert starts_at == datetime(2026, 8, 12, 13, tzinfo=MELBOURNE)
+    assert ends_at == datetime(2026, 8, 12, 14, tzinfo=MELBOURNE)
+
+
+def test_interval_parser_defaults_missing_date_to_next_occurrence_today():
+    now = datetime(2026, 8, 11, 7, 20, tzinfo=MELBOURNE)
+
+    starts_at, ends_at = resolve_interval("at 1pm", now=now)
+
+    assert starts_at == datetime(2026, 8, 11, 13, tzinfo=MELBOURNE)
+    assert ends_at == datetime(2026, 8, 11, 14, tzinfo=MELBOURNE)
+
+
+def test_missing_date_next_occurrence_uses_melbourne_date_for_utc_clock():
+    now = datetime(2026, 8, 24, 21, 20, tzinfo=timezone.utc)
+
+    starts_at, _ = resolve_interval("at 1pm", now=now)
+
+    assert starts_at == datetime(2026, 8, 25, 13, tzinfo=MELBOURNE)
+
+
+def test_interval_parser_defaults_missing_date_to_tomorrow_after_time_passes():
+    now = datetime(2026, 8, 11, 19, 20, tzinfo=MELBOURNE)
+
+    starts_at, ends_at = resolve_interval("at 1pm", now=now)
+
+    assert starts_at == datetime(2026, 8, 12, 13, tzinfo=MELBOURNE)
+    assert ends_at == datetime(2026, 8, 12, 14, tzinfo=MELBOURNE)
+
+
+def test_interval_parser_defaults_missing_date_to_tomorrow_at_exact_start_time():
+    now = datetime(2026, 8, 11, 13, tzinfo=MELBOURNE)
+
+    starts_at, _ = resolve_interval("at 1pm", now=now)
+
+    assert starts_at == datetime(2026, 8, 12, 13, tzinfo=MELBOURNE)
+
+
+def test_interval_parser_uses_next_occurrence_for_routed_start_time():
+    now = datetime(2026, 8, 11, 7, 20, tzinfo=MELBOURNE)
+
+    starts_at, _ = resolve_interval(
+        "book the big meeting room",
+        {"start_time": "1pm"},
+        now=now,
+    )
+
+    assert starts_at == datetime(2026, 8, 11, 13, tzinfo=MELBOURNE)
+
+
+def test_missing_date_next_occurrence_rejects_nonexistent_daylight_saving_hour():
+    with pytest.raises(MeetingRoomInputError, match="does not exist"):
+        resolve_interval(
+            "at 2am",
+            now=datetime(2026, 10, 4, 0, 30, tzinfo=MELBOURNE),
+        )
+
+
+def test_missing_date_default_uses_melbourne_calendar_at_day_boundary():
+    now = datetime(2026, 8, 11, 23, 55, tzinfo=MELBOURNE)
+
+    starts_at, ends_at = resolve_interval("at 12:30am", now=now)
+
+    assert starts_at == datetime(2026, 8, 12, 0, 30, tzinfo=MELBOURNE)
+    assert ends_at == datetime(2026, 8, 12, 1, 30, tzinfo=MELBOURNE)
+
+
+def test_interval_parser_does_not_fuzz_unrelated_date_words():
+    with pytest.raises(MeetingRoomInputError) as raised:
+        resolve_interval(
+            "tomorrowish at 1pm",
+            now=datetime(2026, 8, 11, 9, tzinfo=MELBOURNE),
+        )
+
+    assert raised.value.code == "invalid_date"
+
+
+@pytest.mark.parametrize("text", ("next month at 1pm", "someday at 1pm"))
+def test_interval_parser_rejects_vague_dates_instead_of_defaulting(text):
+    with pytest.raises(MeetingRoomInputError) as raised:
+        resolve_interval(
+            text,
+            now=datetime(2026, 8, 11, 9, tzinfo=MELBOURNE),
+        )
+
+    assert raised.value.code == "invalid_date"
 
 
 @pytest.mark.parametrize(
@@ -437,7 +553,6 @@ def test_interval_parser_rejects_ambiguous_daylight_saving_hour():
 @pytest.mark.parametrize(
     ("text", "code"),
     (
-        ("book at 2pm", "missing_date"),
         ("book tomorrow", "missing_start_time"),
         ("book tomorrow at 2", "ambiguous_time"),
         ("book tomorrow at 2:15pm", "invalid_time"),
@@ -610,10 +725,20 @@ def test_cross_room_conflict_error_is_clear_and_names_selected_room():
 
 
 @pytest.mark.asyncio
-async def test_public_unspecified_booking_sends_private_room_choices(monkeypatch):
-    configured = _settings()
+async def test_public_unspecified_booking_asks_for_room_in_same_thread(
+    tmp_path,
+    monkeypatch,
+):
+    configured = _settings(
+        SLACK_RECEIPTS_DB_PATH=str(tmp_path / "clarifications.db")
+    )
     sent = []
     _patch_executor(monkeypatch, configured)
+    monkeypatch.setattr(
+        room_module,
+        "get_current_datetime",
+        lambda: datetime(2026, 8, 25, 7, 20, tzinfo=MELBOURNE),
+    )
     monkeypatch.setitem(
         SkillExecutor._deliver_meeting_room_response.__globals__,
         "send_dm",
@@ -621,32 +746,176 @@ async def test_public_unspecified_booking_sends_private_room_choices(monkeypatch
     )
 
     result = await SkillExecutor()._execute_meeting_room_booking(
-        text="book the meeting room tomorrow from 2pm to 4pm",
+        text="book the meeting room at 1pm",
         params={
             "action": "book_meeting_room",
             "room_slug": "big-meeting-room",
         },
         user_id="UOWNER",
         channel_id="CPUBLIC",
+        thread_ts="111.000",
+        slack_team_id="TMLAI",
+        request_message_ts="111.000",
+    )
+
+    assert "Which room should I use" in result["message"]
+    assert "buttons expire in 10 minutes" in result["message"]
+    assert "1:00" not in result["message"]
+    buttons = result["blocks"][1]["elements"]
+    assert [button["text"]["text"] for button in buttons] == [
+        "Big Meeting Room",
+        "Small Meeting Room",
+    ]
+    assert [button["action_id"] for button in buttons] == [
+        PUBLIC_ROOM_CHOICE_ACTION_IDS_BY_ROOM["big-meeting-room"],
+        PUBLIC_ROOM_CHOICE_ACTION_IDS_BY_ROOM["small-meeting-room"],
+    ]
+    assert len({button["action_id"] for button in buttons}) == len(buttons)
+    button_values = [
+        parse_public_room_choice_action_value(button["value"])
+        for button in buttons
+    ]
+    assert [value["room_slug"] for value in button_values] == [
+        "big-meeting-room",
+        "small-meeting-room",
+    ]
+    assert all("starts_at" not in button["value"] for button in buttons)
+    assert all("ends_at" not in button["value"] for button in buttons)
+    assert sent == []
+    stored = clarification_module.get_meeting_room_clarification_store(
+        configured.SLACK_RECEIPTS_DB_PATH
+    ).find(
+        team_id="TMLAI",
+        channel_id="CPUBLIC",
+        thread_ts="111.000",
+    )
+    assert stored["owner_user_id"] == "UOWNER"
+    assert stored["status"] == "awaiting_choice"
+    assert stored["choice_mode"] == "buttons"
+    assert stored["available_room_slugs"] == [
+        "big-meeting-room",
+        "small-meeting-room",
+    ]
+    assert stored["starts_at"] == "2026-08-25T13:00:00+10:00"
+    assert stored["ends_at"] == "2026-08-25T14:00:00+10:00"
+    assert [call[0] for call in FakeMeetingRoomClient.instances[0].calls] == ["rooms"]
+
+
+@pytest.mark.asyncio
+async def test_public_room_reply_sends_only_private_deterministic_preview(monkeypatch):
+    configured = _settings()
+    sent = []
+    _patch_executor(monkeypatch, configured)
+    monkeypatch.setitem(
+        SkillExecutor._deliver_meeting_room_response.__globals__,
+        "send_dm",
+        lambda user_id, message, **kwargs: (
+            sent.append((user_id, message, kwargs)) or {"ok": True}
+        ),
+    )
+
+    result = await SkillExecutor().complete_meeting_room_room_choice(
+        user_id="UOWNER",
+        channel_id="CPUBLIC",
+        room_slug="big-meeting-room",
+        starts_at="2026-08-25T14:00:00+10:00",
+        ends_at="2026-08-25T15:00:00+10:00",
+        booking_client_request_id="1409fd17-c84d-4774-af8a-7b847c16bd30",
     )
 
     assert result["message"] == "I've sent you a private reply about the Meeting Room."
     assert len(sent) == 1
-    blocks = sent[0][2]["blocks"]
-    buttons = blocks[1]["elements"]
-    assert [button["text"]["text"] for button in buttons] == [
-        "Small Meeting Room",
-        "Big Meeting Room",
+    assert sent[0][0] == "UOWNER"
+    assert "Big Meeting Room" in sent[0][1]
+    assert "2:00 PM to 3:00 PM" in sent[0][1]
+    assert sent[0][2]["client_msg_id"] == "1409fd17-c84d-4774-af8a-7b847c16bd30"
+    confirm = sent[0][2]["blocks"][1]["elements"][0]
+    parsed = parse_action_value(confirm["value"], expected_action=BOOK_ACTION_ID)
+    assert parsed["client_request_id"] == "1409fd17-c84d-4774-af8a-7b847c16bd30"
+    assert [call[0] for call in FakeMeetingRoomClient.instances[0].calls] == [
+        "rooms",
+        "availability",
     ]
-    assert {button["action_id"] for button in buttons} == {CHOOSE_ROOM_ACTION_ID}
-    parsed = [
-        parse_action_value(button["value"], expected_action=CHOOSE_ROOM_ACTION_ID)
-        for button in buttons
-    ]
-    assert {row["owner_slack_user_id"] for row in parsed} == {"UOWNER"}
-    assert len({row["selection_id"] for row in parsed}) == 1
-    assert len({row["booking_client_request_id"] for row in parsed}) == 2
-    assert [call[0] for call in FakeMeetingRoomClient.instances[0].calls] == ["rooms"]
+
+
+@pytest.mark.asyncio
+async def test_public_room_preview_recovers_duplicate_deterministic_dm(monkeypatch):
+    configured = _settings()
+    _patch_executor(monkeypatch, configured)
+
+    class DuplicateMessageError(RuntimeError):
+        response = {"error": "duplicate_message"}
+
+    monkeypatch.setitem(
+        SkillExecutor._deliver_meeting_room_response.__globals__,
+        "send_dm",
+        lambda *args, **kwargs: (_ for _ in ()).throw(DuplicateMessageError()),
+    )
+
+    result = await SkillExecutor().complete_meeting_room_room_choice(
+        user_id="UOWNER",
+        channel_id="CPUBLIC",
+        room_slug="big-meeting-room",
+        starts_at="2026-08-25T14:00:00+10:00",
+        ends_at="2026-08-25T15:00:00+10:00",
+        booking_client_request_id="1409fd17-c84d-4774-af8a-7b847c16bd30",
+    )
+
+    assert result["message"] == "I've sent you a private reply about the Meeting Room."
+
+
+@pytest.mark.asyncio
+async def test_public_room_preview_surfaces_uncertain_dm_for_durable_retry(monkeypatch):
+    configured = _settings()
+    _patch_executor(monkeypatch, configured)
+    monkeypatch.setitem(
+        SkillExecutor._deliver_meeting_room_response.__globals__,
+        "send_dm",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("response lost")),
+    )
+
+    with pytest.raises(RuntimeError, match="response lost"):
+        await SkillExecutor().complete_meeting_room_room_choice(
+            user_id="UOWNER",
+            channel_id="CPUBLIC",
+            room_slug="big-meeting-room",
+            starts_at="2026-08-25T14:00:00+10:00",
+            ends_at="2026-08-25T15:00:00+10:00",
+            booking_client_request_id="1409fd17-c84d-4774-af8a-7b847c16bd30",
+        )
+
+
+@pytest.mark.asyncio
+async def test_public_room_prompt_fails_closed_when_state_cannot_persist(monkeypatch):
+    configured = _settings()
+    sent = []
+    _patch_executor(monkeypatch, configured)
+    monkeypatch.setitem(
+        SkillExecutor._execute_meeting_room_booking.__globals__,
+        "get_meeting_room_clarification_store",
+        lambda path: (_ for _ in ()).throw(RuntimeError("state unavailable")),
+    )
+    monkeypatch.setitem(
+        SkillExecutor._deliver_meeting_room_response.__globals__,
+        "send_dm",
+        lambda *args, **kwargs: sent.append((args, kwargs)) or {"ok": True},
+    )
+
+    result = await SkillExecutor().execute(
+        skill=SimpleNamespace(name="meeting-room-booking"),
+        text="book the meeting room tomorrow at 2pm",
+        user_id="UOWNER",
+        channel_id="CPUBLIC",
+        thread_ts="111.000",
+        param_overrides={"action": "book_meeting_room"},
+        slack_team_id="TMLAI",
+        current_message_ts="111.000",
+    )
+
+    assert result.success is False
+    assert "problem executing" in result.message
+    assert "Which room" not in result.message
+    assert sent == []
 
 
 def test_missing_channel_never_returns_private_meeting_room_details_inline():
@@ -675,7 +944,63 @@ async def test_direct_message_unspecified_booking_choices_preserve_default_hour(
     )
 
     assert "2:00 PM to 3:00 PM" in result["message"]
-    assert result["blocks"][1]["elements"][0]["action_id"] == CHOOSE_ROOM_ACTION_ID
+    buttons = result["blocks"][1]["elements"]
+    action_ids = {element["action_id"] for element in buttons}
+    assert action_ids == set(CHOOSE_ROOM_ACTION_IDS_BY_ROOM.values())
+    for button in buttons:
+        value = parse_action_value(
+            button["value"],
+            expected_action=CHOOSE_ROOM_ACTION_ID,
+        )
+        assert button["action_id"] == CHOOSE_ROOM_ACTION_IDS_BY_ROOM[
+            value["room_slug"]
+        ]
+
+    malformed_blocks = json.loads(json.dumps(result["blocks"]))
+    malformed_blocks[1]["elements"][1]["action_id"] = malformed_blocks[1][
+        "elements"
+    ][0]["action_id"]
+    with pytest.raises(MeetingRoomInputError, match="safe room-choice card"):
+        validate_room_selection_prompt(result["message"], malformed_blocks)
+
+    invalid_button_text_blocks = json.loads(json.dumps(result["blocks"]))
+    invalid_button_text_blocks[1]["elements"][0]["text"]["type"] = "mrkdwn"
+    with pytest.raises(MeetingRoomInputError, match="safe room-choice card"):
+        validate_room_selection_prompt(
+            result["message"],
+            invalid_button_text_blocks,
+        )
+
+    oversized_section_blocks = json.loads(json.dumps(result["blocks"]))
+    oversized_section_blocks[0]["text"]["text"] = "x" * 3_001
+    with pytest.raises(MeetingRoomInputError, match="safe room-choice card"):
+        validate_room_selection_prompt(
+            result["message"],
+            oversized_section_blocks,
+        )
+
+
+@pytest.mark.asyncio
+async def test_invalid_private_room_card_returns_specific_restart_message(monkeypatch):
+    configured = _settings()
+    _patch_executor(monkeypatch, configured)
+    monkeypatch.setattr(
+        room_module,
+        "room_choice_action_id",
+        lambda room_slug: CHOOSE_ROOM_ACTION_ID,
+    )
+
+    result = await SkillExecutor()._execute_meeting_room_booking(
+        text="book the meeting room tomorrow at 2pm",
+        params={"action": "book_meeting_room"},
+        user_id="UOWNER",
+        channel_id="DOWNER",
+    )
+
+    assert result["message"] == (
+        "I couldn't build a safe room-choice card. Ask Roo to start again."
+    )
+    assert result.get("blocks") is None
 
 
 @pytest.mark.asyncio
@@ -724,6 +1049,118 @@ async def test_bare_24_hour_availability_request_checks_exact_interval(monkeypat
     assert datetime.fromisoformat(call[2]["starts_at"]).hour == 14
     assert datetime.fromisoformat(call[2]["ends_at"]).hour == 15
     assert "is available" in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_misspelled_tomorrow_clarification_checks_requested_time(monkeypatch):
+    configured = _settings()
+    _patch_executor(monkeypatch, configured)
+
+    result = await SkillExecutor()._execute_meeting_room_booking(
+        text="tommorrow at 1pm",
+        params={"action": "check_room_availability"},
+        user_id="UOWNER",
+        channel_id="DOWNER",
+    )
+
+    calls = FakeMeetingRoomClient.instances[0].calls
+    assert [call[0] for call in calls] == ["rooms", "availability", "availability"]
+    starts_at = datetime.fromisoformat(calls[1][2]["starts_at"])
+    ends_at = datetime.fromisoformat(calls[1][2]["ends_at"])
+    assert starts_at.hour == 13
+    assert ends_at.hour == 14
+    assert "What date should I check?" not in result["message"]
+    assert "is available" in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_availability_without_date_defaults_to_next_occurrence(monkeypatch):
+    configured = _settings()
+    _patch_executor(monkeypatch, configured)
+    monkeypatch.setattr(
+        room_module,
+        "get_current_datetime",
+        lambda: datetime(2026, 8, 11, 7, 20, tzinfo=MELBOURNE),
+    )
+
+    result = await SkillExecutor()._execute_meeting_room_booking(
+        text="is the meeting room free at 3pm",
+        params={"action": "check_room_availability"},
+        user_id="UOWNER",
+        channel_id="DOWNER",
+    )
+
+    calls = FakeMeetingRoomClient.instances[0].calls
+    starts_at = datetime.fromisoformat(calls[1][2]["starts_at"])
+    assert starts_at == datetime(2026, 8, 11, 15, tzinfo=MELBOURNE)
+    assert "What date should I check?" not in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_booking_without_date_defaults_to_next_occurrence(monkeypatch):
+    configured = _settings()
+    _patch_executor(monkeypatch, configured)
+    monkeypatch.setattr(
+        room_module,
+        "get_current_datetime",
+        lambda: datetime(2026, 8, 11, 7, 20, tzinfo=MELBOURNE),
+    )
+
+    result = await SkillExecutor()._execute_meeting_room_booking(
+        text="book the big meeting room for me at 3pm",
+        params={"action": "book_meeting_room"},
+        user_id="UOWNER",
+        channel_id="DOWNER",
+    )
+
+    calls = FakeMeetingRoomClient.instances[0].calls
+    starts_at = datetime.fromisoformat(calls[1][2]["starts_at"])
+    assert starts_at == datetime(2026, 8, 11, 15, tzinfo=MELBOURNE)
+    assert "Big Meeting Room" in result["message"]
+    assert result["blocks"][1]["elements"][0]["text"]["text"] == "Confirm booking"
+
+
+@pytest.mark.asyncio
+async def test_booking_without_date_or_time_asks_only_for_time(monkeypatch):
+    configured = _settings()
+    _patch_executor(monkeypatch, configured)
+
+    result = await SkillExecutor()._execute_meeting_room_booking(
+        text="book meeting room",
+        params={"action": "book_meeting_room"},
+        user_id="UOWNER",
+        channel_id="DOWNER",
+    )
+
+    assert result["message"] == "What time should the booking start? Try `2pm`."
+    assert "What date should I check?" not in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_bare_misspelled_tomorrow_clarification_checks_the_day(monkeypatch):
+    configured = _settings()
+    _patch_executor(monkeypatch, configured)
+    monkeypatch.setattr(
+        room_module,
+        "get_current_datetime",
+        lambda: datetime(2026, 8, 11, 9, tzinfo=MELBOURNE),
+    )
+
+    result = await SkillExecutor()._execute_meeting_room_booking(
+        text="tommorrow",
+        params={"action": "check_room_availability"},
+        user_id="UOWNER",
+        channel_id="DOWNER",
+    )
+
+    calls = FakeMeetingRoomClient.instances[0].calls
+    assert [call[0] for call in calls] == ["rooms", "availability", "availability"]
+    assert calls[1][2]["date"] == "2026-08-12"
+    assert "starts_at" not in calls[1][2]
+    assert "What date should I check?" not in result["message"]
+    assert "no bookings or blocks currently shown" in result["message"]
+    assert "specific future time" in result["message"]
+    assert "available" not in result["message"].lower()
 
 
 @pytest.mark.asyncio
@@ -782,12 +1219,14 @@ def test_date_availability_makes_an_empty_day_explicitly_clear():
     )
 
     assert message == (
-        "The *Meeting Room* has no bookings currently shown for that date "
-        "(Melbourne time)."
+        "The *Meeting Room* has no bookings or blocks currently shown for that "
+        "date (Melbourne time). Ask Roo to check a specific future time before "
+        "booking."
     )
+    assert "available" not in message.lower()
 
 
-def test_date_availability_lists_busy_intervals_and_marks_everything_else_free():
+def test_date_availability_lists_busy_intervals_without_claiming_other_times_are_free():
     message = SkillExecutor._format_meeting_room_availability(
         {
             "room": {"name": "Meeting Room"},
@@ -808,7 +1247,12 @@ def test_date_availability_lists_busy_intervals_and_marks_everything_else_free()
     assert "unavailable at these times" in message
     assert "10:00 AM to 11:00 AM" in message
     assert "2:00 PM to 4:00 PM" in message
-    assert message.endswith("All other times that day are currently available.")
+    assert message.endswith(
+        "No room bookings or blocks are currently shown outside these periods. "
+        "Ask Roo to check a specific future time before booking."
+    )
+    assert "all other times" not in message.lower()
+    assert "currently available" not in message.lower()
 
 
 @pytest.mark.asyncio

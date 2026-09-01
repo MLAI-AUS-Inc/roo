@@ -66,7 +66,8 @@ class Settings(BaseSettings):
     ROO_CONTEXTUAL_CLASSIFIER_TIMEOUT_SECONDS: float = 5.0
     ROO_CONTEXTUAL_MODEL: Optional[str] = None
     ROO_IMPLICIT_ACTION_ALLOWLIST: str = (
-        "respond_in_chat,mlai-points:balance,mlai-points:topup_points"
+        "respond_in_chat,mlai-points:balance,mlai-points:topup_points,"
+        "mlai-points:link_account"
     )
     
     # LLM Providers (at least one required)
@@ -133,6 +134,11 @@ class Settings(BaseSettings):
     ROUTER_MODEL: str = "gpt-5.5"
     LINEAR_MEETING_AUTO_CREATE_MIN_CONFIDENCE: float = 0.85
     LINEAR_MEETING_UNCERTAIN_MIN_CONFIDENCE: float = 0.65
+    LINEAR_MEETING_EXTRACTION_CONCURRENCY: int = 3
+    LINEAR_MEETING_EXTRACTION_TOTAL_TIMEOUT_SECONDS: float = 360.0
+    LINEAR_MEETING_EXTRACTION_CHUNK_MAX_CHARS: int = 8000
+    LINEAR_MEETING_EXTRACTION_RECOVERY_MAX_CHARS: int = 4000
+    LINEAR_MEETING_EXTRACTION_RECOVERY_DEPTH: int = 2
     LINEAR_TASK_SIZING_MODE: Optional[str] = None
     LINEAR_TASK_SIZING_AUTO_CREATE_MIN_CONFIDENCE: Optional[float] = None
     LINEAR_TASK_SIZING_CONTEXT_MAX_CHARS: Optional[int] = None

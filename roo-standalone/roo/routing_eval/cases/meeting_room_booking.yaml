@@ -2,6 +2,10 @@
   text: "is the meeting room free tomorrow at 2pm?"
   expect: {skill: meeting-room-booking, action: check_room_availability}
   tags: [meeting-room]
+- id: meeting-room-check-tomorrow-typo
+  text: "is the meeting room free tommorrow at 1pm?"
+  expect: {skill: meeting-room-booking, action: check_room_availability}
+  tags: [meeting-room, typo]
 - id: meeting-room-calendar-day-view
   text: "show the meeting room calendar tomorrow"
   expect: {skill: meeting-room-booking, action: check_room_availability}
@@ -30,10 +34,10 @@
   text: "cancel my room booking tomorrow"
   expect: {skill: meeting-room-booking, action: cancel_meeting_room}
   tags: [meeting-room]
-- id: meeting-room-missing-date
-  text: "book the meeting room at 3pm"
+- id: meeting-room-default-next-day
+  text: "book the big meeting room for me at 3pm"
   expect: {skill: meeting-room-booking, action: book_meeting_room}
-  tags: [meeting-room, clarification]
+  tags: [meeting-room, default-date]
 - id: meeting-room-coworking-separation
   text: "book me a coworking desk tomorrow"
   expect: {skill: mlai-points, action: book_coworking}

@@ -8,8 +8,10 @@ import httpx
 from roo.clients.mlai_backend import MLAIBackendClient, MLAIBackendUnavailableError
 
 LINEAR_MEETING_CONTEXT_ENDPOINT = "/api/v1/integrations/linear/meeting-context"
+LINEAR_PROJECT_RESOLVE_ENDPOINT = "/api/v1/integrations/linear/projects/resolve"
 LINEAR_MEETING_ISSUES_ENDPOINT = "/api/v1/integrations/linear/issues"
 LINEAR_MEETING_PROJECT_UPDATES_ENDPOINT = "/api/v1/integrations/linear/project-updates"
+LINEAR_MEETING_ACTION_BATCHES_ENDPOINT = "/api/v1/integrations/linear/action-batches"
 
 
 class LinearIssueCreationInProgressError(RuntimeError):
@@ -113,6 +115,17 @@ class LinearMeetingActionsClient:
     async def list_recent_open_issues(self, limit: int = 100) -> list[dict[str, Any]]:
         context = await self._meeting_context()
         return _dict_list(context.get("recentIssues") or context.get("recent_issues"))
+
+    async def resolve_project(self, query: str) -> dict[str, Any]:
+        query = str(query or "").strip()
+        if not query:
+            raise ValueError("query is required")
+        return await self._request_json(
+            "GET",
+            LINEAR_PROJECT_RESOLVE_ENDPOINT,
+            params={"query": query},
+            timeout=45.0,
+        )
 
     async def get_project_sizing_context(self, project_id: str) -> dict[str, Any]:
         encoded_project_id = quote(str(project_id or "").strip(), safe="")
@@ -370,6 +383,66 @@ class LinearMeetingActionsClient:
             raise RuntimeError(
                 "An identical Linear issue creation is still in progress; no duplicate was created."
             )
+
+    async def create_action_batch(
+        self,
+        *,
+        requested_by_slack_user_id: str,
+        items: list[dict[str, Any]],
+        slack_channel_id: Optional[str] = None,
+        slack_thread_ts: Optional[str] = None,
+        source_fingerprint: Optional[str] = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "requested_by_slack_user_id": requested_by_slack_user_id,
+            "items": items,
+        }
+        if slack_channel_id:
+            payload["slack_channel_id"] = slack_channel_id
+        if slack_thread_ts:
+            payload["slack_thread_ts"] = slack_thread_ts
+        if source_fingerprint:
+            payload["source_fingerprint"] = source_fingerprint
+        return await self._request_json(
+            "POST",
+            LINEAR_MEETING_ACTION_BATCHES_ENDPOINT,
+            payload=payload,
+            timeout=30.0,
+        )
+
+    async def get_action_batch(self, batch_id: str) -> dict[str, Any]:
+        encoded_batch_id = quote(str(batch_id or "").strip(), safe="")
+        if not encoded_batch_id:
+            raise ValueError("batch_id is required")
+        return await self._request_json(
+            "GET",
+            f"{LINEAR_MEETING_ACTION_BATCHES_ENDPOINT}/{encoded_batch_id}",
+            timeout=20.0,
+        )
+
+    async def decide_action_batch(
+        self,
+        *,
+        batch_id: str,
+        requested_by_slack_user_id: str,
+        decision: str,
+        item_ids: Optional[list[str]] = None,
+    ) -> dict[str, Any]:
+        encoded_batch_id = quote(str(batch_id or "").strip(), safe="")
+        if not encoded_batch_id:
+            raise ValueError("batch_id is required")
+        payload: dict[str, Any] = {
+            "requested_by_slack_user_id": requested_by_slack_user_id,
+            "decision": decision,
+        }
+        if item_ids is not None:
+            payload["item_ids"] = item_ids
+        return await self._request_json(
+            "POST",
+            f"{LINEAR_MEETING_ACTION_BATCHES_ENDPOINT}/{encoded_batch_id}/decisions",
+            payload=payload,
+            timeout=120.0,
+        )
 
     async def create_project_update(
         self,

@@ -42,6 +42,26 @@ _EFFORT_TIMEOUT_SECONDS: dict[LinearReasoningEffort, float] = {
     "xhigh": 120.0,
     "max": 180.0,
 }
+_STAGE_TIMEOUT_FLOORS: dict[
+    LinearInferenceStage, dict[LinearReasoningEffort, float]
+] = {
+    # Meeting extraction returns a comparatively large structured payload. Give
+    # ordinary and complex chunks enough time to finish before progressively
+    # reducing their scope in the caller.
+    "meeting_actions": {"medium": 60.0, "high": 90.0},
+}
+
+
+def _linear_timeout_seconds(
+    stage: LinearInferenceStage,
+    effort: LinearReasoningEffort,
+) -> float:
+    return max(
+        _EFFORT_TIMEOUT_SECONDS[effort],
+        _STAGE_TIMEOUT_FLOORS.get(stage, {}).get(effort, 0.0),
+    )
+
+
 _STAGE_MAX_OUTPUT_TOKENS: dict[LinearInferenceStage, int] = {
     "direct_issue": 4_000,
     "meeting_actions": 8_000,
@@ -272,7 +292,7 @@ def choose_linear_reasoning(signals: LinearReasoningSignals) -> LinearReasoningD
     return LinearReasoningDecision(
         stage=signals.stage,
         effort=effort,
-        timeout_seconds=_EFFORT_TIMEOUT_SECONDS[effort],
+        timeout_seconds=_linear_timeout_seconds(signals.stage, effort),
         complexity_score=score,
         reasons=tuple(reasons) or ("stage_baseline",),
     )
@@ -286,7 +306,7 @@ def escalate_linear_reasoning(
     return replace(
         decision,
         effort=effort,
-        timeout_seconds=_EFFORT_TIMEOUT_SECONDS[effort],
+        timeout_seconds=_linear_timeout_seconds(decision.stage, effort),
         reasons=(*decision.reasons, "structured_validation_retry"),
         retry=True,
     )
@@ -304,7 +324,7 @@ def recover_linear_structured_output(
         effort=effort,
         timeout_seconds=max(
             decision.timeout_seconds,
-            _EFFORT_TIMEOUT_SECONDS[effort],
+            _linear_timeout_seconds(decision.stage, effort),
         ),
         reasons=(*decision.reasons, "structured_output_budget_recovery"),
         retry=True,
