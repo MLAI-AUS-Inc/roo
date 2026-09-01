@@ -11402,10 +11402,21 @@ Chunk {index} source: {label}
             for operation, match in matches
             if operation == detected_operation
         )
+        command_prefix = raw[:command_start].strip()
+        command_prefix = re.sub(r"^(?:<@[A-Z0-9]+>\s*)+", "", command_prefix).strip()
+        if command_prefix and not re.fullmatch(
+            r"(?:(?:please|roo)\s*[,;:]?\s*)?"
+            r"(?:(?:can|could|would|will)\s+you(?:\s+please)?\s*[,;:]?\s*|"
+            r"please\s*[,;:]?\s*|roo\s*[,;:]?\s*)",
+            command_prefix,
+            re.IGNORECASE,
+        ):
+            return None
         if any(
             negation.start() < command_start
             for negation in re.finditer(
-                r"\b(?:do\s+not|don't|dont|never)\b",
+                r"\b(?:do\s+not|don['’]?t|cannot|can['’]?t|shouldn['’]?t|"
+                r"mustn['’]?t|won['’]?t|never)\b",
                 raw,
                 re.IGNORECASE,
             )

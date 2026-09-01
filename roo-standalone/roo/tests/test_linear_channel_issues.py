@@ -95,6 +95,10 @@ def test_value_text_can_name_another_linear_field_without_becoming_second_edit()
         "never add a comment to TECH-29 saying shipped",
         "I don't want you to move TECH-29 to Done",
         "do not under any circumstances move TECH-29 to Done",
+        "why can't I move TECH-29 to Done",
+        "I cannot move TECH-29 to Done",
+        "you shouldn't move TECH-29 to Done",
+        "you mustn't move TECH-29 to Done",
     ],
 )
 def test_negated_edit_commands_are_rejected(text):
@@ -109,6 +113,21 @@ def test_negation_inside_explicit_comment_body_is_preserved():
         "add a comment to TECH-29 saying don't deploy this yet",
         {"field": "comment", "value": "don't deploy this yet"},
     ) == {"operation": "add_comment", "value": "don't deploy this yet"}
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "please move TECH-29 to Done",
+        "could you move TECH-29 to Done",
+        "<@UROO> please move TECH-29 to Done",
+    ],
+)
+def test_explicit_polite_command_prefixes_are_accepted(text):
+    assert SkillExecutor()._linear_channel_write_request(
+        text,
+        {"field": "status", "value": "Done"},
+    ) == {"operation": "set_status", "value": "Done"}
 
 
 @pytest.mark.asyncio
