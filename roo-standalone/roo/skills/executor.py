@@ -11347,15 +11347,6 @@ Chunk {index} source: {label}
 
     def _linear_channel_write_request(self, text: str, params: dict) -> Optional[dict[str, Any]]:
         raw = str(text or "").strip()
-        if re.search(
-            r"\b(?:do\s+not|don't|dont|never)\s+(?:please\s+)?"
-            r"(?:move|set|change|update|rename|add|post|leave|comment|append|replace|"
-            r"clear|remove|assign|mark)\b",
-            raw,
-            re.IGNORECASE,
-        ):
-            return None
-
         field = str(params.get("field") or "").strip().lower().replace("-", "_")
         mode = str(params.get("mode") or "set").strip().lower()
         value = params.get("value")
@@ -11406,6 +11397,20 @@ Chunk {index} source: {label}
         if len(detected_operations) != 1:
             return None
         detected_operation = next(iter(detected_operations))
+        command_start = min(
+            match.start()
+            for operation, match in matches
+            if operation == detected_operation
+        )
+        if any(
+            negation.start() < command_start
+            for negation in re.finditer(
+                r"\b(?:do\s+not|don't|dont|never)\b",
+                raw,
+                re.IGNORECASE,
+            )
+        ):
+            return None
         routed_operation = operation_by_field.get(field)
         if routed_operation and routed_operation != detected_operation:
             return None
