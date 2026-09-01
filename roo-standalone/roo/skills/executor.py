@@ -11349,6 +11349,17 @@ Chunk {index} source: {label}
         identifier = self._linear_issue_identifier(reference)
         if identifier:
             return identifier
+        if re.fullmatch(
+            r"\s*(?:it|this|that)\s*",
+            str(reference or ""),
+            re.IGNORECASE,
+        ):
+            return {
+                "message": (
+                    "Which Linear issue do you mean? Reply in a recognized issue thread "
+                    "or include an issue key such as `TECH-29`. Nothing was changed."
+                )
+            }
         issues, complete = await self._list_all_linear_channel_issues(
             client,
             slack_workspace_id=slack_workspace_id,

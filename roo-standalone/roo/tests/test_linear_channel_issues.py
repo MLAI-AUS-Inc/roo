@@ -333,6 +333,39 @@ async def test_targetless_write_does_not_inherit_thread_issue(monkeypatch):
     assert FakeClient.writes == []
 
 
+@pytest.mark.asyncio
+async def test_unresolved_pronoun_cannot_match_issue_title(monkeypatch):
+    FakeClient.writes = []
+
+    async def list_with_pronoun_title(self, **kwargs):
+        return {
+            "issues": [{"identifier": "TECH-44", "title": "Ship it"}],
+            "pageInfo": {"hasNextPage": False},
+        }
+
+    monkeypatch.setattr(executor_module, "get_settings", lambda: settings())
+    monkeypatch.setattr(FakeClient, "list_linear_channel_issues", list_with_pronoun_title)
+    monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeClient)
+
+    result = await SkillExecutor()._execute_linear_channel_issues(
+        text="move it to Done",
+        params={
+            "action": "update_issue",
+            "issue_reference": "it",
+            "field": "status",
+            "value": "Done",
+        },
+        user_id="U123",
+        channel_id="CTECH",
+        thread_history=None,
+        slack_team_id="TMLAI",
+        request_id="Ev-unresolved-pronoun",
+    )
+
+    assert "Which Linear issue" in result
+    assert FakeClient.writes == []
+
+
 def test_successful_write_confirmation_becomes_latest_pronoun_context(monkeypatch):
     monkeypatch.setattr(executor_module, "get_bot_user_id", lambda: "UROO")
     executor = SkillExecutor()
