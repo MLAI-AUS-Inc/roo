@@ -68,6 +68,8 @@ def settings(**overrides):
         ("set the project of TECH-29 to Project One", {"field": "project", "value": "Project One"}, "set_project"),
         ("set the cycle of TECH-29 to Cycle One", {"field": "cycle", "value": "Cycle One"}, "set_cycle"),
         ("move TECH-29 to Done", {"field": "status", "value": "Done"}, "set_status"),
+        ("change the status of TECH-29 to Done", {"field": "status", "value": "Done"}, "set_status"),
+        ("update status of TECH-29 to In Review", {"field": "status", "value": "In Review"}, "set_status"),
         ("mark TECH-29 as duplicate of TECH-30", {"field": "duplicate", "value": "TECH-30"}, "mark_duplicate"),
     ],
 )

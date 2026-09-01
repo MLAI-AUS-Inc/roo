@@ -11398,6 +11398,7 @@ Chunk {index} source: {label}
 
         value_patterns = [
             ("set_status", r"\b(?:move|set)\s+(?:issue\s+)?(?:[A-Z][A-Z0-9]+-\d+|it|this|that)(?:\s+status)?\s+to\s+(.+)$"),
+            ("set_status", r"\b(?:set|change|update)\s+(?:the\s+)?status(?:\s+of\s+(?:[A-Z][A-Z0-9]+-\d+|it|this|that))?\s+to\s+(.+)$"),
             ("add_comment", r"\b(?:add|post|leave)\s+(?:a\s+)?comment(?:\s+(?:to|on)\s+(?:[A-Z][A-Z0-9]+-\d+|it|this|that))?\s*(?:saying|that says|:)\s*(.+)$"),
             ("add_comment", r"\bcomment\s+on\s+(?:[A-Z][A-Z0-9]+-\d+|it|this|that)\s*:\s*(.+)$"),
             ("set_title", r"\b(?:set|change|update|rename)\s+(?:the\s+)?title(?:\s+of\s+(?:[A-Z][A-Z0-9]+-\d+|it|this|that))?\s+to\s+(.+)$"),
