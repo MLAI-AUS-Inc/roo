@@ -485,6 +485,14 @@ class MLAIBackendClient:
         prefix = "" if base_path.endswith("/api/v1") else "/api/v1"
         return f"{prefix}/org-memory/{suffix}"
 
+    def _linear_channel_endpoint(self, suffix: str) -> str:
+        """Support backend base URLs with or without an /api/v1 suffix."""
+
+        suffix = str(suffix or "").strip("/")
+        base_path = urlparse(self.base_url).path.rstrip("/")
+        prefix = "" if base_path.endswith("/api/v1") else "/api/v1"
+        return f"{prefix}/integrations/linear/channel-issues/{suffix}"
+
     @staticmethod
     def _victor_ai_params(filters: Optional[dict] = None, **pagination: Any) -> dict:
         allowed = {
@@ -2211,7 +2219,7 @@ class MLAIBackendClient:
             payload["status"] = str(status).strip()
         response = await self._request(
             "POST",
-            "/api/v1/integrations/linear/channel-issues/list",
+            self._linear_channel_endpoint("list"),
             json=payload,
             timeout=30.0,
             transport_retries=1,
@@ -2230,7 +2238,7 @@ class MLAIBackendClient:
     ) -> dict:
         response = await self._request(
             "POST",
-            "/api/v1/integrations/linear/channel-issues/statuses",
+            self._linear_channel_endpoint("statuses"),
             json={
                 "slack_workspace_id": str(slack_workspace_id or "").strip(),
                 "slack_channel_id": str(slack_channel_id or "").strip(),
@@ -2258,7 +2266,7 @@ class MLAIBackendClient:
     ) -> dict:
         response = await self._request(
             "POST",
-            "/api/v1/integrations/linear/channel-issues/write",
+            self._linear_channel_endpoint("write"),
             json={
                 "slack_workspace_id": str(slack_workspace_id or "").strip(),
                 "slack_channel_id": str(slack_channel_id or "").strip(),
@@ -2288,7 +2296,7 @@ class MLAIBackendClient:
         """Get one approved Linear issue and its bounded comment history."""
         response = await self._request(
             "POST",
-            "/api/v1/integrations/linear/channel-issues/detail",
+            self._linear_channel_endpoint("detail"),
             json={
                 "slack_workspace_id": str(slack_workspace_id or "").strip(),
                 "slack_channel_id": str(slack_channel_id or "").strip(),

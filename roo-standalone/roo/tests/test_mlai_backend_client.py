@@ -391,6 +391,29 @@ async def test_list_linear_channel_statuses_uses_scoped_endpoint(monkeypatch):
     assert captured["json"]["slack_channel_id"] == "CTECH"
 
 
+@pytest.mark.parametrize(
+    ("base_url", "expected"),
+    [
+        (
+            "https://backend.test",
+            "/api/v1/integrations/linear/channel-issues/statuses",
+        ),
+        (
+            "https://backend.test/api/v1",
+            "/integrations/linear/channel-issues/statuses",
+        ),
+        (
+            "https://backend.test/api/v1/",
+            "/integrations/linear/channel-issues/statuses",
+        ),
+    ],
+)
+def test_linear_channel_endpoint_avoids_duplicate_api_prefix(base_url, expected):
+    client = MLAIBackendClient(base_url=base_url, api_key="roo-api-key")
+
+    assert client._linear_channel_endpoint("statuses") == expected
+
+
 @pytest.mark.asyncio
 async def test_write_linear_channel_issue_disables_transport_retries(monkeypatch):
     captured = {}
