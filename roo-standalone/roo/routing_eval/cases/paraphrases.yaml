@@ -306,32 +306,6 @@
   expect: {skill: tone-of-voice}
   tags: [paraphrase]
 
-# --- medhack (exclusive to #medhack-frontiers) ---
-- id: para-medhack-kickoff
-  text: "what time does medhack kick off on saturday?"
-  channel: medhack-frontiers
-  expect: {skill: medhack}
-  tags: [paraphrase, channel]
-- id: para-medhack-clinical-case
-  text: "give me a clinical case to diagnose"
-  channel: medhack-frontiers
-  expect: {skill: medhack}
-  tags: [paraphrase, channel]
-- id: para-medhack-guess
-  text: "I think the patient has atrial fibrillation"
-  channel: medhack-frontiers
-  expect: {skill: medhack}
-  tags: [paraphrase, channel]
-- id: para-medhack-ecg
-  text: "order an ecg for the patient"
-  channel: medhack-frontiers
-  expect: {skill: medhack}
-  tags: [paraphrase, channel]
-- id: para-medhack-announce-lunch
-  text: "post an announcement that lunch is ready"
-  channel: medhack-frontiers
-  expect: {skill: medhack}
-  tags: [paraphrase, channel]
 
 # --- healthhack announcements (exclusive to #healthhack) ---
 - id: para-healthhack-announce-doors

@@ -122,7 +122,7 @@ CASES = [
     ("whats my balance",                                         "mlai-points"),
     ("balance?",                                                 "mlai-points"),
     ("rewrite this announcement in our tone of voice",           "tone-of-voice"),
-    ("announce the workshop tomorrow",                           "watt-the-hack or medhack (channel-dep)"),
+    ("announce the workshop tomorrow",                           "watt-the-hack or healthhack (channel-dep)"),
     ("how many people registered for the AI safety event?",      "luma-events"),
     ("export the attendee list as a csv",                        "luma-events"),
     ("can you write an article about our medhack winners for the blog?", "content-factory"),
