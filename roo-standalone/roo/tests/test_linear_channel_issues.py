@@ -177,6 +177,7 @@ def test_negation_inside_explicit_comment_body_is_preserved():
     "text",
     [
         "mark TECH-29 as duplicate of TECH-30 but don't do that",
+        "mark TECH-29 as duplicate of TECH-30. Don't do that",
         "move TECH-29 to Done, actually cancel that",
         "change the title of TECH-29 to Safer; never mind",
     ],
@@ -549,6 +550,10 @@ def test_additional_edits_with_non_conjunction_separators_are_rejected(text):
 def test_supported_write_followed_by_destructive_action_is_rejected():
     assert SkillExecutor()._linear_channel_write_request(
         "mark TECH-29 as duplicate of TECH-30, then archive TECH-29",
+        {"field": "duplicate", "value": "TECH-30"},
+    ) is None
+    assert SkillExecutor()._linear_channel_write_request(
+        "mark TECH-29 as duplicate of TECH-30, then delete the existing comment",
         {"field": "duplicate", "value": "TECH-30"},
     ) is None
 

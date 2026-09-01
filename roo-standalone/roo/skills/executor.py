@@ -11513,7 +11513,8 @@ Chunk {index} source: {label}
         match = next(match for operation, match in matches if operation == detected_operation)
         if re.search(
             r"\b(?:but|actually|wait)\b[^\n]*?\b(?:do\s+not|don['’]?t|cancel|ignore|stop)\b|"
-            r"\b(?:never\s+mind|cancel\s+that|ignore\s+that|stop\s+that)\b",
+            r"\b(?:never\s+mind|cancel\s+that|ignore\s+that|stop\s+that)\b|"
+            r"(?:[.!?;]\s+|\n+\s*)(?:please\s+)?(?:do\s+not|don['’]?t)\s+(?:do\s+)?that\b",
             raw[match.start():],
             re.IGNORECASE,
         ):
@@ -11563,7 +11564,7 @@ Chunk {index} source: {label}
         unsupported_command_pattern = (
             rf"(?:delete|archive|trash|restore)\s+(?:issue\s+)?{target}\b|"
             rf"move\s+(?:issue\s+)?{target}\s+to\s+(?:another|the)\s+team\b|"
-            r"edit\s+(?:an?\s+)?existing\s+comment\b"
+            r"(?:edit|delete|remove)\s+(?:the\s+|an?\s+)?(?:existing\s+)?comment\b"
         )
         text = str(value_and_tail or "")
         for separator in re.finditer(
