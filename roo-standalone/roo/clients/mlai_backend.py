@@ -539,6 +539,16 @@ class MLAIBackendClient:
         prefix = "" if base_path.endswith("/api/v1") else "/api/v1"
         return f"{prefix}/org-memory/{suffix}"
 
+    def _api_v1_endpoint(self, suffix: str) -> str:
+        """Build an API endpoint for either supported backend base URL form."""
+
+        raw_suffix = str(suffix or "")
+        suffix = raw_suffix.strip("/")
+        base_path = urlparse(self.base_url).path.rstrip("/")
+        prefix = "" if base_path.endswith("/api/v1") else "/api/v1"
+        trailing_slash = "/" if raw_suffix.endswith("/") else ""
+        return f"{prefix}/{suffix}{trailing_slash}"
+
     @staticmethod
     def _victor_ai_params(filters: Optional[dict] = None, **pagination: Any) -> dict:
         allowed = {
@@ -2388,7 +2398,7 @@ class MLAIBackendClient:
         """Create a short-lived Founder Tools link for the current Slack user."""
         response = await self._request(
             "POST",
-            "/api/v1/users/slack-founder-link/start/",
+            self._api_v1_endpoint("users/slack-founder-link/start/"),
             json={"slack_user_id": self._clean_slack_id(slack_user_id)},
             timeout=15.0,
             # Creating a link invalidates older tokens, so an ambiguous POST

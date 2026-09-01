@@ -307,7 +307,24 @@ async def test_book_coworking_treats_malformed_2xx_as_commit_uncertain(
 
 
 @pytest.mark.asyncio
-async def test_start_founder_account_link_uses_current_slack_identity(monkeypatch):
+@pytest.mark.parametrize(
+    ("base_url", "expected_endpoint"),
+    [
+        (
+            "https://backend.test",
+            "/api/v1/users/slack-founder-link/start/",
+        ),
+        (
+            "https://backend.test/api/v1",
+            "/users/slack-founder-link/start/",
+        ),
+    ],
+)
+async def test_start_founder_account_link_uses_current_slack_identity(
+    monkeypatch,
+    base_url,
+    expected_endpoint,
+):
     captured = {}
 
     async def fake_request(method, endpoint, **kwargs):
@@ -327,7 +344,7 @@ async def test_start_founder_account_link_uses_current_slack_identity(monkeypatc
         )
 
     client = MLAIBackendClient(
-        base_url="https://backend.test",
+        base_url=base_url,
         api_key="roo-api-key",
         internal_api_key="roo-api-key",
     )
@@ -338,7 +355,7 @@ async def test_start_founder_account_link_uses_current_slack_identity(monkeypatc
     assert result["status"] == "link_required"
     assert captured == {
         "method": "POST",
-        "endpoint": "/api/v1/users/slack-founder-link/start/",
+        "endpoint": expected_endpoint,
         "json": {"slack_user_id": "U123"},
         "use_admin_headers": False,
         "transport_retries": 0,
