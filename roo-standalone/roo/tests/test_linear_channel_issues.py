@@ -104,6 +104,9 @@ def test_write_target_extraction_does_not_scan_comment_body():
     assert executor._linear_channel_write_target_reference(
         "add a comment to TECH-29 saying TECH-30 is blocked"
     ) == "TECH-29"
+    assert executor._linear_channel_write_target_reference(
+        "append description of TECH-30 is stale to the description of TECH-29"
+    ) == "TECH-29"
 
 
 def test_destructive_detection_does_not_scan_edit_value():
@@ -380,6 +383,44 @@ async def test_multiple_edits_are_rejected_as_ambiguous(monkeypatch):
 
     assert "couldn't identify one explicit Linear edit" in duplicate_result
     assert FakeClient.writes == []
+
+    repeated_comment_result = await SkillExecutor()._execute_linear_channel_issues(
+        text=(
+            "add a comment to TECH-29 saying one and "
+            "add a comment to TECH-30 saying two"
+        ),
+        params={
+            "action": "update_issue",
+            "issue_reference": "TECH-29",
+            "field": "comment",
+            "value": "one and add a comment to TECH-30 saying two",
+        },
+        user_id="U123",
+        channel_id="CTECH",
+        thread_history=None,
+        slack_team_id="TMLAI",
+        request_id="Ev-two-comments",
+    )
+
+    assert "couldn't identify one explicit Linear edit" in repeated_comment_result
+    assert FakeClient.writes == []
+
+
+@pytest.mark.parametrize(
+    ("text", "params"),
+    [
+        (
+            "move TECH-29 to Done and move TECH-30 to Todo",
+            {"field": "status", "value": "Done and move TECH-30 to Todo"},
+        ),
+        (
+            "change the title of TECH-29 to One and change the title of TECH-30 to Two",
+            {"field": "title", "value": "One and change the title of TECH-30 to Two"},
+        ),
+    ],
+)
+def test_repeated_same_operation_commands_are_rejected(text, params):
+    assert SkillExecutor()._linear_channel_write_request(text, params) is None
 
 
 @pytest.mark.asyncio

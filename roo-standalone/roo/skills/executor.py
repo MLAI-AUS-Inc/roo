@@ -11365,15 +11365,6 @@ Chunk {index} source: {label}
 
     def _linear_channel_write_request(self, text: str, params: dict) -> Optional[dict[str, Any]]:
         raw = str(text or "").strip()
-        duplicate_commands = re.findall(
-            r"\b(?:mark|set)\s+(?:issue\s+)?"
-            r"(?:[A-Z][A-Z0-9]+-\d+|it|this|that)\s+as\s+(?:a\s+)?"
-            r"duplicate\s+of\s+[A-Z][A-Z0-9]+-\d+\b",
-            raw,
-            re.IGNORECASE,
-        )
-        if len(duplicate_commands) > 1:
-            return None
         field = str(params.get("field") or "").strip().lower().replace("-", "_")
         mode = str(params.get("mode") or "set").strip().lower()
         value = params.get("value")
@@ -11450,6 +11441,25 @@ Chunk {index} source: {label}
         if len(detected_operations) != 1:
             return None
         detected_operation = next(iter(detected_operations))
+        repeated_operation_patterns = {
+            "set_status": r"\b(?:(?:move|set)\s+(?:issue\s+)?(?:[A-Z][A-Z0-9]+-\d+|it|this|that)(?:\s+status)?\s+to|(?:set|change|update)\s+(?:the\s+)?status(?:\s+of\s+(?:[A-Z][A-Z0-9]+-\d+|it|this|that))?\s+to)\b",
+            "add_comment": r"\b(?:(?:add|post|leave)\s+(?:a\s+)?comment(?:\s+(?:to|on)\s+(?:[A-Z][A-Z0-9]+-\d+|it|this|that))?\s*(?:saying|that\s+says|:)|comment\s+on\s+(?:[A-Z][A-Z0-9]+-\d+|it|this|that)\s*:)" ,
+            "set_title": r"\b(?:set|change|update|rename)\s+(?:the\s+)?title\b",
+            "append_description": r"\bappend\b[^\n]*?\bdescription\b",
+            "replace_description": r"\b(?:set|replace|update)\s+(?:the\s+)?description\b",
+            "set_priority": r"\b(?:set|change|update)\s+(?:the\s+)?priority\b",
+            "set_estimate": r"\b(?:set|change|update|clear|remove)\s+(?:the\s+)?estimate\b",
+            "set_due_date": r"\b(?:set|change|update|clear|remove)\s+(?:the\s+)?due\s+date\b",
+            "set_assignee": r"\b(?:(?:assign)\s+(?:issue\s+)?(?:[A-Z][A-Z0-9]+-\d+|it|this|that)\s+to|(?:set|change|update|clear|remove)\s+(?:the\s+)?assignee)\b",
+            "add_label": r"\badd\s+(?:the\s+)?label\b",
+            "remove_label": r"\bremove\s+(?:the\s+)?label\b",
+            "set_project": r"\b(?:set|change|update|clear|remove)\s+(?:the\s+)?project\b",
+            "set_cycle": r"\b(?:set|change|update|clear|remove)\s+(?:the\s+)?cycle\b",
+            "mark_duplicate": r"\b(?:mark|set)\s+(?:issue\s+)?(?:[A-Z][A-Z0-9]+-\d+|it|this|that)\s+as\s+(?:a\s+)?duplicate\s+of\b",
+        }
+        repeated_pattern = repeated_operation_patterns[detected_operation]
+        if len(re.findall(repeated_pattern, raw, re.IGNORECASE)) > 1:
+            return None
         command_start = min(
             match.start()
             for operation, match in matches
@@ -11491,6 +11501,7 @@ Chunk {index} source: {label}
         raw = str(text or "")
         target = r"(?P<target>[A-Z][A-Z0-9]{1,15}-\d+|it|this|that)"
         patterns = [
+            rf"\bappend\s+.+\s+to\s+(?:the\s+)?description\s+of\s+{target}\s*$",
             rf"\b(?:move|set)\s+(?:issue\s+)?{target}(?:\s+status)?\s+to\b",
             rf"\b(?:add|post|leave)\s+(?:a\s+)?comment\s+(?:to|on)\s+{target}\b",
             rf"\bcomment\s+on\s+{target}\b",
