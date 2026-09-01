@@ -360,6 +360,27 @@ async def test_multiple_edits_are_rejected_as_ambiguous(monkeypatch):
     assert "couldn't identify one explicit Linear edit" in result
     assert FakeClient.writes == []
 
+    duplicate_result = await SkillExecutor()._execute_linear_channel_issues(
+        text=(
+            "mark TECH-29 as duplicate of TECH-30 and "
+            "mark TECH-31 as duplicate of TECH-32"
+        ),
+        params={
+            "action": "update_issue",
+            "issue_reference": "TECH-29",
+            "field": "duplicate",
+            "value": "TECH-30",
+        },
+        user_id="U123",
+        channel_id="CTECH",
+        thread_history=None,
+        slack_team_id="TMLAI",
+        request_id="Ev-two-duplicates",
+    )
+
+    assert "couldn't identify one explicit Linear edit" in duplicate_result
+    assert FakeClient.writes == []
+
 
 @pytest.mark.asyncio
 async def test_explicit_status_change_uses_current_issue_version(monkeypatch):

@@ -11365,6 +11365,15 @@ Chunk {index} source: {label}
 
     def _linear_channel_write_request(self, text: str, params: dict) -> Optional[dict[str, Any]]:
         raw = str(text or "").strip()
+        duplicate_commands = re.findall(
+            r"\b(?:mark|set)\s+(?:issue\s+)?"
+            r"(?:[A-Z][A-Z0-9]+-\d+|it|this|that)\s+as\s+(?:a\s+)?"
+            r"duplicate\s+of\s+[A-Z][A-Z0-9]+-\d+\b",
+            raw,
+            re.IGNORECASE,
+        )
+        if len(duplicate_commands) > 1:
+            return None
         field = str(params.get("field") or "").strip().lower().replace("-", "_")
         mode = str(params.get("mode") or "set").strip().lower()
         value = params.get("value")
