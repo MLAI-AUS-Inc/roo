@@ -250,6 +250,35 @@ async def test_pronoun_write_target_comes_from_thread_not_comment_body(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_targetless_write_does_not_inherit_thread_issue(monkeypatch):
+    FakeClient.writes = []
+    monkeypatch.setattr(executor_module, "get_settings", lambda: settings())
+    monkeypatch.setattr(executor_module, "get_bot_user_id", lambda: "UROO")
+    monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeClient)
+
+    result = await SkillExecutor()._execute_linear_channel_issues(
+        text="set status to Done",
+        params={
+            "action": "update_issue",
+            "field": "status",
+            "value": "Done",
+        },
+        user_id="U123",
+        channel_id="CTECH",
+        thread_history=[{
+            "is_bot": True,
+            "user": "UROO",
+            "text": "*`TECH-29` — Controlled edits*",
+        }],
+        slack_team_id="TMLAI",
+        request_id="Ev-targetless",
+    )
+
+    assert "Explicitly name the issue" in result
+    assert FakeClient.writes == []
+
+
+@pytest.mark.asyncio
 async def test_comment_without_body_cannot_use_hallucinated_router_value(monkeypatch):
     FakeClient.writes = []
     monkeypatch.setattr(executor_module, "get_settings", lambda: settings())

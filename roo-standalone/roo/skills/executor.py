@@ -11261,6 +11261,11 @@ Chunk {index} source: {label}
                     "I couldn't identify one explicit Linear edit. Include the field and exact new value; "
                     "for example, `move TECH-29 to In Progress`. Nothing was changed."
                 )
+            if not raw_issue_target:
+                return (
+                    "Which Linear issue do you mean? Explicitly name the issue or say `it` "
+                    "in an issue thread. Nothing was changed."
+                )
 
         routed_issue_identifier = self._linear_issue_identifier(
             params.get("issue_reference") or params.get("issue_identifier")
@@ -11283,7 +11288,7 @@ Chunk {index} source: {label}
         if action == "update_issue":
             # Only the deterministic command target may select a write target.
             # Never scan a title/comment/description value for an issue key.
-            resolution_text = raw_issue_target or ("it" if thread_history else "")
+            resolution_text = raw_issue_target
         issue_identifier = await self._resolve_linear_channel_issue_for_action(
             client=client,
             text=resolution_text,
