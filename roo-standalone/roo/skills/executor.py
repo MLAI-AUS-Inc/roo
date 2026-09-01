@@ -11560,6 +11560,11 @@ Chunk {index} source: {label}
             "append_description": {"append_description", "replace_description"},
             "replace_description": {"append_description", "replace_description"},
         }
+        unsupported_command_pattern = (
+            rf"(?:delete|archive|trash|restore)\s+(?:issue\s+)?{target}\b|"
+            rf"move\s+(?:issue\s+)?{target}\s+to\s+(?:another|the)\s+team\b|"
+            r"edit\s+(?:an?\s+)?existing\s+comment\b"
+        )
         text = str(value_and_tail or "")
         for separator in re.finditer(
             r"(?:(?:\band\b|\bthen\b|;|,)\s+|\n+\s*)",
@@ -11568,6 +11573,8 @@ Chunk {index} source: {label}
         ):
             candidate = text[separator.end():].strip()
             candidate = re.sub(r"^(?:please\s+)", "", candidate, flags=re.IGNORECASE)
+            if re.match(unsupported_command_pattern, candidate, re.IGNORECASE):
+                return True
             for operation, pattern in command_patterns.items():
                 if not re.match(pattern, candidate, re.IGNORECASE):
                     continue
