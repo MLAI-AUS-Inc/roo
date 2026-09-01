@@ -59,6 +59,7 @@ def settings(**overrides):
         ("change the title of TECH-29 to Safer", {"field": "title", "value": "Safer"}, "set_title"),
         ("replace the description of TECH-29 with New", {"field": "description", "mode": "replace", "value": "New"}, "replace_description"),
         ("append to the description of TECH-29: More", {"field": "description", "mode": "append", "value": "More"}, "append_description"),
+        ("append this update to the description of TECH-29", {"field": "description", "mode": "append", "value": "this update"}, "append_description"),
         ("set the priority of TECH-29 to high", {"field": "priority", "value": "high"}, "set_priority"),
         ("set the estimate of TECH-29 to 8", {"field": "estimate", "value": "8"}, "set_estimate"),
         ("set the due date of TECH-29 to 2026-09-30", {"field": "due_date", "value": "2026-09-30"}, "set_due_date"),
@@ -380,6 +381,33 @@ async def test_explicit_status_change_uses_current_issue_version(monkeypatch):
         "operation": "set_status", "value": "In Progress",
         "expected_updated_at": "2026-09-01T01:00:00.000Z", "request_id": "Ev123",
     }]
+
+
+@pytest.mark.asyncio
+async def test_value_before_description_append_executes(monkeypatch):
+    FakeClient.writes = []
+    monkeypatch.setattr(executor_module, "get_settings", lambda: settings())
+    monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeClient)
+
+    result = await SkillExecutor()._execute_linear_channel_issues(
+        text="append this update to the description of TECH-29",
+        params={
+            "action": "update_issue",
+            "issue_reference": "TECH-29",
+            "field": "description",
+            "mode": "append",
+            "value": "this update",
+        },
+        user_id="U123",
+        channel_id="CTECH",
+        thread_history=None,
+        slack_team_id="TMLAI",
+        request_id="Ev-append-description",
+    )
+
+    assert "completed in Linear" in result
+    assert FakeClient.writes[-1]["operation"] == "append_description"
+    assert FakeClient.writes[-1]["value"] == "this update"
 
 
 @pytest.mark.asyncio

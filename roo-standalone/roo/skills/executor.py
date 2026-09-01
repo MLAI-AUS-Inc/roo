@@ -11388,6 +11388,7 @@ Chunk {index} source: {label}
             ("add_comment", r"\b(?:add|post|leave)\s+(?:a\s+)?comment(?:\s+(?:to|on)\s+(?:[A-Z][A-Z0-9]+-\d+|it|this|that))?\s*(?:saying|that says|:)\s*(.+)$"),
             ("add_comment", r"\bcomment\s+on\s+(?:[A-Z][A-Z0-9]+-\d+|it|this|that)\s*:\s*(.+)$"),
             ("set_title", r"\b(?:set|change|update|rename)\s+(?:the\s+)?title(?:\s+of\s+(?:[A-Z][A-Z0-9]+-\d+|it|this|that))?\s+to\s+(.+)$"),
+            ("append_description", r"\bappend\s+(.+?)\s+to\s+(?:the\s+)?description\s+of\s+(?:[A-Z][A-Z0-9]+-\d+|it|this|that)\s*$"),
             ("append_description", r"\bappend\s+(?:to\s+)?(?:the\s+)?description(?:\s+of\s+(?:[A-Z][A-Z0-9]+-\d+|it|this|that))?\s*(?:with|:|to)\s*(.+)$"),
             ("replace_description", r"\b(?:set|replace|update)\s+(?:the\s+)?description(?:\s+of\s+(?:[A-Z][A-Z0-9]+-\d+|it|this|that))?\s+(?:to|with)\s+(.+)$"),
             ("set_priority", r"\b(?:set|change|update)\s+(?:the\s+)?priority(?:\s+of\s+(?:[A-Z][A-Z0-9]+-\d+|it|this|that))?\s+to\s+(.+)$"),
