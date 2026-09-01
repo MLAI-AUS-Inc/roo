@@ -761,6 +761,10 @@ def test_supported_write_followed_by_destructive_action_is_rejected():
         {"field": "duplicate", "value": "TECH-30"},
     ) is None
     assert SkillExecutor()._linear_channel_write_request(
+        "mark TECH-29 as duplicate of TECH-30. Archive TECH-29",
+        {"field": "duplicate", "value": "TECH-30"},
+    ) is None
+    assert SkillExecutor()._linear_channel_write_request(
         "mark TECH-29 as duplicate of TECH-30, then delete the existing comment",
         {"field": "duplicate", "value": "TECH-30"},
     ) is None

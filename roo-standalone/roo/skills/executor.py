@@ -11731,7 +11731,7 @@ Chunk {index} source: {label}
         )
         text = str(value_and_tail or "")
         for separator in re.finditer(
-            r"(?:(?:\band\b|\bthen\b|;|,)\s+|\n+\s*)",
+            r"(?:(?:\band\b|\bthen\b|[;,.!?])\s+|\n+\s*)",
             text,
             re.IGNORECASE,
         ):
