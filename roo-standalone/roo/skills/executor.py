@@ -11406,10 +11406,35 @@ Chunk {index} source: {label}
             ("set_cycle", r"\b(?:clear|remove)\s+(?:the\s+)?cycle(?:\s+(?:of|from)\s+(?:[A-Z][A-Z0-9]+-\d+|it|this|that))?\s*$"),
             ("mark_duplicate", r"\b(?:mark|set)\b.*?\bduplicate\s+of\s+([A-Z][A-Z0-9]+-\d+)\b"),
         ]
+        def is_outer_command(match: re.Match[str]) -> bool:
+            command_start = match.start()
+            command_prefix = raw[:command_start].strip()
+            command_prefix = re.sub(
+                r"^(?:<@[A-Z0-9]+>\s*)+", "", command_prefix
+            ).strip()
+            if command_prefix and not re.fullmatch(
+                r"(?:(?:please|roo)\s*[,;:]?\s*)?"
+                r"(?:(?:can|could|would|will)\s+you(?:\s+please)?\s*[,;:]?\s*|"
+                r"please\s*[,;:]?\s*|roo\s*[,;:]?\s*)",
+                command_prefix,
+                re.IGNORECASE,
+            ):
+                return False
+            return not any(
+                negation.start() < command_start
+                for negation in re.finditer(
+                    r"\b(?:do\s+not|don['’]?t|cannot|can['’]?t|shouldn['’]?t|"
+                    r"mustn['’]?t|won['’]?t|never)\b",
+                    raw,
+                    re.IGNORECASE,
+                )
+            )
+
         matches = [
             (operation, match)
             for operation, pattern in value_patterns
             if (match := re.search(pattern, raw, re.IGNORECASE))
+            and is_outer_command(match)
         ]
         detected_operations = {operation for operation, _match in matches}
         if len(detected_operations) != 1:

@@ -87,6 +87,13 @@ def test_value_text_can_name_another_linear_field_without_becoming_second_edit()
     ) == {"operation": "set_title", "value": "Improve priority handling"}
 
 
+def test_comment_body_is_opaque_when_it_contains_another_edit_command():
+    assert SkillExecutor()._linear_channel_write_request(
+        "add a comment to TECH-29 saying move TECH-30 to Done",
+        {"field": "comment", "value": "move TECH-30 to Done"},
+    ) == {"operation": "add_comment", "value": "move TECH-30 to Done"}
+
+
 def test_write_target_extraction_does_not_scan_comment_body():
     executor = SkillExecutor()
 
