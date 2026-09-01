@@ -11205,7 +11205,12 @@ Chunk {index} source: {label}
         )
         action = str(params.get("action") or "").strip().lower()
         lowered = str(text or "").lower()
-        issue_in_text = self._linear_issue_identifier(text)
+        raw_issue_target = (
+            self._linear_channel_write_target_reference(text)
+            if action == "update_issue"
+            else str(text or "")
+        )
+        issue_in_text = self._linear_issue_identifier(raw_issue_target)
         asks_for_status_catalogue = bool(
             re.search(
                 r"(?:\b(?:list|show|which)\b.*\bstatus(?:es)?\b|"
@@ -11248,6 +11253,15 @@ Chunk {index} source: {label}
         if re.search(r"\b(?:delete|archive|trash|restore|move\s+(?:it|the\s+issue|[A-Z]+-\d+)\s+to\s+(?:another|the)\s+team|edit\s+(?:an?\s+)?existing\s+comment)\b", str(text or ""), re.IGNORECASE):
             return "I can't delete, archive, restore, move teams, or edit existing Linear comments."
 
+        write = None
+        if action == "update_issue":
+            write = self._linear_channel_write_request(text, params)
+            if not write:
+                return (
+                    "I couldn't identify one explicit Linear edit. Include the field and exact new value; "
+                    "for example, `move TECH-29 to In Progress`. Nothing was changed."
+                )
+
         routed_issue_identifier = self._linear_issue_identifier(
             params.get("issue_reference") or params.get("issue_identifier")
         )
@@ -11265,9 +11279,14 @@ Chunk {index} source: {label}
                 for key, value in params.items()
                 if key not in {"issue_reference", "issue_identifier"}
             }
+        resolution_text = str(text or "")
+        if action == "update_issue":
+            # Only the deterministic command target may select a write target.
+            # Never scan a title/comment/description value for an issue key.
+            resolution_text = raw_issue_target or ("it" if thread_history else "")
         issue_identifier = await self._resolve_linear_channel_issue_for_action(
             client=client,
-            text=text,
+            text=resolution_text,
             params=resolution_params,
             thread_history=thread_history,
             slack_workspace_id=slack_team_id,
@@ -11293,12 +11312,6 @@ Chunk {index} source: {label}
 
         if not bool(getattr(settings, "LINEAR_CHANNEL_ISSUE_WRITES_ENABLED", False)):
             return "Linear issue editing is currently disabled. Nothing was changed."
-        write = self._linear_channel_write_request(text, params)
-        if not write:
-            return (
-                "I couldn't identify one explicit Linear edit. Include the field and exact new value; "
-                "for example, `move TECH-29 to In Progress`. Nothing was changed."
-            )
         if not request_id:
             return "This Linear edit is missing a Slack request identifier, so nothing was changed."
         issue = detail.get("issue") if isinstance(detail.get("issue"), dict) else {}
@@ -11431,6 +11444,28 @@ Chunk {index} source: {label}
         if value is not None and str(value).strip().casefold() != captured_value.casefold():
             return None
         return {"operation": detected_operation, "value": captured_value}
+
+    def _linear_channel_write_target_reference(self, text: Any) -> str:
+        """Extract only the issue target clause, never an edit's new value."""
+
+        raw = str(text or "")
+        target = r"(?P<target>[A-Z][A-Z0-9]{1,15}-\d+|it|this|that)"
+        patterns = [
+            rf"\b(?:move|set)\s+(?:issue\s+)?{target}(?:\s+status)?\s+to\b",
+            rf"\b(?:add|post|leave)\s+(?:a\s+)?comment\s+(?:to|on)\s+{target}\b",
+            rf"\bcomment\s+on\s+{target}\b",
+            rf"\b(?:set|change|update|rename|replace|append|clear|remove)\b"
+            rf".*?\b(?:status|title|description|priority|estimate|due\s+date|assignee|project|cycle)\b"
+            rf"\s+(?:of|from)\s+{target}\b",
+            rf"\bassign\s+(?:issue\s+)?{target}\s+to\b",
+            rf"\b(?:add|remove)\s+(?:the\s+)?label\b.*?\s+(?:to|from)\s+{target}\s*$",
+            rf"\b(?:mark|set)\s+{target}\s+as\s+(?:a\s+)?duplicate\s+of\b",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, raw, re.IGNORECASE)
+            if match:
+                return str(match.group("target") or "").strip()
+        return ""
 
     def _linear_channel_write_error(self, exc: Exception) -> str:
         if isinstance(exc, httpx.HTTPStatusError):

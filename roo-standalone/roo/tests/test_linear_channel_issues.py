@@ -87,6 +87,17 @@ def test_value_text_can_name_another_linear_field_without_becoming_second_edit()
     ) == {"operation": "set_title", "value": "Improve priority handling"}
 
 
+def test_write_target_extraction_does_not_scan_comment_body():
+    executor = SkillExecutor()
+
+    assert executor._linear_channel_write_target_reference(
+        "add a comment to it saying TECH-30 is blocked"
+    ) == "it"
+    assert executor._linear_channel_write_target_reference(
+        "add a comment to TECH-29 saying TECH-30 is blocked"
+    ) == "TECH-29"
+
+
 @pytest.mark.parametrize(
     "text",
     [
@@ -205,6 +216,37 @@ async def test_raw_issue_identifier_cannot_be_overridden_by_router(monkeypatch):
 
     assert "conflicts with the routed issue" in result
     assert FakeClient.writes == []
+
+
+@pytest.mark.asyncio
+async def test_pronoun_write_target_comes_from_thread_not_comment_body(monkeypatch):
+    FakeClient.writes = []
+    monkeypatch.setattr(executor_module, "get_settings", lambda: settings())
+    monkeypatch.setattr(executor_module, "get_bot_user_id", lambda: "UROO")
+    monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeClient)
+
+    result = await SkillExecutor()._execute_linear_channel_issues(
+        text="add a comment to it saying TECH-30 is blocked",
+        params={
+            "action": "update_issue",
+            "issue_reference": "it",
+            "field": "comment",
+            "value": "TECH-30 is blocked",
+        },
+        user_id="U123",
+        channel_id="CTECH",
+        thread_history=[{
+            "is_bot": True,
+            "user": "UROO",
+            "text": "*`TECH-29` — Controlled edits*",
+        }],
+        slack_team_id="TMLAI",
+        request_id="Ev-pronoun-target",
+    )
+
+    assert "completed in Linear" in result
+    assert FakeClient.writes[-1]["issue_identifier"] == "TECH-29"
+    assert FakeClient.writes[-1]["value"] == "TECH-30 is blocked"
 
 
 @pytest.mark.asyncio
