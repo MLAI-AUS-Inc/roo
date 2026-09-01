@@ -80,13 +80,17 @@ test each supported follow-up:
 @Roo Dev what Linear statuses are available?
 @Roo Dev move TECH-29 to In Progress
 @Roo Dev add a comment to TECH-29 saying local testing passed
+@Roo Dev create a Linear issue titled Fix deployment alerts
+@Roo Dev create a Linear issue titled Fix alerts with description Add retry logs in status In Progress
 ```
 
 The backend should return `403` if the same app invokes these actions from any
 channel other than `#roo-testing` (`C0BRM181EDV`). Production uses a separate
 binding for `#tech_volunteers` (`C0BS0J2Q3M1`).
 
-Write commands execute immediately and therefore must be explicit. Roo first
+Create and edit commands execute immediately and therefore must be explicit.
+Creation always targets the backend-bound MLAI_TECH team and requires one title;
+an explicit description and status are optional. Roo first
 reads the current issue, and the backend rejects the edit if `updatedAt`
 changes before the mutation. Neither Roo nor the backend retries an uncertain
 write response; inspect Linear before manually retrying. Set both write flags

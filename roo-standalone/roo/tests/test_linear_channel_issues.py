@@ -13,6 +13,7 @@ import roo.skills.executor as executor_module
 
 class FakeClient:
     writes = []
+    creates = []
     status_calls = 0
 
     def __init__(self, *args, **kwargs):
@@ -39,6 +40,17 @@ class FakeClient:
     async def write_linear_channel_issue(self, **kwargs):
         self.__class__.writes.append(kwargs)
         return {"operation": kwargs["operation"], "issue": {"identifier": kwargs["issue_identifier"]}}
+
+    async def create_linear_channel_issue(self, **kwargs):
+        self.__class__.creates.append(kwargs)
+        return {
+            "operation": "create_issue",
+            "issue": {
+                "identifier": "TECH-30",
+                "title": kwargs["title"],
+                "url": "https://linear.app/issue/TECH-30",
+            },
+        }
 
 
 def settings(**overrides):
@@ -110,6 +122,104 @@ def test_optional_mode_is_inferred_from_explicit_text():
         "remove label Bug from TECH-29",
         {"field": "label", "value": "Bug"},
     ) == {"operation": "remove_label", "value": "Bug"}
+
+
+@pytest.mark.parametrize(
+    ("text", "params", "expected"),
+    [
+        (
+            "create a new Linear issue for Fix deployment alerts",
+            {"title": "Fix deployment alerts"},
+            {"title": "Fix deployment alerts"},
+        ),
+        (
+            "create an issue in MLAI_TECH titled Fix deployment alerts",
+            {"title": "Fix deployment alerts"},
+            {"title": "Fix deployment alerts"},
+        ),
+        (
+            "create a Linear issue titled Fix alerts with description Add retry logs in status In Progress",
+            {
+                "title": "Fix alerts", "description": "Add retry logs",
+                "status": "In Progress",
+            },
+            {
+                "title": "Fix alerts", "description": "Add retry logs",
+                "status": "In Progress",
+            },
+        ),
+    ],
+)
+def test_explicit_create_request_is_parsed_from_user_text(text, params, expected):
+    assert SkillExecutor()._linear_channel_create_request(text, params) == expected
+
+
+@pytest.mark.parametrize(
+    ("text", "params"),
+    [
+        ("don't create a Linear issue for Fix alerts", {"title": "Fix alerts"}),
+        ("create a Linear issue for Fix alerts, actually cancel that", {"title": "Fix alerts"}),
+        ("create a Linear issue for Fix alerts", {"title": "Invented title"}),
+        (
+            "create a Linear issue for First and create a Linear issue for Second",
+            {"title": "First"},
+        ),
+        (
+            "create a Linear issue for Fix alerts and delete TECH-29",
+            {"title": "Fix alerts"},
+        ),
+    ],
+)
+def test_ambiguous_negated_or_hallucinated_create_is_rejected(text, params):
+    assert SkillExecutor()._linear_channel_create_request(text, params) is None
+
+
+@pytest.mark.asyncio
+async def test_explicit_issue_create_uses_scoped_backend(monkeypatch):
+    FakeClient.creates = []
+    monkeypatch.setattr(executor_module, "get_settings", lambda: settings())
+    monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeClient)
+
+    result = await SkillExecutor()._execute_linear_channel_issues(
+        text=(
+            "create a Linear issue titled Fix alerts with description Add retry logs "
+            "in status In Progress"
+        ),
+        params={
+            "action": "create_issue", "title": "Fix alerts",
+            "description": "Add retry logs", "status": "In Progress",
+        },
+        user_id="U123", channel_id="CTECH", thread_history=None,
+        slack_team_id="TMLAI", request_id="Ev-create-123",
+    )
+
+    assert "Created `TECH-30`" in result
+    assert FakeClient.creates == [{
+        "slack_workspace_id": "TMLAI", "slack_channel_id": "CTECH",
+        "requester_slack_id": "U123", "request_id": "Ev-create-123",
+        "title": "Fix alerts", "description": "Add retry logs",
+        "status": "In Progress",
+    }]
+
+
+@pytest.mark.asyncio
+async def test_issue_create_respects_write_kill_switch(monkeypatch):
+    FakeClient.creates = []
+    monkeypatch.setattr(
+        executor_module, "get_settings",
+        lambda: settings(LINEAR_CHANNEL_ISSUE_WRITES_ENABLED=False),
+    )
+    monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeClient)
+
+    result = await SkillExecutor()._execute_linear_channel_issues(
+        text="create a Linear issue for Fix alerts",
+        params={"action": "create_issue", "title": "Fix alerts"},
+        user_id="U123", channel_id="CTECH", thread_history=None,
+        slack_team_id="TMLAI", request_id="Ev-create-disabled",
+    )
+
+    assert "disabled" in result
+    assert FakeClient.creates == []
 
 
 @pytest.mark.asyncio

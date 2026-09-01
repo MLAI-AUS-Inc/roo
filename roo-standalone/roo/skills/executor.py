@@ -11253,6 +11253,38 @@ Chunk {index} source: {label}
             except Exception as exc:
                 return self._linear_channel_write_error(exc)
 
+        if action == "create_issue":
+            create_request = self._linear_channel_create_request(text, params)
+            if not create_request:
+                return (
+                    "I couldn't identify one explicit Linear issue creation request. "
+                    "Include one exact title; for example, `create a Linear issue "
+                    "titled Fix deployment alerts`. Nothing was created."
+                )
+            if not bool(getattr(settings, "LINEAR_CHANNEL_ISSUE_WRITES_ENABLED", False)):
+                return "Linear issue editing is currently disabled. Nothing was created."
+            if not request_id:
+                return (
+                    "This Linear issue creation is missing a Slack request identifier, "
+                    "so nothing was created."
+                )
+            try:
+                result = await client.create_linear_channel_issue(
+                    slack_workspace_id=slack_team_id,
+                    slack_channel_id=channel_id,
+                    requester_slack_id=user_id,
+                    request_id=str(request_id),
+                    **create_request,
+                )
+            except Exception as exc:
+                return self._linear_channel_write_error(exc)
+            issue = result.get("issue") if isinstance(result.get("issue"), dict) else {}
+            identifier = self._slack_escape(issue.get("identifier") or "New issue")
+            title = self._clean_linear_issue_title(issue.get("title") or create_request["title"])
+            url = str(issue.get("url") or "").strip()
+            suffix = f" <{url}|Open in Linear>" if url.startswith("https://linear.app/") else ""
+            return f"Created `{identifier}` — {title} in MLAI_TECH.{suffix}"
+
         if self._linear_channel_destructive_command(text):
             return "I can't delete, archive, restore, move teams, or edit existing Linear comments."
 
@@ -11346,6 +11378,107 @@ Chunk {index} source: {label}
             return self._linear_channel_write_error(exc)
         operation_label = write["operation"].replace("_", " ")
         return f"Updated `{self._slack_escape(issue_identifier)}`: {operation_label} completed in Linear."
+
+    def _linear_channel_create_request(
+        self, text: Any, params: dict
+    ) -> Optional[dict[str, str]]:
+        raw = str(text or "").strip()
+        command = re.sub(r"^(?:<@[A-Z0-9]+>\s*)+", "", raw).strip()
+        command = re.sub(
+            r"^(?:(?:please|roo)\s*[,;:]?\s*)+", "", command,
+            flags=re.IGNORECASE,
+        ).strip()
+        command = re.sub(
+            r"^(?:can|could|would|will)\s+you(?:\s+please)?\s*[,;:]?\s*",
+            "",
+            command,
+            flags=re.IGNORECASE,
+        ).strip()
+        if re.match(
+            r"^(?:do\s+not|don['’]?t|never|cannot|can['’]?t)\b",
+            command,
+            re.IGNORECASE,
+        ):
+            return None
+        if re.search(
+            r"\b(?:but|actually|wait)\b[^\n]*?\b(?:do\s+not|don['’]?t|cancel|ignore|stop)\b|"
+            r"\b(?:never\s+mind|cancel\s+that|ignore\s+that|stop\s+that)\b",
+            command,
+            re.IGNORECASE,
+        ):
+            return None
+        create_pattern = (
+            r"^(?:create|open|add)\s+(?:a|an|one)?\s*(?:new\s+)?"
+            r"(?:linear\s+)?(?:issue|ticket|task)\b"
+        )
+        if len(re.findall(create_pattern, command, re.IGNORECASE)) != 1:
+            return None
+        if re.search(
+            r"(?:\band\b|\bthen\b|[,;]|\n)\s*(?:please\s+)?"
+            r"(?:create|open|add)\s+(?:a|an|one)?\s*(?:new\s+)?"
+            r"(?:linear\s+)?(?:issue|ticket|task)\b",
+            command,
+            re.IGNORECASE,
+        ):
+            return None
+        match = re.match(create_pattern, command, re.IGNORECASE)
+        if not match:
+            return None
+        tail = command[match.end():].strip()
+        tail = re.sub(
+            r"^(?:(?:in|to)\s+(?:the\s+)?MLAI[_ -]?TECH(?:\s+team)?\s*)",
+            "",
+            tail,
+            flags=re.IGNORECASE,
+        ).strip()
+        title_match = re.match(
+            r"^(?:called|titled|named|for|about|:)\s*(.+)$",
+            tail,
+            re.IGNORECASE,
+        )
+        if not title_match:
+            return None
+        value_text = title_match.group(1).strip()
+        status = ""
+        status_match = re.search(
+            r"\s+(?:with|in)\s+(?:the\s+)?status\s+(.+)$",
+            value_text,
+            re.IGNORECASE,
+        )
+        if status_match:
+            status = status_match.group(1).strip()
+            value_text = value_text[:status_match.start()].rstrip()
+        description = ""
+        description_match = re.search(
+            r"\s+with\s+(?:the\s+)?description\s+(.+)$",
+            value_text,
+            re.IGNORECASE,
+        )
+        if description_match:
+            description = description_match.group(1).strip()
+            value_text = value_text[:description_match.start()].rstrip()
+        title = value_text.strip(" \t\"'")
+        if not title or len(title) > 255 or len(description) > 10000:
+            return None
+        if self._linear_channel_has_additional_write_command(
+            title, outer_operation="create_issue"
+        ):
+            return None
+        routed_values = {
+            "title": str(params.get("title") or "").strip(),
+            "description": str(params.get("description") or "").strip(),
+            "status": str(params.get("status") or "").strip(),
+        }
+        explicit_values = {"title": title, "description": description, "status": status}
+        for field, routed_value in routed_values.items():
+            if routed_value and routed_value.casefold() != explicit_values[field].casefold():
+                return None
+        result = {"title": title}
+        if description:
+            result["description"] = description
+        if status:
+            result["status"] = status
+        return result
 
     def _linear_channel_issue_list_status(self, text: Any) -> str:
         value = str(text or "").strip()

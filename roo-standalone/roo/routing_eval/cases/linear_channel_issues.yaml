@@ -20,7 +20,11 @@
 
 - id: linear-channel-new-issue-negative
   text: "create a new Linear issue for the broken deployment"
-  expect: {skill: linear-meeting-actions, action: create}
+  expect: {skill: linear-channel-issues, action: create_issue}
+
+- id: linear-channel-create-with-status
+  text: "create a Linear issue titled Fix deployment alerts in status In Progress"
+  expect: {skill: linear-channel-issues, action: create_issue}
 
 - id: linear-channel-synced-data-negative
   text: "show Linear issues synced for this startup"

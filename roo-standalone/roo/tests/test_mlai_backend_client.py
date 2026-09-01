@@ -369,6 +369,43 @@ async def test_get_linear_channel_issue_requests_comments(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_create_linear_channel_issue_uses_scoped_non_retrying_endpoint(monkeypatch):
+    captured = {}
+
+    async def fake_request(method, endpoint, **kwargs):
+        captured.update(method=method, endpoint=endpoint, **kwargs)
+        request = httpx.Request(method, f"https://backend.test{endpoint}")
+        return httpx.Response(
+            201, request=request,
+            json={"issue": {"identifier": "TECH-30"}},
+        )
+
+    client = MLAIBackendClient(
+        base_url="https://backend.test",
+        api_key="roo-api-key",
+        internal_api_key="roo-api-key",
+    )
+    monkeypatch.setattr(client, "_request", fake_request)
+
+    result = await client.create_linear_channel_issue(
+        slack_workspace_id="TMLAI", slack_channel_id="CTECH",
+        requester_slack_id="<@U123>", request_id="Ev-create-123",
+        title="Fix alerts", description="Add retry logs", status="In Progress",
+    )
+
+    assert result["issue"]["identifier"] == "TECH-30"
+    assert captured["method"] == "POST"
+    assert captured["endpoint"] == "/api/v1/integrations/linear/channel-issues/create"
+    assert captured["transport_retries"] == 0
+    assert captured["json"] == {
+        "slack_workspace_id": "TMLAI", "slack_channel_id": "CTECH",
+        "requester_slack_id": "U123", "request_id": "Ev-create-123",
+        "title": "Fix alerts", "description": "Add retry logs",
+        "status": "In Progress",
+    }
+
+
+@pytest.mark.asyncio
 async def test_list_linear_channel_statuses_uses_scoped_endpoint(monkeypatch):
     captured = {}
 

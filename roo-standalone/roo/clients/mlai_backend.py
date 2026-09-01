@@ -2284,6 +2284,39 @@ class MLAIBackendClient:
         self._raise_for_status_or_backend_unavailable(response)
         return response.json()
 
+    async def create_linear_channel_issue(
+        self,
+        *,
+        slack_workspace_id: str,
+        slack_channel_id: str,
+        requester_slack_id: str,
+        title: str,
+        request_id: str,
+        description: Optional[str] = None,
+        status: Optional[str] = None,
+    ) -> dict:
+        payload: Dict[str, Any] = {
+            "slack_workspace_id": str(slack_workspace_id or "").strip(),
+            "slack_channel_id": str(slack_channel_id or "").strip(),
+            "requester_slack_id": self._clean_slack_id(requester_slack_id),
+            "title": str(title or "").strip(),
+            "request_id": str(request_id or "").strip(),
+        }
+        if description:
+            payload["description"] = str(description).strip()
+        if status:
+            payload["status"] = str(status).strip()
+        response = await self._request(
+            "POST",
+            self._linear_channel_endpoint("create"),
+            json=payload,
+            timeout=45.0,
+            transport_retries=0,
+            circuit_breaker=True,
+        )
+        self._raise_for_status_or_backend_unavailable(response)
+        return response.json()
+
     async def get_linear_channel_issue(
         self,
         *,
