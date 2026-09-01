@@ -63,9 +63,10 @@ class MLAIBackendClient:
             settings = get_settings()
 
         self.base_url = base_url or (settings.MLAI_BACKEND_URL if settings else None)
-        self.api_key = api_key or (
+        self.roo_api_key = api_key or (
             settings.ROO_API_KEY if settings else None
-        ) or (
+        )
+        self.api_key = self.roo_api_key or (
             settings.MLAI_API_KEY if settings else None
         )
         self.internal_api_key = (
@@ -2319,6 +2320,10 @@ class MLAIBackendClient:
         booking_date: str,
     ) -> dict:
         """Claim today's Office Manager role using the verified Slack actor."""
+        if not self.roo_api_key:
+            raise BackendIdentityError(
+                "ROO_API_KEY is required for Office Manager claims"
+            )
         response = await self._request(
             "POST",
             f"{self._points_base}/coworking/office-manager/claim/",

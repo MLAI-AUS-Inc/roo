@@ -73,7 +73,10 @@ from .slack_client import (
 from .coworking_messages import OFFICE_MANAGER_VOLUNTEER_ACTION_ID
 from .coworking_booking_intents import coworking_booking_retry_loop
 from .office_manager_actions import (
+    OfficeManagerActionLeaseLostError,
     OfficeManagerActionStore,
+    build_office_manager_feedback_client_msg_id,
+    build_office_manager_uncertainty_client_msg_id,
     get_office_manager_action_store,
     office_manager_action_retry_loop,
     process_office_manager_action,
@@ -5441,7 +5444,68 @@ async def _send_office_manager_private_feedback(
     channel_id: str,
     user_id: str,
     text: str,
+    action: Optional[dict[str, Any]] = None,
+    store: Optional[OfficeManagerActionStore] = None,
+    client_msg_id: Optional[str] = None,
 ) -> None:
+    if action is not None and store is not None:
+        action_id = int(action["id"])
+        owner = str(action["locked_by"])
+        client_msg_id = build_office_manager_feedback_client_msg_id(
+            str(action["idempotency_key"])
+        )
+        staged = await asyncio.to_thread(
+            store.stage_feedback,
+            action_id,
+            owner=owner,
+            text=text,
+            client_msg_id=client_msg_id,
+        )
+        if staged is None:
+            raise OfficeManagerActionLeaseLostError(
+                "office_manager_feedback_lease_lost"
+            )
+        if not await asyncio.to_thread(store.owns_lease, action_id, owner=owner):
+            raise OfficeManagerActionLeaseLostError(
+                "office_manager_feedback_lease_lost"
+            )
+        try:
+            response = await asyncio.to_thread(
+                send_dm,
+                user_id,
+                str(staged["feedback_text"]),
+                raise_on_error=True,
+                client_msg_id=str(staged["feedback_client_msg_id"]),
+            )
+            if response and response.get("ok"):
+                return
+            raise RuntimeError("dm_delivery_failed")
+        except Exception as exc:
+            print(
+                "OFFICE_MANAGER_PRIVATE_FEEDBACK_FAILED "
+                f"error_type={exc.__class__.__name__}"
+            )
+            raise RuntimeError("office_manager_private_feedback_failed") from exc
+
+    if client_msg_id:
+        try:
+            response = await asyncio.to_thread(
+                send_dm,
+                user_id,
+                text,
+                raise_on_error=True,
+                client_msg_id=client_msg_id,
+            )
+            if response and response.get("ok"):
+                return
+            raise RuntimeError("dm_delivery_failed")
+        except Exception as exc:
+            print(
+                "OFFICE_MANAGER_PRIVATE_FEEDBACK_FAILED "
+                f"error_type={exc.__class__.__name__}"
+            )
+            raise RuntimeError("office_manager_private_feedback_failed") from exc
+
     try:
         response = await asyncio.to_thread(
             post_ephemeral,
@@ -5484,61 +5548,79 @@ async def _claim_office_manager_from_action(
     user_id: str,
     channel_id: str,
     booking_date: str,
+    action: Optional[dict[str, Any]] = None,
+    store: Optional[OfficeManagerActionStore] = None,
 ) -> None:
     from .clients.mlai_backend import MLAIBackendClient
 
-    try:
-        result = await MLAIBackendClient().claim_office_manager_day(
-            user_id,
-            booking_date,
-        )
-    except httpx.HTTPStatusError as exc:
-        payload = _office_manager_error_payload(exc)
-        code = str(payload.get("code") or "")
-        assignee = str(payload.get("assignee_slack_user_id") or "").strip()
-        if _office_manager_claim_failure_is_retryable(exc, code=code):
+    message = ""
+    if action is not None and store is not None:
+        current = await asyncio.to_thread(store.get, int(action["id"]))
+        if (
+            current is None
+            or str(current.get("status")) != "processing"
+            or str(current.get("locked_by")) != str(action["locked_by"])
+        ):
+            raise OfficeManagerActionLeaseLostError(
+                "office_manager_claim_lease_lost"
+            )
+        message = str(current.get("feedback_text") or "")
+
+    if not message:
+        try:
+            result = await MLAIBackendClient().claim_office_manager_day(
+                user_id,
+                booking_date,
+            )
+        except httpx.HTTPStatusError as exc:
+            payload = _office_manager_error_payload(exc)
+            code = str(payload.get("code") or "")
+            assignee = str(payload.get("assignee_slack_user_id") or "").strip()
+            if _office_manager_claim_failure_is_retryable(exc, code=code):
+                raise OfficeManagerClaimUncertainError(
+                    "office_manager_claim_result_uncertain"
+                ) from exc
+            if code == "already_claimed":
+                selected = f" <@{assignee}> has the role." if assignee else ""
+                message = f"Someone has already volunteered for today.{selected}"
+            elif code == "claim_closed":
+                message = "The Office Manager volunteer window is closed for today."
+            elif code == "member_not_eligible":
+                message = (
+                    "Roo could not confirm you as an active member, so the role "
+                    "was not assigned."
+                )
+            elif code == "office_manager_day_not_found":
+                message = "Today's Office Manager volunteer request is no longer available."
+            elif code == "feature_disabled":
+                message = "Office Manager volunteering is temporarily unavailable."
+            else:
+                message = (
+                    "Roo could not confirm the result of your volunteer request. "
+                    "Check Roo's latest Office Manager announcement before trying "
+                    "the button again."
+                )
+        except Exception as exc:
+            print(
+                "OFFICE_MANAGER_CLAIM_FAILED "
+                f"error_type={exc.__class__.__name__}"
+            )
             raise OfficeManagerClaimUncertainError(
                 "office_manager_claim_result_uncertain"
             ) from exc
-        if code == "already_claimed":
-            selected = f" <@{assignee}> has the role." if assignee else ""
-            message = f"Someone has already volunteered for today.{selected}"
-        elif code == "claim_closed":
-            message = "The Office Manager volunteer window is closed for today."
-        elif code == "member_not_eligible":
-            message = (
-                "Roo could not confirm you as an active member, so the role "
-                "was not assigned."
-            )
-        elif code == "office_manager_day_not_found":
-            message = "Today's Office Manager volunteer request is no longer available."
-        elif code == "feature_disabled":
-            message = "Office Manager volunteering is temporarily unavailable."
         else:
-            message = (
-                "Roo could not confirm the result of your volunteer request. "
-                "Check Roo's latest Office Manager announcement before trying "
-                "the button again."
+            message = _office_manager_claim_success_message(
+                result,
+                expected_user_id=user_id,
+                expected_booking_date=booking_date,
             )
-    except Exception as exc:
-        print(
-            "OFFICE_MANAGER_CLAIM_FAILED "
-            f"error_type={exc.__class__.__name__}"
-        )
-        raise OfficeManagerClaimUncertainError(
-            "office_manager_claim_result_uncertain"
-        ) from exc
-    else:
-        message = _office_manager_claim_success_message(
-            result,
-            expected_user_id=user_id,
-            expected_booking_date=booking_date,
-        )
 
     await _send_office_manager_private_feedback(
         channel_id=channel_id,
         user_id=user_id,
         text=message,
+        action=action,
+        store=store,
     )
 
 
@@ -6434,6 +6516,8 @@ async def _process_office_manager_action_record(
             user_id=str(action["slack_user_id"]),
             channel_id=str(action["channel_id"]),
             booking_date=str(action["booking_date"]),
+            action=action,
+            store=store,
         )
     except OfficeManagerClaimUncertainError:
         should_notify = await asyncio.to_thread(
@@ -6443,6 +6527,14 @@ async def _process_office_manager_action_record(
         )
         if should_notify:
             try:
+                if not await asyncio.to_thread(
+                    store.owns_lease,
+                    int(action["id"]),
+                    owner=str(action["locked_by"]),
+                ):
+                    raise OfficeManagerActionLeaseLostError(
+                        "office_manager_uncertainty_notice_lease_lost"
+                    )
                 await _send_office_manager_private_feedback(
                     channel_id=str(action["channel_id"]),
                     user_id=str(action["slack_user_id"]),
@@ -6451,8 +6543,13 @@ async def _process_office_manager_action_record(
                         "will retry automatically. Please don't click the button "
                         "again."
                     ),
+                    client_msg_id=build_office_manager_uncertainty_client_msg_id(
+                        str(action["idempotency_key"])
+                    ),
                 )
             except asyncio.CancelledError:
+                raise
+            except OfficeManagerActionLeaseLostError:
                 raise
             except Exception:
                 # This is a one-time informational notice. The durable claim retry

@@ -9,7 +9,7 @@ import time
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 
 DEFAULT_PROCESSING_LEASE_SECONDS = 90.0
@@ -29,6 +29,20 @@ def build_office_manager_action_key(slack_user_id: str, booking_date: str) -> st
         f"office_manager:{str(slack_user_id).strip()}:"
         f"{str(booking_date).strip()}"
     )
+
+
+def build_office_manager_feedback_client_msg_id(idempotency_key: str) -> str:
+    """Return the stable Slack message identity for one terminal result."""
+    return str(uuid5(NAMESPACE_URL, f"{idempotency_key}:private-feedback"))
+
+
+def build_office_manager_uncertainty_client_msg_id(idempotency_key: str) -> str:
+    """Return the stable Slack message identity for the optional retry notice."""
+    return str(uuid5(NAMESPACE_URL, f"{idempotency_key}:uncertainty-notice"))
+
+
+class OfficeManagerActionLeaseLostError(RuntimeError):
+    """Raised when a replaced worker must stop without mutating or notifying."""
 
 
 class OfficeManagerActionStore:
@@ -73,6 +87,9 @@ class OfficeManagerActionStore:
                         locked_by TEXT,
                         last_error TEXT,
                         uncertainty_notice_attempted_at REAL,
+                        feedback_text TEXT,
+                        feedback_client_msg_id TEXT,
+                        feedback_prepared_at REAL,
                         created_at REAL NOT NULL,
                         updated_at REAL NOT NULL,
                         completed_at REAL
@@ -98,6 +115,16 @@ class OfficeManagerActionStore:
                         ADD COLUMN uncertainty_notice_attempted_at REAL
                         """
                     )
+                for column_name, column_type in (
+                    ("feedback_text", "TEXT"),
+                    ("feedback_client_msg_id", "TEXT"),
+                    ("feedback_prepared_at", "REAL"),
+                ):
+                    if column_name not in columns:
+                        connection.execute(
+                            "ALTER TABLE office_manager_action_outbox "
+                            f"ADD COLUMN {column_name} {column_type}"
+                        )
             self._initialized = True
 
     @staticmethod
@@ -185,6 +212,9 @@ class OfficeManagerActionStore:
                             locked_until = NULL,
                             locked_by = NULL,
                             last_error = NULL,
+                            feedback_text = NULL,
+                            feedback_client_msg_id = NULL,
+                            feedback_prepared_at = NULL,
                             completed_at = NULL,
                             updated_at = ?
                         WHERE id = ?
@@ -259,6 +289,97 @@ class OfficeManagerActionStore:
                     ).fetchone()
                 )
 
+    def renew(
+        self,
+        action_id: int,
+        *,
+        owner: str,
+        lease_seconds: float = DEFAULT_PROCESSING_LEASE_SECONDS,
+    ) -> bool:
+        """Extend only the current worker's lease."""
+        self._ensure_schema()
+        current_time = time.time()
+        with self._lock:
+            with self._connect() as connection:
+                cursor = connection.execute(
+                    """
+                    UPDATE office_manager_action_outbox
+                    SET locked_until = ?, updated_at = ?
+                    WHERE id = ? AND status = 'processing' AND locked_by = ?
+                    """,
+                    (
+                        current_time + max(1.0, float(lease_seconds)),
+                        current_time,
+                        int(action_id),
+                        str(owner),
+                    ),
+                )
+                return cursor.rowcount == 1
+
+    def owns_lease(self, action_id: int, *, owner: str) -> bool:
+        """Return whether this worker still owns a live processing lease."""
+        self._ensure_schema()
+        current_time = time.time()
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT 1 FROM office_manager_action_outbox
+                WHERE id = ?
+                  AND status = 'processing'
+                  AND locked_by = ?
+                  AND locked_until IS NOT NULL
+                  AND locked_until > ?
+                """,
+                (int(action_id), str(owner), current_time),
+            ).fetchone()
+        return row is not None
+
+    def stage_feedback(
+        self,
+        action_id: int,
+        *,
+        owner: str,
+        text: str,
+        client_msg_id: str,
+    ) -> Optional[dict[str, Any]]:
+        """Durably store a terminal result before attempting Slack delivery."""
+        self._ensure_schema()
+        current_time = time.time()
+        with self._lock:
+            with self._connect() as connection:
+                cursor = connection.execute(
+                    """
+                    UPDATE office_manager_action_outbox
+                    SET
+                        feedback_text = COALESCE(feedback_text, ?),
+                        feedback_client_msg_id = COALESCE(feedback_client_msg_id, ?),
+                        feedback_prepared_at = COALESCE(feedback_prepared_at, ?),
+                        updated_at = ?
+                    WHERE id = ?
+                      AND status = 'processing'
+                      AND locked_by = ?
+                      AND locked_until IS NOT NULL
+                      AND locked_until > ?
+                    """,
+                    (
+                        str(text),
+                        str(client_msg_id),
+                        current_time,
+                        current_time,
+                        int(action_id),
+                        str(owner),
+                        current_time,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    return None
+                return self._row(
+                    connection.execute(
+                        "SELECT * FROM office_manager_action_outbox WHERE id = ?",
+                        (int(action_id),),
+                    ).fetchone()
+                )
+
     def claim_due(
         self,
         *,
@@ -312,6 +433,9 @@ class OfficeManagerActionStore:
                         locked_until = NULL,
                         locked_by = NULL,
                         last_error = NULL,
+                        feedback_text = NULL,
+                        feedback_client_msg_id = NULL,
+                        feedback_prepared_at = NULL,
                         completed_at = ?,
                         updated_at = ?
                     WHERE id = ? AND status = 'processing' AND locked_by = ?
@@ -406,8 +530,34 @@ async def _process_leased_action(
 ) -> None:
     action_id = int(action["id"])
     owner = str(action["locked_by"])
+    lease_lost = asyncio.Event()
+
+    async def keep_lease_alive() -> None:
+        while True:
+            await asyncio.sleep(DEFAULT_PROCESSING_LEASE_SECONDS / 3.0)
+            try:
+                renewed = await asyncio.to_thread(
+                    store.renew,
+                    action_id,
+                    owner=owner,
+                )
+            except Exception as exc:
+                print(
+                    "OFFICE_MANAGER_ACTION_LEASE_RENEW_FAILED "
+                    f"action_id={action_id} error_type={exc.__class__.__name__}"
+                )
+                lease_lost.set()
+                return
+            if not renewed:
+                lease_lost.set()
+                return
+
+    heartbeat = asyncio.create_task(keep_lease_alive())
     try:
         await processor(action, store)
+    except OfficeManagerActionLeaseLostError:
+        print(f"OFFICE_MANAGER_ACTION_LEASE_LOST action_id={action_id}")
+        return
     except asyncio.CancelledError:
         await asyncio.to_thread(
             store.release,
@@ -429,7 +579,22 @@ async def _process_leased_action(
             f"action_id={action_id} error_type={exc.__class__.__name__}"
         )
         return
-    await asyncio.to_thread(store.mark_completed, action_id, owner=owner)
+    finally:
+        heartbeat.cancel()
+        try:
+            await heartbeat
+        except asyncio.CancelledError:
+            pass
+    if lease_lost.is_set():
+        print(f"OFFICE_MANAGER_ACTION_LEASE_LOST action_id={action_id}")
+        return
+    completed = await asyncio.to_thread(
+        store.mark_completed,
+        action_id,
+        owner=owner,
+    )
+    if not completed:
+        print(f"OFFICE_MANAGER_ACTION_COMPLETION_FENCED action_id={action_id}")
 
 
 async def process_office_manager_action(

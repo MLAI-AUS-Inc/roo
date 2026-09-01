@@ -461,6 +461,21 @@ class Settings(BaseSettings):
                     "ROO_API_KEY is required when "
                     "MEETING_ROOM_BOOKING_ENABLED is true"
                 )
+        if self.OFFICE_MANAGER_ACTIONS_ENABLED:
+            if self.ROO_SURFACE != "public":
+                raise ValueError(
+                    "Office Manager actions are available only on Public Roo"
+                )
+            if not str(self.MLAI_BACKEND_URL or "").strip():
+                raise ValueError(
+                    "MLAI_BACKEND_URL is required when "
+                    "OFFICE_MANAGER_ACTIONS_ENABLED is true"
+                )
+            if not str(self.ROO_API_KEY or "").strip():
+                raise ValueError(
+                    "ROO_API_KEY is required when "
+                    "OFFICE_MANAGER_ACTIONS_ENABLED is true"
+                )
 
         if self.ROO_SURFACE == "public":
             if (

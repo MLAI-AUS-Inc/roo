@@ -23,6 +23,7 @@ from roo import main as main_module
 from roo import office_manager_actions as action_module
 from roo import slack_action_tasks
 from roo.clients import mlai_backend as backend_module
+from roo.backend_identity import BackendIdentityError
 from roo.config import Settings, get_settings
 from roo.coworking_messages import (
     NO_FOOD_REMINDER,
@@ -54,6 +55,8 @@ def _settings(tmp_path, **overrides):
         SLACK_SIGNING_SECRET="synthetic-signing-secret",
         SLACK_RECEIPTS_DB_PATH=str(tmp_path / "slack-receipts.db"),
         OPENAI_API_KEY="synthetic-openai-key",
+        MLAI_BACKEND_URL="https://backend.test",
+        ROO_API_KEY="synthetic-roo-api-key",
         OFFICE_MANAGER_ACTIONS_ENABLED=True,
     )
     values.update(overrides)
@@ -178,7 +181,10 @@ def test_signed_button_uses_payload_actor_and_deduplicates_delivery(
         "user_id": "UVERIFIED",
         "channel_id": "CCOWORK",
         "booking_date": "2026-08-03",
+        "action": captured["action"],
+        "store": action_store,
     }
+    assert captured["action"]["locked_by"]
     assert action_store.get(1)["status"] == "completed"
 
     completed_replay = client.post(
@@ -249,6 +255,8 @@ def test_persistence_failure_is_retried_after_generic_receipt_is_committed(
             "user_id": "UVERIFIED",
             "channel_id": "CCOWORK",
             "booking_date": "2026-08-03",
+            "action": captured[0]["action"],
+            "store": action_store,
         }
     ]
     assert action_store.get(int(persisted["id"]))["status"] == "completed"
@@ -395,6 +403,7 @@ def test_admin_surface_ignores_office_manager_action(tmp_path, monkeypatch):
         tmp_path,
         ROO_SURFACE="admin",
         ROO_ALLOWED_CHANNEL_IDS="GADMIN",
+        OFFICE_MANAGER_ACTIONS_ENABLED=False,
     )
     main_module.app.dependency_overrides[get_settings] = lambda: configured
 
@@ -416,6 +425,26 @@ def test_admin_surface_ignores_office_manager_action(tmp_path, monkeypatch):
 
     assert response.status_code == 200
     assert response.json() == {}
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected_error"),
+    (
+        ({"MLAI_BACKEND_URL": ""}, "MLAI_BACKEND_URL"),
+        ({"ROO_API_KEY": ""}, "ROO_API_KEY"),
+        (
+            {"ROO_SURFACE": "admin", "ROO_ALLOWED_CHANNEL_IDS": "GADMIN"},
+            "only on Public Roo",
+        ),
+    ),
+)
+def test_office_manager_actions_fail_closed_without_dedicated_configuration(
+    tmp_path,
+    overrides,
+    expected_error,
+):
+    with pytest.raises(ValueError, match=expected_error):
+        _settings(tmp_path, **overrides)
 
 
 def test_office_manager_kill_switch_acknowledges_without_persisting(
@@ -1090,6 +1119,111 @@ def test_existing_outbox_schema_adds_uncertainty_notice_column(tmp_path):
 
     assert should_process is True
     assert action["uncertainty_notice_attempted_at"] is None
+    assert action["feedback_text"] is None
+    assert action["feedback_client_msg_id"] is None
+    assert action["feedback_prepared_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_terminal_feedback_is_staged_and_retried_with_same_message_id(
+    tmp_path,
+    monkeypatch,
+):
+    current_time = [5_000.0]
+    monkeypatch.setattr(action_module.time, "time", lambda: current_time[0])
+    backend_calls = []
+    slack_attempts = []
+
+    class FakeClient:
+        async def claim_office_manager_day(self, slack_user_id, booking_date):
+            backend_calls.append((slack_user_id, booking_date))
+            return _successful_claim_payload()
+
+    def response_lost_then_duplicate_safe_success(user_id, text, **kwargs):
+        slack_attempts.append((user_id, text, kwargs["client_msg_id"]))
+        if len(slack_attempts) == 1:
+            raise RuntimeError("accepted response lost")
+        return {"ok": True}
+
+    monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeClient)
+    monkeypatch.setattr(
+        main_module,
+        "send_dm",
+        response_lost_then_duplicate_safe_success,
+    )
+    database_path = tmp_path / "actions.db"
+    store = action_module.OfficeManagerActionStore(database_path)
+    action, _ = store.record_action(
+        slack_user_id="UVERIFIED",
+        channel_id="CCOWORK",
+        booking_date="2026-08-03",
+    )
+
+    await action_module.process_office_manager_action(
+        action["id"],
+        store=store,
+        processor=main_module._process_office_manager_action_record,
+    )
+    pending = store.get(action["id"])
+    assert pending["status"] == "pending"
+    assert pending["feedback_text"]
+    assert pending["feedback_client_msg_id"] == slack_attempts[0][2]
+
+    current_time[0] = 5_005.0
+    recovered_store = action_module.OfficeManagerActionStore(database_path)
+    assert await action_module.process_due_office_manager_actions(
+        store=recovered_store,
+        processor=main_module._process_office_manager_action_record,
+    ) == 1
+
+    completed = recovered_store.get(action["id"])
+    assert completed["status"] == "completed"
+    assert completed["feedback_text"] is None
+    assert completed["feedback_client_msg_id"] is None
+    assert len(backend_calls) == 1
+    assert [attempt[2] for attempt in slack_attempts] == [
+        slack_attempts[0][2],
+        slack_attempts[0][2],
+    ]
+
+
+@pytest.mark.asyncio
+async def test_expired_worker_cannot_emit_terminal_private_feedback(
+    tmp_path,
+    monkeypatch,
+):
+    current_time = [6_000.0]
+    monkeypatch.setattr(action_module.time, "time", lambda: current_time[0])
+    store = action_module.OfficeManagerActionStore(tmp_path / "actions.db")
+    action, _ = store.record_action(
+        slack_user_id="UVERIFIED",
+        channel_id="CCOWORK",
+        booking_date="2026-08-03",
+    )
+    stale = store.reserve(action["id"], owner="stale", lease_seconds=1)
+    assert stale is not None
+    current_time[0] += 2
+    assert store.reserve(action["id"], owner="replacement") is not None
+    slack_attempts = []
+    monkeypatch.setattr(
+        main_module,
+        "send_dm",
+        lambda *args, **kwargs: slack_attempts.append((args, kwargs)),
+    )
+
+    with pytest.raises(action_module.OfficeManagerActionLeaseLostError):
+        await main_module._send_office_manager_private_feedback(
+            channel_id="CCOWORK",
+            user_id="UVERIFIED",
+            text="stale result",
+            action=stale,
+            store=store,
+        )
+
+    assert slack_attempts == []
+    current = store.get(action["id"])
+    assert current["locked_by"] == "replacement"
+    assert current["feedback_text"] is None
 
 
 @pytest.mark.asyncio
@@ -1117,7 +1251,7 @@ async def test_private_feedback_failure_keeps_action_pending_until_delivered(
     monkeypatch.setattr(
         main_module,
         "send_dm",
-        lambda user_id, text: {"ok": dm_succeeds[0]},
+        lambda user_id, text, **kwargs: {"ok": dm_succeeds[0]},
     )
     store = action_module.OfficeManagerActionStore(tmp_path / "actions.db")
     action, _ = store.record_action(
@@ -1140,7 +1274,7 @@ async def test_private_feedback_failure_keeps_action_pending_until_delivered(
         processor=main_module._process_office_manager_action_record,
     )
     assert store.get(action["id"])["status"] == "completed"
-    assert len(backend_calls) == 2
+    assert len(backend_calls) == 1
 
 
 @pytest.mark.asyncio
@@ -1305,6 +1439,34 @@ async def test_pending_action_is_recovered_after_restart(tmp_path):
     assert count == 1
     assert processed == ["office_manager:UVERIFIED:2026-08-03"]
     assert recovered_store.get(action["id"])["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_prior_date_action_survives_disabled_interval_and_recovers(tmp_path):
+    database_path = tmp_path / "actions.db"
+    disabled_store = action_module.OfficeManagerActionStore(database_path)
+    action, should_process = disabled_store.record_action(
+        slack_user_id="UVERIFIED",
+        channel_id="CCOWORK",
+        booking_date="2026-08-03",
+    )
+    assert should_process is True
+    assert disabled_store.get(action["id"])["status"] == "pending"
+
+    # No worker runs while the feature is disabled. A later process, after the
+    # local date has rolled over, must still discover the durable record.
+    reenabled_store = action_module.OfficeManagerActionStore(database_path)
+    processed_dates = []
+
+    async def processor(record, _store):
+        processed_dates.append(record["booking_date"])
+
+    assert await action_module.process_due_office_manager_actions(
+        store=reenabled_store,
+        processor=processor,
+    ) == 1
+    assert processed_dates == ["2026-08-03"]
+    assert reenabled_store.get(action["id"])["status"] == "completed"
 
 
 def test_retry_delay_is_exponential_and_capped():

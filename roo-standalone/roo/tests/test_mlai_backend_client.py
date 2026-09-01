@@ -12,6 +12,7 @@ sys.modules.setdefault("frontmatter", SimpleNamespace(load=lambda *args, **kwarg
 backend_module = importlib.import_module("roo.clients.mlai_backend")
 MLAIBackendClient = backend_module.MLAIBackendClient
 MLAIBackendUnavailableError = backend_module.MLAIBackendUnavailableError
+BackendIdentityError = backend_module.BackendIdentityError
 CONTENT_FACTORY_REQUEST_SOURCE = backend_module.CONTENT_FACTORY_REQUEST_SOURCE
 
 
@@ -276,6 +277,28 @@ async def test_claim_office_manager_day_uses_verified_actor_payload(monkeypatch)
             "date": "2026-08-03",
         },
     }
+
+
+@pytest.mark.asyncio
+async def test_claim_office_manager_day_rejects_legacy_api_key_fallback(monkeypatch):
+    settings = type(
+        "SyntheticSettings",
+        (),
+        {
+            "MLAI_BACKEND_URL": "https://backend.test",
+            "ROO_API_KEY": None,
+            "MLAI_API_KEY": "legacy-shared-key",
+            "INTERNAL_API_KEY": None,
+            "ORG_BRAIN_API_KEY": None,
+            "VICTOR_AI_ROO_SIGNING_SECRET": None,
+            "ROO_SURFACE": "public",
+        },
+    )()
+    monkeypatch.setattr(backend_module, "get_settings", lambda: settings)
+    client = MLAIBackendClient()
+
+    with pytest.raises(BackendIdentityError, match="ROO_API_KEY"):
+        await client.claim_office_manager_day("UVERIFIED", "2026-08-03")
 
 
 @pytest.mark.asyncio
