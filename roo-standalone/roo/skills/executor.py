@@ -11250,7 +11250,7 @@ Chunk {index} source: {label}
             except Exception as exc:
                 return self._linear_channel_write_error(exc)
 
-        if re.search(r"\b(?:delete|archive|trash|restore|move\s+(?:it|the\s+issue|[A-Z]+-\d+)\s+to\s+(?:another|the)\s+team|edit\s+(?:an?\s+)?existing\s+comment)\b", str(text or ""), re.IGNORECASE):
+        if self._linear_channel_destructive_command(text):
             return "I can't delete, archive, restore, move teams, or edit existing Linear comments."
 
         write = None
@@ -11471,6 +11471,29 @@ Chunk {index} source: {label}
             if match:
                 return str(match.group("target") or "").strip()
         return ""
+
+    def _linear_channel_destructive_command(self, text: Any) -> bool:
+        """Detect unsupported destructive commands without scanning edit values."""
+
+        command = str(text or "").strip()
+        command = re.sub(r"^(?:<@[A-Z0-9]+>\s*)+", "", command).strip()
+        command = re.sub(
+            r"^(?:(?:please|roo)\s*[,;:]?\s*)+", "", command,
+            flags=re.IGNORECASE,
+        ).strip()
+        command = re.sub(
+            r"^(?:can|could|would|will)\s+you(?:\s+please)?\s*[,;:]?\s*",
+            "",
+            command,
+            flags=re.IGNORECASE,
+        ).strip()
+        return bool(re.match(
+            r"^(?:delete|archive|trash|restore)\b|"
+            r"^move\s+(?:it|the\s+issue|[A-Z]+-\d+)\s+to\s+(?:another|the)\s+team\b|"
+            r"^edit\s+(?:an?\s+)?existing\s+comment\b",
+            command,
+            re.IGNORECASE,
+        ))
 
     def _linear_channel_write_error(self, exc: Exception) -> str:
         if isinstance(exc, httpx.HTTPStatusError):
@@ -11740,11 +11763,17 @@ Chunk {index} source: {label}
             r"|`[A-Z][A-Z0-9]{1,15}-\d+`)\s+—[^\n]+\*\s*$",
             re.IGNORECASE | re.MULTILINE,
         )
+        write_confirmation = re.compile(
+            r"^\s*Updated\s+`[A-Z][A-Z0-9]{1,15}-\d+`:\s+"
+            r"[a-z_ ]+\s+completed\s+in\s+Linear\.\s*$",
+            re.IGNORECASE,
+        )
         return [
             message
             for message in self._roo_authored_thread_messages(thread_history)
             if numbered_issue.search(str(message.get("text") or ""))
             or detail_heading.search(str(message.get("text") or ""))
+            or write_confirmation.search(str(message.get("text") or ""))
             or self._linear_channel_issue_empty_response(message.get("text"))
         ]
 

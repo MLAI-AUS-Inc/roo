@@ -98,6 +98,18 @@ def test_write_target_extraction_does_not_scan_comment_body():
     ) == "TECH-29"
 
 
+def test_destructive_detection_does_not_scan_edit_value():
+    executor = SkillExecutor()
+
+    assert not executor._linear_channel_destructive_command(
+        "add a comment to TECH-29 saying restore staging after deploy"
+    )
+    assert not executor._linear_channel_destructive_command(
+        "change the title of TECH-29 to Archive import results"
+    )
+    assert executor._linear_channel_destructive_command("please archive TECH-29")
+
+
 @pytest.mark.parametrize(
     "text",
     [
@@ -276,6 +288,29 @@ async def test_targetless_write_does_not_inherit_thread_issue(monkeypatch):
 
     assert "Explicitly name the issue" in result
     assert FakeClient.writes == []
+
+
+def test_successful_write_confirmation_becomes_latest_pronoun_context(monkeypatch):
+    monkeypatch.setattr(executor_module, "get_bot_user_id", lambda: "UROO")
+    executor = SkillExecutor()
+    thread_history = [
+        {
+            "is_bot": True,
+            "user": "UROO",
+            "text": "*`TECH-29` — Older issue*",
+        },
+        {
+            "is_bot": True,
+            "user": "UROO",
+            "text": "Updated `TECH-30`: add comment completed in Linear.",
+        },
+    ]
+
+    assert executor._resolve_linear_channel_issue_reference(
+        text="move it to Done",
+        params={},
+        thread_history=thread_history,
+    ) == "TECH-30"
 
 
 @pytest.mark.asyncio
