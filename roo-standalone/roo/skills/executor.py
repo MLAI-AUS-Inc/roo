@@ -11238,13 +11238,16 @@ Chunk {index} source: {label}
                 return self._linear_channel_write_error(exc)
 
         if action == "list_issues":
+            requested_status = str(params.get("status") or "").strip()
+            if not requested_status:
+                requested_status = self._linear_channel_issue_list_status(text)
             try:
                 result = await client.list_linear_channel_issues(
                     slack_workspace_id=slack_team_id,
                     slack_channel_id=channel_id,
                     requester_slack_id=user_id,
                     limit=self._coerce_data_query_limit(params.get("limit"), default=50),
-                    status=str(params.get("status") or "").strip() or None,
+                    status=requested_status or None,
                 )
                 return self._format_linear_channel_issue_list(result)
             except Exception as exc:
@@ -11343,6 +11346,28 @@ Chunk {index} source: {label}
             return self._linear_channel_write_error(exc)
         operation_label = write["operation"].replace("_", " ")
         return f"Updated `{self._slack_escape(issue_identifier)}`: {operation_label} completed in Linear."
+
+    def _linear_channel_issue_list_status(self, text: Any) -> str:
+        value = str(text or "").strip()
+        patterns = (
+            r"\b(?:issues?|tickets?|tasks?)\s+(?:with\s+(?:the\s+)?status\s+|whose\s+status\s+is\s+)([^,;?.]+)",
+            r"\b(?:issues?|tickets?|tasks?)\s+in\s+([^,;?.]+)",
+        )
+        for pattern in patterns:
+            match = re.search(pattern, value, re.IGNORECASE)
+            if not match:
+                continue
+            status = re.sub(
+                r"\s+(?:right\s+now|at\s+the\s+moment|currently|please)\s*$",
+                "",
+                match.group(1),
+                flags=re.IGNORECASE,
+            ).strip(" \t\"'")
+            if status and not re.search(r"\bMLAI[_ -]?TECH\b", status, re.IGNORECASE):
+                return status
+        if re.search(r"\ball\s+(?:MLAI[_ -]?TECH\s+)?(?:issues?|tickets?|tasks?)\b", value, re.IGNORECASE):
+            return "all"
+        return ""
 
     async def _resolve_linear_channel_issue_for_action(
         self, *, client: Any, text: str, params: dict, thread_history: Optional[List[dict]],

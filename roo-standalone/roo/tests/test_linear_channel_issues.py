@@ -112,6 +112,31 @@ def test_optional_mode_is_inferred_from_explicit_text():
     ) == {"operation": "remove_label", "value": "Bug"}
 
 
+@pytest.mark.asyncio
+async def test_list_status_is_inferred_when_router_omits_optional_status(monkeypatch):
+    captured = {}
+
+    async def capture_list(self, **kwargs):
+        captured.update(kwargs)
+        return {"list": {"displayName": "In Review"}, "issues": [], "pageInfo": {}}
+
+    monkeypatch.setattr(executor_module, "get_settings", lambda: settings())
+    monkeypatch.setattr(FakeClient, "list_linear_channel_issues", capture_list)
+    monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeClient)
+
+    await SkillExecutor()._execute_linear_channel_issues(
+        text="show MLAI_TECH issues in review",
+        params={"action": "list_issues"},
+        user_id="U123",
+        channel_id="CTECH",
+        thread_history=None,
+        slack_team_id="TMLAI",
+        request_id="Ev-filter-status",
+    )
+
+    assert captured["status"] == "review"
+
+
 def test_write_target_extraction_does_not_scan_comment_body():
     executor = SkillExecutor()
 
