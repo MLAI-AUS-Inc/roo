@@ -319,7 +319,7 @@ class RooAgent:
                     }
             execution_kwargs = dict(kwargs)
             execution_thread_history = thread_history
-            if skill.name == "mlai-data-query":
+            if skill.name in {"mlai-data-query", "linear-channel-issues"}:
                 # Only the Linear channel reader needs paginated history to
                 # resolve a numbered follow-up after a long thread. It scans
                 # deterministic Roo output rather than adding the history to a

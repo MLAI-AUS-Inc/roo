@@ -1,19 +1,16 @@
 ---
 name: mlai-data-query
-description: Query curated read-only MLAI backend data resources through the permissioned data access API
+description: Query curated read-only MLAI backend data resources, excluding the live channel-bound Linear list
 requires_auth: true
 routing:
   use_when: >
-    Read curated MLAI backend counts, lists, or aggregates, including the live
-    Linear queue bound to the current Slack channel, or list queryable resources.
+    Read curated MLAI backend counts, lists, aggregates, or queryable resources.
   avoid_when: >
-    Creating Linear issues, Luma attendance, personal points/bookings, uploaded
-    files, or any write/SQL request.
+    Live channel-bound Linear issues, Linear writes, Luma attendance, personal
+    points/bookings, uploaded files, or any SQL request.
   examples:
     - {text: "How many Vibe Raising companies do we have?", action: query}
     - {text: "Which Content Factory jobs failed this week?", action: query}
-    - {text: "What issues are in the MLAI_TECH Todo list?", action: list_linear_channel_issues}
-    - {text: "Tell me more about TECH-16", action: get_linear_channel_issue}
     - {text: "What data resources can Roo query?", action: catalog}
   negative_examples:
     - {text: "create a linear ticket from this thread", instead: linear-meeting-actions}
@@ -28,14 +25,6 @@ actions:
       resource: {type: string, description: "Exact resource key if known (e.g. vibe_raising_companies, content_factory_jobs, linear_issues)."}
       operation: {type: string, enum: [list, count, aggregate]}
       limit: {type: integer, description: "Maximum rows."}
-  - name: list_linear_channel_issues
-    description: List the channel's approved live Linear issue titles.
-    params:
-      limit: {type: integer, description: "Maximum titles."}
-  - name: get_linear_channel_issue
-    description: Get one approved issue with its comments.
-    params:
-      issue_reference: {type: string, description: "Key, list number, URL, or title words."}
 ---
 
 # MLAI Data Query Skill

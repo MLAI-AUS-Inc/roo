@@ -34,6 +34,7 @@ def test_public_surface_preserves_reviewed_public_skills_and_has_no_private_skil
     assert configured.ROO_SURFACE == "public"
     assert "mlai-points" in configured.enabled_skill_names
     assert "content-factory" in configured.enabled_skill_names
+    assert "linear-channel-issues" in configured.enabled_skill_names
     assert not (configured.enabled_skill_names & configured.PRIVATE_SKILLS)
     assert configured.is_slack_context_allowed(
         channel_id="CANYWHERE",
@@ -87,6 +88,25 @@ def test_default_implicit_allowlist_uses_only_the_secure_link_action():
 
     assert "mlai-points:link_founder_account" in configured.implicit_action_allowlist
     assert "mlai-points:link_account" not in configured.implicit_action_allowlist
+
+
+def test_linear_channel_issue_writes_fail_closed_without_public_backend_credentials():
+    assert not settings().LINEAR_CHANNEL_ISSUE_WRITES_ENABLED
+    with pytest.raises(ValidationError, match="MLAI_BACKEND_URL"):
+        settings(LINEAR_CHANNEL_ISSUE_WRITES_ENABLED=True, ROO_API_KEY="roo-key")
+    with pytest.raises(ValidationError, match="ROO_API_KEY"):
+        settings(
+            LINEAR_CHANNEL_ISSUE_WRITES_ENABLED=True,
+            MLAI_BACKEND_URL="https://backend.test",
+        )
+    with pytest.raises(ValidationError, match="only on Public Roo"):
+        settings(
+            ROO_SURFACE="admin",
+            ROO_ALLOWED_CHANNEL_IDS="GADMIN123",
+            LINEAR_CHANNEL_ISSUE_WRITES_ENABLED=True,
+            MLAI_BACKEND_URL="https://backend.test",
+            ROO_API_KEY="roo-key",
+        )
 
 
 def test_victor_ai_skill_is_disabled_by_default_and_uses_channel_name_only():

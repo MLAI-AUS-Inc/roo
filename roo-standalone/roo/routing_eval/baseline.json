@@ -3,7 +3,7 @@
   "generated_at": "2026-06-12T08:40:55.002003+00:00",
   "counts": {
     "misroute": 0,
-    "fallthrough": 153,
+    "fallthrough": 147,
     "ok-fallthrough": 27,
     "correct": 10
   },
@@ -103,12 +103,6 @@
       "action": null
     },
     "audit-announce-watt-channel": {
-      "verdict": "fallthrough",
-      "layer": "v2-pending",
-      "skill": null,
-      "action": null
-    },
-    "audit-announce-medhack-channel": {
       "verdict": "fallthrough",
       "layer": "v2-pending",
       "skill": null,
@@ -967,36 +961,6 @@
       "action": null
     },
     "para-tone-friendlier": {
-      "verdict": "fallthrough",
-      "layer": "v2-pending",
-      "skill": null,
-      "action": null
-    },
-    "para-medhack-kickoff": {
-      "verdict": "fallthrough",
-      "layer": "v2-pending",
-      "skill": null,
-      "action": null
-    },
-    "para-medhack-clinical-case": {
-      "verdict": "fallthrough",
-      "layer": "v2-pending",
-      "skill": null,
-      "action": null
-    },
-    "para-medhack-guess": {
-      "verdict": "fallthrough",
-      "layer": "v2-pending",
-      "skill": null,
-      "action": null
-    },
-    "para-medhack-ecg": {
-      "verdict": "fallthrough",
-      "layer": "v2-pending",
-      "skill": null,
-      "action": null
-    },
-    "para-medhack-announce-lunch": {
       "verdict": "fallthrough",
       "layer": "v2-pending",
       "skill": null,

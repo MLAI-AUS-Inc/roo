@@ -160,11 +160,12 @@ jobs:
           VICTOR_AI_ROO_SIGNING_SECRET: ${{ secrets.VICTOR_AI_ROO_SIGNING_SECRET }}
           ROO_PRIVATE_BASE_URL: ${{ vars.ROO_PRIVATE_BASE_URL }}
           MEETING_ROOM_BOOKING_ENABLED: ${{ vars.MEETING_ROOM_BOOKING_ENABLED || 'false' }}
+          LINEAR_CHANNEL_ISSUE_WRITES_ENABLED: ${{ vars.LINEAR_CHANNEL_ISSUE_WRITES_ENABLED || 'false' }}
         with:
           host: ${{ secrets.DO_HOST }}
           username: ${{ secrets.DO_USERNAME }}
           key: ${{ secrets.DO_SSH_KEY }}
-          envs: SIM_PATIENT_API_KEY,SIM_PATIENT_SAFETY_SALT,ROO_API_KEY,VICTOR_AI_ROO_SIGNING_SECRET,ROO_PRIVATE_BASE_URL,MEETING_ROOM_BOOKING_ENABLED,RELEASE_SHA
+          envs: SIM_PATIENT_API_KEY,SIM_PATIENT_SAFETY_SALT,ROO_API_KEY,VICTOR_AI_ROO_SIGNING_SECRET,ROO_PRIVATE_BASE_URL,MEETING_ROOM_BOOKING_ENABLED,LINEAR_CHANNEL_ISSUE_WRITES_ENABLED,RELEASE_SHA
           script: |
             # Stop if any command fails
             set -eu
@@ -190,6 +191,11 @@ jobs:
                 echo "MEETING_ROOM_BOOKING_ENABLED must be true or false" >&2
                 exit 1
                 ;;
+            esac
+            case "$LINEAR_CHANNEL_ISSUE_WRITES_ENABLED" in
+              true|TRUE|True|1|yes|YES|Yes|on|ON|On) LINEAR_CHANNEL_ISSUE_WRITES_ENABLED=true ;;
+              false|FALSE|False|0|no|NO|No|off|OFF|Off|'') LINEAR_CHANNEL_ISSUE_WRITES_ENABLED=false ;;
+              *) echo "LINEAR_CHANNEL_ISSUE_WRITES_ENABLED must be boolean" >&2; exit 1 ;;
             esac
             
             # Define deployment directory
@@ -240,6 +246,7 @@ jobs:
             upsert_env "MEETING_ROOM_BOOKING_ENABLED" "$MEETING_ROOM_BOOKING_ENABLED"
             upsert_env "FOUNDER_TOOLS_LINK_ORIGINS" "https://mlai.au"
             upsert_env "ROO_IMPLICIT_ACTION_ALLOWLIST" "respond_in_chat,mlai-points:balance,mlai-points:topup_points,mlai-points:link_founder_account"
+            upsert_env "LINEAR_CHANNEL_ISSUE_WRITES_ENABLED" "$LINEAR_CHANNEL_ISSUE_WRITES_ENABLED"
             
             # Restart the app
             docker compose up -d --build --remove-orphans
