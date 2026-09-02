@@ -123,6 +123,9 @@ runtime owner.
 For the local, channel-bound Linear issue reader workflow, see
 [`roo-standalone/docs/linear-channel-issues.md`](roo-standalone/docs/linear-channel-issues.md).
 
+For the backend-first Office Manager action rollout and rollback procedure, see
+[`roo-standalone/docs/office-manager.md`](roo-standalone/docs/office-manager.md).
+
 ## Scheduled jobs
 
 The recommended production arrangement keeps `JOBS_SCHEDULER_ENABLED=false` in
