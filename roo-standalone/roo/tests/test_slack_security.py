@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import hmac
 import json
@@ -129,23 +130,36 @@ def test_event_processing_lease_recovers_crash_and_fences_stale_completion(tmp_p
 
     first_claim = store.claim_lease(fingerprint, now=1000, lease_seconds=45)
     assert first_claim == 1000
-    assert store.claim_lease(fingerprint, now=1001, lease_seconds=45) is None
+    assert store.claim_event(fingerprint, now=1001, lease_seconds=45) == (
+        "processing",
+        None,
+    )
+    assert store.renew(
+        fingerprint,
+        claim_token=first_claim,
+        lease_seconds=45,
+        now=1030,
+    )
+    assert store.claim_lease(fingerprint, now=1046, lease_seconds=45) is None
 
-    recovered_claim = store.claim_lease(fingerprint, now=1046, lease_seconds=45)
-    assert recovered_claim == 1046
+    recovered_claim = store.claim_lease(fingerprint, now=1076, lease_seconds=45)
+    assert recovered_claim == 1076
     assert not store.complete(
         fingerprint,
         claim_token=first_claim,
         ttl_seconds=600,
-        now=1047,
+        now=1077,
     )
     assert store.complete(
         fingerprint,
         claim_token=recovered_claim,
         ttl_seconds=600,
-        now=1047,
+        now=1077,
     )
-    assert store.claim_lease(fingerprint, now=1100, lease_seconds=45) is None
+    assert store.claim_event(fingerprint, now=1100, lease_seconds=45) == (
+        "completed",
+        None,
+    )
 
 
 @pytest.mark.asyncio
@@ -197,28 +211,136 @@ async def test_failed_account_link_task_releases_receipt_for_retry(tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("text", "expected"),
+    ("event", "expected"),
     [
-        ("link", True),
-        ("<@UROO123> link my mlai account", True),
-        ("link my github account", False),
-        ("connect me with a founder", False),
+        ({"type": "message", "user": "U123", "text": "hello"}, True),
+        ({"type": "message", "user": "U123", "text": "connect my Roo account"}, True),
+        ({"type": "app_mention", "user": "U123", "text": "hello"}, True),
+        ({"type": "message", "bot_id": "B123", "text": "hello"}, False),
+        ({"type": "reaction_added", "user": "U123"}, False),
     ],
 )
-def test_only_exact_account_link_events_use_recoverable_receipts(text, expected):
+def test_all_async_user_message_events_use_recoverable_receipts(event, expected):
     body = json.dumps(
         {
             "type": "event_callback",
-            "event": {
-                "type": "message",
-                "channel_type": "im",
-                "user": "U123",
-                "text": text,
-            },
+            "event_id": "Ev123",
+            "team_id": "T123",
+            "event": event,
         }
     ).encode()
 
-    assert main_module._is_account_link_slack_event(body) is expected
+    fingerprint = main_module._retry_managed_slack_event_fingerprint(
+        body,
+        "a" * 64,
+    )
+    assert (fingerprint is not None) is expected
+    if expected:
+        assert fingerprint == hashlib.sha256(
+            b"slack-event:T123:Ev123"
+        ).hexdigest()
+
+
+def test_semantic_account_link_event_is_retried_until_async_work_completes(
+    tmp_path,
+    monkeypatch,
+):
+    configured = _settings(tmp_path)
+    main_module.app.dependency_overrides[get_settings] = lambda: configured
+    client = TestClient(main_module.app)
+    scheduled = []
+    handled = []
+
+    async def handle(event):
+        handled.append(event["text"])
+
+    monkeypatch.setattr(main_module, "_handle_mention", handle)
+    monkeypatch.setattr(main_module, "start_slack_action", scheduled.append)
+    body = json.dumps(
+        {
+            "type": "event_callback",
+            "event_id": "EvSemanticLink",
+            "team_id": "T123",
+            "event": {
+                "type": "message",
+                "channel_type": "im",
+                "channel": "D123",
+                "user": "U123",
+                "text": "please connect my Roo account",
+            },
+        },
+        separators=(",", ":"),
+    ).encode()
+    timestamp = int(time.time())
+    headers = _signed_headers(
+        configured.SLACK_SIGNING_SECRET,
+        timestamp,
+        body,
+        "application/json",
+    )
+
+    first = client.post("/slack/events", content=body, headers=headers)
+    duplicate_while_processing = client.post(
+        "/slack/events",
+        content=body,
+        headers=headers,
+    )
+
+    assert first.status_code == 503
+    assert duplicate_while_processing.status_code == 503
+    assert len(scheduled) == 1
+    asyncio.run(scheduled.pop())
+
+    completed_retry = client.post("/slack/events", content=body, headers=headers)
+    assert completed_retry.status_code == 200
+    assert handled == ["please connect my Roo account"]
+
+
+def test_failed_async_event_is_released_for_a_fresh_retry(tmp_path, monkeypatch):
+    configured = _settings(tmp_path)
+    main_module.app.dependency_overrides[get_settings] = lambda: configured
+    client = TestClient(main_module.app)
+    scheduled = []
+    should_fail = True
+
+    async def handle(_event):
+        if should_fail:
+            raise RuntimeError("simulated crash")
+
+    monkeypatch.setattr(main_module, "_handle_mention", handle)
+    monkeypatch.setattr(main_module, "start_slack_action", scheduled.append)
+    body = json.dumps(
+        {
+            "type": "event_callback",
+            "event_id": "EvRetryAfterCrash",
+            "team_id": "T123",
+            "event": {
+                "type": "message",
+                "channel_type": "im",
+                "channel": "D123",
+                "user": "U123",
+                "text": "connect my Founder Tools account",
+            },
+        },
+        separators=(",", ":"),
+    ).encode()
+    timestamp = int(time.time())
+    headers = _signed_headers(
+        configured.SLACK_SIGNING_SECRET,
+        timestamp,
+        body,
+        "application/json",
+    )
+
+    assert client.post("/slack/events", content=body, headers=headers).status_code == 503
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        asyncio.run(scheduled.pop())
+
+    should_fail = False
+    assert client.post("/slack/events", content=body, headers=headers).status_code == 503
+    assert len(scheduled) == 1
+    asyncio.run(scheduled.pop())
+    assert client.post("/slack/events", content=body, headers=headers).status_code == 200
 
 
 @pytest.mark.parametrize(
@@ -277,6 +399,27 @@ def test_signed_url_verification_returns_challenge(tmp_path):
 
     assert response.status_code == 200
     assert response.json() == {"challenge": "challenge-1"}
+
+
+def test_signed_malformed_event_json_returns_bad_request(tmp_path):
+    configured = _settings(tmp_path)
+    main_module.app.dependency_overrides[get_settings] = lambda: configured
+    client = TestClient(main_module.app)
+    body = b"{not-json"
+    timestamp = int(time.time())
+
+    response = client.post(
+        "/slack/events",
+        content=body,
+        headers=_signed_headers(
+            configured.SLACK_SIGNING_SECRET,
+            timestamp,
+            body,
+            "application/json",
+        ),
+    )
+
+    assert response.status_code == 400
 
 
 def test_duplicate_signed_command_is_acknowledged_without_reexecution(tmp_path):

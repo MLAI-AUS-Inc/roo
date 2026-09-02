@@ -135,6 +135,27 @@ class SlackRequestReceiptStore:
         Completion separately extends the same row to the normal dedupe TTL.
         """
 
+        disposition, claim_token = self.claim_event(
+            fingerprint,
+            now=now,
+            lease_seconds=lease_seconds,
+        )
+        return claim_token if disposition == "claimed" else None
+
+    def claim_event(
+        self,
+        fingerprint: str,
+        *,
+        now: Optional[float] = None,
+        lease_seconds: int = 45,
+    ) -> tuple[str, Optional[float]]:
+        """Return ``claimed``, ``processing``, or ``completed`` for an event.
+
+        Processing rows store a negative fencing timestamp. This distinguishes
+        work that still needs a retryable HTTP response from completed receipts
+        without changing the existing SQLite schema.
+        """
+
         if lease_seconds <= 0:
             raise ValueError("lease_seconds must be positive")
         if not fingerprint or len(fingerprint) != 64:
@@ -142,6 +163,7 @@ class SlackRequestReceiptStore:
 
         self._initialise()
         current_time = time.time() if now is None else float(now)
+        claim_token = current_time
         expires_at = current_time + lease_seconds
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -155,10 +177,52 @@ class SlackRequestReceiptStore:
                     (fingerprint, received_at, expires_at)
                 VALUES (?, ?, ?)
                 """,
-                (fingerprint, current_time, expires_at),
+                (fingerprint, -claim_token, expires_at),
+            )
+            if cursor.rowcount == 1:
+                connection.commit()
+                return "claimed", claim_token
+            row = connection.execute(
+                """
+                SELECT received_at
+                FROM slack_request_receipts
+                WHERE fingerprint = ?
+                """,
+                (fingerprint,),
+            ).fetchone()
+            connection.commit()
+            if row is not None and float(row[0]) < 0:
+                return "processing", None
+            return "completed", None
+
+    def renew(
+        self,
+        fingerprint: str,
+        *,
+        claim_token: float,
+        lease_seconds: int,
+        now: Optional[float] = None,
+    ) -> bool:
+        """Extend only the caller's fenced processing lease."""
+
+        if lease_seconds <= 0:
+            raise ValueError("lease_seconds must be positive")
+        current_time = time.time() if now is None else float(now)
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE slack_request_receipts
+                SET expires_at = ?
+                WHERE fingerprint = ? AND received_at = ?
+                """,
+                (
+                    current_time + lease_seconds,
+                    fingerprint,
+                    -float(claim_token),
+                ),
             )
             connection.commit()
-            return current_time if cursor.rowcount == 1 else None
+            return cursor.rowcount == 1
 
     def complete(
         self,
@@ -177,10 +241,15 @@ class SlackRequestReceiptStore:
             cursor = connection.execute(
                 """
                 UPDATE slack_request_receipts
-                SET expires_at = ?
+                SET received_at = ?, expires_at = ?
                 WHERE fingerprint = ? AND received_at = ?
                 """,
-                (current_time + ttl_seconds, fingerprint, float(claim_token)),
+                (
+                    float(claim_token),
+                    current_time + ttl_seconds,
+                    fingerprint,
+                    -float(claim_token),
+                ),
             )
             connection.commit()
             return cursor.rowcount == 1
@@ -194,7 +263,7 @@ class SlackRequestReceiptStore:
                 DELETE FROM slack_request_receipts
                 WHERE fingerprint = ? AND received_at = ?
                 """,
-                (fingerprint, float(claim_token)),
+                (fingerprint, -float(claim_token)),
             )
             connection.commit()
             return cursor.rowcount == 1

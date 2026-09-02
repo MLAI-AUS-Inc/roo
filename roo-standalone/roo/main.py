@@ -6,6 +6,7 @@ Roo Standalone - FastAPI Application
 Main entrypoint for the Roo AI agent service.
 """
 import asyncio
+import hashlib
 import json
 import hmac
 import re
@@ -182,25 +183,45 @@ def _request_settings(request: Request) -> Settings:
     return getattr(state, "roo_settings", None) or get_settings()
 
 
-def _is_account_link_slack_event(raw_body: bytes) -> bool:
-    """Identify the exact fast-path link command without retaining its body."""
+def _retry_managed_slack_event_fingerprint(
+    raw_body: bytes,
+    request_fingerprint: str,
+) -> Optional[str]:
+    """Return a durable identity for every user message we process async."""
 
     try:
         payload = json.loads(raw_body)
     except (TypeError, ValueError, json.JSONDecodeError):
-        return False
+        return None
     event = payload.get("event") if isinstance(payload, dict) else None
     if not isinstance(event, dict) or event.get("type") not in {"app_mention", "message"}:
-        return False
+        return None
     if event.get("bot_id"):
-        return False
-    text = re.sub(r"<@[A-Z0-9]+>", "", str(event.get("text") or ""))
-    return bool(
-        re.fullmatch(
-            r"(?:link|link (?:my )?(?:mlai |slack )?account|link my slack)",
-            text.lower().strip(),
+        return None
+    event_id = str(payload.get("event_id") or "").strip()
+    if not event_id:
+        return request_fingerprint
+    team_id = str(payload.get("team_id") or payload.get("team") or "").strip()
+    return hashlib.sha256(
+        f"slack-event:{team_id}:{event_id}".encode("utf-8")
+    ).hexdigest()
+
+
+def _slack_event_disposition(request: Request) -> str:
+    state = getattr(request, "state", None)
+    return str(getattr(state, "slack_event_disposition", "") or "")
+
+
+def _slack_event_response(request: Request, *, work_pending: bool = False) -> JSONResponse:
+    """Keep Slack retrying until durable receipt completion is observable."""
+
+    if work_pending and _slack_event_disposition(request) in {"claimed", "processing"}:
+        return JSONResponse(
+            status_code=503,
+            content={},
+            headers={"Retry-After": "3"},
         )
-    )
+    return JSONResponse(status_code=200, content={})
 
 
 async def _complete_slack_event_receipt(request: Request) -> None:
@@ -234,17 +255,52 @@ async def _release_slack_event_receipt(request: Request) -> None:
     )
 
 
+async def _renew_slack_event_receipt(request: Request) -> bool:
+    state = getattr(request, "state", None)
+    fingerprint = getattr(state, "slack_event_fingerprint", None)
+    claim_token = getattr(state, "slack_event_claim_token", None)
+    settings = getattr(state, "roo_settings", None)
+    if fingerprint is None or claim_token is None or settings is None:
+        return False
+    store = get_slack_receipt_store(str(settings.SLACK_RECEIPTS_DB_PATH))
+    return await asyncio.to_thread(
+        store.renew,
+        fingerprint,
+        claim_token=claim_token,
+        lease_seconds=settings.SLACK_EVENT_PROCESSING_LEASE_SECONDS,
+    )
+
+
 def _start_slack_event_task(request: Request, coro: Any) -> asyncio.Task[Any]:
-    """Complete a short durable receipt only after in-memory handoff finishes."""
+    """Keep a durable lease until async work finishes, then mark it complete."""
 
     async def run_with_receipt() -> Any:
+        settings = _request_settings(request)
+
+        async def renew_while_running() -> None:
+            interval = max(1.0, settings.SLACK_EVENT_PROCESSING_LEASE_SECONDS / 3)
+            while True:
+                await asyncio.sleep(interval)
+                if not await _renew_slack_event_receipt(request):
+                    return
+
+        renewal_task = None
+        state = getattr(request, "state", None)
+        if getattr(state, "slack_event_claim_token", None) is not None:
+            renewal_task = asyncio.create_task(renew_while_running())
         try:
             result = await coro
         except BaseException:
             await _release_slack_event_receipt(request)
             raise
-        await _complete_slack_event_receipt(request)
-        return result
+        else:
+            await _complete_slack_event_receipt(request)
+            return result
+        finally:
+            if renewal_task is not None:
+                renewal_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await renewal_task
 
     return start_slack_action(run_with_receipt())
 
@@ -2723,14 +2779,21 @@ async def verify_slack_signature(
     except SlackRequestVerificationError:
         raise HTTPException(status_code=403, detail="unauthorized")
     store = get_slack_receipt_store(str(settings.SLACK_RECEIPTS_DB_PATH))
-    if request.url.path == "/slack/events" and _is_account_link_slack_event(raw_body):
-        claim_token = store.claim_lease(
+    event_fingerprint = None
+    if request.url.path == "/slack/events":
+        event_fingerprint = _retry_managed_slack_event_fingerprint(
+            raw_body,
             fingerprint,
+        )
+    if event_fingerprint is not None:
+        disposition, claim_token = store.claim_event(
+            event_fingerprint,
             lease_seconds=settings.SLACK_EVENT_PROCESSING_LEASE_SECONDS,
         )
-        is_duplicate = claim_token is None
+        is_duplicate = disposition != "claimed"
+        request.state.slack_event_disposition = disposition
         if claim_token is not None:
-            request.state.slack_event_fingerprint = fingerprint
+            request.state.slack_event_fingerprint = event_fingerprint
             request.state.slack_event_claim_token = claim_token
     else:
         is_duplicate = not store.claim(
@@ -2897,7 +2960,11 @@ async def slack_events(
         return {"challenge": payload.get("challenge")}
 
     if _is_duplicate_slack_request(request):
-        print("↩️ Ignoring duplicate signed Slack event request")
+        disposition = _slack_event_disposition(request)
+        if disposition == "processing":
+            print("↩️ Slack event is still processing; requesting a retry")
+            return _slack_event_response(request, work_pending=True)
+        print("↩️ Ignoring completed duplicate signed Slack event request")
         return JSONResponse(status_code=200, content={})
     
     # Handle events
@@ -2936,9 +3003,6 @@ async def slack_events(
     #     print(f"⚠️ Quest processing failed: {e}")
     
     if event_type == "app_mention":
-        if not _mark_app_mention_event_seen(payload, event):
-            await _complete_slack_event_receipt(request)
-            return JSONResponse(status_code=200, content={})
         routed_event = _with_slack_delivery_context(event, payload)
         _start_slack_event_task(
             request,
@@ -2947,7 +3011,7 @@ async def slack_events(
                 slack_team_id=str(payload.get("team_id") or ""),
             )
         )
-        return JSONResponse(status_code=200, content={})
+        return _slack_event_response(request, work_pending=True)
 
     if event_type == "reaction_added":
         _start_slack_event_task(request, _handle_reaction_added(event))
@@ -2980,7 +3044,7 @@ async def slack_events(
             and event.get("channel") == boost_channel_id
         ):
             _start_slack_event_task(request, handle_boost_root_edit(event))
-            return JSONResponse(status_code=200, content={})
+            return _slack_event_response(request, work_pending=True)
 
         try:
             settings = get_settings()
@@ -2995,6 +3059,7 @@ async def slack_events(
         if start_here_id and event.get("channel") == start_here_id:
             if normalize_intro_event(event) is not None:
                 _start_slack_event_task(request, _handle_start_here_intro(event))
+                return _slack_event_response(request, work_pending=True)
             else:
                 await _complete_slack_event_receipt(request)
             return JSONResponse(status_code=200, content={})
@@ -3023,7 +3088,7 @@ async def slack_events(
                 return JSONResponse(status_code=200, content={})
 
             _start_slack_event_task(request, _handle_start_here_intro(event))
-            return JSONResponse(status_code=200, content={})
+            return _slack_event_response(request, work_pending=True)
 
         try:
             settings = get_settings()
@@ -3057,6 +3122,9 @@ async def slack_events(
                             ),
                         )
                     )
+                if (thread_ts and message_ts and thread_ts != message_ts) or not thread_ts:
+                    return _slack_event_response(request, work_pending=True)
+                await _complete_slack_event_receipt(request)
                 return JSONResponse(status_code=200, content={})
         
         is_dm = event.get("channel_type") == "im"
@@ -3073,7 +3141,7 @@ async def slack_events(
                 request,
                 _handle_mention(_with_slack_delivery_context(event, payload))
             )
-            return JSONResponse(status_code=200, content={})
+            return _slack_event_response(request, work_pending=True)
 
         if not event.get("subtype") and (
             _is_contextual_channel_enabled(settings, event.get("channel"))
@@ -3089,7 +3157,7 @@ async def slack_events(
                     slack_team_id=str(payload.get("team_id") or ""),
                 )
             )
-            return JSONResponse(status_code=200, content={})
+            return _slack_event_response(request, work_pending=True)
 
     await _complete_slack_event_receipt(request)
     return JSONResponse(status_code=200, content={})
