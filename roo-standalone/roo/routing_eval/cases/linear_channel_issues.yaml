@@ -1,0 +1,35 @@
+- id: linear-channel-statuses
+  text: "what statuses are available in MLAI_TECH?"
+  expect: {skill: linear-channel-issues, action: list_statuses}
+
+- id: linear-channel-filter-status
+  text: "show MLAI_TECH issues in review"
+  expect: {skill: linear-channel-issues, action: list_issues}
+
+- id: linear-channel-move-status
+  text: "move TECH-29 to In Progress"
+  expect: {skill: linear-channel-issues, action: update_issue}
+
+- id: linear-channel-add-comment
+  text: "add a comment to TECH-29 saying the backend checks passed"
+  expect: {skill: linear-channel-issues, action: update_issue}
+
+- id: linear-channel-append-description
+  text: "append this update to the description of TECH-29"
+  expect: {skill: linear-channel-issues, action: update_issue}
+
+- id: linear-channel-new-issue-negative
+  text: "create a new Linear issue for the broken deployment"
+  expect: {skill: linear-channel-issues, action: create_issue}
+
+- id: linear-channel-create-with-status
+  text: "create a Linear issue titled Fix deployment alerts in status In Progress"
+  expect: {skill: linear-channel-issues, action: create_issue}
+
+- id: linear-channel-synced-data-negative
+  text: "show Linear issues synced for this startup"
+  expect: {skill: mlai-data-query, action: query}
+
+- id: linear-channel-delete-refused
+  text: "delete TECH-29"
+  expect: {skill: linear-channel-issues, action: update_issue}

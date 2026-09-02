@@ -485,6 +485,14 @@ class MLAIBackendClient:
         prefix = "" if base_path.endswith("/api/v1") else "/api/v1"
         return f"{prefix}/org-memory/{suffix}"
 
+    def _linear_channel_endpoint(self, suffix: str) -> str:
+        """Support backend base URLs with or without an /api/v1 suffix."""
+
+        suffix = str(suffix or "").strip("/")
+        base_path = urlparse(self.base_url).path.rstrip("/")
+        prefix = "" if base_path.endswith("/api/v1") else "/api/v1"
+        return f"{prefix}/integrations/linear/channel-issues/{suffix}"
+
     @staticmethod
     def _victor_ai_params(filters: Optional[dict] = None, **pagination: Any) -> dict:
         allowed = {
@@ -2196,6 +2204,7 @@ class MLAIBackendClient:
         requester_slack_id: str,
         limit: int = 50,
         after: Optional[str] = None,
+        status: Optional[str] = None,
     ) -> dict:
         """List the live Linear queue bound to the invoking Slack channel."""
         payload: Dict[str, Any] = {
@@ -2206,13 +2215,103 @@ class MLAIBackendClient:
         }
         if after:
             payload["after"] = str(after).strip()
+        if status:
+            payload["status"] = str(status).strip()
         response = await self._request(
             "POST",
-            "/api/v1/integrations/linear/channel-issues/list",
+            self._linear_channel_endpoint("list"),
             json=payload,
             timeout=30.0,
             transport_retries=1,
             retry_backoff_seconds=0.25,
+            circuit_breaker=True,
+        )
+        self._raise_for_status_or_backend_unavailable(response)
+        return response.json()
+
+    async def list_linear_channel_statuses(
+        self,
+        *,
+        slack_workspace_id: str,
+        slack_channel_id: str,
+        requester_slack_id: str,
+    ) -> dict:
+        response = await self._request(
+            "POST",
+            self._linear_channel_endpoint("statuses"),
+            json={
+                "slack_workspace_id": str(slack_workspace_id or "").strip(),
+                "slack_channel_id": str(slack_channel_id or "").strip(),
+                "requester_slack_id": self._clean_slack_id(requester_slack_id),
+            },
+            timeout=30.0,
+            transport_retries=1,
+            retry_backoff_seconds=0.25,
+            circuit_breaker=True,
+        )
+        self._raise_for_status_or_backend_unavailable(response)
+        return response.json()
+
+    async def write_linear_channel_issue(
+        self,
+        *,
+        slack_workspace_id: str,
+        slack_channel_id: str,
+        requester_slack_id: str,
+        issue_identifier: str,
+        operation: str,
+        value: Any,
+        expected_updated_at: str,
+        request_id: str,
+    ) -> dict:
+        response = await self._request(
+            "POST",
+            self._linear_channel_endpoint("write"),
+            json={
+                "slack_workspace_id": str(slack_workspace_id or "").strip(),
+                "slack_channel_id": str(slack_channel_id or "").strip(),
+                "requester_slack_id": self._clean_slack_id(requester_slack_id),
+                "issue_identifier": str(issue_identifier or "").strip(),
+                "operation": str(operation or "").strip(),
+                "value": value,
+                "expected_updated_at": str(expected_updated_at or "").strip(),
+                "request_id": str(request_id or "").strip(),
+            },
+            timeout=45.0,
+            transport_retries=0,
+            circuit_breaker=True,
+        )
+        self._raise_for_status_or_backend_unavailable(response)
+        return response.json()
+
+    async def create_linear_channel_issue(
+        self,
+        *,
+        slack_workspace_id: str,
+        slack_channel_id: str,
+        requester_slack_id: str,
+        title: str,
+        request_id: str,
+        description: Optional[str] = None,
+        status: Optional[str] = None,
+    ) -> dict:
+        payload: Dict[str, Any] = {
+            "slack_workspace_id": str(slack_workspace_id or "").strip(),
+            "slack_channel_id": str(slack_channel_id or "").strip(),
+            "requester_slack_id": self._clean_slack_id(requester_slack_id),
+            "title": str(title or "").strip(),
+            "request_id": str(request_id or "").strip(),
+        }
+        if description:
+            payload["description"] = str(description).strip()
+        if status:
+            payload["status"] = str(status).strip()
+        response = await self._request(
+            "POST",
+            self._linear_channel_endpoint("create"),
+            json=payload,
+            timeout=45.0,
+            transport_retries=0,
             circuit_breaker=True,
         )
         self._raise_for_status_or_backend_unavailable(response)
@@ -2230,7 +2329,7 @@ class MLAIBackendClient:
         """Get one approved Linear issue and its bounded comment history."""
         response = await self._request(
             "POST",
-            "/api/v1/integrations/linear/channel-issues/detail",
+            self._linear_channel_endpoint("detail"),
             json={
                 "slack_workspace_id": str(slack_workspace_id or "").strip(),
                 "slack_channel_id": str(slack_channel_id or "").strip(),

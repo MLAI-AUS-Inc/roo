@@ -38,18 +38,18 @@
 - id: dq-linear-tech-todo-live
   text: "what linear issues are in the mlai_tech todo list at the moment?"
   channel: tech_volunteers
-  expect: {skill: mlai-data-query, action: list_linear_channel_issues}
+  expect: {skill: linear-channel-issues, action: list_issues}
   tags: [data-query, linear, live]
 - id: dq-linear-tech-details-key
   text: "tell me more about TECH-16"
   channel: tech_volunteers
-  expect: {skill: mlai-data-query, action: get_linear_channel_issue}
+  expect: {skill: linear-channel-issues, action: get_issue}
   tags: [data-query, linear, follow-up]
 - id: dq-linear-tech-details-number
   text: "show me number 7 from that Linear list"
   channel: tech_volunteers
-  thread: {skill: mlai-data-query}
-  expect: {skill: mlai-data-query, action: get_linear_channel_issue}
+  thread: {skill: linear-channel-issues}
+  expect: {skill: linear-channel-issues, action: get_issue}
   tags: [data-query, linear, follow-up]
 
 # harvested from upstream funnel tests before Phase 3 deleted the heuristics
