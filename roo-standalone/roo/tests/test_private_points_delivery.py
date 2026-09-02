@@ -9,9 +9,15 @@ os.environ.setdefault("SLACK_SIGNING_SECRET", "private-points-signing-test")
 
 from roo import agent as agent_module
 from roo import coworking_booking_intents as coworking_module
+from roo.coworking_booking_schema_v2 import migrate_coworking_booking_intents_v2
 from roo.agent import RooAgent
 from roo.skills import executor as executor_module
 from roo.skills.executor import SkillExecutor
+
+
+def coworking_intent_store(db_path):
+    migrate_coworking_booking_intents_v2(db_path)
+    return coworking_module.CoworkingBookingIntentStore(db_path)
 
 
 @pytest.mark.parametrize(
@@ -388,7 +394,7 @@ async def test_fast_coworking_booking_surfaces_terminal_backend_reason(
     monkeypatch,
     tmp_path,
 ):
-    store = coworking_module.CoworkingBookingIntentStore(tmp_path / "coworking.db")
+    store = coworking_intent_store(tmp_path / "coworking.db")
 
     class TerminalCoworkingClient:
         def __init__(self, *args, **kwargs):
@@ -475,7 +481,7 @@ async def test_channel_coworking_confirmation_keeps_remaining_balance_in_member_
     tmp_path,
 ):
     direct_messages, _ = _capture_private_delivery(monkeypatch)
-    store = coworking_module.CoworkingBookingIntentStore(tmp_path / "coworking.db")
+    store = coworking_intent_store(tmp_path / "coworking.db")
     monkeypatch.setattr(executor_module, "get_coworking_intent_store", lambda: store)
 
     result = await SkillExecutor()._book_coworking_with_intent(
@@ -508,7 +514,7 @@ async def test_dm_coworking_confirmation_returns_remaining_balance_directly(
         return {"ok": True, "ts": "333.444"}
 
     monkeypatch.setattr("roo.slack_client.post_message", post_current_dm)
-    store = coworking_module.CoworkingBookingIntentStore(tmp_path / "coworking.db")
+    store = coworking_intent_store(tmp_path / "coworking.db")
     monkeypatch.setattr(executor_module, "get_coworking_intent_store", lambda: store)
 
     result = await SkillExecutor()._book_coworking_with_intent(
@@ -535,7 +541,7 @@ async def test_admin_coworking_confirmation_never_exposes_target_balance(
     tmp_path,
 ):
     direct_messages, _ = _capture_private_delivery(monkeypatch)
-    store = coworking_module.CoworkingBookingIntentStore(tmp_path / "coworking.db")
+    store = coworking_intent_store(tmp_path / "coworking.db")
     monkeypatch.setattr(executor_module, "get_coworking_intent_store", lambda: store)
 
     result = await SkillExecutor()._book_coworking_with_intent(
