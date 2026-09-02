@@ -12,7 +12,11 @@ from uuid import NAMESPACE_URL, uuid4, uuid5
 import httpx
 
 from .config import get_settings
-from .coworking_booking_schema_v2 import REQUIRED_COLUMNS, REQUIRED_INDEXES
+from .coworking_booking_schema_v3 import (
+    REQUIRED_COLUMNS,
+    REQUIRED_INDEXES,
+    SCHEMA_VERSION,
+)
 
 
 DEFAULT_COWORKING_INTENTS_DB_PATH = "data/coworking_booking_intents.db"
@@ -96,7 +100,7 @@ class CoworkingBookingIntentStore:
             if not self.db_path.is_file():
                 raise RuntimeError(
                     "Coworking booking database is not initialized; run "
-                    "scripts/migrate_coworking_booking_intents_v2.py before startup"
+                    "scripts/migrate_coworking_booking_intents_v3.py before startup"
                 )
             with self._connect_readonly() as conn:
                 columns = {
@@ -111,11 +115,17 @@ class CoworkingBookingIntentStore:
                 }
                 missing_columns = sorted(REQUIRED_COLUMNS - columns)
                 missing_indexes = sorted(REQUIRED_INDEXES - indexes)
-                if missing_columns or missing_indexes:
+                schema_version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+                if (
+                    schema_version < SCHEMA_VERSION
+                    or missing_columns
+                    or missing_indexes
+                ):
                     raise RuntimeError(
-                        "Coworking booking schema v2 is not applied; run "
-                        "scripts/migrate_coworking_booking_intents_v2.py before startup "
-                        f"(missing columns={missing_columns}, indexes={missing_indexes})"
+                        "Coworking booking schema v3 is not applied; run "
+                        "scripts/migrate_coworking_booking_intents_v3.py before startup "
+                        f"(version={schema_version}, missing columns={missing_columns}, "
+                        f"indexes={missing_indexes})"
                     )
             self._initialized = True
 

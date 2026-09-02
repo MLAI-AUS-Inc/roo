@@ -10,11 +10,15 @@ import pytest
 
 coworking = importlib.import_module("roo.coworking_booking_intents")
 backend_module = importlib.import_module("roo.clients.mlai_backend")
-schema_module = importlib.import_module("roo.coworking_booking_schema_v2")
+schema_module = importlib.import_module("roo.coworking_booking_schema_v3")
+v2_schema_module = importlib.import_module("roo.coworking_booking_schema_v2")
+reconciliation_module = importlib.import_module(
+    "roo.coworking_notification_reconciliation"
+)
 
 
 def intent_store(db_path):
-    schema_module.migrate_coworking_booking_intents_v2(db_path)
+    schema_module.migrate_coworking_booking_intents_v3(db_path)
     return coworking.CoworkingBookingIntentStore(db_path)
 
 
@@ -680,46 +684,57 @@ async def test_stale_mutation_outcome_emits_no_message_and_keeps_winner(
 
 def test_schema_scrubs_legacy_raw_request_text(tmp_path):
     db_path = tmp_path / "intents.db"
-    store = intent_store(db_path)
-    intent = store.record_intent(
-        slack_user_id="U123",
-        booking_date="2026-04-22",
-        channel_id="C123",
-        thread_ts="111.222",
-    )
+    v2_schema_module.migrate_coworking_booking_intents_v2(db_path)
     with sqlite3.connect(db_path) as conn:
         conn.execute(
-            "UPDATE coworking_booking_intents SET request_text = ? WHERE id = ?",
-            ("private raw Slack message", intent["id"]),
+            """
+            INSERT INTO coworking_booking_intents (
+                idempotency_key, slack_user_id, requested_by_slack_id,
+                booking_date, channel_id, thread_ts, request_text, status,
+                next_attempt_at, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "legacy-raw-text",
+                "U123",
+                "U123",
+                "2026-04-22",
+                "C123",
+                "111.222",
+                "private raw Slack message",
+                "pending",
+                0.0,
+                1.0,
+                1.0,
+            ),
         )
+    schema_module.migrate_coworking_booking_intents_v3(db_path)
 
-    reloaded = coworking.CoworkingBookingIntentStore(db_path)
-    reloaded.validate_schema()
-    with sqlite3.connect(db_path) as conn:
-        raw_text = conn.execute(
-            "SELECT request_text FROM coworking_booking_intents WHERE id = ?",
-            (intent["id"],),
-        ).fetchone()[0]
-
-    assert raw_text == "private raw Slack message"
-
-    schema_module.migrate_coworking_booking_intents_v2(db_path)
-
-    assert reloaded.get(intent["id"])["request_text"] is None
+    assert coworking.CoworkingBookingIntentStore(db_path).get_by_key(
+        "legacy-raw-text"
+    )["request_text"] is None
 
 
 def test_store_validation_fails_closed_without_explicit_migration(tmp_path):
     store = coworking.CoworkingBookingIntentStore(tmp_path / "uninitialized.db")
 
-    with pytest.raises(RuntimeError, match="migrate_coworking_booking_intents_v2"):
+    with pytest.raises(RuntimeError, match="migrate_coworking_booking_intents_v3"):
         store.validate_schema()
+
+
+def test_store_validation_rejects_shared_v2_predecessor(tmp_path):
+    db_path = tmp_path / "v2-only.db"
+    v2_schema_module.migrate_coworking_booking_intents_v2(db_path)
+
+    with pytest.raises(RuntimeError, match=r"schema v3.*version=2"):
+        coworking.CoworkingBookingIntentStore(db_path).validate_schema()
 
 
 def test_explicit_schema_migration_is_idempotent(tmp_path):
     db_path = tmp_path / "intents.db"
 
-    schema_module.migrate_coworking_booking_intents_v2(db_path)
-    schema_module.migrate_coworking_booking_intents_v2(db_path)
+    schema_module.migrate_coworking_booking_intents_v3(db_path)
+    schema_module.migrate_coworking_booking_intents_v3(db_path)
 
     coworking.CoworkingBookingIntentStore(db_path).validate_schema()
 
@@ -783,7 +798,7 @@ def test_v1_terminal_rows_are_quarantined_when_delivery_is_unknown(
             ),
         )
 
-    schema_module.migrate_coworking_booking_intents_v2(db_path)
+    schema_module.migrate_coworking_booking_intents_v3(db_path)
     migrated = coworking.CoworkingBookingIntentStore(db_path).get_by_key(
         f"legacy-{legacy_status}"
     )
@@ -796,7 +811,7 @@ def test_v1_terminal_rows_are_quarantined_when_delivery_is_unknown(
 
     # A repeated migration must not turn the quarantine into an automatic
     # delivery or mark it safe for retention cleanup.
-    schema_module.migrate_coworking_booking_intents_v2(db_path)
+    schema_module.migrate_coworking_booking_intents_v3(db_path)
     assert coworking.CoworkingBookingIntentStore(db_path).get_by_key(
         f"legacy-{legacy_status}"
     )["notification_status"] == "reconciliation_required"
@@ -804,12 +819,167 @@ def test_v1_terminal_rows_are_quarantined_when_delivery_is_unknown(
 
 def test_store_schema_validation_is_read_only(tmp_path):
     db_path = tmp_path / "intents.db"
-    schema_module.migrate_coworking_booking_intents_v2(db_path)
+    schema_module.migrate_coworking_booking_intents_v3(db_path)
     before = hashlib.sha256(db_path.read_bytes()).digest()
 
     coworking.CoworkingBookingIntentStore(db_path).validate_schema()
 
     assert hashlib.sha256(db_path.read_bytes()).digest() == before
+
+
+def test_v3_quarantines_indistinguishable_shared_v2_terminal_histories(tmp_path):
+    db_path = tmp_path / "shared-v2.db"
+    v2_schema_module.migrate_coworking_booking_intents_v2(db_path)
+    with sqlite3.connect(db_path) as conn:
+        for idempotency_key in (
+            "v2-delivery-unknown",
+            "v2-intentionally-not-required",
+        ):
+            conn.execute(
+                """
+                INSERT INTO coworking_booking_intents (
+                    idempotency_key, slack_user_id, requested_by_slack_id,
+                    booking_date, channel_id, thread_ts, status,
+                    next_attempt_at, backend_result_json,
+                    created_at, updated_at, confirmed_at,
+                    notification_status, notification_delivered_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    idempotency_key,
+                    "U123",
+                    "U123",
+                    "2026-04-22",
+                    "C123",
+                    "111.222",
+                    "confirmed",
+                    0.0,
+                    '{"id":"booking-1"}',
+                    1.0,
+                    2.0,
+                    2.0,
+                    "not_required",
+                    None,
+                ),
+            )
+        conn.execute(
+            """
+            INSERT INTO coworking_booking_intents (
+                idempotency_key, slack_user_id, booking_date, status,
+                next_attempt_at, created_at, updated_at, confirmed_at,
+                notification_status, notification_delivered_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "v2-proven-delivered",
+                "U123",
+                "2026-04-23",
+                "confirmed",
+                0.0,
+                1.0,
+                2.0,
+                2.0,
+                "delivered",
+                2.0,
+            ),
+        )
+
+    assert schema_module.migrate_coworking_booking_intents_v3(db_path) == 2
+
+    store = coworking.CoworkingBookingIntentStore(db_path)
+    for idempotency_key in (
+        "v2-delivery-unknown",
+        "v2-intentionally-not-required",
+    ):
+        migrated = store.get_by_key(idempotency_key)
+        assert migrated["notification_status"] == "reconciliation_required"
+        assert migrated["notification_last_error"] == "v2_delivery_provenance_unknown"
+        assert migrated["notification_reconciliation_reference"] is None
+    delivered = store.get_by_key("v2-proven-delivered")
+    assert delivered["notification_status"] == "delivered"
+    assert delivered["notification_delivered_at"] == 2.0
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+
+
+@pytest.mark.parametrize(
+    ("outcome", "expected_status", "expects_delivery_time"),
+    [
+        ("delivered", "delivered", True),
+        ("not_required", "not_required", False),
+        ("retry", "pending", False),
+    ],
+)
+def test_v3_quarantine_has_fenced_audited_recovery(
+    tmp_path,
+    outcome,
+    expected_status,
+    expects_delivery_time,
+):
+    db_path = tmp_path / f"reconcile-{outcome}.db"
+    v2_schema_module.migrate_coworking_booking_intents_v2(db_path)
+    with sqlite3.connect(db_path) as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO coworking_booking_intents (
+                idempotency_key, slack_user_id, booking_date, status,
+                next_attempt_at, created_at, updated_at, confirmed_at,
+                notification_status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                f"reconcile-{outcome}",
+                "U123",
+                "2026-04-22",
+                "confirmed",
+                0.0,
+                1.0,
+                2.0,
+                2.0,
+                "not_required",
+            ),
+        )
+        intent_id = cursor.lastrowid
+    schema_module.migrate_coworking_booking_intents_v3(db_path)
+
+    reconciled = reconciliation_module.reconcile_coworking_notification(
+        db_path,
+        intent_id=intent_id,
+        outcome=outcome,
+        operator_reference="INC-648-evidence-1",
+        now=1000.0,
+    )
+
+    assert reconciled["notification_status"] == expected_status
+    assert reconciled["notification_reconciled_at"] == 1000.0
+    assert reconciled["notification_reconciliation_reference"] == "INC-648-evidence-1"
+    assert reconciled["notification_reconciliation_outcome"] == outcome
+    assert (reconciled["notification_delivered_at"] is not None) is expects_delivery_time
+    assert (reconciled["notification_next_attempt_at"] is not None) is (
+        outcome == "retry"
+    )
+    with pytest.raises(ValueError, match="does not require reconciliation"):
+        reconciliation_module.reconcile_coworking_notification(
+            db_path,
+            intent_id=intent_id,
+            outcome=outcome,
+            operator_reference="INC-648-evidence-2",
+            now=1001.0,
+        )
+
+
+def test_reconciliation_does_not_create_a_missing_database(tmp_path):
+    db_path = tmp_path / "missing.db"
+
+    with pytest.raises(ValueError, match="database was not found"):
+        reconciliation_module.reconcile_coworking_notification(
+            db_path,
+            intent_id=1,
+            outcome="delivered",
+            operator_reference="INC-648-missing-db",
+        )
+
+    assert not db_path.exists()
 
 
 def test_terminal_retention_preserves_unfinished_notifications(tmp_path):

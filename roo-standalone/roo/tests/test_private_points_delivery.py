@@ -9,14 +9,14 @@ os.environ.setdefault("SLACK_SIGNING_SECRET", "private-points-signing-test")
 
 from roo import agent as agent_module
 from roo import coworking_booking_intents as coworking_module
-from roo.coworking_booking_schema_v2 import migrate_coworking_booking_intents_v2
+from roo.coworking_booking_schema_v3 import migrate_coworking_booking_intents_v3
 from roo.agent import RooAgent
 from roo.skills import executor as executor_module
 from roo.skills.executor import SkillExecutor
 
 
 def coworking_intent_store(db_path):
-    migrate_coworking_booking_intents_v2(db_path)
+    migrate_coworking_booking_intents_v3(db_path)
     return coworking_module.CoworkingBookingIntentStore(db_path)
 
 

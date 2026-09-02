@@ -433,7 +433,7 @@ def test_deploy_workflow_requires_and_secretly_upserts_security_values():
         "envs: SIM_PATIENT_API_KEY,SIM_PATIENT_SAFETY_SALT,ROO_API_KEY,"
         "VICTOR_AI_ROO_SIGNING_SECRET,ROO_PRIVATE_BASE_URL,"
         "MEETING_ROOM_BOOKING_ENABLED,LINEAR_CHANNEL_ISSUE_WRITES_ENABLED,"
-        "FOUNDER_ACCOUNT_LINK_ENABLED,COWORKING_INTENTS_V2_MIGRATION_APPROVED"
+        "FOUNDER_ACCOUNT_LINK_ENABLED,COWORKING_INTENTS_V3_MIGRATION_APPROVED"
     ) in workflow
     assert 'upsert_env "ROO_ENVIRONMENT" "production"' in workflow
     assert 'upsert_env "SIM_PATIENT_API_KEY" "$SIM_PATIENT_API_KEY"' in workflow
@@ -483,8 +483,8 @@ def test_deploy_workflow_requires_and_secretly_upserts_security_values():
     assert 'echo "$ROO_API_KEY"' not in workflow
     assert 'echo "$VICTOR_AI_ROO_SIGNING_SECRET"' not in workflow
     assert "http://127.0.0.1/healthz/ready" in workflow
-    assert "migrate_coworking_booking_intents_v2.py" in workflow
-    assert "COWORKING_INTENTS_V2_MIGRATION_APPROVED" in workflow
+    assert "migrate_coworking_booking_intents_v3.py" in workflow
+    assert "COWORKING_INTENTS_V3_MIGRATION_APPROVED" in workflow
     assert "restore_previous_release" in workflow
     migration_start = workflow.index("schema_migration_started=1")
     assert workflow.index("docker compose stop roo", migration_start - 200) < migration_start

@@ -14,7 +14,7 @@ sys.modules.pop("roo.skills.executor", None)
 
 backend_module = importlib.import_module("roo.clients.mlai_backend")
 coworking_module = importlib.import_module("roo.coworking_booking_intents")
-coworking_schema_module = importlib.import_module("roo.coworking_booking_schema_v2")
+coworking_schema_module = importlib.import_module("roo.coworking_booking_schema_v3")
 main_module = importlib.import_module("roo.main")
 approval_module = importlib.import_module("roo.points_request_approval")
 slack_client_module = importlib.import_module("roo.slack_client")
@@ -23,7 +23,7 @@ SkillExecutor = executor_module.SkillExecutor
 
 
 def coworking_intent_store(db_path):
-    coworking_schema_module.migrate_coworking_booking_intents_v2(db_path)
+    coworking_schema_module.migrate_coworking_booking_intents_v3(db_path)
     return coworking_module.CoworkingBookingIntentStore(db_path)
 
 
