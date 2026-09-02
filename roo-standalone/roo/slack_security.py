@@ -116,9 +116,33 @@ class SlackRequestReceiptStore:
         if not fingerprint or len(fingerprint) != 64:
             raise ValueError("fingerprint must be a SHA-256 hex digest")
 
+        return self.claim_lease(
+            fingerprint,
+            now=now,
+            lease_seconds=ttl_seconds,
+        ) is not None
+
+    def claim_lease(
+        self,
+        fingerprint: str,
+        *,
+        now: Optional[float] = None,
+        lease_seconds: int = 45,
+    ) -> Optional[float]:
+        """Claim processing ownership and return its fencing timestamp.
+
+        An unfinished event becomes reclaimable when this short lease expires.
+        Completion separately extends the same row to the normal dedupe TTL.
+        """
+
+        if lease_seconds <= 0:
+            raise ValueError("lease_seconds must be positive")
+        if not fingerprint or len(fingerprint) != 64:
+            raise ValueError("fingerprint must be a SHA-256 hex digest")
+
         self._initialise()
         current_time = time.time() if now is None else float(now)
-        expires_at = current_time + ttl_seconds
+        expires_at = current_time + lease_seconds
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             connection.execute(
@@ -132,6 +156,45 @@ class SlackRequestReceiptStore:
                 VALUES (?, ?, ?)
                 """,
                 (fingerprint, current_time, expires_at),
+            )
+            connection.commit()
+            return current_time if cursor.rowcount == 1 else None
+
+    def complete(
+        self,
+        fingerprint: str,
+        *,
+        claim_token: float,
+        ttl_seconds: int,
+        now: Optional[float] = None,
+    ) -> bool:
+        """Mark the fenced claim complete for the normal retry-suppression TTL."""
+
+        if ttl_seconds <= 0:
+            raise ValueError("ttl_seconds must be positive")
+        current_time = time.time() if now is None else float(now)
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE slack_request_receipts
+                SET expires_at = ?
+                WHERE fingerprint = ? AND received_at = ?
+                """,
+                (current_time + ttl_seconds, fingerprint, float(claim_token)),
+            )
+            connection.commit()
+            return cursor.rowcount == 1
+
+    def release(self, fingerprint: str, *, claim_token: float) -> bool:
+        """Release only the caller's fenced claim so Slack can retry promptly."""
+
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                DELETE FROM slack_request_receipts
+                WHERE fingerprint = ? AND received_at = ?
+                """,
+                (fingerprint, float(claim_token)),
             )
             connection.commit()
             return cursor.rowcount == 1

@@ -4,6 +4,7 @@ import json
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.parse import urlencode
 
 import pytest
@@ -120,6 +121,104 @@ def test_receipt_store_deduplicates_across_instances_and_expires(tmp_path):
     assert first_store.claim(fingerprint, now=1000, ttl_seconds=600)
     assert not second_store.claim(fingerprint, now=1001, ttl_seconds=600)
     assert second_store.claim(fingerprint, now=1601, ttl_seconds=600)
+
+
+def test_event_processing_lease_recovers_crash_and_fences_stale_completion(tmp_path):
+    fingerprint = "b" * 64
+    store = SlackRequestReceiptStore(tmp_path / "event-receipts.db")
+
+    first_claim = store.claim_lease(fingerprint, now=1000, lease_seconds=45)
+    assert first_claim == 1000
+    assert store.claim_lease(fingerprint, now=1001, lease_seconds=45) is None
+
+    recovered_claim = store.claim_lease(fingerprint, now=1046, lease_seconds=45)
+    assert recovered_claim == 1046
+    assert not store.complete(
+        fingerprint,
+        claim_token=first_claim,
+        ttl_seconds=600,
+        now=1047,
+    )
+    assert store.complete(
+        fingerprint,
+        claim_token=recovered_claim,
+        ttl_seconds=600,
+        now=1047,
+    )
+    assert store.claim_lease(fingerprint, now=1100, lease_seconds=45) is None
+
+
+@pytest.mark.asyncio
+async def test_account_link_task_completes_receipt_only_after_work_finishes(tmp_path):
+    configured = _settings(tmp_path)
+    fingerprint = "c" * 64
+    store = get_slack_receipt_store(configured.SLACK_RECEIPTS_DB_PATH)
+    claim_token = store.claim_lease(fingerprint, lease_seconds=45)
+    request = SimpleNamespace(
+        state=SimpleNamespace(
+            slack_event_fingerprint=fingerprint,
+            slack_event_claim_token=claim_token,
+            roo_settings=configured,
+        )
+    )
+    work_finished = False
+
+    async def work():
+        nonlocal work_finished
+        work_finished = True
+
+    await main_module._start_slack_event_task(request, work())
+
+    assert work_finished
+    assert store.claim_lease(fingerprint, lease_seconds=45) is None
+
+
+@pytest.mark.asyncio
+async def test_failed_account_link_task_releases_receipt_for_retry(tmp_path):
+    configured = _settings(tmp_path)
+    fingerprint = "d" * 64
+    store = get_slack_receipt_store(configured.SLACK_RECEIPTS_DB_PATH)
+    claim_token = store.claim_lease(fingerprint, lease_seconds=45)
+    request = SimpleNamespace(
+        state=SimpleNamespace(
+            slack_event_fingerprint=fingerprint,
+            slack_event_claim_token=claim_token,
+            roo_settings=configured,
+        )
+    )
+
+    async def fail():
+        raise RuntimeError("simulated worker failure")
+
+    with pytest.raises(RuntimeError, match="simulated worker failure"):
+        await main_module._start_slack_event_task(request, fail())
+
+    assert store.claim_lease(fingerprint, lease_seconds=45) is not None
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("link", True),
+        ("<@UROO123> link my mlai account", True),
+        ("link my github account", False),
+        ("connect me with a founder", False),
+    ],
+)
+def test_only_exact_account_link_events_use_recoverable_receipts(text, expected):
+    body = json.dumps(
+        {
+            "type": "event_callback",
+            "event": {
+                "type": "message",
+                "channel_type": "im",
+                "user": "U123",
+                "text": text,
+            },
+        }
+    ).encode()
+
+    assert main_module._is_account_link_slack_event(body) is expected
 
 
 @pytest.mark.parametrize(

@@ -234,9 +234,20 @@ jobs:
             # Go to the sub-project directory
             cd "$DEPLOY_DIR/roo-standalone"
 
+            schema_migration_started=0
             restore_previous_release() {
               trap - ERR
               set +e
+              if [ "$schema_migration_started" = "1" ]; then
+                # The v2 migration clears raw Slack text and quarantines
+                # ambiguous v1 notification state. Reintroducing the v1
+                # writer after that boundary would recreate both hazards.
+                echo "Deployment failed after coworking schema advancement began; keeping Roo safely stopped"
+                docker compose stop roo || true
+                echo "Complete the documented forward recovery before restarting Roo"
+                rm -f "$previous_env_backup"
+                return
+              fi
               echo "Deployment failed; restoring the previous Roo release"
               if [ -n "$previous_env_backup" ] && [ -f "$previous_env_backup" ]; then
                 cp "$previous_env_backup" "$DEPLOY_DIR/roo-standalone/.env"
@@ -295,6 +306,10 @@ jobs:
             # migration before any new application process can report ready.
             docker compose build roo
             if [ "$COWORKING_INTENTS_V2_MIGRATION_APPROVED" = "true" ]; then
+              # Stop every process that can write the shared SQLite volume
+              # before crossing the irreversible privacy/outbox boundary.
+              docker compose stop roo
+              schema_migration_started=1
               docker compose run -T --rm --no-deps roo \
                 python scripts/migrate_coworking_booking_intents_v2.py </dev/null
             else

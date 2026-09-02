@@ -91,6 +91,7 @@ def migrate_coworking_booking_intents_v2(db_path: str | Path) -> None:
                 "PRAGMA table_info(coworking_booking_intents)"
             ).fetchall()
         }
+        had_notification_status = "notification_status" in columns
         additions = {
             "requested_by_slack_id": "TEXT",
             "notification_status": "TEXT NOT NULL DEFAULT 'not_required'",
@@ -106,6 +107,23 @@ def migrate_coworking_booking_intents_v2(db_path: str | Path) -> None:
                 conn.execute(
                     f"ALTER TABLE {TABLE_NAME} ADD COLUMN {column_name} {definition}"
                 )
+
+        if not had_notification_status:
+            # V1 committed terminal mutation state before its best-effort
+            # Slack send. Delivery therefore cannot be inferred for historical
+            # confirmed/blocked rows. Quarantine them for manual reconciliation
+            # instead of silently declaring the notification unnecessary or
+            # risking a duplicate notification.
+            conn.execute(
+                "UPDATE coworking_booking_intents "
+                "SET notification_status = 'reconciliation_required', "
+                "notification_next_attempt_at = NULL, "
+                "notification_locked_until = NULL, "
+                "notification_locked_by = NULL, "
+                "notification_last_error = 'legacy_delivery_unknown', "
+                "notification_delivered_at = NULL "
+                "WHERE status IN ('confirmed', 'blocked')"
+            )
 
         # Canonical fields are sufficient for replay. Remove historical raw
         # Slack text once, under the same transaction as the schema upgrade.

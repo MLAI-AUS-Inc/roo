@@ -47,6 +47,7 @@ class Settings(BaseSettings):
     SLACK_SIGNING_SECRET: Optional[str] = None
     SLACK_REQUEST_MAX_AGE_SECONDS: int = 300
     SLACK_RECEIPT_TTL_SECONDS: int = 10 * 60
+    SLACK_EVENT_PROCESSING_LEASE_SECONDS: int = 45
     SLACK_RECEIPTS_DB_PATH: str = "data/slack_request_receipts.db"
     SLACK_CONTEXTUAL_STATE_DB_PATH: str = "data/slack_contextual_responses.db"
     SLACK_MODERATOR_USER_TOKEN: Optional[str] = None
@@ -319,6 +320,11 @@ class Settings(BaseSettings):
         if self.SLACK_RECEIPT_TTL_SECONDS < self.SLACK_REQUEST_MAX_AGE_SECONDS:
             raise ValueError(
                 "SLACK_RECEIPT_TTL_SECONDS must be at least SLACK_REQUEST_MAX_AGE_SECONDS"
+            )
+        if not 5 <= self.SLACK_EVENT_PROCESSING_LEASE_SECONDS < self.SLACK_RECEIPT_TTL_SECONDS:
+            raise ValueError(
+                "SLACK_EVENT_PROCESSING_LEASE_SECONDS must be at least 5 seconds "
+                "and shorter than SLACK_RECEIPT_TTL_SECONDS"
             )
         if not str(self.SLACK_RECEIPTS_DB_PATH or "").strip():
             raise ValueError("SLACK_RECEIPTS_DB_PATH is required")

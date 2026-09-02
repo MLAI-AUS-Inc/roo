@@ -724,6 +724,84 @@ def test_explicit_schema_migration_is_idempotent(tmp_path):
     coworking.CoworkingBookingIntentStore(db_path).validate_schema()
 
 
+@pytest.mark.parametrize("legacy_status", ["confirmed", "blocked"])
+def test_v1_terminal_rows_are_quarantined_when_delivery_is_unknown(
+    tmp_path,
+    legacy_status,
+):
+    db_path = tmp_path / "legacy-intents.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE coworking_booking_intents (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                idempotency_key TEXT NOT NULL UNIQUE,
+                slack_user_id TEXT NOT NULL,
+                requested_by_slack_id TEXT,
+                booking_date TEXT NOT NULL,
+                channel_id TEXT,
+                thread_ts TEXT,
+                request_text TEXT,
+                status TEXT NOT NULL,
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                next_attempt_at REAL NOT NULL,
+                locked_until REAL,
+                locked_by TEXT,
+                last_error TEXT,
+                backend_booking_id TEXT,
+                backend_result_json TEXT,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                confirmed_at REAL
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO coworking_booking_intents (
+                idempotency_key, slack_user_id, requested_by_slack_id,
+                booking_date, channel_id, thread_ts, request_text, status,
+                next_attempt_at, last_error, backend_result_json,
+                created_at, updated_at, confirmed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                f"legacy-{legacy_status}",
+                "U123",
+                "U123",
+                "2026-04-22",
+                "C123",
+                "111.222",
+                "private raw Slack message",
+                legacy_status,
+                0.0,
+                "backend_http_400" if legacy_status == "blocked" else None,
+                '{"id":"booking-1","date":"2026-04-22"}',
+                1.0,
+                2.0,
+                2.0 if legacy_status == "confirmed" else None,
+            ),
+        )
+
+    schema_module.migrate_coworking_booking_intents_v2(db_path)
+    migrated = coworking.CoworkingBookingIntentStore(db_path).get_by_key(
+        f"legacy-{legacy_status}"
+    )
+
+    assert migrated["request_text"] is None
+    assert migrated["notification_status"] == "reconciliation_required"
+    assert migrated["notification_last_error"] == "legacy_delivery_unknown"
+    assert migrated["notification_next_attempt_at"] is None
+    assert migrated["notification_delivered_at"] is None
+
+    # A repeated migration must not turn the quarantine into an automatic
+    # delivery or mark it safe for retention cleanup.
+    schema_module.migrate_coworking_booking_intents_v2(db_path)
+    assert coworking.CoworkingBookingIntentStore(db_path).get_by_key(
+        f"legacy-{legacy_status}"
+    )["notification_status"] == "reconciliation_required"
+
+
 def test_store_schema_validation_is_read_only(tmp_path):
     db_path = tmp_path / "intents.db"
     schema_module.migrate_coworking_booking_intents_v2(db_path)
