@@ -395,6 +395,7 @@ async def test_fast_coworking_booking_surfaces_terminal_backend_reason(
     tmp_path,
 ):
     store = coworking_intent_store(tmp_path / "coworking.db")
+    posted_messages = []
 
     class TerminalCoworkingClient:
         def __init__(self, *args, **kwargs):
@@ -428,6 +429,11 @@ async def test_fast_coworking_booking_surfaces_terminal_backend_reason(
     agent.skills = [FakeSkill()]
     agent.skill_executor = SkillExecutor()
     monkeypatch.setattr(executor_module, "get_coworking_intent_store", lambda: store)
+    monkeypatch.setattr(
+        coworking_module,
+        "_safe_post_message",
+        lambda **kwargs: posted_messages.append(kwargs) or True,
+    )
     monkeypatch.setattr("roo.slack_client.get_bot_user_id", lambda: "UROO")
     monkeypatch.setattr(
         agent_module,
@@ -448,12 +454,18 @@ async def test_fast_coworking_booking_surfaces_terminal_backend_reason(
         thread_ts="111.222",
     )
 
-    assert result["message"] == (
+    assert result["message"] == ""
+    assert result["suppress_post"] is True
+    assert posted_messages[0]["text"] == (
         "🛑 I couldn't book you in for **2026-08-25**: "
         "Please link your Slack account first"
     )
-    assert result["data"] == {"action": "book_coworking"}
-    assert "connecting" not in result["message"]
+    assert result["data"] == {
+        "action": "book_coworking",
+        "booking_blocked": True,
+        "notification_status": "delivered",
+    }
+    assert "connecting" not in posted_messages[0]["text"]
 
 
 class CoworkingClient:

@@ -6,7 +6,7 @@ import sqlite3
 import threading
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
 import httpx
@@ -825,6 +825,7 @@ async def deliver_coworking_booking_notification(
     client: Any = None,
     executor: Any = None,
     post_public_message: Optional[bool] = None,
+    blocked_message: Optional[str] = None,
 ) -> dict[str, Any]:
     """Deliver a confirmed booking notification with durable retry ownership."""
     store = store or get_coworking_intent_store()
@@ -845,10 +846,13 @@ async def deliver_coworking_booking_notification(
             delivered = _safe_post_message(
                 channel_id=intent.get("channel_id"),
                 thread_ts=intent.get("thread_ts"),
-                text=_coworking_retry_blocked_message(
-                    slack_user_id=slack_user_id,
-                    requested_by_slack_id=requested_by_slack_id,
-                    error=error_code,
+                text=(
+                    blocked_message
+                    or _coworking_retry_blocked_message(
+                        slack_user_id=slack_user_id,
+                        requested_by_slack_id=requested_by_slack_id,
+                        error=error_code,
+                    )
                 ),
                 client_msg_id=str(
                     uuid5(
@@ -1072,6 +1076,7 @@ async def coworking_booking_retry_loop(
     *,
     store: Optional[CoworkingBookingIntentStore] = None,
     poll_seconds: Optional[float] = None,
+    health_reporter: Optional[Callable[[dict[str, Any]], None]] = None,
 ) -> None:
     settings = get_settings()
     store = store or get_coworking_intent_store()
@@ -1082,6 +1087,7 @@ async def coworking_booking_retry_loop(
     )
     owner = f"roo-retry-worker-{uuid4().hex}"
     last_cleanup_at = 0.0
+    consecutive_failures = 0
     print(f"🏢 Coworking booking retry worker started owner={owner} poll_seconds={poll_interval}")
 
     while True:
@@ -1115,9 +1121,28 @@ async def coworking_booking_retry_loop(
                     intent,
                     store=store,
                 )
+            consecutive_failures = 0
+            if health_reporter is not None:
+                health_reporter(
+                    {
+                        "status": "ok",
+                        "consecutive_failures": 0,
+                        "last_success_at": _now(),
+                    }
+                )
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            consecutive_failures += 1
+            if health_reporter is not None:
+                health_reporter(
+                    {
+                        "status": "degraded",
+                        "consecutive_failures": consecutive_failures,
+                        "last_error_type": exc.__class__.__name__,
+                        "last_failure_at": _now(),
+                    }
+                )
             print(
                 "🏢 coworking_retry_worker_error "
                 f"exc_type={exc.__class__.__name__}"

@@ -1074,6 +1074,7 @@ def test_terminal_retention_preserves_unfinished_notifications(tmp_path):
 @pytest.mark.asyncio
 async def test_retry_loop_runs_bounded_retention_cleanup(monkeypatch):
     calls = []
+    health = []
 
     class FakeStore:
         def purge_terminal(self, *, retention_days):
@@ -1102,6 +1103,7 @@ async def test_retry_loop_runs_bounded_retention_cleanup(monkeypatch):
         await coworking.coworking_booking_retry_loop(
             store=FakeStore(),
             poll_seconds=0,
+            health_reporter=health.append,
         )
 
     assert calls == [
@@ -1109,6 +1111,35 @@ async def test_retry_loop_runs_bounded_retention_cleanup(monkeypatch):
         ("mutations", 10, True),
         ("notifications", 10, True),
     ]
+    assert health[-1]["status"] == "ok"
+    assert health[-1]["consecutive_failures"] == 0
+
+
+@pytest.mark.asyncio
+async def test_retry_loop_failure_degrades_health_before_next_poll(monkeypatch):
+    health = []
+
+    class BrokenStore:
+        def purge_terminal(self, *, retention_days):
+            raise sqlite3.OperationalError("simulated storage failure")
+
+    async def stop_after_failure(_seconds):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(coworking.asyncio, "sleep", stop_after_failure)
+
+    with pytest.raises(asyncio.CancelledError):
+        await coworking.coworking_booking_retry_loop(
+            store=BrokenStore(),
+            poll_seconds=0,
+            health_reporter=health.append,
+        )
+
+    assert len(health) == 1
+    assert health[0]["status"] == "degraded"
+    assert health[0]["consecutive_failures"] == 1
+    assert health[0]["last_error_type"] == "OperationalError"
+    assert isinstance(health[0]["last_failure_at"], float)
 
 
 @pytest.mark.asyncio

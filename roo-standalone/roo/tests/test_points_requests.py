@@ -3648,6 +3648,7 @@ async def test_book_coworking_surfaces_terminal_backend_reason_instead_of_outage
     monkeypatch,
 ):
     store = coworking_intent_store(tmp_path / "intents.db")
+    posted_messages = []
 
     class UnlinkedCoworkingClient:
         def __init__(self):
@@ -3673,6 +3674,11 @@ async def test_book_coworking_surfaces_terminal_backend_reason_instead_of_outage
     client = UnlinkedCoworkingClient()
     executor = SkillExecutor()
     monkeypatch.setattr(executor_module, "get_coworking_intent_store", lambda: store)
+    monkeypatch.setattr(
+        coworking_module,
+        "_safe_post_message",
+        lambda **kwargs: posted_messages.append(kwargs) or True,
+    )
 
     result = await executor._handle_points_action(
         client=client,
@@ -3686,14 +3692,67 @@ async def test_book_coworking_surfaces_terminal_backend_reason_instead_of_outage
     )
 
     intent = store.get_by_key("coworking:U123:2026-08-25")
-    assert result == (
+    assert result["message"] == ""
+    assert result["suppress_post"] is True
+    assert posted_messages[0]["text"] == (
         "🛑 I couldn't book you in for **2026-08-25**: "
         "Please link your Slack account first"
     )
-    assert "connecting" not in result
+    assert "connecting" not in posted_messages[0]["text"]
     assert client.calls == 1
     assert intent["status"] == "blocked"
     assert intent["attempt_count"] == 1
+    assert intent["notification_status"] == "delivered"
+
+
+@pytest.mark.asyncio
+async def test_terminal_coworking_rejection_survives_delivery_crash(
+    tmp_path,
+    monkeypatch,
+):
+    store = coworking_intent_store(tmp_path / "intents.db")
+
+    class RejectedCoworkingClient:
+        async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None):
+            request = httpx.Request("POST", "https://backend.test/coworking")
+            response = httpx.Response(400, request=request, json={"error": "Rejected"})
+            raise httpx.HTTPStatusError(
+                "bad request",
+                request=request,
+                response=response,
+            )
+
+    def fail_delivery(**kwargs):
+        raise RuntimeError("Slack unavailable")
+
+    monkeypatch.setattr(executor_module, "get_coworking_intent_store", lambda: store)
+    monkeypatch.setattr(coworking_module, "_safe_post_message", fail_delivery)
+
+    result = await SkillExecutor()._handle_points_action(
+        client=RejectedCoworkingClient(),
+        action="book_coworking",
+        params={"date": "2026-08-25"},
+        text="book me in",
+        user_id="U123",
+        channel_id="C123",
+        thread_ts="111.222",
+        skill=SimpleNamespace(name="mlai-points"),
+    )
+
+    intent = store.get_by_key("coworking:U123:2026-08-25")
+    assert result["suppress_post"] is True
+    assert intent["status"] == "blocked"
+    assert intent["notification_status"] == "pending_retry"
+    assert intent["notification_delivered_at"] is None
+
+    with store._connect() as conn:
+        conn.execute(
+            "UPDATE coworking_booking_intents "
+            "SET notification_next_attempt_at = 0 WHERE id = ?",
+            (intent["id"],),
+        )
+    due = store.claim_due_notifications(owner="restarted-worker", limit=10)
+    assert [row["id"] for row in due] == [intent["id"]]
 
 
 @pytest.mark.asyncio
@@ -3703,6 +3762,7 @@ async def test_book_coworking_redacts_balance_rejection_in_channel(
 ):
     store = coworking_intent_store(tmp_path / "intents.db")
     direct_messages = []
+    posted_messages = []
 
     class InsufficientBalanceCoworkingClient:
         async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None):
@@ -3731,6 +3791,11 @@ async def test_book_coworking_redacts_balance_rejection_in_channel(
         lambda user_id, text, **kwargs: direct_messages.append((user_id, text))
         or {"ok": True},
     )
+    monkeypatch.setattr(
+        coworking_module,
+        "_safe_post_message",
+        lambda **kwargs: posted_messages.append(kwargs) or True,
+    )
 
     result = await SkillExecutor()._handle_points_action(
         client=InsufficientBalanceCoworkingClient(),
@@ -3743,12 +3808,14 @@ async def test_book_coworking_redacts_balance_rejection_in_channel(
         skill=SimpleNamespace(name="mlai-points"),
     )
 
-    assert result["message"] == (
+    assert result["message"] == ""
+    assert result["suppress_post"] is True
+    assert posted_messages[0]["text"] == (
         "🛑 I couldn't book you in for **2026-08-25**: "
         "There are not enough Roo Points for this action."
     )
-    assert "balance: 0" not in result["message"]
-    assert "< 8" not in result["message"]
+    assert "balance: 0" not in posted_messages[0]["text"]
+    assert "< 8" not in posted_messages[0]["text"]
     assert direct_messages == [
         (
             "U123",
@@ -3757,7 +3824,9 @@ async def test_book_coworking_redacts_balance_rejection_in_channel(
             "Your current balance is **0 Roo Points**.",
         )
     ]
-    assert store.get_by_key("coworking:U123:2026-08-25")["status"] == "blocked"
+    stored = store.get_by_key("coworking:U123:2026-08-25")
+    assert stored["status"] == "blocked"
+    assert stored["notification_status"] == "delivered"
 
 
 @pytest.mark.asyncio

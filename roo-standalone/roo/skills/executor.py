@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Optional, List
 from difflib import SequenceMatcher
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid4, uuid5
 import httpx
 
 from .loader import Skill
@@ -14398,6 +14398,7 @@ Chunk {index} source: {label}
         thread_ts: Optional[str],
         admin_checkin: bool,
         exc: httpx.HTTPStatusError,
+        client_msg_id: Optional[str] = None,
     ) -> Any:
         """Render a terminal backend rejection without calling it an outage."""
         status_code = exc.response.status_code
@@ -14450,6 +14451,7 @@ Chunk {index} source: {label}
             public_message=public_message,
             action="book_coworking_error",
             private_ack=public_message,
+            client_msg_id=client_msg_id,
         )
 
     def _format_admin_coworking_batch_success(
@@ -14665,6 +14667,7 @@ Chunk {index} source: {label}
                 int(leased_intent["id"]),
                 owner=mutation_owner,
                 error=error,
+                notification_required=True,
             )
             if blocked is None:
                 return self._coworking_booking_already_queued_message(
@@ -14677,7 +14680,27 @@ Chunk {index} source: {label}
                     "🏢 coworking_booking_terminal_rejection "
                     f"status={exc.response.status_code}"
                 )
-                return await self._format_coworking_booking_rejection(
+                notification = store.reserve_notification(
+                    int(leased_intent["id"]),
+                    owner=f"roo-sync-rejection-{uuid4().hex}",
+                )
+                if notification is None:
+                    return {
+                        "message": "",
+                        "suppress_post": True,
+                        "data": {
+                            "action": "book_coworking",
+                            "booking_blocked": True,
+                            "notification_status": blocked.get("notification_status"),
+                        },
+                    }
+                rejection_client_msg_id = str(
+                    uuid5(
+                        NAMESPACE_URL,
+                        f"roo:coworking-rejection:{leased_intent['id']}:{error}",
+                    )
+                )
+                rendered_rejection = await self._format_coworking_booking_rejection(
                     client=client,
                     target_user_id=target_user_id,
                     requested_by_user_id=requested_by_user_id,
@@ -14686,7 +14709,31 @@ Chunk {index} source: {label}
                     thread_ts=thread_ts,
                     admin_checkin=admin_checkin,
                     exc=exc,
+                    client_msg_id=rejection_client_msg_id,
                 )
+                rejection_message = (
+                    str(rendered_rejection.get("message") or "")
+                    if isinstance(rendered_rejection, dict)
+                    else str(rendered_rejection or "")
+                )
+                notification_result = await deliver_coworking_booking_notification(
+                    notification,
+                    store=store,
+                    client=client,
+                    executor=self,
+                    blocked_message=rejection_message,
+                )
+                return {
+                    "message": "",
+                    "suppress_post": True,
+                    "data": {
+                        "action": "book_coworking",
+                        "booking_blocked": True,
+                        "notification_status": notification_result.get(
+                            "notification_status"
+                        ),
+                    },
+                }
             raise
 
         notification = store.reserve_notification(

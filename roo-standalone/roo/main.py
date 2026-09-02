@@ -2671,7 +2671,19 @@ async def lifespan(app: FastAPI):
         # Read-only validation keeps readiness false until the separately
         # approved one-shot schema migration has completed.
         get_coworking_intent_store().validate_schema()
-        coworking_retry_task = asyncio.create_task(coworking_booking_retry_loop())
+        app.state.coworking_retry_health = {
+            "status": "starting",
+            "consecutive_failures": 0,
+        }
+
+        def report_coworking_retry_health(health: dict[str, Any]) -> None:
+            app.state.coworking_retry_health = dict(health)
+
+        coworking_retry_task = asyncio.create_task(
+            coworking_booking_retry_loop(
+                health_reporter=report_coworking_retry_health,
+            )
+        )
         app.state.coworking_retry_task = coworking_retry_task
         if settings.MEETING_ROOM_BOOKING_ENABLED:
             meeting_room_action_store = get_meeting_room_action_store(
@@ -2836,6 +2848,21 @@ async def readiness_check():
             status_code=503,
         )
     settings = get_settings()
+    if settings.ROO_SURFACE == "public":
+        retry_health = getattr(app.state, "coworking_retry_health", None)
+        if retry_health is not None and retry_health.get("status") != "ok":
+            return JSONResponse(
+                {
+                    "status": "not_ready",
+                    "service": "roo",
+                    "component": "coworking_booking_retry_worker",
+                    "component_status": retry_health.get("status", "unknown"),
+                    "consecutive_failures": int(
+                        retry_health.get("consecutive_failures", 0)
+                    ),
+                },
+                status_code=503,
+            )
     payload = {
         "status": "ok",
         "service": "roo",

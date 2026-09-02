@@ -1,4 +1,5 @@
 import asyncio
+import json
 import sys
 from pathlib import Path
 
@@ -455,3 +456,31 @@ def test_admin_readiness_reports_the_enforced_runtime_shape(monkeypatch):
     assert payload["org_brain_enabled"] is True
     assert payload["org_brain_actions_enabled"] is False
     assert payload["contextual_shadow_mode"] is False
+
+
+def test_public_readiness_degrades_with_required_retry_worker(monkeypatch):
+    configured = settings(ROO_SURFACE="public")
+    monkeypatch.setattr(main_module, "get_settings", lambda: configured)
+    monkeypatch.setattr(main_module.app.state, "startup_complete", True, raising=False)
+    monkeypatch.setattr(
+        main_module.app.state,
+        "coworking_retry_health",
+        {
+            "status": "degraded",
+            "consecutive_failures": 3,
+            "last_error_type": "OperationalError",
+        },
+        raising=False,
+    )
+
+    response = asyncio.run(main_module.readiness_check())
+    payload = json.loads(response.body)
+
+    assert response.status_code == 503
+    assert payload == {
+        "status": "not_ready",
+        "service": "roo",
+        "component": "coworking_booking_retry_worker",
+        "component_status": "degraded",
+        "consecutive_failures": 3,
+    }
