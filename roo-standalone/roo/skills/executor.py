@@ -14750,6 +14750,11 @@ Chunk {index} source: {label}
         # =====================================================================
 
         if action == "link_founder_account":
+            if not bool(getattr(get_settings(), "FOUNDER_ACCOUNT_LINK_ENABLED", False)):
+                return (
+                    "Founder Tools account linking is not available yet. "
+                    "Please try again after the MLAI team enables it."
+                )
             try:
                 result = await client.start_founder_account_link(user_id)
             except MLAIBackendUnavailableError:

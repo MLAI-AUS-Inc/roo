@@ -333,6 +333,39 @@ async def test_account_link_mention_ingress_logs_no_identity_or_token_sentinels(
     assert "[url]" in output
 
 
+def test_account_link_button_click_log_excludes_slack_identity(tmp_path, capsys):
+    configured = _settings(tmp_path, FOUNDER_ACCOUNT_LINK_ENABLED=True)
+    main_module.app.dependency_overrides[get_settings] = lambda: configured
+    client = TestClient(main_module.app)
+    slack_user_id = "UACCOUNTLINKSENTINEL"
+    payload = {
+        "type": "block_actions",
+        "user": {"id": slack_user_id},
+        "channel": {"id": "DPRIVATE123"},
+        "team": {"id": "TWORKSPACE123"},
+        "message": {"ts": "1758000000.123456"},
+        "actions": [{"action_id": "roo_link_founder_account"}],
+    }
+    body = urlencode({"payload": json.dumps(payload)}).encode("utf-8")
+    timestamp = int(time.time())
+
+    response = client.post(
+        "/slack/actions",
+        content=body,
+        headers=_signed_headers(
+            configured.SLACK_SIGNING_SECRET,
+            timestamp,
+            body,
+            "application/x-www-form-urlencoded",
+        ),
+    )
+
+    assert response.status_code == 200
+    output = capsys.readouterr().out
+    assert "FOUNDER_ACCOUNT_LINK_BUTTON_CLICKED" in output
+    assert slack_user_id not in output
+
+
 @pytest.mark.parametrize(
     "channel_payload",
     [

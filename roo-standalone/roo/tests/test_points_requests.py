@@ -14,11 +14,17 @@ sys.modules.pop("roo.skills.executor", None)
 
 backend_module = importlib.import_module("roo.clients.mlai_backend")
 coworking_module = importlib.import_module("roo.coworking_booking_intents")
+coworking_schema_module = importlib.import_module("roo.coworking_booking_schema_v2")
 main_module = importlib.import_module("roo.main")
 approval_module = importlib.import_module("roo.points_request_approval")
 slack_client_module = importlib.import_module("roo.slack_client")
 executor_module = importlib.import_module("roo.skills.executor")
 SkillExecutor = executor_module.SkillExecutor
+
+
+def coworking_intent_store(db_path):
+    coworking_schema_module.migrate_coworking_booking_intents_v2(db_path)
+    return coworking_module.CoworkingBookingIntentStore(db_path)
 
 
 def complete_coworking_booking_result(
@@ -2695,6 +2701,7 @@ async def test_execute_mlai_points_returns_backend_unavailable_message(monkeypat
             MLAI_API_KEY="api-key",
             ROO_API_KEY="roo-api-key",
             INTERNAL_API_KEY="internal-key",
+            FOUNDER_ACCOUNT_LINK_ENABLED=False,
         ),
     )
 
@@ -2713,7 +2720,7 @@ async def test_execute_mlai_points_returns_backend_unavailable_message(monkeypat
 @pytest.mark.asyncio
 async def test_book_coworking_still_succeeds_when_balance_refresh_times_out(tmp_path):
     monkeypatch = pytest.MonkeyPatch()
-    store = coworking_module.CoworkingBookingIntentStore(tmp_path / "intents.db")
+    store = coworking_intent_store(tmp_path / "intents.db")
 
     class FakeCoworkingClient:
         async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None):
@@ -2751,7 +2758,7 @@ async def test_book_coworking_still_succeeds_when_balance_refresh_times_out(tmp_
 
 @pytest.mark.asyncio
 async def test_book_coworking_defaults_missing_date_to_today(tmp_path, monkeypatch):
-    store = coworking_module.CoworkingBookingIntentStore(tmp_path / "intents.db")
+    store = coworking_intent_store(tmp_path / "intents.db")
 
     class FakeCoworkingClient:
         def __init__(self):
@@ -2824,7 +2831,7 @@ class FakeAdminCheckinCoworkingClient:
 
 @pytest.mark.asyncio
 async def test_admin_checkin_books_target_for_today(tmp_path, monkeypatch):
-    store = coworking_module.CoworkingBookingIntentStore(tmp_path / "intents.db")
+    store = coworking_intent_store(tmp_path / "intents.db")
     client = FakeAdminCheckinCoworkingClient(balance=13)
     executor = SkillExecutor()
     monkeypatch.setattr("roo.utils.get_current_date", lambda: date(2026, 5, 4))
@@ -2860,7 +2867,7 @@ async def test_admin_checkin_books_target_for_today(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_admin_checkin_book_mention_phrase_books_target_for_today(tmp_path, monkeypatch):
-    store = coworking_module.CoworkingBookingIntentStore(tmp_path / "intents.db")
+    store = coworking_intent_store(tmp_path / "intents.db")
     client = FakeAdminCheckinCoworkingClient(balance=13)
     executor = SkillExecutor()
     monkeypatch.setattr("roo.utils.get_current_date", lambda: date(2026, 5, 4))
@@ -2894,7 +2901,7 @@ async def test_admin_checkin_book_mention_phrase_books_target_for_today(tmp_path
 
 @pytest.mark.asyncio
 async def test_admin_checkin_honors_explicit_date(tmp_path, monkeypatch):
-    store = coworking_module.CoworkingBookingIntentStore(tmp_path / "intents.db")
+    store = coworking_intent_store(tmp_path / "intents.db")
     client = FakeAdminCheckinCoworkingClient()
     executor = SkillExecutor()
     monkeypatch.setattr(executor_module, "get_coworking_intent_store", lambda: store)
@@ -2919,7 +2926,7 @@ async def test_admin_checkin_honors_explicit_date(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_admin_checkin_denies_partner_without_booking(tmp_path, monkeypatch):
-    store = coworking_module.CoworkingBookingIntentStore(tmp_path / "intents.db")
+    store = coworking_intent_store(tmp_path / "intents.db")
     client = FakeAdminCheckinCoworkingClient(role="partner")
     executor = SkillExecutor()
     monkeypatch.setattr("roo.utils.get_current_date", lambda: date(2026, 5, 4))
@@ -2976,7 +2983,7 @@ async def test_admin_checkin_requires_exactly_one_target(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_book_coworking_with_target_mention_refuses_self_booking(tmp_path, monkeypatch):
-    store = coworking_module.CoworkingBookingIntentStore(tmp_path / "intents.db")
+    store = coworking_intent_store(tmp_path / "intents.db")
     client = FakeAdminCheckinCoworkingClient()
     executor = SkillExecutor()
     monkeypatch.setattr("roo.utils.get_current_date", lambda: date(2026, 5, 4))
@@ -3008,7 +3015,7 @@ async def test_admin_checkin_insufficient_balance_message_names_target(tmp_path,
         request=request,
         json={"detail": "Insufficient balance: need 1 point"},
     )
-    store = coworking_module.CoworkingBookingIntentStore(tmp_path / "intents.db")
+    store = coworking_intent_store(tmp_path / "intents.db")
     client = FakeAdminCheckinCoworkingClient(
         book_exception=httpx.HTTPStatusError("bad request", request=request, response=response),
         balance=0,
@@ -3533,7 +3540,7 @@ async def test_execute_mlai_points_html_500_uses_backend_unavailable_message(mon
 
 @pytest.mark.asyncio
 async def test_book_coworking_persists_intent_and_queues_backend_timeout(tmp_path, monkeypatch):
-    store = coworking_module.CoworkingBookingIntentStore(tmp_path / "intents.db")
+    store = coworking_intent_store(tmp_path / "intents.db")
 
     class TimeoutCoworkingClient:
         async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None):
@@ -3570,7 +3577,7 @@ async def test_immediate_coworking_stale_worker_cannot_overwrite_winner(
     monkeypatch,
     stale_outcome,
 ):
-    store = coworking_module.CoworkingBookingIntentStore(tmp_path / "intents.db")
+    store = coworking_intent_store(tmp_path / "intents.db")
     original_reserve = store.reserve_for_processing
 
     def reserve_with_expired_sync_lease(intent_id, *, owner=None, lease_seconds=90):
@@ -3640,7 +3647,7 @@ async def test_book_coworking_surfaces_terminal_backend_reason_instead_of_outage
     tmp_path,
     monkeypatch,
 ):
-    store = coworking_module.CoworkingBookingIntentStore(tmp_path / "intents.db")
+    store = coworking_intent_store(tmp_path / "intents.db")
 
     class UnlinkedCoworkingClient:
         def __init__(self):
@@ -3694,7 +3701,7 @@ async def test_book_coworking_redacts_balance_rejection_in_channel(
     tmp_path,
     monkeypatch,
 ):
-    store = coworking_module.CoworkingBookingIntentStore(tmp_path / "intents.db")
+    store = coworking_intent_store(tmp_path / "intents.db")
     direct_messages = []
 
     class InsufficientBalanceCoworkingClient:
@@ -3787,6 +3794,43 @@ async def test_dependency_health_check_reports_degraded_backend(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_dependency_health_requires_founder_link_contract_when_enabled(monkeypatch):
+    class FakeBackendClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def get_backend_readiness(self):
+            return {"status": "ok"}
+
+        async def get_points_health(self):
+            return {"status": "ok"}
+
+        async def get_founder_account_link_health(self):
+            raise backend_module.MLAIBackendUnavailableError("link contract unavailable")
+
+    monkeypatch.setattr(
+        main_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            MLAI_BACKEND_URL="https://backend.test",
+            MLAI_API_KEY="api-key",
+            ROO_API_KEY="roo-api-key",
+            INTERNAL_API_KEY="internal-key",
+            FOUNDER_ACCOUNT_LINK_ENABLED=True,
+        ),
+    )
+    monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeBackendClient)
+    main_module.app.state.startup_complete = True
+
+    result = await main_module.dependency_health_check()
+
+    assert result["status"] == "degraded"
+    backend = result["dependencies"]["mlai_backend"]
+    assert backend["status"] == "degraded"
+    assert "founder_account_link_error" in backend
+
+
+@pytest.mark.asyncio
 async def test_check_coworking_passes_slack_user_id_for_per_user_pricing():
     class FakeAvailabilityClient:
         def __init__(self):
@@ -3824,7 +3868,7 @@ async def test_check_coworking_passes_slack_user_id_for_per_user_pricing():
 
 @pytest.mark.asyncio
 async def test_book_coworking_nudges_founder_when_charged_standard_price(tmp_path, monkeypatch):
-    store = coworking_module.CoworkingBookingIntentStore(tmp_path / "intents.db")
+    store = coworking_intent_store(tmp_path / "intents.db")
 
     class FakeCoworkingClient:
         async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None):
@@ -3878,7 +3922,7 @@ async def test_book_coworking_treats_missing_link_state_as_commit_uncertain(
     tmp_path,
     monkeypatch,
 ):
-    store = coworking_module.CoworkingBookingIntentStore(tmp_path / "intents.db")
+    store = coworking_intent_store(tmp_path / "intents.db")
     class FakeCoworkingClient:
         async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None):
             return {
@@ -3912,7 +3956,7 @@ async def test_book_coworking_treats_missing_link_state_as_commit_uncertain(
 
 @pytest.mark.asyncio
 async def test_book_coworking_omits_nudge_when_discount_applied(tmp_path, monkeypatch):
-    store = coworking_module.CoworkingBookingIntentStore(tmp_path / "intents.db")
+    store = coworking_intent_store(tmp_path / "intents.db")
 
     class FakeCoworkingClient:
         async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None):
@@ -3960,7 +4004,7 @@ async def test_book_coworking_omits_link_nudge_when_accounts_are_linked(
     tmp_path,
     monkeypatch,
 ):
-    store = coworking_module.CoworkingBookingIntentStore(tmp_path / "intents.db")
+    store = coworking_intent_store(tmp_path / "intents.db")
 
     class FakeCoworkingClient:
         async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None):

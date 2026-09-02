@@ -161,11 +161,13 @@ jobs:
           ROO_PRIVATE_BASE_URL: ${{ vars.ROO_PRIVATE_BASE_URL }}
           MEETING_ROOM_BOOKING_ENABLED: ${{ vars.MEETING_ROOM_BOOKING_ENABLED || 'false' }}
           LINEAR_CHANNEL_ISSUE_WRITES_ENABLED: ${{ vars.LINEAR_CHANNEL_ISSUE_WRITES_ENABLED || 'false' }}
+          FOUNDER_ACCOUNT_LINK_ENABLED: ${{ vars.FOUNDER_ACCOUNT_LINK_ENABLED || 'false' }}
+          COWORKING_INTENTS_V2_MIGRATION_APPROVED: ${{ vars.COWORKING_INTENTS_V2_MIGRATION_APPROVED || 'false' }}
         with:
           host: ${{ secrets.DO_HOST }}
           username: ${{ secrets.DO_USERNAME }}
           key: ${{ secrets.DO_SSH_KEY }}
-          envs: SIM_PATIENT_API_KEY,SIM_PATIENT_SAFETY_SALT,ROO_API_KEY,VICTOR_AI_ROO_SIGNING_SECRET,ROO_PRIVATE_BASE_URL,MEETING_ROOM_BOOKING_ENABLED,LINEAR_CHANNEL_ISSUE_WRITES_ENABLED,RELEASE_SHA
+          envs: SIM_PATIENT_API_KEY,SIM_PATIENT_SAFETY_SALT,ROO_API_KEY,VICTOR_AI_ROO_SIGNING_SECRET,ROO_PRIVATE_BASE_URL,MEETING_ROOM_BOOKING_ENABLED,LINEAR_CHANNEL_ISSUE_WRITES_ENABLED,FOUNDER_ACCOUNT_LINK_ENABLED,COWORKING_INTENTS_V2_MIGRATION_APPROVED,RELEASE_SHA
           script: |
             # Stop if any command fails
             set -eu
@@ -197,6 +199,16 @@ jobs:
               false|FALSE|False|0|no|NO|No|off|OFF|Off|'') LINEAR_CHANNEL_ISSUE_WRITES_ENABLED=false ;;
               *) echo "LINEAR_CHANNEL_ISSUE_WRITES_ENABLED must be boolean" >&2; exit 1 ;;
             esac
+            case "$FOUNDER_ACCOUNT_LINK_ENABLED" in
+              true|TRUE|True|1|yes|YES|Yes|on|ON|On) FOUNDER_ACCOUNT_LINK_ENABLED=true ;;
+              false|FALSE|False|0|no|NO|No|off|OFF|Off|'') FOUNDER_ACCOUNT_LINK_ENABLED=false ;;
+              *) echo "FOUNDER_ACCOUNT_LINK_ENABLED must be boolean" >&2; exit 1 ;;
+            esac
+            case "$COWORKING_INTENTS_V2_MIGRATION_APPROVED" in
+              true|TRUE|True|1|yes|YES|Yes|on|ON|On) COWORKING_INTENTS_V2_MIGRATION_APPROVED=true ;;
+              false|FALSE|False|0|no|NO|No|off|OFF|Off|'') COWORKING_INTENTS_V2_MIGRATION_APPROVED=false ;;
+              *) echo "COWORKING_INTENTS_V2_MIGRATION_APPROVED must be boolean" >&2; exit 1 ;;
+            esac
             
             # Define deployment directory
             DEPLOY_DIR="/root/roo"
@@ -207,6 +219,12 @@ jobs:
               git clone https://github.com/MLAI-AUS-Inc/roo.git "$DEPLOY_DIR"
             fi
             cd "$DEPLOY_DIR"
+            previous_release_sha="$(git rev-parse HEAD 2>/dev/null || true)"
+            previous_env_backup=""
+            if [ -f roo-standalone/.env ]; then
+              previous_env_backup="$(mktemp)"
+              cp roo-standalone/.env "$previous_env_backup"
+            fi
             git fetch origin main
             git cat-file -e "${RELEASE_SHA}^{commit}"
             git merge-base --is-ancestor "$RELEASE_SHA" origin/main
@@ -215,6 +233,26 @@ jobs:
             
             # Go to the sub-project directory
             cd "$DEPLOY_DIR/roo-standalone"
+
+            restore_previous_release() {
+              trap - ERR
+              set +e
+              echo "Deployment failed; restoring the previous Roo release"
+              if [ -n "$previous_env_backup" ] && [ -f "$previous_env_backup" ]; then
+                cp "$previous_env_backup" "$DEPLOY_DIR/roo-standalone/.env"
+              fi
+              if printf '%s' "$previous_release_sha" | grep -Eq '^[0-9a-f]{40}$' \
+                && [ "$previous_release_sha" != "$RELEASE_SHA" ]; then
+                cd "$DEPLOY_DIR"
+                git checkout --detach "$previous_release_sha"
+                cd "$DEPLOY_DIR/roo-standalone"
+                docker compose up -d --build --remove-orphans
+              else
+                echo "No distinct previous release was available for automatic rollback" >&2
+              fi
+              rm -f "$previous_env_backup"
+            }
+            trap restore_previous_release ERR
 
             docker network inspect roo-admin-gateway >/dev/null 2>&1 \
               || docker network create roo-admin-gateway
@@ -245,11 +283,28 @@ jobs:
             upsert_env "ROO_POINTS_STRIPE_CHECKOUT_HOSTS" "checkout.stripe.com"
             upsert_env "MEETING_ROOM_BOOKING_ENABLED" "$MEETING_ROOM_BOOKING_ENABLED"
             upsert_env "FOUNDER_TOOLS_LINK_ORIGINS" "https://mlai.au"
-            upsert_env "ROO_IMPLICIT_ACTION_ALLOWLIST" "respond_in_chat,mlai-points:balance,mlai-points:topup_points,mlai-points:link_founder_account"
+            upsert_env "FOUNDER_ACCOUNT_LINK_ENABLED" "$FOUNDER_ACCOUNT_LINK_ENABLED"
+            implicit_actions="respond_in_chat,mlai-points:balance,mlai-points:topup_points"
+            if [ "$FOUNDER_ACCOUNT_LINK_ENABLED" = "true" ]; then
+              implicit_actions="$implicit_actions,mlai-points:link_founder_account"
+            fi
+            upsert_env "ROO_IMPLICIT_ACTION_ALLOWLIST" "$implicit_actions"
             upsert_env "LINEAR_CHANNEL_ISSUE_WRITES_ENABLED" "$LINEAR_CHANNEL_ISSUE_WRITES_ENABLED"
             
-            # Restart the app
-            docker compose up -d --build --remove-orphans
+            # Build first, then run or validate the explicitly approved schema
+            # migration before any new application process can report ready.
+            docker compose build roo
+            if [ "$COWORKING_INTENTS_V2_MIGRATION_APPROVED" = "true" ]; then
+              docker compose run -T --rm --no-deps roo \
+                python scripts/migrate_coworking_booking_intents_v2.py </dev/null
+            else
+              docker compose run -T --rm --no-deps roo python -c \
+                'from roo.coworking_booking_intents import get_coworking_intent_store; get_coworking_intent_store().validate_schema()' \
+                </dev/null
+            fi
+
+            # Restart the app only after schema validation succeeds.
+            docker compose up -d --no-build --remove-orphans
 
             # Bounded readiness check. Never wait forever on a broken release.
             ready_attempt=0
@@ -258,12 +313,26 @@ jobs:
               ready_attempt=$((ready_attempt + 1))
               if [ "$ready_attempt" -ge 18 ]; then
                 echo "Roo readiness check timed out" >&2
-                exit 1
+                false
               fi
               sleep 5
             done
 
-            docker compose exec -T roo python -c 'from roo.config import get_settings; actions = get_settings().implicit_action_allowlist; assert "mlai-points:link_founder_account" in actions; assert "mlai-points:link_account" not in actions'
+            docker compose exec -T roo python -c 'from roo.config import get_settings; settings = get_settings(); actions = settings.implicit_action_allowlist; assert ("mlai-points:link_founder_account" in actions) is settings.FOUNDER_ACCOUNT_LINK_ENABLED; assert "mlai-points:link_account" not in actions'
+
+            if [ "$FOUNDER_ACCOUNT_LINK_ENABLED" = "true" ]; then
+              curl --silent --show-error --fail --max-time 8 \
+                http://127.0.0.1/healthz/dependencies | python -c '
+              import json, sys
+              payload = json.load(sys.stdin)
+              dependency = payload.get("dependencies", {}).get("mlai_backend", {})
+              assert payload.get("status") == "ok", payload
+              assert dependency.get("founder_account_link") == {
+                  "status": "ok",
+                  "contract": "slack-founder-link-v1",
+              }, payload
+              '
+            fi
 
             if [ "$MEETING_ROOM_BOOKING_ENABLED" = "true" ]; then
               echo "Verifying the Meeting Room skill is enabled on Public Roo..."
@@ -294,7 +363,7 @@ jobs:
                 bridge_attempt=$((bridge_attempt + 1))
                 if [ "$bridge_attempt" -ge 18 ]; then
                   echo "Slack bridge readiness check timed out" >&2
-                  exit 1
+                  false
                 fi
                 sleep 5
               done
@@ -315,9 +384,12 @@ jobs:
                 --data '{"question":""}')"
               if [ "$private_status" != "422" ]; then
                 echo "Private authenticated validation check failed (status $private_status)" >&2
-                exit 1
+                false
               fi
             fi
+
+            trap - ERR
+            rm -f "$previous_env_backup"
             
             # Clean up space
             docker image prune -f

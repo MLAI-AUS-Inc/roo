@@ -70,7 +70,10 @@ from .slack_client import (
     post_message,
     send_dm,
 )
-from .coworking_booking_intents import coworking_booking_retry_loop
+from .coworking_booking_intents import (
+    coworking_booking_retry_loop,
+    get_coworking_intent_store,
+)
 from .boost_moderation import (
     boost_post_retry_loop,
     handle_boost_recheck_reaction,
@@ -2541,6 +2544,9 @@ async def lifespan(app: FastAPI):
     agent = get_agent()
     print(f"   Loaded {len(agent.skills)} skills")
     if settings.ROO_SURFACE == "public":
+        # Read-only validation keeps readiness false until the separately
+        # approved one-shot schema migration has completed.
+        get_coworking_intent_store().validate_schema()
         coworking_retry_task = asyncio.create_task(coworking_booking_retry_loop())
         app.state.coworking_retry_task = coworking_retry_task
         if settings.MEETING_ROOM_BOOKING_ENABLED:
@@ -2751,7 +2757,26 @@ async def dependency_health_check():
         except Exception as exc:
             backend_status["points_error"] = f"{exc.__class__.__name__}: {exc}"
 
-        if backend_status.get("readiness", {}).get("status") == "ok" and backend_status.get("points", {}).get("status") == "ok":
+        if settings.FOUNDER_ACCOUNT_LINK_ENABLED:
+            try:
+                backend_status[
+                    "founder_account_link"
+                ] = await client.get_founder_account_link_health()
+            except Exception as exc:
+                backend_status[
+                    "founder_account_link_error"
+                ] = f"{exc.__class__.__name__}: {exc}"
+
+        founder_link_ready = (
+            not settings.FOUNDER_ACCOUNT_LINK_ENABLED
+            or backend_status.get("founder_account_link")
+            == {"status": "ok", "contract": "slack-founder-link-v1"}
+        )
+        if (
+            backend_status.get("readiness", {}).get("status") == "ok"
+            and backend_status.get("points", {}).get("status") == "ok"
+            and founder_link_ready
+        ):
             backend_status["status"] = "ok"
 
     dependency_status = "ok" if backend_status.get("status") in {"ok", "unconfigured"} else "degraded"
@@ -6394,7 +6419,10 @@ async def slack_actions(
     message = payload.get("message", {})
     thread_ts = message.get("thread_ts") or message.get("ts")
     
-    print(f"🖱️ Action: {action_id} from {user_id}")
+    if action_id == "roo_link_founder_account":
+        print("FOUNDER_ACCOUNT_LINK_BUTTON_CLICKED")
+    else:
+        print(f"🖱️ Action: {action_id} from {user_id}")
 
     if action_id == POINTS_FLEX_ACTION_ID:
         return await _handle_points_flex_confirmation_action(

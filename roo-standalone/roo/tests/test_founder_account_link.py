@@ -40,6 +40,7 @@ def trusted_founder_tools_origin(monkeypatch):
         executor_module,
         "get_settings",
         lambda: SimpleNamespace(
+            FOUNDER_ACCOUNT_LINK_ENABLED=True,
             founder_tools_link_origins={"https://mlai.au"},
             is_production=False,
         ),
@@ -77,6 +78,28 @@ async def execute_link(client, *, channel_id="D123", params=None):
         thread_ts="111.222",
         skill=SimpleNamespace(name="mlai-points"),
     )
+
+
+@pytest.mark.asyncio
+async def test_link_is_fail_closed_without_release_enablement(monkeypatch):
+    client = FakeLinkClient()
+    monkeypatch.setattr(
+        executor_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            FOUNDER_ACCOUNT_LINK_ENABLED=False,
+            founder_tools_link_origins={"https://mlai.au"},
+            is_production=False,
+        ),
+    )
+
+    result = await execute_link(client)
+
+    assert result == (
+        "Founder Tools account linking is not available yet. "
+        "Please try again after the MLAI team enables it."
+    )
+    assert client.slack_user_ids == []
 
 
 @pytest.mark.asyncio

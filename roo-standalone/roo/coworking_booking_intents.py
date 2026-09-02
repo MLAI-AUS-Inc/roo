@@ -12,6 +12,7 @@ from uuid import NAMESPACE_URL, uuid4, uuid5
 import httpx
 
 from .config import get_settings
+from .coworking_booking_schema_v2 import REQUIRED_COLUMNS, REQUIRED_INDEXES
 
 
 DEFAULT_COWORKING_INTENTS_DB_PATH = "data/coworking_booking_intents.db"
@@ -79,98 +80,47 @@ class CoworkingBookingIntentStore:
         conn.execute("PRAGMA busy_timeout=30000")
         return conn
 
+    def _connect_readonly(self) -> sqlite3.Connection:
+        uri = f"{self.db_path.resolve().as_uri()}?mode=ro"
+        conn = sqlite3.connect(uri, uri=True, timeout=30)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout=30000")
+        return conn
+
     def _ensure_schema(self) -> None:
         if self._initialized:
             return
         with self._lock:
             if self._initialized:
                 return
-            with self._connect() as conn:
-                conn.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS coworking_booking_intents (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        idempotency_key TEXT NOT NULL UNIQUE,
-                        slack_user_id TEXT NOT NULL,
-                        requested_by_slack_id TEXT,
-                        booking_date TEXT NOT NULL,
-                        channel_id TEXT,
-                        thread_ts TEXT,
-                        request_text TEXT,
-                        status TEXT NOT NULL,
-                        attempt_count INTEGER NOT NULL DEFAULT 0,
-                        next_attempt_at REAL NOT NULL,
-                        locked_until REAL,
-                        locked_by TEXT,
-                        last_error TEXT,
-                        backend_booking_id TEXT,
-                        backend_result_json TEXT,
-                        created_at REAL NOT NULL,
-                        updated_at REAL NOT NULL,
-                        confirmed_at REAL,
-                        notification_status TEXT NOT NULL DEFAULT 'not_required',
-                        notification_attempt_count INTEGER NOT NULL DEFAULT 0,
-                        notification_next_attempt_at REAL,
-                        notification_locked_until REAL,
-                        notification_locked_by TEXT,
-                        notification_last_error TEXT,
-                        notification_delivered_at REAL
-                    )
-                    """
+            if not self.db_path.is_file():
+                raise RuntimeError(
+                    "Coworking booking database is not initialized; run "
+                    "scripts/migrate_coworking_booking_intents_v2.py before startup"
                 )
+            with self._connect_readonly() as conn:
                 columns = {
                     row["name"]
                     for row in conn.execute("PRAGMA table_info(coworking_booking_intents)").fetchall()
                 }
-                if "requested_by_slack_id" not in columns:
-                    conn.execute(
-                        "ALTER TABLE coworking_booking_intents "
-                        "ADD COLUMN requested_by_slack_id TEXT"
-                    )
-                notification_columns = {
-                    "notification_status": "TEXT NOT NULL DEFAULT 'not_required'",
-                    "notification_attempt_count": "INTEGER NOT NULL DEFAULT 0",
-                    "notification_next_attempt_at": "REAL",
-                    "notification_locked_until": "REAL",
-                    "notification_locked_by": "TEXT",
-                    "notification_last_error": "TEXT",
-                    "notification_delivered_at": "REAL",
+                indexes = {
+                    row["name"]
+                    for row in conn.execute(
+                        "PRAGMA index_list(coworking_booking_intents)"
+                    ).fetchall()
                 }
-                for column_name, column_definition in notification_columns.items():
-                    if column_name not in columns:
-                        conn.execute(
-                            "ALTER TABLE coworking_booking_intents "
-                            f"ADD COLUMN {column_name} {column_definition}"
-                        )
-                # Raw Slack messages are not needed to replay a canonical
-                # booking intent. Clear data written by older versions.
-                conn.execute(
-                    "UPDATE coworking_booking_intents "
-                    "SET request_text = NULL WHERE request_text IS NOT NULL"
-                )
-                conn.execute(
-                    """
-                    CREATE INDEX IF NOT EXISTS idx_coworking_intents_due
-                    ON coworking_booking_intents (status, next_attempt_at)
-                    """
-                )
-                conn.execute(
-                    """
-                    CREATE INDEX IF NOT EXISTS idx_coworking_intents_user_date
-                    ON coworking_booking_intents (slack_user_id, booking_date)
-                    """
-                )
-                conn.execute(
-                    """
-                    CREATE INDEX IF NOT EXISTS idx_coworking_notifications_due
-                    ON coworking_booking_intents (
-                        status,
-                        notification_status,
-                        notification_next_attempt_at
+                missing_columns = sorted(REQUIRED_COLUMNS - columns)
+                missing_indexes = sorted(REQUIRED_INDEXES - indexes)
+                if missing_columns or missing_indexes:
+                    raise RuntimeError(
+                        "Coworking booking schema v2 is not applied; run "
+                        "scripts/migrate_coworking_booking_intents_v2.py before startup "
+                        f"(missing columns={missing_columns}, indexes={missing_indexes})"
                     )
-                    """
-                )
             self._initialized = True
+
+    def validate_schema(self) -> None:
+        self._ensure_schema()
 
     @staticmethod
     def _row_to_dict(row: sqlite3.Row | None) -> Optional[dict[str, Any]]:

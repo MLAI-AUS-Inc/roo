@@ -56,7 +56,10 @@ def test_coworking_intent_retention_is_bounded(retention_days):
 
 
 def test_founder_tools_link_origins_are_validated_by_environment():
-    configured = settings(FOUNDER_TOOLS_LINK_ORIGINS="https://mlai.au")
+    configured = settings(
+        FOUNDER_ACCOUNT_LINK_ENABLED=True,
+        FOUNDER_TOOLS_LINK_ORIGINS="https://mlai.au",
+    )
     assert configured.founder_tools_link_origins == frozenset({"https://mlai.au"})
 
     local = settings(
@@ -79,15 +82,18 @@ def test_founder_tools_link_origins_are_validated_by_environment():
     with pytest.raises(ValidationError, match="allowed origin in production"):
         settings(
             ROO_ENVIRONMENT="production",
+            FOUNDER_ACCOUNT_LINK_ENABLED=True,
             FOUNDER_TOOLS_LINK_ORIGINS="",
         )
 
 
-def test_default_implicit_allowlist_uses_only_the_secure_link_action():
-    configured = settings()
+def test_founder_link_action_is_fail_closed_until_enabled():
+    disabled = settings()
+    enabled = settings(FOUNDER_ACCOUNT_LINK_ENABLED=True)
 
-    assert "mlai-points:link_founder_account" in configured.implicit_action_allowlist
-    assert "mlai-points:link_account" not in configured.implicit_action_allowlist
+    assert "mlai-points:link_founder_account" not in disabled.implicit_action_allowlist
+    assert "mlai-points:link_founder_account" in enabled.implicit_action_allowlist
+    assert "mlai-points:link_account" not in enabled.implicit_action_allowlist
 
 
 def test_linear_channel_issue_writes_fail_closed_without_public_backend_credentials():

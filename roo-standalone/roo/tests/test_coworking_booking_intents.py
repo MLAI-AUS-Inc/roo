@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import importlib
 import sqlite3
 from types import SimpleNamespace
@@ -9,6 +10,12 @@ import pytest
 
 coworking = importlib.import_module("roo.coworking_booking_intents")
 backend_module = importlib.import_module("roo.clients.mlai_backend")
+schema_module = importlib.import_module("roo.coworking_booking_schema_v2")
+
+
+def intent_store(db_path):
+    schema_module.migrate_coworking_booking_intents_v2(db_path)
+    return coworking.CoworkingBookingIntentStore(db_path)
 
 
 def booking_result(
@@ -59,7 +66,7 @@ def leased_intent(
     channel_id="C123",
     thread_ts="111.222",
 ):
-    store = coworking.CoworkingBookingIntentStore(tmp_path / "intents.db")
+    store = intent_store(tmp_path / "intents.db")
     intent = store.record_intent(
         slack_user_id=slack_user_id,
         requested_by_slack_id=requested_by_slack_id,
@@ -110,7 +117,7 @@ def capture_delivery(
 
 
 def test_intent_store_persists_and_claims_due_work(tmp_path):
-    store = coworking.CoworkingBookingIntentStore(tmp_path / "intents.db")
+    store = intent_store(tmp_path / "intents.db")
 
     intent = store.record_intent(
         slack_user_id="U123",
@@ -552,7 +559,7 @@ def test_stale_mutation_worker_cannot_overwrite_replacement_confirmation(
     tmp_path,
     stale_transition,
 ):
-    store = coworking.CoworkingBookingIntentStore(tmp_path / "intents.db")
+    store = intent_store(tmp_path / "intents.db")
     intent = store.record_intent(
         slack_user_id="U123",
         booking_date="2026-04-22",
@@ -613,7 +620,7 @@ async def test_stale_mutation_outcome_emits_no_message_and_keeps_winner(
     monkeypatch,
     stale_outcome,
 ):
-    store = coworking.CoworkingBookingIntentStore(tmp_path / "intents.db")
+    store = intent_store(tmp_path / "intents.db")
     intent = store.record_intent(
         slack_user_id="U123",
         booking_date="2026-04-22",
@@ -673,7 +680,7 @@ async def test_stale_mutation_outcome_emits_no_message_and_keeps_winner(
 
 def test_schema_scrubs_legacy_raw_request_text(tmp_path):
     db_path = tmp_path / "intents.db"
-    store = coworking.CoworkingBookingIntentStore(db_path)
+    store = intent_store(db_path)
     intent = store.record_intent(
         slack_user_id="U123",
         booking_date="2026-04-22",
@@ -687,12 +694,48 @@ def test_schema_scrubs_legacy_raw_request_text(tmp_path):
         )
 
     reloaded = coworking.CoworkingBookingIntentStore(db_path)
+    reloaded.validate_schema()
+    with sqlite3.connect(db_path) as conn:
+        raw_text = conn.execute(
+            "SELECT request_text FROM coworking_booking_intents WHERE id = ?",
+            (intent["id"],),
+        ).fetchone()[0]
+
+    assert raw_text == "private raw Slack message"
+
+    schema_module.migrate_coworking_booking_intents_v2(db_path)
 
     assert reloaded.get(intent["id"])["request_text"] is None
 
 
+def test_store_validation_fails_closed_without_explicit_migration(tmp_path):
+    store = coworking.CoworkingBookingIntentStore(tmp_path / "uninitialized.db")
+
+    with pytest.raises(RuntimeError, match="migrate_coworking_booking_intents_v2"):
+        store.validate_schema()
+
+
+def test_explicit_schema_migration_is_idempotent(tmp_path):
+    db_path = tmp_path / "intents.db"
+
+    schema_module.migrate_coworking_booking_intents_v2(db_path)
+    schema_module.migrate_coworking_booking_intents_v2(db_path)
+
+    coworking.CoworkingBookingIntentStore(db_path).validate_schema()
+
+
+def test_store_schema_validation_is_read_only(tmp_path):
+    db_path = tmp_path / "intents.db"
+    schema_module.migrate_coworking_booking_intents_v2(db_path)
+    before = hashlib.sha256(db_path.read_bytes()).digest()
+
+    coworking.CoworkingBookingIntentStore(db_path).validate_schema()
+
+    assert hashlib.sha256(db_path.read_bytes()).digest() == before
+
+
 def test_terminal_retention_preserves_unfinished_notifications(tmp_path):
-    store = coworking.CoworkingBookingIntentStore(tmp_path / "intents.db")
+    store = intent_store(tmp_path / "intents.db")
 
     delivered = store.record_intent(
         slack_user_id="UDELIVER1",

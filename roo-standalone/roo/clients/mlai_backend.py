@@ -2551,6 +2551,28 @@ class MLAIBackendClient:
         response.raise_for_status()
         return response.json()
 
+    async def get_founder_account_link_health(self) -> dict:
+        """Verify the exact backend contract required before link activation."""
+        response = await self._request(
+            "GET",
+            self._api_v1_endpoint("users/slack-founder-link/health/"),
+            timeout=5.0,
+            transport_retries=1,
+            retry_backoff_seconds=0.25,
+            circuit_breaker=False,
+            use_admin_headers=False,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict) or payload != {
+            "status": "ok",
+            "contract": "slack-founder-link-v1",
+        }:
+            raise MLAIBackendUnavailableError(
+                "mlai-backend returned an incompatible account-link health contract"
+            )
+        return payload
+
     async def get_points_health(self) -> dict:
         response = await self._request(
             "GET",

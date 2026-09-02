@@ -98,6 +98,55 @@ async def test_circuit_breaker_probes_readiness_before_main_request(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_founder_account_link_health_requires_exact_contract(monkeypatch):
+    captured = {}
+
+    async def fake_request(method, endpoint, **kwargs):
+        captured.update(method=method, endpoint=endpoint, kwargs=kwargs)
+        request = httpx.Request(method, f"https://backend.test{endpoint}")
+        return httpx.Response(
+            200,
+            request=request,
+            json={"status": "ok", "contract": "slack-founder-link-v1"},
+        )
+
+    client = MLAIBackendClient(
+        base_url="https://backend.test",
+        api_key="roo-api-key",
+        internal_api_key="admin-api-key",
+    )
+    monkeypatch.setattr(client, "_request", fake_request)
+
+    result = await client.get_founder_account_link_health()
+
+    assert result == {"status": "ok", "contract": "slack-founder-link-v1"}
+    assert captured["method"] == "GET"
+    assert captured["endpoint"] == "/api/v1/users/slack-founder-link/health/"
+    assert captured["kwargs"]["use_admin_headers"] is False
+
+
+@pytest.mark.asyncio
+async def test_founder_account_link_health_rejects_version_skew(monkeypatch):
+    async def fake_request(method, endpoint, **kwargs):
+        request = httpx.Request(method, f"https://backend.test{endpoint}")
+        return httpx.Response(
+            200,
+            request=request,
+            json={"status": "ok", "contract": "slack-founder-link-v2"},
+        )
+
+    client = MLAIBackendClient(
+        base_url="https://backend.test",
+        api_key="roo-api-key",
+        internal_api_key="admin-api-key",
+    )
+    monkeypatch.setattr(client, "_request", fake_request)
+
+    with pytest.raises(MLAIBackendUnavailableError, match="incompatible"):
+        await client.get_founder_account_link_health()
+
+
+@pytest.mark.asyncio
 async def test_admit_boost_post_uses_strict_roo_key_headers(monkeypatch):
     captured = {}
 

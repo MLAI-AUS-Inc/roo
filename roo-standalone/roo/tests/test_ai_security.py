@@ -431,7 +431,8 @@ def test_deploy_workflow_requires_and_secretly_upserts_security_values():
     assert (
         "envs: SIM_PATIENT_API_KEY,SIM_PATIENT_SAFETY_SALT,ROO_API_KEY,"
         "VICTOR_AI_ROO_SIGNING_SECRET,ROO_PRIVATE_BASE_URL,"
-        "MEETING_ROOM_BOOKING_ENABLED"
+        "MEETING_ROOM_BOOKING_ENABLED,LINEAR_CHANNEL_ISSUE_WRITES_ENABLED,"
+        "FOUNDER_ACCOUNT_LINK_ENABLED,COWORKING_INTENTS_V2_MIGRATION_APPROVED"
     ) in workflow
     assert 'upsert_env "ROO_ENVIRONMENT" "production"' in workflow
     assert 'upsert_env "SIM_PATIENT_API_KEY" "$SIM_PATIENT_API_KEY"' in workflow
@@ -452,11 +453,12 @@ def test_deploy_workflow_requires_and_secretly_upserts_security_values():
         '"$MEETING_ROOM_BOOKING_ENABLED"'
     ) in workflow
     assert (
-        'upsert_env "ROO_IMPLICIT_ACTION_ALLOWLIST" '
-        '"respond_in_chat,mlai-points:balance,mlai-points:topup_points,'
-        'mlai-points:link_founder_account"'
+        'implicit_actions="respond_in_chat,mlai-points:balance,'
+        'mlai-points:topup_points"'
     ) in workflow
-    assert 'assert "mlai-points:link_founder_account" in actions' in workflow
+    assert 'if [ "$FOUNDER_ACCOUNT_LINK_ENABLED" = "true" ]; then' in workflow
+    assert 'upsert_env "FOUNDER_ACCOUNT_LINK_ENABLED"' in workflow
+    assert 'slack-founder-link-v1' in workflow
     assert 'assert "mlai-points:link_account" not in actions' in workflow
     assert 'assert settings.MEETING_ROOM_BOOKING_ENABLED is True' in workflow
     assert (
@@ -465,22 +467,25 @@ def test_deploy_workflow_requires_and_secretly_upserts_security_values():
     assert 'assert "meeting-room-booking" in settings.enabled_skill_names' in workflow
     assert 'if [ "${#ROO_API_KEY}" -lt 32 ]' in workflow
     assert 'if [ "${#VICTOR_AI_ROO_SIGNING_SECRET}" -lt 32 ]' in workflow
-    assert workflow.index('upsert_env "ROO_API_KEY"') < workflow.index("docker compose up")
-    assert workflow.index('upsert_env "VICTOR_AI_SKILL_ENABLED"') < workflow.index(
-        "docker compose up"
-    )
+    deploy_start = workflow.index("docker compose up -d --no-build")
+    assert workflow.index('upsert_env "ROO_API_KEY"') < deploy_start
+    assert workflow.index('upsert_env "VICTOR_AI_SKILL_ENABLED"') < deploy_start
     assert workflow.index(
         'upsert_env "MEETING_ROOM_BOOKING_ENABLED"'
-    ) < workflow.index("docker compose up")
+    ) < deploy_start
     assert "systemctl restart slack-bridge.service" in workflow
     assert "docker compose -f docker-compose.bridge.yml up -d --build" in workflow
     assert "Slack bridge readiness check timed out" in workflow
-    assert workflow.index("upsert_env \"SIM_PATIENT_API_KEY\"") < workflow.index("docker compose up")
+    assert workflow.index("upsert_env \"SIM_PATIENT_API_KEY\"") < deploy_start
     assert 'echo "$SIM_PATIENT_API_KEY"' not in workflow
     assert 'echo "$SIM_PATIENT_SAFETY_SALT"' not in workflow
     assert 'echo "$ROO_API_KEY"' not in workflow
     assert 'echo "$VICTOR_AI_ROO_SIGNING_SECRET"' not in workflow
     assert "http://127.0.0.1/healthz/ready" in workflow
+    assert "migrate_coworking_booking_intents_v2.py" in workflow
+    assert "COWORKING_INTENTS_V2_MIGRATION_APPROVED" in workflow
+    assert "restore_previous_release" in workflow
+    assert workflow.rindex("trap - ERR") > workflow.index("healthz/dependencies")
     assert "vars.ROO_PRIVATE_BASE_URL" in workflow
     assert '"${ROO_PRIVATE_BASE_URL%/}/api/sim-patient"' in workflow
     assert "http://10.126.0.5/api/sim-patient" not in workflow

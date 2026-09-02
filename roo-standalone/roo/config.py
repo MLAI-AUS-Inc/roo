@@ -160,6 +160,7 @@ class Settings(BaseSettings):
     COWORKING_INTENTS_DB_PATH: str = "data/coworking_booking_intents.db"
     COWORKING_RETRY_POLL_SECONDS: float = 30.0
     COWORKING_INTENT_RETENTION_DAYS: int = 30
+    FOUNDER_ACCOUNT_LINK_ENABLED: bool = False
     ROO_POINTS_TOPUP_ENABLED: bool = False
     ROO_POINTS_TOPUP_BUTTONS_ENABLED: bool = False
     ROO_POINTS_STRIPE_CHECKOUT_HOSTS: str = "checkout.stripe.com"
@@ -260,7 +261,10 @@ class Settings(BaseSettings):
 
     @property
     def implicit_action_allowlist(self) -> frozenset[str]:
-        return self._split_configured_values(self.ROO_IMPLICIT_ACTION_ALLOWLIST)
+        allowed = set(self._split_configured_values(self.ROO_IMPLICIT_ACTION_ALLOWLIST))
+        if not self.FOUNDER_ACCOUNT_LINK_ENABLED:
+            allowed.discard("mlai-points:link_founder_account")
+        return frozenset(allowed)
 
     @property
     def roo_points_stripe_checkout_hosts(self) -> frozenset[str]:
@@ -363,6 +367,7 @@ class Settings(BaseSettings):
         if (
             self.ROO_SURFACE == "public"
             and self.is_production
+            and self.FOUNDER_ACCOUNT_LINK_ENABLED
             and not self.founder_tools_link_origins
         ):
             raise ValueError(
