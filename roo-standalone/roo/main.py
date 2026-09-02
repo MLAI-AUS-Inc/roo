@@ -2309,124 +2309,6 @@ def _build_confirm_follow_up_message(follow_up: dict[str, Any]) -> str:
     return "✅ Generating article. No additional Roo points will be charged for this confirmation."
 
 
-async def _medhack_daily_case_loop():
-    """Background task that posts a new diagnosis case each day."""
-    import asyncio
-    from .slack_client import get_channel_id, post_message
-    from .utils import get_current_date
-
-    # Wait a bit for the app to fully start
-    await asyncio.sleep(10)
-
-    while True:
-        try:
-            today = get_current_date()
-            # Try medhack-testing first (for dev), then medhack-frontiers (for prod)
-            channel_id = get_channel_id("medhack-testing") or get_channel_id("medhack-frontiers")
-            if not channel_id:
-                print("⚠️ MedHack: neither #medhack-testing nor #medhack-frontiers channel found, skipping daily case")
-                await asyncio.sleep(3600)  # Retry in an hour
-                continue
-
-            # Load the medhack client
-            from pathlib import Path
-            import sys
-            settings = get_settings()
-            skills_dir = Path(settings.SKILLS_DIR) / "medhack"
-            client_path = skills_dir / "client.py"
-
-            if not client_path.exists():
-                print("⚠️ MedHack client.py not found, skipping daily case")
-                await asyncio.sleep(3600)
-                continue
-
-            # Import the client
-            import importlib.util
-            spec = importlib.util.spec_from_file_location("medhack_daily_client", client_path)
-            mod = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(mod)
-            client = mod.MedHackClient()
-
-            # Check if there's already a case for today
-            current = await client.get_current_case(today)
-            if current is None:
-                # Start a new case
-                new_case = await client.start_new_case(today)
-                if new_case:
-                    difficulty = new_case.get("difficulty", "medium").upper()
-                    title = new_case.get("title", "")
-                    title_str = f' - _{title}_' if title else ""
-                    header = f"*GUESS THE DIAGNOSIS* - Daily Challenge [{difficulty}]{title_str}"
-
-                    # New-style cases have an ed_first_look narrative + triage note
-                    if new_case.get("ed_first_look"):
-                        scene = new_case["ed_first_look"].strip()
-                        triage = new_case["presenting_complaint"].strip()
-                        message = (
-                            f"{header}\n\n"
-                            f"{scene}\n\n"
-                            f"*Triage note:* {triage}\n\n"
-                            f"Tag *@Roo* to interact — I'm your gateway to the patient. "
-                            f"Ask me anything you'd ask them and I'll relay their answer. "
-                            f"You can also request examinations and investigations, but be specific — "
-                            f"the hospital has limited resources and inappropriate or costly tests may be denied.\n\n"
-                            f"When you're ready, tell me your diagnosis!\n\n"
-                            f"_You get *one guess* — make it count! First correct answer wins 12 MLAI points "
-                            f"+ DM Dr Sam for a free ticket code to MedHack: Frontiers!_"
-                        )
-                    else:
-                        complaint = new_case["presenting_complaint"].strip()
-                        message = (
-                            f"{header}\n\n"
-                            f"{complaint}\n\n"
-                            f"Tag *@Roo* to interact — I'm your gateway to the patient. "
-                            f"Ask me anything you'd ask them and I'll relay their answer. "
-                            f"You can also request examinations and investigations, but be specific — "
-                            f"the hospital has limited resources and inappropriate or costly tests may be denied.\n\n"
-                            f"When you're ready, tell me your diagnosis!\n\n"
-                            f"_You get *one guess* — make it count! First correct answer wins 12 MLAI points "
-                            f"+ DM Dr Sam for a free ticket code to MedHack: Frontiers!_"
-                        )
-
-                    # Build blocks with optional image
-                    image_url = new_case.get("image_url", "")
-                    if image_url:
-                        blocks = [
-                            {
-                                "type": "image",
-                                "image_url": image_url,
-                                "alt_text": f"Guess the Diagnosis - {new_case.get('title', 'Daily Case')}",
-                            },
-                            {
-                                "type": "section",
-                                "text": {"type": "mrkdwn", "text": message},
-                            },
-                        ]
-                        post_message(channel=channel_id, text=message, blocks=blocks)
-                    else:
-                        post_message(channel=channel_id, text=message)
-                    print(f"Posted new MedHack case #{new_case['id']} for {today}")
-                else:
-                    print("⚠️ No available MedHack cases to post")
-
-        except Exception as e:
-            print(f"❌ MedHack daily case error: {e}")
-            import traceback
-            traceback.print_exc()
-
-        # Sleep until tomorrow (calculate seconds until next 10 AM AEST)
-        from datetime import datetime, timedelta
-        from zoneinfo import ZoneInfo
-        tz = ZoneInfo(get_settings().TIMEZONE)
-        now = datetime.now(tz)
-        next_post = now.replace(hour=10, minute=0, second=0, microsecond=0)
-        if now >= next_post:
-            next_post += timedelta(days=1)
-        sleep_seconds = (next_post - now).total_seconds()
-        print(f"MedHack: Next case in {sleep_seconds/3600:.1f} hours")
-        await asyncio.sleep(sleep_seconds)
-
-
 def _build_jobs_status_url(base_api_url: str, status_url: Optional[str]) -> Optional[str]:
     cleaned_status_url = str(status_url or "").strip()
     if not cleaned_status_url:
@@ -2743,11 +2625,6 @@ async def lifespan(app: FastAPI):
         print("   Public Roo background workflows disabled on Admin surface")
     app.state.startup_complete = True
 
-    # MedHack daily case scheduler (currently disabled)
-    # import asyncio
-    # medhack_task = asyncio.create_task(_medhack_daily_case_loop())
-    # print("   Started MedHack daily case scheduler")
-
     try:
         yield
     finally:
@@ -2786,7 +2663,6 @@ async def lifespan(app: FastAPI):
                 await start_here_intro_task
 
     # Cancel the background task on shutdown (disabled)
-    # medhack_task.cancel()
     print("🦘 Roo Standalone shutting down...")
 
 
@@ -3742,8 +3618,8 @@ async def api_sim_patient(
 ):
     """Simulated-patient roleplay for the health-hack 3D ward.
 
-    Runs the medhack "Guess the Diagnosis" case as an in-character narrator.
-    Stateless: never touches medhack game state, points, or the guess lockout.
+    Runs a "Guess the Diagnosis" clinical case as an in-character narrator.
+    Stateless: never touches game state, points, or any guess lockout.
     role="nurse" runs Dr Snow's results agent and role="clerk" runs Nurse
     Paws' observations, examination, and final-guess preparation agent.
 

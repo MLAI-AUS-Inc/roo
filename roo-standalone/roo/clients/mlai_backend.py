@@ -494,6 +494,14 @@ class MLAIBackendClient:
         prefix = "" if base_path.endswith("/api/v1") else "/api/v1"
         return f"{prefix}/org-memory/{suffix}"
 
+    def _linear_channel_endpoint(self, suffix: str) -> str:
+        """Support backend base URLs with or without an /api/v1 suffix."""
+
+        suffix = str(suffix or "").strip("/")
+        base_path = urlparse(self.base_url).path.rstrip("/")
+        prefix = "" if base_path.endswith("/api/v1") else "/api/v1"
+        return f"{prefix}/integrations/linear/channel-issues/{suffix}"
+
     @staticmethod
     def _victor_ai_params(filters: Optional[dict] = None, **pagination: Any) -> dict:
         allowed = {
@@ -2205,6 +2213,7 @@ class MLAIBackendClient:
         requester_slack_id: str,
         limit: int = 50,
         after: Optional[str] = None,
+        status: Optional[str] = None,
     ) -> dict:
         """List the live Linear queue bound to the invoking Slack channel."""
         payload: Dict[str, Any] = {
@@ -2215,13 +2224,103 @@ class MLAIBackendClient:
         }
         if after:
             payload["after"] = str(after).strip()
+        if status:
+            payload["status"] = str(status).strip()
         response = await self._request(
             "POST",
-            "/api/v1/integrations/linear/channel-issues/list",
+            self._linear_channel_endpoint("list"),
             json=payload,
             timeout=30.0,
             transport_retries=1,
             retry_backoff_seconds=0.25,
+            circuit_breaker=True,
+        )
+        self._raise_for_status_or_backend_unavailable(response)
+        return response.json()
+
+    async def list_linear_channel_statuses(
+        self,
+        *,
+        slack_workspace_id: str,
+        slack_channel_id: str,
+        requester_slack_id: str,
+    ) -> dict:
+        response = await self._request(
+            "POST",
+            self._linear_channel_endpoint("statuses"),
+            json={
+                "slack_workspace_id": str(slack_workspace_id or "").strip(),
+                "slack_channel_id": str(slack_channel_id or "").strip(),
+                "requester_slack_id": self._clean_slack_id(requester_slack_id),
+            },
+            timeout=30.0,
+            transport_retries=1,
+            retry_backoff_seconds=0.25,
+            circuit_breaker=True,
+        )
+        self._raise_for_status_or_backend_unavailable(response)
+        return response.json()
+
+    async def write_linear_channel_issue(
+        self,
+        *,
+        slack_workspace_id: str,
+        slack_channel_id: str,
+        requester_slack_id: str,
+        issue_identifier: str,
+        operation: str,
+        value: Any,
+        expected_updated_at: str,
+        request_id: str,
+    ) -> dict:
+        response = await self._request(
+            "POST",
+            self._linear_channel_endpoint("write"),
+            json={
+                "slack_workspace_id": str(slack_workspace_id or "").strip(),
+                "slack_channel_id": str(slack_channel_id or "").strip(),
+                "requester_slack_id": self._clean_slack_id(requester_slack_id),
+                "issue_identifier": str(issue_identifier or "").strip(),
+                "operation": str(operation or "").strip(),
+                "value": value,
+                "expected_updated_at": str(expected_updated_at or "").strip(),
+                "request_id": str(request_id or "").strip(),
+            },
+            timeout=45.0,
+            transport_retries=0,
+            circuit_breaker=True,
+        )
+        self._raise_for_status_or_backend_unavailable(response)
+        return response.json()
+
+    async def create_linear_channel_issue(
+        self,
+        *,
+        slack_workspace_id: str,
+        slack_channel_id: str,
+        requester_slack_id: str,
+        title: str,
+        request_id: str,
+        description: Optional[str] = None,
+        status: Optional[str] = None,
+    ) -> dict:
+        payload: Dict[str, Any] = {
+            "slack_workspace_id": str(slack_workspace_id or "").strip(),
+            "slack_channel_id": str(slack_channel_id or "").strip(),
+            "requester_slack_id": self._clean_slack_id(requester_slack_id),
+            "title": str(title or "").strip(),
+            "request_id": str(request_id or "").strip(),
+        }
+        if description:
+            payload["description"] = str(description).strip()
+        if status:
+            payload["status"] = str(status).strip()
+        response = await self._request(
+            "POST",
+            self._linear_channel_endpoint("create"),
+            json=payload,
+            timeout=45.0,
+            transport_retries=0,
             circuit_breaker=True,
         )
         self._raise_for_status_or_backend_unavailable(response)
@@ -2239,7 +2338,7 @@ class MLAIBackendClient:
         """Get one approved Linear issue and its bounded comment history."""
         response = await self._request(
             "POST",
-            "/api/v1/integrations/linear/channel-issues/detail",
+            self._linear_channel_endpoint("detail"),
             json={
                 "slack_workspace_id": str(slack_workspace_id or "").strip(),
                 "slack_channel_id": str(slack_channel_id or "").strip(),
@@ -3615,189 +3714,6 @@ class MLAIBackendClient:
         if user_id is None:
             raise ValueError("MLAI backend omitted the linked user ID")
         return int(user_id)
-
-    # --- MedHack Game State ---
-
-    async def medhack_get_current_case(self) -> Optional[dict]:
-        """Get the currently active MedHack case."""
-        try:
-            response = await self._request(
-                "GET",
-                "/api/v1/medhack/cases/current/",
-                timeout=10.0,
-                circuit_breaker=True,
-            )
-            if response.status_code == 404:
-                return None
-            response.raise_for_status()
-            return response.json()
-        except Exception as e:
-            print(f"⚠️ MedHack get current case error: {e}")
-            return None
-
-    async def medhack_start_case(self, case_id: int, admin_slack_id: str) -> Optional[dict]:
-        """Start a new MedHack case (admin only). Closes any active case."""
-        try:
-            response = await self._request(
-                "POST",
-                "/api/v1/medhack/cases/start/",
-                json={"case_id": case_id, "admin_slack_id": admin_slack_id},
-                timeout=10.0,
-                circuit_breaker=True,
-                use_admin_headers=True,
-            )
-            response.raise_for_status()
-            return response.json()
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code == 403:
-                print(f"⚠️ MedHack start case: not authorized")
-                return None
-            raise
-        except Exception as e:
-            print(f"⚠️ MedHack start case error: {e}")
-            return None
-
-    async def medhack_get_user_status(self, slack_user_id: str) -> Optional[dict]:
-        """Get a user's status for the active MedHack case."""
-        try:
-            response = await self._request(
-                "GET",
-                f"/api/v1/medhack/cases/active/user/{slack_user_id}/",
-                timeout=10.0,
-                circuit_breaker=True,
-            )
-            if response.status_code == 404:
-                return None
-            response.raise_for_status()
-            return response.json()
-        except Exception as e:
-            print(f"⚠️ MedHack get user status error: {e}")
-            return None
-
-    async def medhack_set_pending_guess(self, case_id: int, slack_user_id: str, guess: str) -> Optional[dict]:
-        """Store a pending guess awaiting user confirmation."""
-        try:
-            response = await self._request(
-                "POST",
-                "/api/v1/medhack/guesses/pending/",
-                json={"case_id": case_id, "slack_user_id": slack_user_id, "guess": guess},
-                timeout=10.0,
-                circuit_breaker=True,
-            )
-            response.raise_for_status()
-            return response.json()
-        except Exception as e:
-            print(f"⚠️ MedHack set pending guess error: {e}")
-            return None
-
-    async def medhack_clear_pending_guess(self, case_id: int, slack_user_id: str) -> bool:
-        """Clear a user's pending guess."""
-        try:
-            response = await self._request(
-                "DELETE",
-                "/api/v1/medhack/guesses/pending/",
-                json={"case_id": case_id, "slack_user_id": slack_user_id},
-                timeout=10.0,
-                circuit_breaker=True,
-            )
-            return response.status_code == 204
-        except Exception as e:
-            print(f"⚠️ MedHack clear pending guess error: {e}")
-            return False
-
-    async def medhack_submit_guess(
-        self, case_id: int, slack_user_id: str, guess: str, correct: bool
-    ) -> Optional[dict]:
-        """Submit a confirmed guess."""
-        try:
-            response = await self._request(
-                "POST",
-                "/api/v1/medhack/guesses/submit/",
-                json={
-                    "case_id": case_id,
-                    "slack_user_id": slack_user_id,
-                    "guess": guess,
-                    "correct": correct,
-                },
-                timeout=10.0,
-                circuit_breaker=True,
-            )
-            response.raise_for_status()
-            return response.json()
-        except Exception as e:
-            print(f"⚠️ MedHack submit guess error: {e}")
-            return None
-
-    async def medhack_record_winner(
-        self, case_id: int, slack_user_id: str, is_first_solver: bool
-    ) -> Optional[dict]:
-        """Record a winner for a MedHack case."""
-        try:
-            response = await self._request(
-                "POST",
-                f"/api/v1/medhack/cases/{case_id}/winners/",
-                json={"slack_user_id": slack_user_id, "is_first_solver": is_first_solver},
-                timeout=10.0,
-                circuit_breaker=True,
-            )
-            response.raise_for_status()
-            return response.json()
-        except Exception as e:
-            print(f"⚠️ MedHack record winner error: {e}")
-            return None
-
-    async def medhack_get_case_history(self) -> list:
-        """Get history of all played MedHack cases."""
-        try:
-            response = await self._request(
-                "GET",
-                "/api/v1/medhack/cases/history/",
-                timeout=10.0,
-                circuit_breaker=True,
-            )
-            response.raise_for_status()
-            return response.json().get("cases", [])
-        except Exception as e:
-            print(f"⚠️ MedHack get case history error: {e}")
-            return []
-
-    async def medhack_create_announcement(
-        self,
-        title: str,
-        body: str,
-        requester_slack_id: str,
-        author_slack_id: Optional[str] = None,
-    ) -> Optional[dict]:
-        """Create an announcement on the MedHack: Frontiers website.
-
-        Args:
-            title: Announcement title
-            body: Announcement body text
-            requester_slack_id: Slack ID of the human requesting the announcement
-            author_slack_id: Optional Slack ID to display as the author
-
-        Returns:
-            Response dict on success (201), None on error
-        """
-        try:
-            response = await self._request(
-                "POST",
-                "/api/v1/medhack/announcements/",
-                json={
-                    "title": title,
-                    "body": body,
-                    "requester_slack_id": requester_slack_id,
-                    "author_slack_id": author_slack_id,
-                },
-                timeout=10.0,
-                circuit_breaker=True,
-            )
-            if response.status_code == 201:
-                return response.json()
-            return {"status_code": response.status_code, "detail": response.text}
-        except Exception as e:
-            print(f"⚠️ MedHack create announcement error: {e}")
-            return None
 
     async def healthhack_create_announcement(
         self,

@@ -75,11 +75,6 @@
   channel: watt-the-hack
   expect: {skill: watt-the-hack, action: announce}
   tags: [audit, channel]
-- id: audit-announce-medhack-channel
-  text: "announce the workshop tomorrow"
-  channel: medhack-frontiers
-  expect: {skill: medhack}
-  tags: [audit, channel]
 - id: audit-announce-general-channel
   text: "announce the workshop tomorrow"
   channel: general
