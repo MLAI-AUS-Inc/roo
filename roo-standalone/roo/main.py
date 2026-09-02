@@ -78,6 +78,7 @@ from .office_manager_actions import (
     build_office_manager_feedback_client_msg_id,
     build_office_manager_uncertainty_client_msg_id,
     get_office_manager_action_store,
+    office_manager_action_housekeeping_loop,
     office_manager_action_retry_loop,
     process_office_manager_action,
 )
@@ -97,7 +98,7 @@ from .start_here_introductions import (
 )
 from .slack_security import (
     SlackRequestVerificationError,
-    verify_and_claim_slack_request,
+    verify_and_claim_slack_request_with_fingerprint,
 )
 from .slack_action_tasks import drain as drain_slack_actions
 from .slack_action_tasks import start as start_slack_action
@@ -2661,6 +2662,7 @@ async def lifespan(app: FastAPI):
     link_love_task: Optional[asyncio.Task] = None
     start_here_intro_task: Optional[asyncio.Task] = None
     meeting_room_action_retry_task: Optional[asyncio.Task] = None
+    office_manager_action_housekeeping_task: Optional[asyncio.Task] = None
     office_manager_action_retry_task: Optional[asyncio.Task] = None
     jobs_scheduler_task: Optional[asyncio.Task] = None
     print(f"🦘 Roo Standalone starting...")
@@ -2672,6 +2674,20 @@ async def lifespan(app: FastAPI):
     agent = get_agent()
     print(f"   Loaded {len(agent.skills)} skills")
     if settings.ROO_SURFACE == "public":
+        # Retention is independent of whether new Office Manager clicks are
+        # enabled. A retired/disabled feature must still purge terminal PII.
+        office_manager_action_store = get_office_manager_action_store(
+            settings.SLACK_RECEIPTS_DB_PATH
+        )
+        await asyncio.to_thread(office_manager_action_store.prune_completed)
+        office_manager_action_housekeeping_task = asyncio.create_task(
+            office_manager_action_housekeeping_loop(
+                store=office_manager_action_store,
+            )
+        )
+        app.state.office_manager_action_housekeeping_task = (
+            office_manager_action_housekeeping_task
+        )
         coworking_retry_task = asyncio.create_task(coworking_booking_retry_loop())
         app.state.coworking_retry_task = coworking_retry_task
         if settings.MEETING_ROOM_BOOKING_ENABLED:
@@ -2686,9 +2702,6 @@ async def lifespan(app: FastAPI):
             )
             app.state.meeting_room_action_retry_task = meeting_room_action_retry_task
         if settings.OFFICE_MANAGER_ACTIONS_ENABLED:
-            office_manager_action_store = get_office_manager_action_store(
-                settings.SLACK_RECEIPTS_DB_PATH
-            )
             office_manager_action_retry_task = asyncio.create_task(
                 office_manager_action_retry_loop(
                     store=office_manager_action_store,
@@ -2746,6 +2759,10 @@ async def lifespan(app: FastAPI):
             office_manager_action_retry_task.cancel()
             with suppress(asyncio.CancelledError):
                 await office_manager_action_retry_task
+        if office_manager_action_housekeeping_task:
+            office_manager_action_housekeeping_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await office_manager_action_housekeeping_task
         await drain_slack_actions()
         if jobs_scheduler_task:
             jobs_scheduler_task.cancel()
@@ -2792,7 +2809,7 @@ async def verify_slack_signature(
 ) -> bool:
     """Verify every internet-facing Slack webhook before parsing its body."""
     try:
-        is_duplicate = verify_and_claim_slack_request(
+        is_duplicate, request_fingerprint = verify_and_claim_slack_request_with_fingerprint(
             signing_secret=settings.SLACK_SIGNING_SECRET,
             raw_body=await request.body(),
             headers=request.headers,
@@ -2803,6 +2820,7 @@ async def verify_slack_signature(
     except SlackRequestVerificationError:
         raise HTTPException(status_code=403, detail="unauthorized")
     request.state.slack_duplicate = is_duplicate
+    request.state.slack_request_fingerprint = request_fingerprint
     request.state.roo_settings = settings
     return True
 
@@ -2860,6 +2878,12 @@ async def readiness_check():
                     settings.ROO_UNIFIED_ADMIN_ROUTING_ENABLED
                 ),
                 "contextual_shadow_mode": settings.ROO_CONTEXTUAL_SHADOW_MODE,
+                "office_manager": {
+                    "actions_enabled": settings.OFFICE_MANAGER_ACTIONS_ENABLED,
+                    "backend_base_url": str(settings.MLAI_BACKEND_URL or "").rstrip("/"),
+                    "claim_path": "/api/v1/points/coworking/office-manager/claim/",
+                    "timezone": settings.TIMEZONE,
+                },
             }
         )
     return payload
@@ -5350,6 +5374,7 @@ def _office_manager_claim_success_message(
     *,
     expected_user_id: str,
     expected_booking_date: str,
+    expected_attempt_id: Optional[str] = None,
 ) -> str:
     def invalid(reason: str) -> None:
         print(f"OFFICE_MANAGER_CLAIM_RESPONSE_INVALID reason={reason}")
@@ -5362,10 +5387,14 @@ def _office_manager_claim_success_message(
 
     claim_status = str(result.get("status") or "").strip()
     if claim_status not in {"claimed", "already_claimed_by_you"}:
-        invalid(f"unexpected_status status={claim_status or 'missing'}")
+        invalid("unexpected_status")
 
     if str(result.get("date") or "").strip() != expected_booking_date:
         invalid("date_mismatch")
+    if expected_attempt_id is not None and (
+        str(result.get("attempt_id") or "").strip() != expected_attempt_id
+    ):
+        invalid("attempt_id_mismatch")
     if (
         str(result.get("office_manager_slack_user_id") or "").strip()
         != expected_user_id
@@ -5452,7 +5481,7 @@ async def _send_office_manager_private_feedback(
         action_id = int(action["id"])
         owner = str(action["locked_by"])
         client_msg_id = build_office_manager_feedback_client_msg_id(
-            str(action["idempotency_key"])
+            str(action["attempt_id"])
         )
         staged = await asyncio.to_thread(
             store.stage_feedback,
@@ -5476,6 +5505,7 @@ async def _send_office_manager_private_feedback(
                 str(staged["feedback_text"]),
                 raise_on_error=True,
                 client_msg_id=str(staged["feedback_client_msg_id"]),
+                redact_logs=True,
             )
             if response and response.get("ok"):
                 return
@@ -5495,6 +5525,7 @@ async def _send_office_manager_private_feedback(
                 text,
                 raise_on_error=True,
                 client_msg_id=client_msg_id,
+                redact_logs=True,
             )
             if response and response.get("ok"):
                 return
@@ -5512,6 +5543,7 @@ async def _send_office_manager_private_feedback(
             channel=channel_id,
             user=user_id,
             text=text,
+            redact_logs=True,
         )
         if response and response.get("ok"):
             return
@@ -5519,7 +5551,12 @@ async def _send_office_manager_private_feedback(
         pass
 
     try:
-        response = await asyncio.to_thread(send_dm, user_id, text)
+        response = await asyncio.to_thread(
+            send_dm,
+            user_id,
+            text,
+            redact_logs=True,
+        )
         if response and response.get("ok"):
             return
         raise RuntimeError("dm_delivery_failed")
@@ -5533,12 +5570,8 @@ async def _send_office_manager_private_feedback(
 
 def _office_manager_claim_failure_is_retryable(
     exc: httpx.HTTPStatusError,
-    *,
-    code: str,
 ) -> bool:
     """Classify only transient or commit-uncertain backend responses for replay."""
-    if code == "feature_disabled":
-        return False
     status_code = int(exc.response.status_code)
     return status_code in {408, 425, 429} or status_code >= 500
 
@@ -5568,19 +5601,63 @@ async def _claim_office_manager_from_action(
 
     if not message:
         try:
-            result = await MLAIBackendClient().claim_office_manager_day(
-                user_id,
-                booking_date,
-            )
+            backend_client = MLAIBackendClient()
+            if action is not None:
+                result = await backend_client.claim_office_manager_day(
+                    user_id,
+                    booking_date,
+                    str(action["attempt_id"]),
+                )
+            else:
+                # This branch exists for isolated callers and tests. The routed
+                # durable action path always supplies its persisted attempt ID.
+                result = await backend_client.claim_office_manager_day(
+                    user_id,
+                    booking_date,
+                )
         except httpx.HTTPStatusError as exc:
             payload = _office_manager_error_payload(exc)
             code = str(payload.get("code") or "")
             assignee = str(payload.get("assignee_slack_user_id") or "").strip()
-            if _office_manager_claim_failure_is_retryable(exc, code=code):
+            expected_attempt_id = (
+                str(action["attempt_id"]) if action is not None else ""
+            )
+            echoed_attempt_id = str(payload.get("attempt_id") or "").strip()
+            if (
+                expected_attempt_id
+                and echoed_attempt_id
+                and echoed_attempt_id != expected_attempt_id
+            ):
+                raise OfficeManagerClaimUncertainError(
+                    "office_manager_claim_attempt_mismatch"
+                ) from exc
+            if _office_manager_claim_failure_is_retryable(exc):
                 raise OfficeManagerClaimUncertainError(
                     "office_manager_claim_result_uncertain"
                 ) from exc
-            if code == "already_claimed":
+            if code in {"attempt_superseded", "attempt_payload_conflict"} and (
+                not expected_attempt_id
+                or echoed_attempt_id != expected_attempt_id
+            ):
+                raise OfficeManagerClaimUncertainError(
+                    "office_manager_claim_attempt_missing"
+                ) from exc
+            if code == "attempt_superseded":
+                if str(payload.get("status") or "").strip() != "superseded":
+                    raise OfficeManagerClaimUncertainError(
+                        "office_manager_claim_supersession_invalid"
+                    ) from exc
+                message = (
+                    "This earlier Office Manager request was cancelled or replaced, "
+                    "so Roo did not recreate the assignment. Use the latest "
+                    "announcement if you want to volunteer again."
+                )
+            elif code == "attempt_payload_conflict":
+                message = (
+                    "Roo rejected this volunteer request because its saved attempt "
+                    "no longer matches the request. No assignment was changed."
+                )
+            elif code == "already_claimed":
                 selected = f" <@{assignee}> has the role." if assignee else ""
                 message = f"Someone has already volunteered for today.{selected}"
             elif code == "claim_closed":
@@ -5592,8 +5669,6 @@ async def _claim_office_manager_from_action(
                 )
             elif code == "office_manager_day_not_found":
                 message = "Today's Office Manager volunteer request is no longer available."
-            elif code == "feature_disabled":
-                message = "Office Manager volunteering is temporarily unavailable."
             else:
                 message = (
                     "Roo could not confirm the result of your volunteer request. "
@@ -5613,6 +5688,9 @@ async def _claim_office_manager_from_action(
                 result,
                 expected_user_id=user_id,
                 expected_booking_date=booking_date,
+                expected_attempt_id=(
+                    str(action["attempt_id"]) if action is not None else None
+                ),
             )
 
     await _send_office_manager_private_feedback(
@@ -6515,10 +6593,10 @@ async def _process_office_manager_action_record(
         booking_date = date.fromisoformat(str(action["booking_date"]))
     except (KeyError, TypeError, ValueError):
         booking_date = None
-    if booking_date != get_current_date():
+    if booking_date is None:
         print(
-            "OFFICE_MANAGER_ACTION_EXPIRED "
-            f"action_id={action.get('id')} booking_date={action.get('booking_date')}"
+            "OFFICE_MANAGER_ACTION_INVALID "
+            f"action_id={action.get('id')}"
         )
         return
     try:
@@ -6554,7 +6632,7 @@ async def _process_office_manager_action_record(
                         "again."
                     ),
                     client_msg_id=build_office_manager_uncertainty_client_msg_id(
-                        str(action["idempotency_key"])
+                        str(action["attempt_id"])
                     ),
                 )
             except asyncio.CancelledError:
@@ -6752,6 +6830,37 @@ async def slack_actions(
             )
         except ValueError:
             is_current_booking_date = False
+        request_fingerprint = str(
+            getattr(request.state, "slack_request_fingerprint", "")
+        ).strip()
+        if (
+            user_id
+            and channel_id
+            and booking_date
+            and not is_current_booking_date
+            and request_fingerprint
+        ):
+            action_store = get_office_manager_action_store(
+                settings.SLACK_RECEIPTS_DB_PATH
+            )
+            existing_action = await asyncio.to_thread(
+                action_store.get_by_request_fingerprint,
+                request_fingerprint,
+            )
+            if (
+                existing_action is not None
+                and str(existing_action["slack_user_id"]) == str(user_id)
+                and str(existing_action["channel_id"]) == str(channel_id)
+                and str(existing_action["booking_date"]) == booking_date
+            ):
+                start_slack_action(
+                    process_office_manager_action(
+                        int(existing_action["id"]),
+                        store=action_store,
+                        processor=_process_office_manager_action_record,
+                    )
+                )
+                return JSONResponse(status_code=200, content={})
         if (
             not user_id
             or not channel_id
@@ -6780,7 +6889,7 @@ async def slack_actions(
                 slack_user_id=str(user_id),
                 channel_id=str(channel_id),
                 booking_date=booking_date,
-                replay_existing=not is_duplicate_request,
+                request_fingerprint=request_fingerprint,
             )
         except Exception as exc:
             print(

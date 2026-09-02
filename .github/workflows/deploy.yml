@@ -146,11 +146,12 @@ jobs:
           VICTOR_AI_ROO_SIGNING_SECRET: ${{ secrets.VICTOR_AI_ROO_SIGNING_SECRET }}
           ROO_PRIVATE_BASE_URL: ${{ vars.ROO_PRIVATE_BASE_URL }}
           MEETING_ROOM_BOOKING_ENABLED: ${{ vars.MEETING_ROOM_BOOKING_ENABLED || 'false' }}
+          OFFICE_MANAGER_ACTIONS_ENABLED: ${{ vars.OFFICE_MANAGER_ACTIONS_ENABLED || 'false' }}
         with:
           host: ${{ secrets.DO_HOST }}
           username: ${{ secrets.DO_USERNAME }}
           key: ${{ secrets.DO_SSH_KEY }}
-          envs: SIM_PATIENT_API_KEY,SIM_PATIENT_SAFETY_SALT,ROO_API_KEY,VICTOR_AI_ROO_SIGNING_SECRET,ROO_PRIVATE_BASE_URL,MEETING_ROOM_BOOKING_ENABLED,RELEASE_SHA
+          envs: SIM_PATIENT_API_KEY,SIM_PATIENT_SAFETY_SALT,ROO_API_KEY,VICTOR_AI_ROO_SIGNING_SECRET,ROO_PRIVATE_BASE_URL,MEETING_ROOM_BOOKING_ENABLED,OFFICE_MANAGER_ACTIONS_ENABLED,RELEASE_SHA
           script: |
             # Stop if any command fails
             set -eu
@@ -174,6 +175,14 @@ jobs:
               false|FALSE|False|0|no|NO|No|off|OFF|Off|"") MEETING_ROOM_BOOKING_ENABLED=false ;;
               *)
                 echo "MEETING_ROOM_BOOKING_ENABLED must be true or false" >&2
+                exit 1
+                ;;
+            esac
+            case "$OFFICE_MANAGER_ACTIONS_ENABLED" in
+              true|TRUE|True|1|yes|YES|Yes|on|ON|On) OFFICE_MANAGER_ACTIONS_ENABLED=true ;;
+              false|FALSE|False|0|no|NO|No|off|OFF|Off|"") OFFICE_MANAGER_ACTIONS_ENABLED=false ;;
+              *)
+                echo "OFFICE_MANAGER_ACTIONS_ENABLED must be true or false" >&2
                 exit 1
                 ;;
             esac
@@ -224,6 +233,7 @@ jobs:
             upsert_env "ROO_POINTS_TOPUP_BUTTONS_ENABLED" "true"
             upsert_env "ROO_POINTS_STRIPE_CHECKOUT_HOSTS" "checkout.stripe.com"
             upsert_env "MEETING_ROOM_BOOKING_ENABLED" "$MEETING_ROOM_BOOKING_ENABLED"
+            upsert_env "OFFICE_MANAGER_ACTIONS_ENABLED" "$OFFICE_MANAGER_ACTIONS_ENABLED"
             
             # Restart the app
             docker compose up -d --build --remove-orphans
@@ -243,6 +253,11 @@ jobs:
             if [ "$MEETING_ROOM_BOOKING_ENABLED" = "true" ]; then
               echo "Verifying the Meeting Room skill is enabled on Public Roo..."
               docker compose exec -T roo python -c 'from roo.config import get_settings; settings = get_settings(); assert settings.ROO_SURFACE == "public"; assert settings.MEETING_ROOM_BOOKING_ENABLED is True; assert "meeting-room-booking" in settings.enabled_skill_names'
+            fi
+
+            if [ "$OFFICE_MANAGER_ACTIONS_ENABLED" = "true" ]; then
+              echo "Verifying Office Manager actions are enabled on Public Roo..."
+              docker compose exec -T roo python -c 'from roo.config import get_settings; settings = get_settings(); assert settings.ROO_SURFACE == "public"; assert settings.OFFICE_MANAGER_ACTIONS_ENABLED is True; assert settings.MLAI_BACKEND_URL; assert settings.ROO_API_KEY'
             fi
 
             # The cross-workspace Slack bridge is a separate Compose project.

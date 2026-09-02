@@ -471,9 +471,27 @@ class Settings(BaseSettings):
                     "MLAI_BACKEND_URL is required when "
                     "OFFICE_MANAGER_ACTIONS_ENABLED is true"
                 )
+            office_manager_backend_url = urlparse(str(self.MLAI_BACKEND_URL))
+            if (
+                office_manager_backend_url.scheme not in {"http", "https"}
+                or not office_manager_backend_url.hostname
+                or office_manager_backend_url.username is not None
+                or office_manager_backend_url.password is not None
+                or office_manager_backend_url.query
+                or office_manager_backend_url.fragment
+            ):
+                raise ValueError(
+                    "MLAI_BACKEND_URL must be a non-secret HTTP(S) base URL when "
+                    "OFFICE_MANAGER_ACTIONS_ENABLED is true"
+                )
             if not str(self.ROO_API_KEY or "").strip():
                 raise ValueError(
                     "ROO_API_KEY is required when "
+                    "OFFICE_MANAGER_ACTIONS_ENABLED is true"
+                )
+            if self.TIMEZONE != "Australia/Melbourne":
+                raise ValueError(
+                    "TIMEZONE must be Australia/Melbourne when "
                     "OFFICE_MANAGER_ACTIONS_ENABLED is true"
                 )
 

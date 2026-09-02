@@ -9,11 +9,12 @@ import time
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
-from uuid import NAMESPACE_URL, uuid4, uuid5
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 
 DEFAULT_PROCESSING_LEASE_SECONDS = 90.0
 DEFAULT_RETRY_POLL_SECONDS = 5.0
+DEFAULT_HOUSEKEEPING_POLL_SECONDS = 60 * 60.0
 COMPLETED_RETENTION_SECONDS = 90 * 24 * 60 * 60
 
 
@@ -23,22 +24,36 @@ def _retry_delay(attempt_count: int) -> float:
     return min(5 * 60.0, 5.0 * (2 ** (bounded_attempt - 1)))
 
 
-def build_office_manager_action_key(slack_user_id: str, booking_date: str) -> str:
-    """Return the backend-idempotent identity for one member and day."""
-    return (
-        f"office_manager:{str(slack_user_id).strip()}:"
-        f"{str(booking_date).strip()}"
+def _canonical_attempt_id(value: str) -> str:
+    """Return a canonical UUID or reject an invalid durable operation identity."""
+    candidate = str(value or "").strip()
+    try:
+        parsed = UUID(candidate)
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise ValueError("attempt_id must be a canonical UUID") from exc
+    if str(parsed) != candidate:
+        raise ValueError("attempt_id must be a canonical UUID")
+    return candidate
+
+
+def build_office_manager_feedback_client_msg_id(attempt_id: str) -> str:
+    """Return the stable Slack message identity for one terminal result."""
+    return str(
+        uuid5(
+            NAMESPACE_URL,
+            f"{_canonical_attempt_id(attempt_id)}:private-feedback",
+        )
     )
 
 
-def build_office_manager_feedback_client_msg_id(idempotency_key: str) -> str:
-    """Return the stable Slack message identity for one terminal result."""
-    return str(uuid5(NAMESPACE_URL, f"{idempotency_key}:private-feedback"))
-
-
-def build_office_manager_uncertainty_client_msg_id(idempotency_key: str) -> str:
+def build_office_manager_uncertainty_client_msg_id(attempt_id: str) -> str:
     """Return the stable Slack message identity for the optional retry notice."""
-    return str(uuid5(NAMESPACE_URL, f"{idempotency_key}:uncertainty-notice"))
+    return str(
+        uuid5(
+            NAMESPACE_URL,
+            f"{_canonical_attempt_id(attempt_id)}:uncertainty-notice",
+        )
+    )
 
 
 class OfficeManagerActionLeaseLostError(RuntimeError):
@@ -82,6 +97,8 @@ class OfficeManagerActionStore:
                     CREATE TABLE IF NOT EXISTS office_manager_action_outbox (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         idempotency_key TEXT NOT NULL UNIQUE,
+                        attempt_id TEXT NOT NULL UNIQUE,
+                        request_fingerprint TEXT UNIQUE,
                         slack_user_id TEXT NOT NULL,
                         channel_id TEXT NOT NULL,
                         booking_date TEXT NOT NULL,
@@ -113,6 +130,44 @@ class OfficeManagerActionStore:
                         "PRAGMA table_info(office_manager_action_outbox)"
                     ).fetchall()
                 }
+                for column_name, column_type in (
+                    ("attempt_id", "TEXT"),
+                    ("request_fingerprint", "TEXT"),
+                ):
+                    if column_name not in columns:
+                        connection.execute(
+                            "ALTER TABLE office_manager_action_outbox "
+                            f"ADD COLUMN {column_name} {column_type}"
+                        )
+                missing_attempts = connection.execute(
+                    """
+                    SELECT id FROM office_manager_action_outbox
+                    WHERE attempt_id IS NULL OR attempt_id = ''
+                    """
+                ).fetchall()
+                for row in missing_attempts:
+                    connection.execute(
+                        """
+                        UPDATE office_manager_action_outbox
+                        SET attempt_id = ? WHERE id = ?
+                        """,
+                        (str(uuid4()), int(row["id"])),
+                    )
+                connection.execute(
+                    """
+                    CREATE UNIQUE INDEX IF NOT EXISTS
+                    idx_office_manager_actions_attempt_id
+                    ON office_manager_action_outbox (attempt_id)
+                    """
+                )
+                connection.execute(
+                    """
+                    CREATE UNIQUE INDEX IF NOT EXISTS
+                    idx_office_manager_actions_request_fingerprint
+                    ON office_manager_action_outbox (request_fingerprint)
+                    WHERE request_fingerprint IS NOT NULL
+                    """
+                )
                 if "uncertainty_notice_attempted_at" not in columns:
                     connection.execute(
                         """
@@ -142,44 +197,40 @@ class OfficeManagerActionStore:
         slack_user_id: str,
         channel_id: str,
         booking_date: str,
-        replay_existing: bool = True,
+        request_fingerprint: Optional[str] = None,
     ) -> tuple[dict[str, Any], bool]:
-        """Persist a signed click and report whether it needs a worker."""
+        """Persist one signed click and report whether it created durable work."""
         self._ensure_schema()
         current_time = time.time()
         slack_user_id = str(slack_user_id).strip()
         channel_id = str(channel_id).strip()
         booking_date = str(booking_date).strip()
-        idempotency_key = build_office_manager_action_key(
-            slack_user_id,
-            booking_date,
-        )
+        if request_fingerprint is None:
+            request_fingerprint = uuid4().hex
+        request_fingerprint = str(request_fingerprint).strip()
+        if not request_fingerprint:
+            raise ValueError("request_fingerprint is required")
+        self.prune_completed(now=current_time)
 
         with self._lock:
             with self._connect() as connection:
                 connection.execute("BEGIN IMMEDIATE")
-                connection.execute(
-                    """
-                    DELETE FROM office_manager_action_outbox
-                    WHERE status = 'completed'
-                      AND completed_at IS NOT NULL
-                      AND completed_at <= ?
-                    """,
-                    (current_time - COMPLETED_RETENTION_SECONDS,),
-                )
                 existing = connection.execute(
                     """
                     SELECT * FROM office_manager_action_outbox
-                    WHERE idempotency_key = ?
+                    WHERE request_fingerprint = ?
                     """,
-                    (idempotency_key,),
+                    (request_fingerprint,),
                 ).fetchone()
                 should_process = existing is None
                 if existing is None:
+                    attempt_id = str(uuid4())
                     connection.execute(
                         """
                         INSERT INTO office_manager_action_outbox (
                             idempotency_key,
+                            attempt_id,
+                            request_fingerprint,
                             slack_user_id,
                             channel_id,
                             booking_date,
@@ -188,10 +239,12 @@ class OfficeManagerActionStore:
                             created_at,
                             updated_at
                         )
-                        VALUES (?, ?, ?, ?, 'pending', ?, ?, ?)
+                        VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)
                         """,
                         (
-                            idempotency_key,
+                            attempt_id,
+                            attempt_id,
+                            request_fingerprint,
                             slack_user_id,
                             channel_id,
                             booking_date,
@@ -200,47 +253,32 @@ class OfficeManagerActionStore:
                             current_time,
                         ),
                     )
-                elif replay_existing and not (
-                    existing["status"] == "processing"
-                    and existing["locked_until"] is not None
-                    and float(existing["locked_until"]) > current_time
-                ):
-                    # A distinct signed click for the same member/day may safely
-                    # replay the backend's idempotent claim operation.
-                    connection.execute(
-                        """
-                        UPDATE office_manager_action_outbox
-                        SET
-                            channel_id = ?,
-                            status = 'pending',
-                            next_attempt_at = ?,
-                            locked_until = NULL,
-                            locked_by = NULL,
-                            last_error = NULL,
-                            feedback_text = NULL,
-                            feedback_client_msg_id = NULL,
-                            feedback_prepared_at = NULL,
-                            completed_at = NULL,
-                            updated_at = ?
-                        WHERE id = ?
-                        """,
-                        (
-                            channel_id,
-                            current_time,
-                            current_time,
-                            int(existing["id"]),
-                        ),
-                    )
-                    should_process = True
                 row = connection.execute(
                     """
                     SELECT * FROM office_manager_action_outbox
-                    WHERE idempotency_key = ?
+                    WHERE request_fingerprint = ?
                     """,
-                    (idempotency_key,),
+                    (request_fingerprint,),
                 ).fetchone()
                 connection.commit()
                 return dict(row), should_process
+
+    def prune_completed(self, *, now: Optional[float] = None) -> int:
+        """Delete terminal personal data after retention, independent of ingress."""
+        self._ensure_schema()
+        current_time = time.time() if now is None else float(now)
+        with self._lock:
+            with self._connect() as connection:
+                cursor = connection.execute(
+                    """
+                    DELETE FROM office_manager_action_outbox
+                    WHERE status = 'completed'
+                      AND completed_at IS NOT NULL
+                      AND completed_at <= ?
+                    """,
+                    (current_time - COMPLETED_RETENTION_SECONDS,),
+                )
+                return max(0, int(cursor.rowcount))
 
     def reserve(
         self,
@@ -393,7 +431,7 @@ class OfficeManagerActionStore:
         lease_seconds: float = DEFAULT_PROCESSING_LEASE_SECONDS,
     ) -> list[dict[str, Any]]:
         """Lease pending actions and processing actions whose worker disappeared."""
-        self._ensure_schema()
+        self.prune_completed()
         current_time = time.time()
         owner = owner or f"roo-office-manager-retry-{uuid4().hex}"
         with self._lock:
@@ -512,6 +550,23 @@ class OfficeManagerActionStore:
                     SELECT * FROM office_manager_action_outbox WHERE id = ?
                     """,
                     (int(action_id),),
+                ).fetchone()
+            )
+
+    def get_by_request_fingerprint(
+        self,
+        request_fingerprint: str,
+    ) -> Optional[dict[str, Any]]:
+        """Return the durable attempt for one exact signed Slack delivery."""
+        self._ensure_schema()
+        with self._connect() as connection:
+            return self._row(
+                connection.execute(
+                    """
+                    SELECT * FROM office_manager_action_outbox
+                    WHERE request_fingerprint = ?
+                    """,
+                    (str(request_fingerprint).strip(),),
                 ).fetchone()
             )
 
@@ -653,6 +708,26 @@ async def office_manager_action_retry_loop(
         except Exception as exc:
             print(
                 "OFFICE_MANAGER_ACTION_WORKER_FAILED "
+                f"error_type={exc.__class__.__name__}"
+            )
+        await asyncio.sleep(poll_seconds)
+
+
+async def office_manager_action_housekeeping_loop(
+    *,
+    store: OfficeManagerActionStore,
+    poll_seconds: float = DEFAULT_HOUSEKEEPING_POLL_SECONDS,
+) -> None:
+    """Purge expired terminal rows even while new actions are disabled."""
+    poll_seconds = max(0.05, float(poll_seconds))
+    while True:
+        try:
+            await asyncio.to_thread(store.prune_completed)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            print(
+                "OFFICE_MANAGER_ACTION_HOUSEKEEPING_FAILED "
                 f"error_type={exc.__class__.__name__}"
             )
         await asyncio.sleep(poll_seconds)

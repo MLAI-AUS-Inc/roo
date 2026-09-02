@@ -266,6 +266,7 @@ async def test_claim_office_manager_day_uses_verified_actor_payload(monkeypatch)
     result = await client.claim_office_manager_day(
         "<@UVERIFIED>",
         "2026-08-03",
+        "11111111-1111-4111-8111-111111111111",
     )
 
     assert result == {"status": "claimed", "points_charged": 0}
@@ -275,6 +276,7 @@ async def test_claim_office_manager_day_uses_verified_actor_payload(monkeypatch)
         "json": {
             "slack_user_id": "UVERIFIED",
             "date": "2026-08-03",
+            "attempt_id": "11111111-1111-4111-8111-111111111111",
         },
     }
 
@@ -299,6 +301,69 @@ async def test_claim_office_manager_day_rejects_legacy_api_key_fallback(monkeypa
 
     with pytest.raises(BackendIdentityError, match="ROO_API_KEY"):
         await client.claim_office_manager_day("UVERIFIED", "2026-08-03")
+
+
+@pytest.mark.asyncio
+async def test_claim_office_manager_day_rejects_noncanonical_attempt_id(monkeypatch):
+    client = MLAIBackendClient(
+        base_url="https://backend.test",
+        api_key="roo-api-key",
+        internal_api_key="roo-api-key",
+    )
+
+    async def unexpected_request(*args, **kwargs):
+        pytest.fail("invalid attempt ID reached the backend transport")
+
+    monkeypatch.setattr(client, "_request", unexpected_request)
+
+    with pytest.raises(ValueError, match="canonical UUID"):
+        await client.claim_office_manager_day(
+            "UVERIFIED",
+            "2026-08-03",
+            "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA",
+        )
+
+
+@pytest.mark.asyncio
+async def test_office_manager_backend_transport_redacts_exception_taint(
+    monkeypatch,
+    capsys,
+):
+    user_sentinel = "U-SECRET-BACKEND-ID"
+    exception_sentinel = "TOKEN-LIKE\nFORGED_BACKEND_LOG=true"
+
+    class FailingAsyncClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def request(self, *args, **kwargs):
+            raise httpx.ConnectError(
+                f"{exception_sentinel} {kwargs['json']['slack_user_id']}"
+            )
+
+    client = MLAIBackendClient(
+        base_url="https://taint-backend.test",
+        api_key="roo-api-key",
+        internal_api_key="roo-api-key",
+    )
+    client._backend_transport_failures.clear()
+    monkeypatch.setattr(backend_module.httpx, "AsyncClient", FailingAsyncClient)
+
+    with pytest.raises(backend_module.MLAIBackendUnavailableError):
+        await client.claim_office_manager_day(
+            user_sentinel,
+            "2026-08-03",
+            "11111111-1111-4111-8111-111111111111",
+        )
+
+    output = capsys.readouterr().out
+    assert user_sentinel not in output
+    assert exception_sentinel not in output
+    assert "FORGED_BACKEND_LOG" not in output
+    assert "exc_type=ConnectError" in output
 
 
 @pytest.mark.asyncio

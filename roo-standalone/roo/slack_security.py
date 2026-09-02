@@ -142,7 +142,7 @@ def get_slack_receipt_store(database_path: str) -> SlackRequestReceiptStore:
     return SlackRequestReceiptStore(database_path)
 
 
-def verify_and_claim_slack_request(
+def verify_and_claim_slack_request_with_fingerprint(
     *,
     headers: Mapping[str, str],
     raw_body: bytes,
@@ -151,8 +151,8 @@ def verify_and_claim_slack_request(
     max_age_seconds: int = 300,
     receipt_ttl_seconds: int = 600,
     now: Optional[float] = None,
-) -> bool:
-    """Verify a request and return true when it is a previously seen retry."""
+) -> tuple[bool, str]:
+    """Verify a request and return its duplicate state and stable fingerprint."""
 
     fingerprint = verify_slack_request(
         signing_secret=signing_secret,
@@ -167,4 +167,28 @@ def verify_and_claim_slack_request(
         now=now,
         ttl_seconds=receipt_ttl_seconds,
     )
-    return not claimed
+    return not claimed, fingerprint
+
+
+def verify_and_claim_slack_request(
+    *,
+    headers: Mapping[str, str],
+    raw_body: bytes,
+    signing_secret: str,
+    receipt_db_path: str,
+    max_age_seconds: int = 300,
+    receipt_ttl_seconds: int = 600,
+    now: Optional[float] = None,
+) -> bool:
+    """Verify a request and return true when it is a previously seen retry."""
+
+    duplicate, _fingerprint = verify_and_claim_slack_request_with_fingerprint(
+        headers=headers,
+        raw_body=raw_body,
+        signing_secret=signing_secret,
+        receipt_db_path=receipt_db_path,
+        max_age_seconds=max_age_seconds,
+        receipt_ttl_seconds=receipt_ttl_seconds,
+        now=now,
+    )
+    return duplicate

@@ -134,13 +134,19 @@ class MLAIBackendClient:
         duration_ms: float,
         circuit_open: bool,
         circuit_breaker: bool,
+        redact_logs: bool = False,
     ) -> None:
+        exception_detail = (
+            f"exc_type={exc.__class__.__name__}"
+            if redact_logs
+            else f"exc_type={exc.__class__.__name__} exc_repr={exc!r}"
+        )
         print(
             "🌐 MLAI request_failed "
             f"method={method.upper()} endpoint={endpoint} "
             f"attempt={attempt}/{total_attempts} timeout_bucket={timeout}s request_id={request_id} "
             f"duration_ms={duration_ms:.2f} "
-            f"exc_type={exc.__class__.__name__} exc_repr={exc!r} "
+            f"{exception_detail} "
             f"circuit_breaker={circuit_breaker} circuit_open={circuit_open}"
         )
 
@@ -271,6 +277,7 @@ class MLAIBackendClient:
         use_admin_headers: bool = False,
         use_org_memory_identity: bool = False,
         use_victor_ai_identity: bool = False,
+        redact_logs: bool = False,
     ) -> httpx.Response:
         if not self.base_url:
             raise ValueError("MLAI_BACKEND_URL not configured")
@@ -334,6 +341,7 @@ class MLAIBackendClient:
                     duration_ms=duration_ms,
                     circuit_open=circuit_open,
                     circuit_breaker=circuit_breaker,
+                    redact_logs=redact_logs,
                 )
                 if attempt < total_attempts:
                     await asyncio.sleep(retry_backoff_seconds * (2 ** (attempt - 1)))
@@ -2318,23 +2326,33 @@ class MLAIBackendClient:
         self,
         slack_user_id: str,
         booking_date: str,
+        attempt_id: str = "",
     ) -> dict:
         """Claim today's Office Manager role using the verified Slack actor."""
         if not self.roo_api_key:
             raise BackendIdentityError(
                 "ROO_API_KEY is required for Office Manager claims"
             )
+        attempt_id = str(attempt_id or "").strip()
+        try:
+            parsed_attempt_id = UUID(attempt_id)
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise ValueError("attempt_id must be a canonical UUID") from exc
+        if str(parsed_attempt_id) != attempt_id:
+            raise ValueError("attempt_id must be a canonical UUID")
         response = await self._request(
             "POST",
             f"{self._points_base}/coworking/office-manager/claim/",
             json={
                 "slack_user_id": self._clean_slack_id(slack_user_id),
                 "date": str(booking_date or "").strip(),
+                "attempt_id": attempt_id,
             },
             timeout=15.0,
             transport_retries=1,
             retry_backoff_seconds=0.5,
             circuit_breaker=True,
+            redact_logs=True,
         )
         response.raise_for_status()
         return response.json()
