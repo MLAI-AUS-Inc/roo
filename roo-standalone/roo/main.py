@@ -75,6 +75,7 @@ from .coworking_booking_intents import coworking_booking_retry_loop
 from .office_manager_actions import (
     OfficeManagerActionLeaseLostError,
     OfficeManagerActionStore,
+    build_office_manager_action_occurrence_key,
     build_office_manager_feedback_client_msg_id,
     build_office_manager_uncertainty_client_msg_id,
     get_office_manager_action_store,
@@ -5320,6 +5321,19 @@ def _office_manager_claim_success_message(
     ):
         invalid("invalid_points_refunded")
 
+    if expected_booking_date != get_current_date().isoformat():
+        message = (
+            f"Roo confirmed your Office Manager request for {expected_booking_date}. "
+            "That date has passed, so this is a historical confirmation only "
+            "and no action is needed now."
+        )
+        if points_refunded:
+            message += (
+                f" The {points_refunded} Roo points charged for that date "
+                "remain returned."
+            )
+        return message
+
     if claim_status == "already_claimed_by_you":
         message = (
             "You are already today's Office Manager. Roo has kept your "
@@ -5463,6 +5477,7 @@ async def _claim_office_manager_from_action(
     from .clients.mlai_backend import MLAIBackendClient
 
     message = ""
+    is_current_booking_date = booking_date == get_current_date().isoformat()
     if action is not None and store is not None:
         current = await asyncio.to_thread(store.get, int(action["id"]))
         if (
@@ -5534,23 +5549,52 @@ async def _claim_office_manager_from_action(
                     "no longer matches the request. No assignment was changed."
                 )
             elif code == "already_claimed":
-                selected = f" <@{assignee}> has the role." if assignee else ""
-                message = f"Someone has already volunteered for today.{selected}"
+                if is_current_booking_date:
+                    selected = f" <@{assignee}> has the role." if assignee else ""
+                    message = f"Someone has already volunteered for today.{selected}"
+                else:
+                    message = (
+                        "Someone had already volunteered for Office Manager on "
+                        f"{booking_date}. That date has passed, so no action is "
+                        "needed now."
+                    )
             elif code == "claim_closed":
-                message = "The Office Manager volunteer window is closed for today."
+                message = (
+                    "The Office Manager volunteer window is closed for today."
+                    if is_current_booking_date
+                    else (
+                        f"The Office Manager volunteer window for {booking_date} "
+                        "was closed. That date has passed, so no action is needed now."
+                    )
+                )
             elif code == "member_not_eligible":
                 message = (
                     "Roo could not confirm you as an active member, so the role "
                     "was not assigned."
                 )
             elif code == "office_manager_day_not_found":
-                message = "Today's Office Manager volunteer request is no longer available."
-            else:
                 message = (
-                    "Roo could not confirm the result of your volunteer request. "
-                    "Check Roo's latest Office Manager announcement before trying "
-                    "the button again."
+                    "Today's Office Manager volunteer request is no longer available."
+                    if is_current_booking_date
+                    else (
+                        f"The Office Manager volunteer request for {booking_date} "
+                        "is no longer available. That date has passed, so no action "
+                        "is needed now."
+                    )
                 )
+            else:
+                if is_current_booking_date:
+                    message = (
+                        "Roo could not confirm the result of your volunteer request. "
+                        "Check Roo's latest Office Manager announcement before trying "
+                        "the button again."
+                    )
+                else:
+                    message = (
+                        "Roo could not confirm the result of your Office Manager "
+                        f"request for {booking_date}. That date has passed, so do "
+                        "not use this result as a current assignment."
+                    )
         except Exception as exc:
             print(
                 "OFFICE_MANAGER_CLAIM_FAILED "
@@ -6682,6 +6726,9 @@ async def slack_actions(
             print("Ignoring Office Manager action outside Public Roo")
             return JSONResponse(status_code=200, content={})
         if not settings.OFFICE_MANAGER_ACTIONS_ENABLED:
+            if is_duplicate_request:
+                print("↩️ Ignoring duplicate disabled Office Manager action request")
+                return JSONResponse(status_code=200, content={})
             if user_id and channel_id:
                 start_slack_action(
                     _send_office_manager_private_feedback(
@@ -6709,6 +6756,20 @@ async def slack_actions(
         request_fingerprint = str(
             getattr(request.state, "slack_request_fingerprint", "")
         ).strip()
+        action_ts = str(office_manager_action.get("action_ts") or "").strip()
+        action_occurrence_key = (
+            build_office_manager_action_occurrence_key(
+                slack_team_id=str((payload.get("team") or {}).get("id") or ""),
+                slack_user_id=str(user_id or ""),
+                channel_id=str(channel_id or ""),
+                action_id=str(office_manager_action.get("action_id") or ""),
+                action_ts=action_ts,
+                message_ts=early_action_message_ts,
+                booking_date=booking_date,
+            )
+            if action_ts
+            else None
+        )
         if (
             user_id
             and channel_id
@@ -6719,10 +6780,17 @@ async def slack_actions(
             action_store = get_office_manager_action_store(
                 settings.SLACK_RECEIPTS_DB_PATH
             )
-            existing_action = await asyncio.to_thread(
-                action_store.get_by_request_fingerprint,
-                request_fingerprint,
-            )
+            existing_action = None
+            if action_occurrence_key:
+                existing_action = await asyncio.to_thread(
+                    action_store.get_by_action_occurrence_key,
+                    action_occurrence_key,
+                )
+            if existing_action is None:
+                existing_action = await asyncio.to_thread(
+                    action_store.get_by_request_fingerprint,
+                    request_fingerprint,
+                )
             if (
                 existing_action is not None
                 and str(existing_action["slack_user_id"]) == str(user_id)
@@ -6743,6 +6811,9 @@ async def slack_actions(
             or not booking_date
             or not is_current_booking_date
         ):
+            if is_duplicate_request:
+                print("↩️ Ignoring duplicate invalid Office Manager action request")
+                return JSONResponse(status_code=200, content={})
             if user_id and channel_id:
                 start_slack_action(
                     _send_office_manager_private_feedback(
@@ -6766,6 +6837,7 @@ async def slack_actions(
                 channel_id=str(channel_id),
                 booking_date=booking_date,
                 request_fingerprint=request_fingerprint,
+                action_occurrence_key=action_occurrence_key,
             )
         except Exception as exc:
             print(

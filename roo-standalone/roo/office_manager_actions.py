@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import sqlite3
 import threading
 import time
@@ -56,6 +58,36 @@ def build_office_manager_uncertainty_client_msg_id(attempt_id: str) -> str:
     )
 
 
+def build_office_manager_action_occurrence_key(
+    *,
+    slack_team_id: str,
+    slack_user_id: str,
+    channel_id: str,
+    action_id: str,
+    action_ts: str,
+    message_ts: str,
+    booking_date: str,
+) -> str:
+    """Hash immutable Slack action fields into one logical click identity."""
+    canonical_action_ts = str(action_ts or "").strip()
+    if not canonical_action_ts:
+        raise ValueError("action_ts is required for a logical action identity")
+    canonical = json.dumps(
+        {
+            "action_id": str(action_id or "").strip(),
+            "action_ts": canonical_action_ts,
+            "booking_date": str(booking_date or "").strip(),
+            "channel_id": str(channel_id or "").strip(),
+            "message_ts": str(message_ts or "").strip(),
+            "slack_team_id": str(slack_team_id or "").strip(),
+            "slack_user_id": str(slack_user_id or "").strip(),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 class OfficeManagerActionLeaseLostError(RuntimeError):
     """Raised when a replaced worker must stop without mutating or notifying."""
 
@@ -76,8 +108,8 @@ class OfficeManagerActionStore:
             isolation_level=None,
         )
         connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA journal_mode=WAL")
         connection.execute("PRAGMA busy_timeout=2000")
+        connection.execute("PRAGMA journal_mode=WAL")
         return connection
 
     def _ensure_schema(self) -> None:
@@ -99,6 +131,7 @@ class OfficeManagerActionStore:
                         idempotency_key TEXT NOT NULL UNIQUE,
                         attempt_id TEXT NOT NULL UNIQUE,
                         request_fingerprint TEXT UNIQUE,
+                        action_occurrence_key TEXT UNIQUE,
                         slack_user_id TEXT NOT NULL,
                         channel_id TEXT NOT NULL,
                         booking_date TEXT NOT NULL,
@@ -133,6 +166,7 @@ class OfficeManagerActionStore:
                 for column_name, column_type in (
                     ("attempt_id", "TEXT"),
                     ("request_fingerprint", "TEXT"),
+                    ("action_occurrence_key", "TEXT"),
                 ):
                     if column_name not in columns:
                         connection.execute(
@@ -168,6 +202,14 @@ class OfficeManagerActionStore:
                     WHERE request_fingerprint IS NOT NULL
                     """
                 )
+                connection.execute(
+                    """
+                    CREATE UNIQUE INDEX IF NOT EXISTS
+                    idx_office_manager_actions_occurrence_key
+                    ON office_manager_action_outbox (action_occurrence_key)
+                    WHERE action_occurrence_key IS NOT NULL
+                    """
+                )
                 if "uncertainty_notice_attempted_at" not in columns:
                     connection.execute(
                         """
@@ -198,6 +240,7 @@ class OfficeManagerActionStore:
         channel_id: str,
         booking_date: str,
         request_fingerprint: Optional[str] = None,
+        action_occurrence_key: Optional[str] = None,
     ) -> tuple[dict[str, Any], bool]:
         """Persist one signed click and report whether it created durable work."""
         self._ensure_schema()
@@ -210,27 +253,39 @@ class OfficeManagerActionStore:
         request_fingerprint = str(request_fingerprint).strip()
         if not request_fingerprint:
             raise ValueError("request_fingerprint is required")
+        action_occurrence_key = str(action_occurrence_key or "").strip() or None
         self.prune_completed(now=current_time)
 
         with self._lock:
             with self._connect() as connection:
                 connection.execute("BEGIN IMMEDIATE")
-                existing = connection.execute(
-                    """
-                    SELECT * FROM office_manager_action_outbox
-                    WHERE request_fingerprint = ?
-                    """,
-                    (request_fingerprint,),
-                ).fetchone()
+                existing = None
+                if action_occurrence_key is not None:
+                    existing = connection.execute(
+                        """
+                        SELECT * FROM office_manager_action_outbox
+                        WHERE action_occurrence_key = ?
+                        """,
+                        (action_occurrence_key,),
+                    ).fetchone()
+                if existing is None:
+                    existing = connection.execute(
+                        """
+                        SELECT * FROM office_manager_action_outbox
+                        WHERE request_fingerprint = ?
+                        """,
+                        (request_fingerprint,),
+                    ).fetchone()
                 should_process = existing is None
                 if existing is None:
                     attempt_id = str(uuid4())
-                    connection.execute(
+                    cursor = connection.execute(
                         """
                         INSERT INTO office_manager_action_outbox (
                             idempotency_key,
                             attempt_id,
                             request_fingerprint,
+                            action_occurrence_key,
                             slack_user_id,
                             channel_id,
                             booking_date,
@@ -239,12 +294,13 @@ class OfficeManagerActionStore:
                             created_at,
                             updated_at
                         )
-                        VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)
                         """,
                         (
                             attempt_id,
                             attempt_id,
                             request_fingerprint,
+                            action_occurrence_key,
                             slack_user_id,
                             channel_id,
                             booking_date,
@@ -253,12 +309,28 @@ class OfficeManagerActionStore:
                             current_time,
                         ),
                     )
+                    action_id = int(cursor.lastrowid)
+                elif (
+                    action_occurrence_key is not None
+                    and not str(existing["action_occurrence_key"] or "").strip()
+                ):
+                    connection.execute(
+                        """
+                        UPDATE office_manager_action_outbox
+                        SET action_occurrence_key = ?, updated_at = ?
+                        WHERE id = ? AND action_occurrence_key IS NULL
+                        """,
+                        (action_occurrence_key, current_time, int(existing["id"])),
+                    )
+                    action_id = int(existing["id"])
+                else:
+                    action_id = int(existing["id"])
                 row = connection.execute(
                     """
                     SELECT * FROM office_manager_action_outbox
-                    WHERE request_fingerprint = ?
+                    WHERE id = ?
                     """,
-                    (request_fingerprint,),
+                    (action_id,),
                 ).fetchone()
                 connection.commit()
                 return dict(row), should_process
@@ -570,6 +642,23 @@ class OfficeManagerActionStore:
                 ).fetchone()
             )
 
+    def get_by_action_occurrence_key(
+        self,
+        action_occurrence_key: str,
+    ) -> Optional[dict[str, Any]]:
+        """Return the durable attempt for one logical Slack action occurrence."""
+        self._ensure_schema()
+        with self._connect() as connection:
+            return self._row(
+                connection.execute(
+                    """
+                    SELECT * FROM office_manager_action_outbox
+                    WHERE action_occurrence_key = ?
+                    """,
+                    (str(action_occurrence_key).strip(),),
+                ).fetchone()
+            )
+
 
 OfficeManagerActionProcessor = Callable[
     [dict[str, Any], OfficeManagerActionStore],
@@ -606,7 +695,9 @@ async def _process_leased_action(
                     "OFFICE_MANAGER_ACTION_LEASE_RENEW_FAILED "
                     f"action_id={action_id} error_type={exc.__class__.__name__}"
                 )
-                lease_lost.set()
+                # A transport/storage error does not prove another worker owns
+                # the lease. Stop heartbeating and let the processor's durable
+                # ownership fences decide whether it may publish and complete.
                 return
             if not renewed:
                 lease_lost.set()

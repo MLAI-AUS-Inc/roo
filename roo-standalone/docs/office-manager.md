@@ -11,7 +11,9 @@ delivers the backend's authoritative result privately.
   defaults to `false`.
 - `ROO_API_KEY` must be Roo's dedicated backend credential. It must not equal
   the backend's internal or MLAI service keys.
-- `MLAI_BACKEND_URL` must identify the backend that owns the claim endpoint.
+- `MLAI_BACKEND_URL` must be the backend's root origin with no path, query, or
+  fragment, for example `https://api.mlai.au`. Roo appends the versioned Office
+  Manager claim path itself; do not configure a value ending in `/api/v1`.
 - Public Roo must use the same Slack application that owns the Office Manager
   button. Do not put this action or its credential on Admin Roo.
 
@@ -39,8 +41,9 @@ The backend deployment validates this contract before enabling its scheduler.
 To roll back, disable new backend Office Manager creation and Roo actions, but
 leave the backend scheduler running until committed Slack retractions have
 drained. Existing non-terminal Roo action records remain durable while the
-gate is disabled and resume only when re-enabled on the same Melbourne-local
-date; stale records finish with non-actionable private feedback.
+gate is disabled. When re-enabled, Roo reconciles them with their original
+attempt ID even after the Melbourne-local date changes; historical results
+name the original date and explicitly say that no current action is required.
 
 ## Local verification
 

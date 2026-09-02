@@ -114,8 +114,8 @@ def _successful_claim_payload(
     return payload
 
 
-def _signed_headers(settings, body):
-    timestamp = int(time.time())
+def _signed_headers(settings, body, *, timestamp=None):
+    timestamp = int(time.time()) if timestamp is None else int(timestamp)
     return {
         "X-Slack-Request-Timestamp": str(timestamp),
         "X-Slack-Signature": _signature(
@@ -202,6 +202,47 @@ def test_signed_button_uses_payload_actor_and_deduplicates_delivery(
     assert completed_replay.status_code == 200
     assert len(scheduled) == 1
     assert action_store.get(1)["status"] == "completed"
+
+
+def test_resigned_retry_with_same_action_ts_reuses_durable_attempt(
+    tmp_path,
+    monkeypatch,
+):
+    configured = _settings(tmp_path)
+    main_module.app.dependency_overrides[get_settings] = lambda: configured
+    scheduled = []
+    monkeypatch.setattr(main_module, "start_slack_action", scheduled.append)
+    body = _action_body(action_ts="1.000001")
+    first_timestamp = int(time.time())
+    first_headers = _signed_headers(
+        configured,
+        body,
+        timestamp=first_timestamp,
+    )
+    retry_headers = _signed_headers(
+        configured,
+        body,
+        timestamp=first_timestamp + 1,
+    )
+    client = TestClient(main_module.app)
+
+    first = client.post("/slack/actions", content=body, headers=first_headers)
+    resigned_retry = client.post(
+        "/slack/actions",
+        content=body,
+        headers=retry_headers,
+    )
+
+    assert first.status_code == resigned_retry.status_code == 200
+    assert first_headers["X-Slack-Signature"] != retry_headers["X-Slack-Signature"]
+    assert len(scheduled) == 1
+    store = action_module.get_office_manager_action_store(
+        configured.SLACK_RECEIPTS_DB_PATH
+    )
+    first_record = store.get(1)
+    assert first_record["action_occurrence_key"]
+    assert store.get(2) is None
+    scheduled[0].close()
 
 
 def test_persistence_failure_is_retried_after_generic_receipt_is_committed(
@@ -302,11 +343,20 @@ def test_commit_uncertain_retry_is_recovered_by_durable_worker(
     )
     monkeypatch.setattr(main_module, "get_current_date", lambda: date(2026, 8, 3))
     monkeypatch.setattr(main_module, "start_slack_action", scheduled.append)
-    body = _action_body()
-    headers = _signed_headers(configured, body)
+    body = _action_body(action_ts="1.000001")
+    first_timestamp = int(time.time())
+    headers = _signed_headers(configured, body, timestamp=first_timestamp)
 
     first = client.post("/slack/actions", content=body, headers=headers)
-    retry = client.post("/slack/actions", content=body, headers=headers)
+    retry = client.post(
+        "/slack/actions",
+        content=body,
+        headers=_signed_headers(
+            configured,
+            body,
+            timestamp=first_timestamp + 1,
+        ),
+    )
 
     assert first.status_code == 503
     assert retry.status_code == 200
@@ -491,6 +541,10 @@ def test_admin_surface_ignores_office_manager_action(tmp_path, monkeypatch):
             {"MLAI_BACKEND_URL": "https://secret@backend.test?token=value"},
             "non-secret HTTP",
         ),
+        (
+            {"MLAI_BACKEND_URL": "https://backend.test/api/v1"},
+            "root origin",
+        ),
     ),
 )
 def test_office_manager_actions_fail_closed_without_dedicated_configuration(
@@ -512,14 +566,17 @@ def test_office_manager_kill_switch_acknowledges_without_persisting(
     monkeypatch.setattr(main_module, "start_slack_action", scheduled.append)
     monkeypatch.setattr(main_module, "get_current_date", lambda: date(2026, 8, 3))
     body = _action_body()
+    headers = _signed_headers(configured, body)
 
-    response = TestClient(main_module.app).post(
+    client = TestClient(main_module.app)
+    response = client.post(
         "/slack/actions",
         content=body,
-        headers=_signed_headers(configured, body),
+        headers=headers,
     )
+    retry = client.post("/slack/actions", content=body, headers=headers)
 
-    assert response.status_code == 200
+    assert response.status_code == retry.status_code == 200
     assert len(scheduled) == 1
     action_store = action_module.get_office_manager_action_store(
         configured.SLACK_RECEIPTS_DB_PATH
@@ -652,13 +709,15 @@ def test_stale_button_is_rejected_before_backend_claim(tmp_path, monkeypatch):
     monkeypatch.setattr(main_module, "start_slack_action", scheduled.append)
 
     body = _action_body(value={"date": "2026-08-02"})
+    headers = _signed_headers(configured, body)
     response = client.post(
         "/slack/actions",
         content=body,
-        headers=_signed_headers(configured, body),
+        headers=headers,
     )
+    retry = client.post("/slack/actions", content=body, headers=headers)
 
-    assert response.status_code == 200
+    assert response.status_code == retry.status_code == 200
     assert len(scheduled) == 1
     asyncio.run(scheduled[0])
     assert "no longer valid" in feedback[0]["text"]
@@ -685,12 +744,21 @@ def test_exact_accepted_delivery_crossing_midnight_resumes_durable_attempt(
         capture_action,
     )
     body = _action_body(action_ts="1.000001")
-    headers = _signed_headers(configured, body)
+    first_timestamp = int(time.time())
+    headers = _signed_headers(configured, body, timestamp=first_timestamp)
     client = TestClient(main_module.app)
 
     first = client.post("/slack/actions", content=body, headers=headers)
     current_date[0] = date(2026, 8, 4)
-    retry = client.post("/slack/actions", content=body, headers=headers)
+    retry = client.post(
+        "/slack/actions",
+        content=body,
+        headers=_signed_headers(
+            configured,
+            body,
+            timestamp=first_timestamp + 1,
+        ),
+    )
 
     assert first.status_code == retry.status_code == 200
     assert len(scheduled) == 2
@@ -1337,7 +1405,10 @@ async def test_commit_response_loss_restart_and_rollover_reuse_attempt(
     assert restarted_store.get(action["id"])["status"] == "completed"
     assert len(delivered) == 2
     assert "still confirming" in delivered[0][1]
-    assert "already today's Office Manager" in delivered[1][1]
+    assert "request for 2026-08-03" in delivered[1][1]
+    assert "historical confirmation only" in delivered[1][1]
+    assert "no action is needed now" in delivered[1][1]
+    assert "today's Office Manager" not in delivered[1][1]
 
 
 @pytest.mark.asyncio
@@ -1505,6 +1576,7 @@ def test_existing_outbox_schema_adds_uncertainty_notice_column(tmp_path):
     assert action["feedback_text"] is None
     assert action["feedback_client_msg_id"] is None
     assert action["feedback_prepared_at"] is None
+    assert action["action_occurrence_key"] is None
 
 
 def test_concurrent_processes_serialize_legacy_schema_upgrade(tmp_path):
@@ -1549,6 +1621,7 @@ def test_concurrent_processes_serialize_legacy_schema_upgrade(tmp_path):
     assert len(upgraded) == 2
     assert all(row["feedback_text"] is None for row in upgraded)
     assert all(row["feedback_client_msg_id"] is None for row in upgraded)
+    assert all(row["action_occurrence_key"] is None for row in upgraded)
 
 
 @pytest.mark.asyncio
@@ -1657,6 +1730,55 @@ async def test_expired_worker_cannot_emit_terminal_private_feedback(
     current = store.get(action["id"])
     assert current["locked_by"] == "replacement"
     assert current["feedback_text"] is None
+
+
+@pytest.mark.asyncio
+async def test_lease_renew_exception_completes_once_when_original_lease_is_live(
+    tmp_path,
+    monkeypatch,
+):
+    store = action_module.OfficeManagerActionStore(tmp_path / "actions.db")
+    action, _ = store.record_action(
+        slack_user_id="UVERIFIED",
+        channel_id="CCOWORK",
+        booking_date="2026-08-03",
+    )
+    renew_failures = []
+    deliveries = []
+
+    def fail_renew(*args, **kwargs):
+        renew_failures.append((args, kwargs))
+        raise sqlite3.OperationalError("synthetic heartbeat storage error")
+
+    async def stage_one_terminal_delivery(record, current_store):
+        while not renew_failures:
+            await asyncio.sleep(0.001)
+        staged = await asyncio.to_thread(
+            current_store.stage_feedback,
+            int(record["id"]),
+            owner=str(record["locked_by"]),
+            text="Private terminal result",
+            client_msg_id=action_module.build_office_manager_feedback_client_msg_id(
+                str(record["attempt_id"])
+            ),
+        )
+        assert staged is not None
+        deliveries.append(staged["feedback_client_msg_id"])
+
+    monkeypatch.setattr(action_module, "DEFAULT_PROCESSING_LEASE_SECONDS", 0.03)
+    monkeypatch.setattr(store, "renew", fail_renew)
+
+    assert await action_module.process_office_manager_action(
+        action["id"],
+        store=store,
+        processor=stage_one_terminal_delivery,
+    )
+
+    completed = store.get(action["id"])
+    assert len(renew_failures) == 1
+    assert len(deliveries) == 1
+    assert completed["status"] == "completed"
+    assert completed["feedback_client_msg_id"] is None
 
 
 @pytest.mark.asyncio
@@ -2057,7 +2179,10 @@ async def test_prior_date_accepted_action_recovers_backend_result_privately(
         ("UVERIFIED", "2026-08-03", action["attempt_id"]),
     ]
     assert delivered[0][0] == "UVERIFIED"
-    assert "already today's Office Manager" in delivered[0][1]
+    assert "request for 2026-08-03" in delivered[0][1]
+    assert "historical confirmation only" in delivered[0][1]
+    assert "no action is needed now" in delivered[0][1]
+    assert "today's Office Manager" not in delivered[0][1]
 
 
 def test_exact_delivery_reuses_attempt_but_new_click_gets_new_lifecycle(tmp_path):

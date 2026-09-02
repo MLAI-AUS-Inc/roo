@@ -489,12 +489,14 @@ class Settings(BaseSettings):
                 or not office_manager_backend_url.hostname
                 or office_manager_backend_url.username is not None
                 or office_manager_backend_url.password is not None
+                or office_manager_backend_url.path not in {"", "/"}
+                or office_manager_backend_url.params
                 or office_manager_backend_url.query
                 or office_manager_backend_url.fragment
             ):
                 raise ValueError(
-                    "MLAI_BACKEND_URL must be a non-secret HTTP(S) base URL when "
-                    "OFFICE_MANAGER_ACTIONS_ENABLED is true"
+                    "MLAI_BACKEND_URL must be a non-secret HTTP(S) root origin "
+                    "without a path when OFFICE_MANAGER_ACTIONS_ENABLED is true"
                 )
             if not str(self.ROO_API_KEY or "").strip():
                 raise ValueError(

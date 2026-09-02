@@ -264,7 +264,7 @@ jobs:
 
             if [ "$OFFICE_MANAGER_ACTIONS_ENABLED" = "true" ]; then
               echo "Verifying Office Manager actions are enabled on Public Roo..."
-              docker compose exec -T roo python -c 'from roo.config import get_settings; settings = get_settings(); assert settings.ROO_SURFACE == "public"; assert settings.OFFICE_MANAGER_ACTIONS_ENABLED is True; assert settings.MLAI_BACKEND_URL; assert settings.ROO_API_KEY'
+              docker compose exec -T roo python -c 'from urllib.parse import urlparse; from roo.config import get_settings; settings = get_settings(); backend_url = urlparse(str(settings.MLAI_BACKEND_URL or "")); assert settings.ROO_SURFACE == "public"; assert settings.OFFICE_MANAGER_ACTIONS_ENABLED is True; assert backend_url.scheme in {"http", "https"} and backend_url.hostname and backend_url.path in {"", "/"} and not backend_url.params and not backend_url.query and not backend_url.fragment; assert settings.ROO_API_KEY'
             fi
 
             # The cross-workspace Slack bridge is a separate Compose project.
