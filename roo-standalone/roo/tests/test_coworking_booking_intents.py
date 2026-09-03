@@ -1,8 +1,10 @@
 import asyncio
 import hashlib
 import importlib
+import json
 import sqlite3
 from types import SimpleNamespace
+from uuid import UUID
 
 import httpx
 import pytest
@@ -52,10 +54,14 @@ class FakeClient:
         self.error = error
         self.balance = balance
         self.book_calls = []
+        self.operation_ids = []
         self.balance_calls = []
 
-    async def book_coworking(self, slack_user_id, booking_date, channel_id):
+    async def book_coworking(
+        self, slack_user_id, booking_date, channel_id, *, operation_id=None
+    ):
         self.book_calls.append((slack_user_id, booking_date, channel_id))
+        self.operation_ids.append(operation_id)
         if self.error is not None:
             raise self.error
         return dict(self.result)
@@ -147,7 +153,6 @@ def test_intent_store_persists_and_claims_due_work(tmp_path):
         delay_seconds=0,
     )
     assert retry["status"] == "pending_retry"
-
     claimed = store.claim_due(owner="retry-worker")
     assert len(claimed) == 1
     assert claimed[0]["status"] == "processing"
@@ -161,6 +166,35 @@ def test_intent_store_persists_and_claims_due_work(tmp_path):
     assert confirmed["status"] == "confirmed"
     assert confirmed["backend_booking_id"] == "booking-1"
     assert store.counts_by_status() == {"confirmed": 1}
+
+
+def test_new_user_action_after_terminal_intent_gets_new_operation(tmp_path):
+    store = intent_store(tmp_path / "intents.db")
+    first = store.record_intent(
+        slack_user_id="U123",
+        booking_date="2026-04-22",
+        channel_id="C123",
+        thread_ts=None,
+    )
+    leased = store.reserve_for_processing(first["id"], owner="worker")
+    store.mark_confirmed(
+        first["id"],
+        owner=leased["locked_by"],
+        backend_result=booking_result(),
+        notification_required=False,
+    )
+
+    second = store.record_intent(
+        slack_user_id="U123",
+        booking_date="2026-04-22",
+        channel_id="C123",
+        thread_ts=None,
+    )
+
+    assert second["id"] != first["id"]
+    assert coworking.build_coworking_operation_id(second["idempotency_key"]) != (
+        coworking.build_coworking_operation_id(first["idempotency_key"])
+    )
 
 
 @pytest.mark.asyncio
@@ -190,6 +224,7 @@ async def test_existing_booking_replay_uses_complete_result_and_private_link_gui
     assert result["status"] == "confirmed"
     assert result["backend_result"]["already_booked"] is True
     assert client.book_calls == [("U123", "2026-04-22", "C123")]
+    UUID(client.operation_ids[0])
     assert client.balance_calls == ["U123"]
     stored = store.get(intent["id"])
     assert stored["status"] == "confirmed"
@@ -642,7 +677,9 @@ async def test_stale_mutation_outcome_emits_no_message_and_keeps_winner(
     winner_result = booking_result(cost=4, discount_applied=True)
 
     class RacingClient(FakeClient):
-        async def book_coworking(self, slack_user_id, booking_date, channel_id):
+        async def book_coworking(
+            self, slack_user_id, booking_date, channel_id, *, operation_id=None
+        ):
             replacement = store.reserve_for_processing(
                 intent["id"],
                 owner="replacement-worker",
@@ -927,8 +964,8 @@ def test_v3_quarantine_has_fenced_audited_recovery(
             INSERT INTO coworking_booking_intents (
                 idempotency_key, slack_user_id, booking_date, status,
                 next_attempt_at, created_at, updated_at, confirmed_at,
-                notification_status
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                notification_status, backend_result_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 f"reconcile-{outcome}",
@@ -940,6 +977,14 @@ def test_v3_quarantine_has_fenced_audited_recovery(
                 2.0,
                 2.0,
                 "not_required",
+                json.dumps(
+                    {
+                        "id": "legacy-booking-1",
+                        "date": "2026-04-22",
+                        "status": "booked",
+                        "points_cost": 8,
+                    }
+                ),
             ),
         )
         intent_id = cursor.lastrowid
@@ -961,6 +1006,10 @@ def test_v3_quarantine_has_fenced_audited_recovery(
     assert (reconciled["notification_next_attempt_at"] is not None) is (
         outcome == "retry"
     )
+    if outcome == "retry":
+        normalized = json.loads(reconciled["backend_result_json"])
+        UUID(normalized["id"])
+        assert normalized["founder_tools_account_linked"] is False
     with pytest.raises(ValueError, match="does not require reconciliation"):
         reconciliation_module.reconcile_coworking_notification(
             db_path,
@@ -983,6 +1032,46 @@ def test_reconciliation_does_not_create_a_missing_database(tmp_path):
         )
 
     assert not db_path.exists()
+
+
+def test_retry_reconciliation_fails_closed_without_booking_result(tmp_path):
+    db_path = tmp_path / "missing-result.db"
+    v2_schema_module.migrate_coworking_booking_intents_v2(db_path)
+    with sqlite3.connect(db_path) as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO coworking_booking_intents (
+                idempotency_key, slack_user_id, booking_date, status,
+                next_attempt_at, created_at, updated_at, confirmed_at,
+                notification_status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "missing-result",
+                "U123",
+                "2026-04-22",
+                "confirmed",
+                0.0,
+                1.0,
+                2.0,
+                2.0,
+                "not_required",
+            ),
+        )
+        intent_id = cursor.lastrowid
+    schema_module.migrate_coworking_booking_intents_v3(db_path)
+
+    with pytest.raises(ValueError, match="recorded booking result"):
+        reconciliation_module.reconcile_coworking_notification(
+            db_path,
+            intent_id=intent_id,
+            outcome="retry",
+            operator_reference="INC-648-no-result",
+        )
+
+    assert coworking.CoworkingBookingIntentStore(db_path).get(intent_id)[
+        "notification_status"
+    ] == "reconciliation_required"
 
 
 def test_terminal_retention_preserves_unfinished_notifications(tmp_path):
@@ -1061,6 +1150,22 @@ def test_terminal_retention_preserves_unfinished_notifications(tmp_path):
         thread_ts=None,
     )
 
+    batch_pending = store.record_batch_intent(
+        admin_slack_user_id="UADMIN",
+        target_slack_user_ids=["UBATCH1"],
+        booking_date="2026-04-24",
+        channel_id="C123",
+        thread_ts=None,
+    )
+    batch_lease = store.reserve_batch_for_processing(
+        batch_pending["id"], owner="batch-worker"
+    )
+    store.mark_batch_blocked(
+        batch_pending["id"],
+        owner=batch_lease["locked_by"],
+        error="terminal rejection",
+    )
+
     with sqlite3.connect(store.db_path) as conn:
         conn.execute("UPDATE coworking_booking_intents SET updated_at = 0")
 
@@ -1072,6 +1177,7 @@ def test_terminal_retention_preserves_unfinished_notifications(tmp_path):
     assert store.get(blocked_pending["id"])["notification_status"] == "pending"
     assert store.get(unfinished["id"])["notification_status"] == "pending"
     assert store.get(pending_mutation["id"])["status"] == "pending"
+    assert store.get(batch_pending["id"])["notification_status"] == "pending"
 
 
 @pytest.mark.asyncio
@@ -1269,7 +1375,9 @@ async def test_process_intent_treats_malformed_success_as_commit_uncertain(
     store, intent, leased = leased_intent(tmp_path)
 
     class MalformedClient(FakeClient):
-        async def book_coworking(self, slack_user_id, booking_date, channel_id):
+        async def book_coworking(
+            self, slack_user_id, booking_date, channel_id, *, operation_id=None
+        ):
             self.book_calls.append((slack_user_id, booking_date, channel_id))
             return malformed_result
 

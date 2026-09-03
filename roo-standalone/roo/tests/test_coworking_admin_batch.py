@@ -2,6 +2,7 @@ import importlib
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+from uuid import UUID
 
 import httpx
 import pytest
@@ -69,6 +70,7 @@ class FakeCoworkingClient:
         target_slack_user_ids,
         booking_date,
         slack_channel_id=None,
+        operation_id=None,
     ):
         self.batch_calls.append(
             {
@@ -76,6 +78,7 @@ class FakeCoworkingClient:
                 "target_slack_user_ids": list(target_slack_user_ids),
                 "booking_date": booking_date,
                 "slack_channel_id": slack_channel_id,
+                "operation_id": operation_id,
             }
         )
         if self.batch_exc:
@@ -153,6 +156,7 @@ async def test_admin_checkin_coworking_batches_deduped_targets(batch_runtime):
         text="<@UROO> check <@U1> <@U2> <@U1> in today",
     )
 
+    UUID(client.batch_calls[0].pop("operation_id"))
     assert client.batch_calls == [
         {
             "admin_slack_user_id": "UADMIN",
@@ -208,12 +212,13 @@ async def test_book_coworking_with_tagged_users_routes_to_admin_batch_flow():
     )
 
     assert client.batch_calls[0]["target_slack_user_ids"] == ["U1", "U2"]
+    UUID(client.batch_calls[0]["operation_id"])
     assert "Processed **2** coworking check-ins" in result
     assert "Admin Roo Points were not charged" in result
 
 
 @pytest.mark.asyncio
-async def test_backend_batch_failure_formats_no_bookings_created_response():
+async def test_backend_batch_failure_formats_no_bookings_created_response(batch_runtime):
     exc = _batch_http_error(
         {
             "error": "One or more users have insufficient Roo Points",
@@ -237,6 +242,13 @@ async def test_backend_batch_failure_formats_no_bookings_created_response():
     assert "One or more users have insufficient Roo Points" in result
     assert "<@U2>: There are not enough Roo Points for this action" in result
     assert "4 < 8" not in result
+    intent = batch_runtime["store"].get_by_key(
+        coworking_module.build_coworking_batch_intent_key(
+            "UADMIN", ["U1", "U2"], "2026-07-04"
+        )
+    )
+    assert intent["status"] == "batch_blocked"
+    assert intent["notification_status"] == "not_required"
 
 
 @pytest.mark.asyncio

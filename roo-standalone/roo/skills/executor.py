@@ -98,6 +98,7 @@ from ..clients.mlai_backend import (
     validate_coworking_booking_result,
 )
 from ..coworking_booking_intents import (
+    build_coworking_operation_id,
     coworking_failure_code,
     deliver_coworking_booking_notification,
     get_coworking_intent_store,
@@ -14329,9 +14330,13 @@ Chunk {index} source: {label}
             "founder_tools_explicitly_linked"
         )
         founder_tools_explicitly_linked = (
-            raw_explicit_link_state
-            if isinstance(raw_explicit_link_state, bool)
-            else None
+            None
+            if backend_result.get("founder_tools_link_state_historical_unknown") is True
+            else (
+                raw_explicit_link_state
+                if isinstance(raw_explicit_link_state, bool)
+                else None
+            )
         )
 
         new_balance = None
@@ -14551,11 +14556,17 @@ Chunk {index} source: {label}
                 target_slack_user_ids=target_user_ids,
                 booking_date=booking_date,
                 slack_channel_id=channel_id,
+                operation_id=build_coworking_operation_id(
+                    str(leased_intent["idempotency_key"])
+                ),
             )
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 400:
                 store.mark_batch_blocked(
-                    int(leased_intent["id"]), owner=owner, error=coworking_failure_code(exc)
+                    int(leased_intent["id"]),
+                    owner=owner,
+                    error=coworking_failure_code(exc),
+                    notification_required=False,
                 )
                 return self._format_admin_coworking_batch_bad_request(
                     booking_date=booking_date,
@@ -14563,7 +14574,10 @@ Chunk {index} source: {label}
                 )
             if exc.response.status_code == 403:
                 store.mark_batch_blocked(
-                    int(leased_intent["id"]), owner=owner, error=coworking_failure_code(exc)
+                    int(leased_intent["id"]),
+                    owner=owner,
+                    error=coworking_failure_code(exc),
+                    notification_required=False,
                 )
                 return self._full_points_admin_denial(None, "check people in for coworking")
             if is_retryable_coworking_exception(exc):
@@ -14669,7 +14683,14 @@ Chunk {index} source: {label}
                 admin_checkin=admin_checkin,
             )
         try:
-            result = await client.book_coworking(target_user_id, booking_date, channel_id)
+            result = await client.book_coworking(
+                target_user_id,
+                booking_date,
+                channel_id,
+                operation_id=build_coworking_operation_id(
+                    str(leased_intent["idempotency_key"])
+                ),
+            )
             result = validate_coworking_booking_result(
                 result,
                 expected_date=booking_date,

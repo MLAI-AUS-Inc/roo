@@ -2539,7 +2539,14 @@ class MLAIBackendClient:
         self._raise_for_status_or_backend_unavailable(response)
         return response.json()
 
-    async def book_coworking(self, slack_user_id: str, booking_date: str, slack_channel_id: Optional[str] = None) -> dict:
+    async def book_coworking(
+        self,
+        slack_user_id: str,
+        booking_date: str,
+        slack_channel_id: Optional[str] = None,
+        *,
+        operation_id: Optional[str] = None,
+    ) -> dict:
         """Book a coworking day."""
         try:
             from datetime import datetime
@@ -2551,6 +2558,8 @@ class MLAIBackendClient:
             "date": booking_date,
             "current_time": current_time,
         }
+        if operation_id:
+            payload["operation_id"] = str(operation_id).strip()
         if slack_channel_id:
             payload["slack_channel_id"] = slack_channel_id
         response = await self._request(
@@ -2581,6 +2590,8 @@ class MLAIBackendClient:
         target_slack_user_ids: List[str],
         booking_date: str,
         slack_channel_id: Optional[str] = None,
+        *,
+        operation_id: Optional[str] = None,
     ) -> dict:
         """Book multiple coworking days as a full Points Admin."""
         try:
@@ -2601,6 +2612,8 @@ class MLAIBackendClient:
             "date": booking_date,
             "current_time": current_time,
         }
+        if operation_id:
+            payload["operation_id"] = str(operation_id).strip()
         if slack_channel_id:
             payload["slack_channel_id"] = slack_channel_id
 

@@ -1,16 +1,76 @@
 from __future__ import annotations
 
+import json
 import re
 import sqlite3
 import time
 from pathlib import Path
 from typing import Optional
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from .coworking_booking_schema_v3 import SCHEMA_VERSION, TABLE_NAME
 
 
 VALID_OUTCOMES = frozenset({"delivered", "not_required", "retry"})
 _REFERENCE_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,119}\Z")
+
+
+def _normalized_retry_payload(row: sqlite3.Row) -> str:
+    """Upgrade a historical confirmation into today's delivery contract."""
+    try:
+        payload = json.loads(str(row["backend_result_json"] or ""))
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError(
+            "retry requires a recorded booking result; choose delivered or not_required"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise ValueError(
+            "retry requires a recorded booking result; choose delivered or not_required"
+        )
+    raw_id = str(payload.get("id") or "").strip()
+    booking_date = str(payload.get("date") or "").strip()
+    points_cost = payload.get("points_cost")
+    if (
+        not raw_id
+        or booking_date != str(row["booking_date"])
+        or payload.get("status") != "booked"
+        or not isinstance(points_cost, int)
+        or isinstance(points_cost, bool)
+        or points_cost < 0
+    ):
+        raise ValueError(
+            "retry requires a complete historical booking result; "
+            "choose delivered or not_required"
+        )
+    try:
+        normalized_id = str(UUID(raw_id))
+    except ValueError:
+        normalized_id = str(uuid5(NAMESPACE_URL, f"roo:legacy-booking:{raw_id}"))
+        payload["legacy_booking_reference"] = raw_id
+    standard_cost = payload.get("standard_points_cost")
+    if (
+        not isinstance(standard_cost, int)
+        or isinstance(standard_cost, bool)
+        or standard_cost < points_cost
+    ):
+        standard_cost = points_cost
+    connection_type = payload.get("founder_tools_connection_type")
+    if connection_type not in {None, "direct", "explicit"}:
+        connection_type = None
+    payload.update(
+        {
+            "id": normalized_id,
+            "standard_points_cost": standard_cost,
+            "monthly_update_discount_applied": points_cost < standard_cost,
+            "founder_tools_connection_type": connection_type,
+            "founder_tools_account_linked": connection_type is not None,
+            "founder_tools_explicitly_linked": connection_type == "explicit",
+            "founder_tools_link_state_historical_unknown": (
+                "founder_tools_connection_type" not in payload
+            ),
+        }
+    )
+    return json.dumps(payload, separators=(",", ":"), sort_keys=True)
 
 
 def reconcile_coworking_notification(
@@ -55,6 +115,10 @@ def reconcile_coworking_notification(
         if row["notification_status"] != "reconciliation_required":
             raise ValueError("notification does not require reconciliation")
 
+        normalized_backend_result = row["backend_result_json"]
+        if normalized_outcome == "retry" and row["status"] == "confirmed":
+            normalized_backend_result = _normalized_retry_payload(row)
+
         notification_status = (
             "pending" if normalized_outcome == "retry" else normalized_outcome
         )
@@ -64,6 +128,7 @@ def reconcile_coworking_notification(
             f"""
             UPDATE {TABLE_NAME}
             SET notification_status = ?,
+                backend_result_json = ?,
                 notification_next_attempt_at = ?,
                 notification_locked_until = NULL,
                 notification_locked_by = NULL,
@@ -78,6 +143,7 @@ def reconcile_coworking_notification(
             """,
             (
                 notification_status,
+                normalized_backend_result,
                 next_attempt_at,
                 delivered_at,
                 current_time,

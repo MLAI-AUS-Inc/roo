@@ -277,6 +277,7 @@ async def test_book_coworking_many_uses_canonical_endpoint_and_deduped_payload(m
         target_slack_user_ids=["<@U1>", "U2", "<@U1>"],
         booking_date="2026-07-04",
         slack_channel_id="C123",
+        operation_id="00000000-0000-4000-8000-000000000098",
     )
 
     assert result == valid_coworking_batch_result()
@@ -287,6 +288,7 @@ async def test_book_coworking_many_uses_canonical_endpoint_and_deduped_payload(m
     assert captured["json"]["date"] == "2026-07-04"
     assert captured["json"]["slack_channel_id"] == "C123"
     assert captured["json"]["current_time"]
+    assert captured["json"]["operation_id"] == "00000000-0000-4000-8000-000000000098"
 
 
 def valid_coworking_batch_result():
@@ -378,7 +380,10 @@ def valid_coworking_booking_result():
 
 @pytest.mark.asyncio
 async def test_book_coworking_validates_complete_success_response(monkeypatch):
+    captured = {}
+
     async def fake_request(method, endpoint, **kwargs):
+        captured["json"] = kwargs["json"]
         request = httpx.Request(method, f"https://backend.test{endpoint}")
         return httpx.Response(
             201,
@@ -393,9 +398,13 @@ async def test_book_coworking_validates_complete_success_response(monkeypatch):
     )
     monkeypatch.setattr(client, "_request", fake_request)
 
-    result = await client.book_coworking("U123", "2026-07-04", "C123")
+    operation_id = "00000000-0000-4000-8000-000000000099"
+    result = await client.book_coworking(
+        "U123", "2026-07-04", "C123", operation_id=operation_id
+    )
 
     assert result["points_cost"] == 8
+    assert captured["json"]["operation_id"] == operation_id
 
 
 @pytest.mark.asyncio

@@ -31,6 +31,11 @@ def build_coworking_intent_key(slack_user_id: str, booking_date: str) -> str:
     return f"coworking:{str(slack_user_id).strip()}:{str(booking_date).strip()}"
 
 
+def build_coworking_operation_id(idempotency_key: str) -> str:
+    """Map one durable Roo intent lifecycle to a stable backend operation."""
+    return str(uuid5(NAMESPACE_URL, f"roo:{str(idempotency_key).strip()}"))
+
+
 def build_coworking_batch_intent_key(
     admin_slack_user_id: str,
     target_slack_user_ids: list[str],
@@ -172,6 +177,16 @@ class CoworkingBookingIntentStore:
         cleaned_requested_by = str(requested_by_slack_id or cleaned_slack_user_id).strip()
         with self._lock:
             with self._connect() as conn:
+                prior = conn.execute(
+                    "SELECT status FROM coworking_booking_intents "
+                    "WHERE idempotency_key = ?",
+                    (idempotency_key,),
+                ).fetchone()
+                # A completed or rejected intent is one finished lifecycle. A
+                # later user action must get a fresh backend operation so a
+                # genuine cancel/rebook can create a fresh debit and receipt.
+                if prior and prior["status"] in {"confirmed", "blocked"}:
+                    idempotency_key = f"{idempotency_key}:{uuid4().hex}"
                 conn.execute(
                     """
                     INSERT INTO coworking_booking_intents (
@@ -804,6 +819,7 @@ class CoworkingBookingIntentStore:
         *,
         owner: str,
         error: str,
+        notification_required: bool = True,
     ) -> Optional[dict[str, Any]]:
         self._ensure_schema()
         current_time = _now()
@@ -814,7 +830,7 @@ class CoworkingBookingIntentStore:
                     UPDATE coworking_booking_intents
                     SET status = 'batch_blocked', locked_until = NULL,
                         locked_by = NULL, last_error = ?,
-                        notification_status = 'pending',
+                        notification_status = ?,
                         notification_next_attempt_at = ?,
                         notification_locked_until = NULL,
                         notification_locked_by = NULL,
@@ -824,7 +840,10 @@ class CoworkingBookingIntentStore:
                     WHERE id = ? AND status = 'batch_processing' AND locked_by = ?
                     """,
                     (
-                        str(error), current_time, current_time,
+                        str(error),
+                        "pending" if notification_required else "not_required",
+                        current_time if notification_required else None,
+                        current_time,
                         int(intent_id), str(owner),
                     ),
                 )
@@ -1039,6 +1058,7 @@ class CoworkingBookingIntentStore:
                         status IN ('blocked', 'confirmed')
                         AND notification_status IN ('delivered', 'not_required')
                         OR status IN ('batch_blocked', 'batch_confirmed')
+                        AND notification_status IN ('delivered', 'not_required')
                       )
                     """,
                     (cutoff,),
@@ -1449,6 +1469,7 @@ async def process_coworking_booking_intent(
             slack_user_id,
             booking_date,
             channel_id,
+            operation_id=build_coworking_operation_id(str(intent["idempotency_key"])),
         )
         from .clients.mlai_backend import validate_coworking_booking_result
 
@@ -1555,6 +1576,7 @@ async def process_coworking_booking_batch_intent(
             target_slack_user_ids=targets,
             booking_date=str(intent["booking_date"]),
             slack_channel_id=intent.get("channel_id"),
+            operation_id=build_coworking_operation_id(str(intent["idempotency_key"])),
         )
     except Exception as exc:
         error = coworking_failure_code(exc)

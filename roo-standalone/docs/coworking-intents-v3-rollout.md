@@ -8,6 +8,11 @@ v2 will not rerun a corrected v2 body, so startup now requires schema version
 
 ## Migration
 
+Deploy the companion backend migration that creates durable coworking
+operation receipts before deploying this Roo build. The backend keeps
+`operation_id` optional during the rolling upgrade, so the old Roo remains
+compatible; the new Roo must not go live until the receipt table is present.
+
 Take a volume snapshot and stop every Roo process that can write the shared
 SQLite volume. From `roo-standalone`, run:
 
@@ -45,6 +50,9 @@ python scripts/reconcile_coworking_notification.py \
 
 Use `delivered` only when Slack delivery is proven, `not-required` only when no
 notification was required, and `retry` only when non-delivery is proven and a
-new notification should be sent. The command accepts only quarantined terminal
-rows, records the outcome, timestamp, and reference transactionally, and
-cannot be replayed after the state fence changes.
+recorded booking result is complete enough to render. For historical confirmed
+rows, `retry` upgrades the old result shape to the current private-notification
+contract; it fails closed when no trustworthy result exists. The command
+accepts only quarantined terminal rows, records the outcome, timestamp, and
+reference transactionally, and cannot be replayed after the state fence
+changes.
