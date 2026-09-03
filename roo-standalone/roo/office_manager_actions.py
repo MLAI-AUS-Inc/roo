@@ -970,12 +970,10 @@ async def _process_leased_action(
         if lease_lost.is_set():
             print(f"OFFICE_MANAGER_ACTION_LEASE_LOST action_id={action_id}")
             return
-        await asyncio.to_thread(
-            store.release,
-            action_id,
-            owner=owner,
-            error="worker_cancelled",
-        )
+        # Cancellation cannot stop synchronous provider work already running
+        # in asyncio.to_thread. Preserve the current (possibly extended Slack
+        # delivery) fence until expiry so a replacement cannot publish while
+        # the old mutation may still land.
         raise
     except OfficeManagerActionPermanentError as exc:
         reason = str(exc) or exc.__class__.__name__

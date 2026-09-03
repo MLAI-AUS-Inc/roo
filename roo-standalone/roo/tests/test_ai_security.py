@@ -427,7 +427,7 @@ def test_deploy_workflow_requires_and_secretly_upserts_security_values():
     assert "envs: SIM_PATIENT_API_KEY,SIM_PATIENT_SAFETY_SALT" in workflow
     assert (
         "envs: SIM_PATIENT_API_KEY,SIM_PATIENT_SAFETY_SALT,ROO_API_KEY,"
-        "VICTOR_AI_ROO_SIGNING_SECRET,ROO_PRIVATE_BASE_URL,"
+        "VICTOR_AI_ROO_SIGNING_SECRET,ROO_PUBLIC_HOST,ROO_PRIVATE_BASE_URL,"
         "MEETING_ROOM_BOOKING_ENABLED"
     ) in workflow
     assert 'upsert_env "ROO_ENVIRONMENT" "production"' in workflow
@@ -496,9 +496,15 @@ def test_deploy_workflow_requires_and_secretly_upserts_security_values():
     assert "http://10.126.0.5/api/sim-patient" not in workflow
     assert 'if [ "$private_status" != "422" ]' in workflow
     assert "Verify public Roo containment" in workflow
-    assert "expect_status 404 GET /docs" in workflow
-    assert "expect_status 404 POST /api/mention" in workflow
-    assert "expect_status 403 POST /api/sim-patient" in workflow
+    assert "expect_public_status 404 GET /docs" in workflow
+    assert "expect_public_status 404 POST /api/mention" in workflow
+    assert "expect_public_status 403 POST /api/sim-patient" in workflow
+    assert workflow.index("expect_public_status 200 GET /healthz/ready") < (
+        workflow.index("docker image prune -f")
+    )
+    assert workflow.index("expect_public_status 200 GET /healthz/ready") > (
+        workflow.index("trap rollback_release EXIT")
+    )
 
 
 def test_nginx_exposes_only_slack_health_and_vpc_service_routes():

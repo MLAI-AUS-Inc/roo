@@ -3858,7 +3858,9 @@ def test_expired_worker_cannot_overwrite_replacement_worker_state(
 
 
 @pytest.mark.asyncio
-async def test_cancelled_action_returns_to_pending_for_recovery(tmp_path):
+async def test_cancelled_action_preserves_lease_until_recovery(tmp_path, monkeypatch):
+    current_time = [1_000.0]
+    monkeypatch.setattr(action_module.time, "time", lambda: current_time[0])
     store = action_module.OfficeManagerActionStore(tmp_path / "actions.db")
     action, should_process = store.record_action(
         slack_user_id="UVERIFIED",
@@ -3884,7 +3886,75 @@ async def test_cancelled_action_returns_to_pending_for_recovery(tmp_path):
     with pytest.raises(asyncio.CancelledError):
         await task
 
-    assert store.get(action["id"])["status"] == "pending"
+    current = store.get(action["id"])
+    assert current["status"] == "processing"
+    assert store.reserve(action["id"], owner="replacement") is None
+
+    current_time[0] = float(current["locked_until"]) + 1
+    assert store.reserve(action["id"], owner="replacement") is not None
+
+
+@pytest.mark.asyncio
+async def test_shutdown_during_slack_send_keeps_replacement_fenced(
+    tmp_path,
+    monkeypatch,
+):
+    current_time = [2_000.0]
+    monkeypatch.setattr(action_module.time, "time", lambda: current_time[0])
+    store = action_module.OfficeManagerActionStore(tmp_path / "actions.db")
+    action, _ = store.record_action(
+        slack_user_id="UVERIFIED",
+        channel_id="CCOWORK",
+        booking_date="2026-08-03",
+    )
+    send_started = threading.Event()
+    allow_send_to_finish = threading.Event()
+    send_finished = threading.Event()
+
+    def blocking_send(*args, **kwargs):
+        send_started.set()
+        assert allow_send_to_finish.wait(timeout=2)
+        send_finished.set()
+        return {"ok": True}
+
+    async def deliver(record, current_store):
+        await main_module._send_office_manager_private_feedback(
+            channel_id=str(record["channel_id"]),
+            user_id=str(record["slack_user_id"]),
+            text="Original terminal outcome",
+            action=record,
+            store=current_store,
+        )
+
+    monkeypatch.setattr(main_module, "send_dm", blocking_send)
+    task = asyncio.create_task(
+        action_module.process_office_manager_action(
+            action["id"],
+            store=store,
+            processor=deliver,
+        )
+    )
+    assert await asyncio.to_thread(send_started.wait, 1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    current = store.get(action["id"])
+    assert current["status"] == "processing"
+    assert current["locked_until"] == (
+        current_time[0]
+        + action_module.OFFICE_MANAGER_SLACK_DELIVERY_LEASE_SECONDS
+    )
+    assert store.reserve(action["id"], owner="replacement") is None
+
+    # The synchronous Slack call drains well before the five-minute fence. A
+    # replacement may recover only after both conditions are true.
+    allow_send_to_finish.set()
+    assert await asyncio.to_thread(send_finished.wait, 1)
+    current_time[0] = float(current["locked_until"]) + 1
+    replacement = store.reserve(action["id"], owner="replacement")
+    assert replacement is not None
+    assert replacement["feedback_outcome"] == "terminal"
 
 
 @pytest.mark.asyncio

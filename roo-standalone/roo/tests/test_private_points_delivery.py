@@ -450,6 +450,66 @@ async def test_fast_coworking_booking_surfaces_terminal_backend_reason(
     assert "connecting" not in result["message"]
 
 
+@pytest.mark.asyncio
+async def test_fast_coworking_cancel_resolves_current_booking_id(monkeypatch):
+    captured = {}
+
+    class CancellationClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def get_my_bookings(self, slack_user_id):
+            return [
+                {
+                    "id": "current-booking-id",
+                    "date": "2026-08-25",
+                    "status": "booked",
+                }
+            ]
+
+        async def cancel_coworking(self, slack_user_id, **kwargs):
+            captured["slack_user_id"] = slack_user_id
+            captured.update(kwargs)
+            return {"refunded": True, "refund_amount": 8}
+
+    class FakeSkill:
+        name = "mlai-points"
+
+        @staticmethod
+        def get_client_class(name):
+            assert name == "MLAIBackendClient"
+            return CancellationClient
+
+    agent = object.__new__(RooAgent)
+    agent.skills = [FakeSkill()]
+    agent.skill_executor = SkillExecutor()
+    monkeypatch.setattr(
+        agent_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            MLAI_BACKEND_URL="https://backend.test",
+            MLAI_API_KEY="api-key",
+            ROO_API_KEY="roo-key",
+            INTERNAL_API_KEY="internal-key",
+        ),
+    )
+
+    result = await agent._execute_fast_points(
+        "UVERIFIED",
+        "cancel_coworking",
+        date="2026-08-25",
+        channel_id="CCOWORK",
+        thread_ts="111.222",
+    )
+
+    assert captured == {
+        "slack_user_id": "UVERIFIED",
+        "booking_id": "current-booking-id",
+    }
+    assert "cancelled" in result["message"].lower()
+    assert "8 point refunded" in result["message"]
+
+
 class CoworkingClient:
     def __init__(self, *, balance=9):
         self.balance = balance

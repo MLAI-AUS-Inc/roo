@@ -144,6 +144,7 @@ jobs:
           SIM_PATIENT_SAFETY_SALT: ${{ secrets.SIM_PATIENT_SAFETY_SALT }}
           ROO_API_KEY: ${{ secrets.ROO_API_KEY }}
           VICTOR_AI_ROO_SIGNING_SECRET: ${{ secrets.VICTOR_AI_ROO_SIGNING_SECRET }}
+          ROO_PUBLIC_HOST: ${{ secrets.DO_HOST }}
           ROO_PRIVATE_BASE_URL: ${{ vars.ROO_PRIVATE_BASE_URL }}
           MEETING_ROOM_BOOKING_ENABLED: ${{ vars.MEETING_ROOM_BOOKING_ENABLED || 'false' }}
           OFFICE_MANAGER_ACTIONS_ENABLED: ${{ vars.OFFICE_MANAGER_ACTIONS_ENABLED || 'false' }}
@@ -152,7 +153,7 @@ jobs:
           host: ${{ secrets.DO_HOST }}
           username: ${{ secrets.DO_USERNAME }}
           key: ${{ secrets.DO_SSH_KEY }}
-          envs: SIM_PATIENT_API_KEY,SIM_PATIENT_SAFETY_SALT,ROO_API_KEY,VICTOR_AI_ROO_SIGNING_SECRET,ROO_PRIVATE_BASE_URL,MEETING_ROOM_BOOKING_ENABLED,OFFICE_MANAGER_ACTIONS_ENABLED,LINEAR_CHANNEL_ISSUE_WRITES_ENABLED,RELEASE_SHA
+          envs: SIM_PATIENT_API_KEY,SIM_PATIENT_SAFETY_SALT,ROO_API_KEY,VICTOR_AI_ROO_SIGNING_SECRET,ROO_PUBLIC_HOST,ROO_PRIVATE_BASE_URL,MEETING_ROOM_BOOKING_ENABLED,OFFICE_MANAGER_ACTIONS_ENABLED,LINEAR_CHANNEL_ISSUE_WRITES_ENABLED,RELEASE_SHA
           script: |
             # Stop if any command fails
             set -eu
@@ -364,33 +365,31 @@ jobs:
                 exit 1
               fi
             fi
-            
-            # Clean up space
-            docker image prune -f
 
-      - name: Verify public Roo containment
-        env:
-          ROO_PUBLIC_HOST: ${{ secrets.DO_HOST }}
-        run: |
-          set -eu
-          base_url="http://${ROO_PUBLIC_HOST}"
-          expect_status() {
-            expected="$1"
-            method="$2"
-            path="$3"
-            actual="$(curl --silent --show-error --max-time 8 \
-              --output /dev/null --write-out '%{http_code}' \
-              --request "$method" "${base_url}${path}")"
-            if [ "$actual" != "$expected" ]; then
-              echo "Public containment failed for $path (status $actual)" >&2
-              exit 1
-            fi
-          }
-          expect_status 200 GET /healthz/ready
-          expect_status 404 GET /docs
-          expect_status 404 POST /api/mention
-          expect_status 403 POST /api/sim-patient
-          expect_status 403 POST /api/diagnosis-check
+            # Verify public Roo containment through the deployed public route
+            # while rollback state and the previous image are still retained.
+            # Any failure exits through rollback_release.
+            public_base_url="http://${ROO_PUBLIC_HOST}"
+            expect_public_status() {
+              expected="$1"
+              method="$2"
+              path="$3"
+              actual="$(curl --silent --show-error --max-time 8 \
+                --output /dev/null --write-out '%{http_code}' \
+                --request "$method" "${public_base_url}${path}")"
+              if [ "$actual" != "$expected" ]; then
+                echo "Public containment failed for $path (status $actual)" >&2
+                exit 1
+              fi
+            }
+            expect_public_status 200 GET /healthz/ready
+            expect_public_status 404 GET /docs
+            expect_public_status 404 POST /api/mention
+            expect_public_status 403 POST /api/sim-patient
+            expect_public_status 403 POST /api/diagnosis-check
+            
+            # Clean up only after every rollback-capable gate has passed.
+            docker image prune -f
 
   rollout-diagnostics:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.diagnostics_only == true }}
