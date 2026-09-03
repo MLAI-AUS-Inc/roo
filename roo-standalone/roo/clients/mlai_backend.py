@@ -2455,6 +2455,27 @@ class MLAIBackendClient:
         )
         response.raise_for_status()
         return response.json()
+
+    async def get_office_manager_preflight(self) -> dict:
+        """Prove the exact Office Manager route accepts Roo's strict identity."""
+        if not self.roo_api_key:
+            raise BackendIdentityError(
+                "ROO_API_KEY is required for Office Manager preflight"
+            )
+        response = await self._request(
+            "GET",
+            f"{self._points_base}/coworking/office-manager/preflight/",
+            timeout=5.0,
+            transport_retries=1,
+            retry_backoff_seconds=0.25,
+            circuit_breaker=False,
+            redact_logs=True,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise ValueError("Office Manager preflight returned an invalid payload")
+        return payload
     
     async def get_github_auth_url(self, slack_user_id: str, domain: Optional[str] = None) -> dict:
         """Get the GitHub OAuth URL for a user from the backend."""

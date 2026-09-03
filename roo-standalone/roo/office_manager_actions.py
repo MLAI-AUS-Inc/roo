@@ -18,6 +18,7 @@ DEFAULT_PROCESSING_LEASE_SECONDS = 90.0
 DEFAULT_RETRY_POLL_SECONDS = 5.0
 DEFAULT_HOUSEKEEPING_POLL_SECONDS = 60 * 60.0
 COMPLETED_RETENTION_SECONDS = 90 * 24 * 60 * 60
+TERMINAL_FAILURE_RETENTION_SECONDS = 7 * 24 * 60 * 60
 
 
 def _retry_delay(attempt_count: int) -> float:
@@ -44,6 +45,16 @@ def build_office_manager_feedback_client_msg_id(attempt_id: str) -> str:
         uuid5(
             NAMESPACE_URL,
             f"{_canonical_attempt_id(attempt_id)}:private-feedback",
+        )
+    )
+
+
+def build_office_manager_supersession_client_msg_id(attempt_id: str) -> str:
+    """Return a distinct stable identity for a later correction message."""
+    return str(
+        uuid5(
+            NAMESPACE_URL,
+            f"{_canonical_attempt_id(attempt_id)}:supersession-feedback",
         )
     )
 
@@ -92,6 +103,10 @@ class OfficeManagerActionLeaseLostError(RuntimeError):
     """Raised when a replaced worker must stop without mutating or notifying."""
 
 
+class OfficeManagerActionPermanentError(RuntimeError):
+    """Raised when retrying cannot deliver to the immutable Slack target."""
+
+
 class OfficeManagerActionStore:
     """SQLite outbox shared by Public Roo workers and process restarts."""
 
@@ -102,17 +117,45 @@ class OfficeManagerActionStore:
 
     def _connect(self) -> sqlite3.Connection:
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
-        connection = sqlite3.connect(
-            str(self.database_path),
-            timeout=2,
-            isolation_level=None,
-        )
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA busy_timeout=2000")
-        connection.execute("PRAGMA journal_mode=WAL")
-        return connection
+        last_error: Optional[sqlite3.OperationalError] = None
+        for attempt in range(6):
+            connection = sqlite3.connect(
+                str(self.database_path),
+                timeout=2,
+                isolation_level=None,
+            )
+            connection.row_factory = sqlite3.Row
+            try:
+                connection.execute("PRAGMA busy_timeout=2000")
+                connection.execute("PRAGMA journal_mode=WAL")
+                return connection
+            except sqlite3.OperationalError as exc:
+                connection.close()
+                if "locked" not in str(exc).lower() and "busy" not in str(exc).lower():
+                    raise
+                last_error = exc
+                time.sleep(0.02 * (2**attempt))
+        assert last_error is not None
+        raise last_error
 
     def _ensure_schema(self) -> None:
+        """Initialize safely when multiple fresh processes share this database."""
+        if self._initialized:
+            return
+        last_error: Optional[sqlite3.OperationalError] = None
+        for attempt in range(7):
+            try:
+                self._initialize_schema_once()
+                return
+            except sqlite3.OperationalError as exc:
+                if "locked" not in str(exc).lower() and "busy" not in str(exc).lower():
+                    raise
+                last_error = exc
+                time.sleep(0.02 * (2**attempt))
+        assert last_error is not None
+        raise last_error
+
+    def _initialize_schema_once(self) -> None:
         if self._initialized:
             return
         with self._lock:
@@ -145,6 +188,7 @@ class OfficeManagerActionStore:
                         feedback_text TEXT,
                         feedback_client_msg_id TEXT,
                         feedback_prepared_at REAL,
+                        feedback_outcome TEXT,
                         created_at REAL NOT NULL,
                         updated_at REAL NOT NULL,
                         completed_at REAL
@@ -221,6 +265,7 @@ class OfficeManagerActionStore:
                     ("feedback_text", "TEXT"),
                     ("feedback_client_msg_id", "TEXT"),
                     ("feedback_prepared_at", "REAL"),
+                    ("feedback_outcome", "TEXT"),
                 ):
                     if column_name not in columns:
                         connection.execute(
@@ -228,6 +273,43 @@ class OfficeManagerActionStore:
                             f"ADD COLUMN {column_name} {column_type}"
                         )
             self._initialized = True
+
+    def operability_snapshot(self, *, now: Optional[float] = None) -> dict[str, Any]:
+        """Return content-free backlog signals for readiness and alerting."""
+        self._ensure_schema()
+        current_time = time.time() if now is None else float(now)
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT
+                    SUM(CASE WHEN status IN ('pending', 'processing') THEN 1 ELSE 0 END)
+                        AS non_terminal_count,
+                    SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END)
+                        AS terminal_failure_count,
+                    MIN(CASE
+                        WHEN status = 'pending' AND next_attempt_at <= ?
+                        THEN created_at
+                    END) AS oldest_due_created_at
+                FROM office_manager_action_outbox
+                """,
+                (current_time,),
+            ).fetchone()
+        oldest_due_created_at = (
+            float(row["oldest_due_created_at"])
+            if row and row["oldest_due_created_at"] is not None
+            else None
+        )
+        return {
+            "non_terminal_count": int((row or {})["non_terminal_count"] or 0),
+            "terminal_failure_count": int(
+                (row or {})["terminal_failure_count"] or 0
+            ),
+            "oldest_due_age_seconds": (
+                max(0.0, current_time - oldest_due_created_at)
+                if oldest_due_created_at is not None
+                else None
+            ),
+        }
 
     @staticmethod
     def _row(row: sqlite3.Row | None) -> Optional[dict[str, Any]]:
@@ -344,11 +426,16 @@ class OfficeManagerActionStore:
                 cursor = connection.execute(
                     """
                     DELETE FROM office_manager_action_outbox
-                    WHERE status = 'completed'
-                      AND completed_at IS NOT NULL
-                      AND completed_at <= ?
+                    WHERE completed_at IS NOT NULL
+                      AND (
+                        (status = 'completed' AND completed_at <= ?)
+                        OR (status = 'failed' AND completed_at <= ?)
+                      )
                     """,
-                    (current_time - COMPLETED_RETENTION_SECONDS,),
+                    (
+                        current_time - COMPLETED_RETENTION_SECONDS,
+                        current_time - TERMINAL_FAILURE_RETENTION_SECONDS,
+                    ),
                 )
                 return max(0, int(cursor.rowcount))
 
@@ -456,6 +543,7 @@ class OfficeManagerActionStore:
         owner: str,
         text: str,
         client_msg_id: str,
+        outcome: str = "terminal",
     ) -> Optional[dict[str, Any]]:
         """Durably store a terminal result before attempting Slack delivery."""
         self._ensure_schema()
@@ -469,6 +557,7 @@ class OfficeManagerActionStore:
                         feedback_text = COALESCE(feedback_text, ?),
                         feedback_client_msg_id = COALESCE(feedback_client_msg_id, ?),
                         feedback_prepared_at = COALESCE(feedback_prepared_at, ?),
+                        feedback_outcome = COALESCE(feedback_outcome, ?),
                         updated_at = ?
                     WHERE id = ?
                       AND status = 'processing'
@@ -480,6 +569,50 @@ class OfficeManagerActionStore:
                         str(text),
                         str(client_msg_id),
                         current_time,
+                        str(outcome),
+                        current_time,
+                        int(action_id),
+                        str(owner),
+                        current_time,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    return None
+                return self._row(
+                    connection.execute(
+                        "SELECT * FROM office_manager_action_outbox WHERE id = ?",
+                        (int(action_id),),
+                    ).fetchone()
+                )
+
+    def supersede_feedback(
+        self,
+        action_id: int,
+        *,
+        owner: str,
+        text: str,
+        client_msg_id: str,
+        outcome: str,
+    ) -> Optional[dict[str, Any]]:
+        """Replace staged feedback with a monotonic correction generation."""
+        self._ensure_schema()
+        current_time = time.time()
+        with self._lock:
+            with self._connect() as connection:
+                cursor = connection.execute(
+                    """
+                    UPDATE office_manager_action_outbox
+                    SET feedback_text = ?, feedback_client_msg_id = ?,
+                        feedback_prepared_at = ?, feedback_outcome = ?,
+                        updated_at = ?
+                    WHERE id = ? AND status = 'processing'
+                      AND locked_by = ? AND locked_until > ?
+                    """,
+                    (
+                        str(text),
+                        str(client_msg_id),
+                        current_time,
+                        str(outcome),
                         current_time,
                         int(action_id),
                         str(owner),
@@ -551,11 +684,45 @@ class OfficeManagerActionStore:
                         feedback_text = NULL,
                         feedback_client_msg_id = NULL,
                         feedback_prepared_at = NULL,
+                        feedback_outcome = NULL,
                         completed_at = ?,
                         updated_at = ?
                     WHERE id = ? AND status = 'processing' AND locked_by = ?
                     """,
                     (current_time, current_time, int(action_id), str(owner)),
+                )
+                return cursor.rowcount == 1
+
+    def mark_terminal_failure(
+        self,
+        action_id: int,
+        *,
+        owner: str,
+        reason: str,
+    ) -> bool:
+        """Stop retrying a permanent target error and redact its payload."""
+        self._ensure_schema()
+        current_time = time.time()
+        with self._lock:
+            with self._connect() as connection:
+                cursor = connection.execute(
+                    """
+                    UPDATE office_manager_action_outbox
+                    SET status = 'failed', locked_until = NULL, locked_by = NULL,
+                        last_error = ?, slack_user_id = '', channel_id = '',
+                        booking_date = '', feedback_text = NULL,
+                        feedback_client_msg_id = NULL,
+                        feedback_prepared_at = NULL, feedback_outcome = NULL,
+                        completed_at = ?, updated_at = ?
+                    WHERE id = ? AND status = 'processing' AND locked_by = ?
+                    """,
+                    (
+                        str(reason)[:500],
+                        current_time,
+                        current_time,
+                        int(action_id),
+                        str(owner),
+                    ),
                 )
                 return cursor.rowcount == 1
 
@@ -717,6 +884,19 @@ async def _process_leased_action(
             error="worker_cancelled",
         )
         raise
+    except OfficeManagerActionPermanentError as exc:
+        reason = str(exc) or exc.__class__.__name__
+        await asyncio.to_thread(
+            store.mark_terminal_failure,
+            action_id,
+            owner=owner,
+            reason=reason,
+        )
+        print(
+            "OFFICE_MANAGER_ACTION_TERMINAL_FAILURE "
+            f"action_id={action_id} reason={reason}"
+        )
+        return
     except Exception as exc:
         await asyncio.to_thread(
             store.release,
@@ -785,18 +965,26 @@ async def office_manager_action_retry_loop(
     store: OfficeManagerActionStore,
     processor: OfficeManagerActionProcessor,
     poll_seconds: float = DEFAULT_RETRY_POLL_SECONDS,
+    health_state: Optional[dict[str, Any]] = None,
 ) -> None:
     """Continuously recover pending or abandoned Office Manager actions."""
     poll_seconds = max(0.05, float(poll_seconds))
     while True:
+        if health_state is not None:
+            health_state["heartbeat_at"] = time.time()
         try:
             await process_due_office_manager_actions(
                 store=store,
                 processor=processor,
             )
+            if health_state is not None:
+                health_state["last_success_at"] = time.time()
+                health_state["last_error"] = None
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            if health_state is not None:
+                health_state["last_error"] = exc.__class__.__name__
             print(
                 "OFFICE_MANAGER_ACTION_WORKER_FAILED "
                 f"error_type={exc.__class__.__name__}"

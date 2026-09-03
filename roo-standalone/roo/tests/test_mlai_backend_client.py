@@ -325,6 +325,63 @@ async def test_claim_office_manager_day_rejects_noncanonical_attempt_id(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_office_manager_preflight_uses_exact_authenticated_route(monkeypatch):
+    captured = {}
+
+    async def fake_request(method, endpoint, **kwargs):
+        captured.update(method=method, endpoint=endpoint, kwargs=kwargs)
+        request = httpx.Request(method, f"https://backend.test{endpoint}")
+        return httpx.Response(
+            200,
+            request=request,
+            json={
+                "status": "ok",
+                "contract": "office-manager-v1",
+                "credential_scope": "strict_roo",
+                "timezone": "Australia/Melbourne",
+                "enabled": True,
+            },
+        )
+
+    client = MLAIBackendClient(
+        base_url="https://backend.test",
+        api_key="strict-roo-key",
+        internal_api_key="different-internal-key",
+    )
+    monkeypatch.setattr(client, "_request", fake_request)
+
+    result = await client.get_office_manager_preflight()
+
+    assert result["contract"] == "office-manager-v1"
+    assert captured["method"] == "GET"
+    assert captured["endpoint"] == (
+        "/api/v1/points/coworking/office-manager/preflight/"
+    )
+    assert captured["kwargs"]["redact_logs"] is True
+
+
+@pytest.mark.asyncio
+async def test_office_manager_preflight_rejects_legacy_key_fallback(monkeypatch):
+    settings = type(
+        "SyntheticSettings",
+        (),
+        {
+            "MLAI_BACKEND_URL": "https://backend.test",
+            "ROO_API_KEY": None,
+            "MLAI_API_KEY": "legacy-shared-key",
+            "INTERNAL_API_KEY": "different-internal-key",
+            "ORG_BRAIN_API_KEY": None,
+            "VICTOR_AI_ROO_SIGNING_SECRET": None,
+            "ROO_SURFACE": "public",
+        },
+    )()
+    monkeypatch.setattr(backend_module, "get_settings", lambda: settings)
+
+    with pytest.raises(BackendIdentityError, match="ROO_API_KEY"):
+        await MLAIBackendClient().get_office_manager_preflight()
+
+
+@pytest.mark.asyncio
 async def test_office_manager_backend_transport_redacts_exception_taint(
     monkeypatch,
     capsys,

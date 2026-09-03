@@ -18,8 +18,10 @@ delivers the backend's authoritative result privately.
   button. Do not put this action or its credential on Admin Roo.
 
 The readiness endpoint exposes a non-secret `office_manager` contract with the
-gate state, backend base URL, claim path, and `Australia/Melbourne` timezone.
-The backend deployment validates this contract before enabling its scheduler.
+gate state, backend base URL, claim path, authenticated backend contract,
+worker heartbeat, and content-free outbox health. Startup calls the exact
+backend preflight with `ROO_API_KEY`; a wrong credential, route, contract, or
+timezone fails closed before the action worker starts.
 
 ## Rollout
 
@@ -32,11 +34,13 @@ The backend deployment validates this contract before enabling its scheduler.
 3. Deploy this Roo release with `OFFICE_MANAGER_ACTIONS_ENABLED=false` and
    verify `/healthz/ready` reports the expected Office Manager contract.
 4. Set the repository variable `OFFICE_MANAGER_ACTIONS_ENABLED=true` and
-   redeploy Roo. Smoke-test one signed volunteer click, an exact retry of that
-   click, and a genuinely new click.
+   redeploy Roo. The authenticated preflight may report the backend creation
+   gate disabled during this staged interval; retries remain durable.
 5. Enable `OFFICE_MANAGER_ENABLED` on the backend only after Roo is ready.
    Verify the backend preflight accepts the real Slack app/channel and the Roo
-   readiness contract, then monitor pending action age and terminal failures.
+   readiness contract, then smoke-test one signed volunteer click, an exact
+   retry of that click, and a genuinely new click. Monitor pending action age
+   and terminal failures.
 
 To roll back, disable new backend Office Manager creation and Roo actions, but
 leave the backend scheduler running until committed Slack retractions have

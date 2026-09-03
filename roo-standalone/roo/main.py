@@ -74,9 +74,11 @@ from .coworking_messages import OFFICE_MANAGER_VOLUNTEER_ACTION_ID
 from .coworking_booking_intents import coworking_booking_retry_loop
 from .office_manager_actions import (
     OfficeManagerActionLeaseLostError,
+    OfficeManagerActionPermanentError,
     OfficeManagerActionStore,
     build_office_manager_action_occurrence_key,
     build_office_manager_feedback_client_msg_id,
+    build_office_manager_supersession_client_msg_id,
     build_office_manager_uncertainty_client_msg_id,
     get_office_manager_action_store,
     office_manager_action_housekeeping_loop,
@@ -2534,12 +2536,33 @@ async def _jobs_daily_run_loop() -> None:
             await asyncio.sleep(60)
 
 
+def _validate_office_manager_backend_contract(
+    payload: dict[str, Any],
+    *,
+    timezone_name: str,
+) -> dict[str, Any]:
+    expected = {
+        "status": "ok",
+        "contract": "office-manager-v1",
+        "credential_scope": "strict_roo",
+        "timezone": timezone_name,
+    }
+    if (
+        not isinstance(payload, dict)
+        or any(payload.get(key) != value for key, value in expected.items())
+        or not isinstance(payload.get("enabled"), bool)
+    ):
+        raise RuntimeError("Office Manager backend contract mismatch")
+    return {**{key: payload[key] for key in expected}, "enabled": payload["enabled"]}
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan handler for startup/shutdown."""
     settings = get_settings()
     validate_runtime_security(settings)
     app.state.startup_complete = False
+    app.state.office_manager_action_worker_state = None
     coworking_retry_task: Optional[asyncio.Task] = None
     boost_post_retry_task: Optional[asyncio.Task] = None
     link_love_task: Optional[asyncio.Task] = None
@@ -2556,6 +2579,25 @@ async def lifespan(app: FastAPI):
     # Initialize agent on startup
     agent = get_agent()
     print(f"   Loaded {len(agent.skills)} skills")
+    office_manager_contract: Optional[dict[str, Any]] = None
+    if (
+        settings.ROO_SURFACE == "public"
+        and settings.OFFICE_MANAGER_ACTIONS_ENABLED
+    ):
+        from .clients.mlai_backend import MLAIBackendClient
+
+        office_manager_backend = MLAIBackendClient(
+            base_url=settings.MLAI_BACKEND_URL,
+            api_key=settings.ROO_API_KEY,
+            internal_api_key=settings.INTERNAL_API_KEY,
+        )
+        office_manager_contract = (
+            await office_manager_backend.get_office_manager_preflight()
+        )
+        office_manager_contract = _validate_office_manager_backend_contract(
+            office_manager_contract,
+            timezone_name=settings.TIMEZONE,
+        )
     if settings.ROO_SURFACE == "public":
         # Retention is independent of whether new Office Manager clicks are
         # enabled. A retired/disabled feature must still purge terminal PII.
@@ -2585,10 +2627,22 @@ async def lifespan(app: FastAPI):
             )
             app.state.meeting_room_action_retry_task = meeting_room_action_retry_task
         if settings.OFFICE_MANAGER_ACTIONS_ENABLED:
+            assert office_manager_contract is not None
+            office_manager_worker_state = {
+                "started_at": time.time(),
+                "heartbeat_at": time.time(),
+                "last_success_at": None,
+                "last_error": None,
+                "backend_contract": dict(office_manager_contract),
+            }
+            app.state.office_manager_action_worker_state = (
+                office_manager_worker_state
+            )
             office_manager_action_retry_task = asyncio.create_task(
                 office_manager_action_retry_loop(
                     store=office_manager_action_store,
                     processor=_process_office_manager_action_record,
+                    health_state=office_manager_worker_state,
                 )
             )
             app.state.office_manager_action_retry_task = (
@@ -2749,20 +2803,70 @@ async def readiness_check():
             }
         )
     else:
+        office_manager_readiness: dict[str, Any] = {
+            "actions_enabled": settings.OFFICE_MANAGER_ACTIONS_ENABLED,
+            "backend_base_url": str(settings.MLAI_BACKEND_URL or "").rstrip("/"),
+            "claim_path": "/api/v1/points/coworking/office-manager/claim/",
+            "timezone": settings.TIMEZONE,
+        }
+        readiness_errors: list[str] = []
+        if settings.OFFICE_MANAGER_ACTIONS_ENABLED:
+            worker_state = getattr(
+                app.state,
+                "office_manager_action_worker_state",
+                None,
+            )
+            worker_task = getattr(
+                app.state,
+                "office_manager_action_retry_task",
+                None,
+            )
+            if not isinstance(worker_state, dict):
+                readiness_errors.append("office_manager_worker_not_started")
+            else:
+                heartbeat_at = float(worker_state.get("heartbeat_at") or 0)
+                if time.time() - heartbeat_at > 60:
+                    readiness_errors.append("office_manager_worker_stale")
+                if worker_state.get("last_error"):
+                    readiness_errors.append("office_manager_worker_error")
+                office_manager_readiness["backend_contract"] = dict(
+                    worker_state.get("backend_contract") or {}
+                )
+                office_manager_readiness["worker_heartbeat_age_seconds"] = max(
+                    0,
+                    int(time.time() - heartbeat_at),
+                )
+            if worker_task is None or worker_task.done():
+                readiness_errors.append("office_manager_worker_stopped")
+            try:
+                office_manager_store = get_office_manager_action_store(
+                    settings.SLACK_RECEIPTS_DB_PATH
+                )
+                snapshot = await asyncio.to_thread(
+                    office_manager_store.operability_snapshot
+                )
+                office_manager_readiness["outbox"] = snapshot
+                oldest_due = snapshot.get("oldest_due_age_seconds")
+                if oldest_due is not None and float(oldest_due) > 60:
+                    readiness_errors.append("office_manager_due_backlog_stale")
+                if int(snapshot.get("terminal_failure_count") or 0) > 0:
+                    readiness_errors.append("office_manager_terminal_failures")
+            except Exception:
+                readiness_errors.append("office_manager_outbox_unavailable")
+        if readiness_errors:
+            office_manager_readiness["errors"] = sorted(set(readiness_errors))
+            payload["status"] = "not_ready"
         payload.update(
             {
                 "unified_admin_routing_enabled": (
                     settings.ROO_UNIFIED_ADMIN_ROUTING_ENABLED
                 ),
                 "contextual_shadow_mode": settings.ROO_CONTEXTUAL_SHADOW_MODE,
-                "office_manager": {
-                    "actions_enabled": settings.OFFICE_MANAGER_ACTIONS_ENABLED,
-                    "backend_base_url": str(settings.MLAI_BACKEND_URL or "").rstrip("/"),
-                    "claim_path": "/api/v1/points/coworking/office-manager/claim/",
-                    "timezone": settings.TIMEZONE,
-                },
+                "office_manager": office_manager_readiness,
             }
         )
+    if payload["status"] != "ok":
+        return JSONResponse(payload, status_code=503)
     return payload
 
 
@@ -5366,19 +5470,25 @@ async def _send_office_manager_private_feedback(
     action: Optional[dict[str, Any]] = None,
     store: Optional[OfficeManagerActionStore] = None,
     client_msg_id: Optional[str] = None,
+    outcome: str = "terminal",
+    replace_staged: bool = False,
 ) -> None:
     if action is not None and store is not None:
         action_id = int(action["id"])
         owner = str(action["locked_by"])
-        client_msg_id = build_office_manager_feedback_client_msg_id(
+        client_msg_id = client_msg_id or build_office_manager_feedback_client_msg_id(
             str(action["attempt_id"])
         )
+        stage_operation = (
+            store.supersede_feedback if replace_staged else store.stage_feedback
+        )
         staged = await asyncio.to_thread(
-            store.stage_feedback,
+            stage_operation,
             action_id,
             owner=owner,
             text=text,
             client_msg_id=client_msg_id,
+            outcome=outcome,
         )
         if staged is None:
             raise OfficeManagerActionLeaseLostError(
@@ -5399,8 +5509,20 @@ async def _send_office_manager_private_feedback(
             )
             if response and response.get("ok"):
                 return
+            error_code = _slack_error_code(response)
+            if error_code in PERMANENT_TARGET_NOTIFICATION_ERRORS:
+                raise OfficeManagerActionPermanentError(
+                    f"slack_target:{error_code}"
+                )
             raise RuntimeError("dm_delivery_failed")
         except Exception as exc:
+            if isinstance(exc, OfficeManagerActionPermanentError):
+                raise
+            error_code = _slack_error_code(exc)
+            if error_code in PERMANENT_TARGET_NOTIFICATION_ERRORS:
+                raise OfficeManagerActionPermanentError(
+                    f"slack_target:{error_code}"
+                ) from exc
             print(
                 "OFFICE_MANAGER_PRIVATE_FEEDBACK_FAILED "
                 f"error_type={exc.__class__.__name__}"
@@ -5419,8 +5541,20 @@ async def _send_office_manager_private_feedback(
             )
             if response and response.get("ok"):
                 return
+            error_code = _slack_error_code(response)
+            if error_code in PERMANENT_TARGET_NOTIFICATION_ERRORS:
+                raise OfficeManagerActionPermanentError(
+                    f"slack_target:{error_code}"
+                )
             raise RuntimeError("dm_delivery_failed")
         except Exception as exc:
+            if isinstance(exc, OfficeManagerActionPermanentError):
+                raise
+            error_code = _slack_error_code(exc)
+            if error_code in PERMANENT_TARGET_NOTIFICATION_ERRORS:
+                raise OfficeManagerActionPermanentError(
+                    f"slack_target:{error_code}"
+                ) from exc
             print(
                 "OFFICE_MANAGER_PRIVATE_FEEDBACK_FAILED "
                 f"error_type={exc.__class__.__name__}"
@@ -5477,6 +5611,10 @@ async def _claim_office_manager_from_action(
     from .clients.mlai_backend import MLAIBackendClient
 
     message = ""
+    outcome = ""
+    replace_staged = False
+    feedback_client_msg_id: Optional[str] = None
+    current: Optional[dict[str, Any]] = None
     is_current_booking_date = booking_date == get_current_date().isoformat()
     if action is not None and store is not None:
         current = await asyncio.to_thread(store.get, int(action["id"]))
@@ -5489,6 +5627,12 @@ async def _claim_office_manager_from_action(
                 "office_manager_claim_lease_lost"
             )
         message = str(current.get("feedback_text") or "")
+        outcome = str(current.get("feedback_outcome") or "")
+        if message and outcome in {"claimed", "already_claimed_by_you"}:
+            # Cancellation can supersede a backend success after its feedback
+            # was staged but before Slack accepted it. Re-read that immutable
+            # attempt instead of treating the cached delivery payload as truth.
+            message = ""
 
     if not message:
         try:
@@ -5543,11 +5687,20 @@ async def _claim_office_manager_from_action(
                     "so Roo did not recreate the assignment. Use the latest "
                     "announcement if you want to volunteer again."
                 )
+                outcome = code
+                if current and str(current.get("feedback_text") or ""):
+                    replace_staged = True
+                    feedback_client_msg_id = (
+                        build_office_manager_supersession_client_msg_id(
+                            str(action["attempt_id"])
+                        )
+                    )
             elif code == "attempt_payload_conflict":
                 message = (
                     "Roo rejected this volunteer request because its saved attempt "
                     "no longer matches the request. No assignment was changed."
                 )
+                outcome = code
             elif code == "already_claimed":
                 if is_current_booking_date:
                     selected = f" <@{assignee}> has the role." if assignee else ""
@@ -5558,6 +5711,7 @@ async def _claim_office_manager_from_action(
                         f"{booking_date}. That date has passed, so no action is "
                         "needed now."
                     )
+                outcome = code
             elif code == "claim_closed":
                 message = (
                     "The Office Manager volunteer window is closed for today."
@@ -5567,11 +5721,13 @@ async def _claim_office_manager_from_action(
                         "was closed. That date has passed, so no action is needed now."
                     )
                 )
+                outcome = code
             elif code == "member_not_eligible":
                 message = (
                     "Roo could not confirm you as an active member, so the role "
                     "was not assigned."
                 )
+                outcome = code
             elif code == "office_manager_day_not_found":
                 message = (
                     "Today's Office Manager volunteer request is no longer available."
@@ -5582,6 +5738,7 @@ async def _claim_office_manager_from_action(
                         "is needed now."
                     )
                 )
+                outcome = code
             else:
                 if is_current_booking_date:
                     message = (
@@ -5595,6 +5752,7 @@ async def _claim_office_manager_from_action(
                         f"request for {booking_date}. That date has passed, so do "
                         "not use this result as a current assignment."
                     )
+                outcome = code or "claim_rejected"
         except Exception as exc:
             print(
                 "OFFICE_MANAGER_CLAIM_FAILED "
@@ -5612,6 +5770,7 @@ async def _claim_office_manager_from_action(
                     str(action["attempt_id"]) if action is not None else None
                 ),
             )
+            outcome = str(result.get("status") or "")
 
     await _send_office_manager_private_feedback(
         channel_id=channel_id,
@@ -5619,6 +5778,9 @@ async def _claim_office_manager_from_action(
         text=message,
         action=action,
         store=store,
+        client_msg_id=feedback_client_msg_id,
+        outcome=outcome or "terminal",
+        replace_staged=replace_staged,
     )
 
 
