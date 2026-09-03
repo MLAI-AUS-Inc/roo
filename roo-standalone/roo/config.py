@@ -11,6 +11,38 @@ from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+PRODUCTION_MUTATION_BACKEND_AUTHORITIES = frozenset(
+    {
+        ("https", "api.mlai.au", 443),
+        ("http", "10.126.0.2", 80),
+        ("http", "10.126.0.2", 8000),
+    }
+)
+
+
+def backend_authority(url: str) -> tuple[str, str, int] | None:
+    """Return a canonical root authority, or None for an unsafe backend URL."""
+    parsed = urlparse(url)
+    try:
+        port = parsed.port
+    except ValueError:
+        return None
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in {"", "/"}
+        or parsed.params
+        or parsed.query
+        or parsed.fragment
+    ):
+        return None
+    if port is None:
+        port = 443 if parsed.scheme == "https" else 80
+    return parsed.scheme, parsed.hostname.lower(), port
+
+
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
 
@@ -473,6 +505,41 @@ class Settings(BaseSettings):
                     "ROO_API_KEY is required when "
                     "MEETING_ROOM_BOOKING_ENABLED is true"
                 )
+        authenticated_backend_preflight = (
+            self.ROO_SURFACE == "public" and self.is_production
+        )
+        if (
+            authenticated_backend_preflight
+            or self.MEETING_ROOM_BOOKING_ENABLED
+            or self.OFFICE_MANAGER_ACTIONS_ENABLED
+        ):
+            if not str(self.MLAI_BACKEND_URL or "").strip():
+                raise ValueError(
+                    "MLAI_BACKEND_URL is required for Public Roo's authenticated "
+                    "backend preflight"
+                )
+            if not str(self.ROO_API_KEY or "").strip():
+                raise ValueError(
+                    "ROO_API_KEY is required for Public Roo's authenticated "
+                    "backend preflight"
+                )
+            mutation_backend_authority = backend_authority(
+                str(self.MLAI_BACKEND_URL or "")
+            )
+            if mutation_backend_authority is None:
+                raise ValueError(
+                    "MLAI_BACKEND_URL must be a non-secret HTTP(S) root origin "
+                    "without a path when Public Roo authenticates to the backend"
+                )
+            if (
+                self.is_production
+                and mutation_backend_authority
+                not in PRODUCTION_MUTATION_BACKEND_AUTHORITIES
+            ):
+                raise ValueError(
+                    "MLAI_BACKEND_URL must target the reviewed MLAI production "
+                    "backend authority when Public Roo authenticates to the backend"
+                )
         if self.OFFICE_MANAGER_ACTIONS_ENABLED:
             if self.ROO_SURFACE != "public":
                 raise ValueError(
@@ -482,21 +549,6 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "MLAI_BACKEND_URL is required when "
                     "OFFICE_MANAGER_ACTIONS_ENABLED is true"
-                )
-            office_manager_backend_url = urlparse(str(self.MLAI_BACKEND_URL))
-            if (
-                office_manager_backend_url.scheme not in {"http", "https"}
-                or not office_manager_backend_url.hostname
-                or office_manager_backend_url.username is not None
-                or office_manager_backend_url.password is not None
-                or office_manager_backend_url.path not in {"", "/"}
-                or office_manager_backend_url.params
-                or office_manager_backend_url.query
-                or office_manager_backend_url.fragment
-            ):
-                raise ValueError(
-                    "MLAI_BACKEND_URL must be a non-secret HTTP(S) root origin "
-                    "without a path when OFFICE_MANAGER_ACTIONS_ENABLED is true"
                 )
             if not str(self.ROO_API_KEY or "").strip():
                 raise ValueError(

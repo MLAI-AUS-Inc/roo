@@ -78,8 +78,10 @@ from .office_manager_actions import (
     OfficeManagerActionStore,
     build_office_manager_action_occurrence_key,
     build_office_manager_feedback_client_msg_id,
+    build_office_manager_reconciled_feedback_client_msg_id,
     build_office_manager_supersession_client_msg_id,
     build_office_manager_uncertainty_client_msg_id,
+    canonical_office_manager_generation,
     get_office_manager_action_store,
     office_manager_action_housekeeping_loop,
     office_manager_action_retry_loop,
@@ -2546,10 +2548,16 @@ def _validate_office_manager_backend_contract(
         "contract": "office-manager-v1",
         "credential_scope": "strict_roo",
         "timezone": timezone_name,
+        "claim_generation_supported": True,
+        "claim_generation_required": True,
     }
     if (
         not isinstance(payload, dict)
-        or any(payload.get(key) != value for key, value in expected.items())
+        or any(
+            type(payload.get(key)) is not type(value)
+            or payload.get(key) != value
+            for key, value in expected.items()
+        )
         or not isinstance(payload.get("enabled"), bool)
     ):
         raise RuntimeError("Office Manager backend contract mismatch")
@@ -2563,6 +2571,7 @@ async def lifespan(app: FastAPI):
     validate_runtime_security(settings)
     app.state.startup_complete = False
     app.state.office_manager_action_worker_state = None
+    app.state.office_manager_backend_contract = None
     coworking_retry_task: Optional[asyncio.Task] = None
     boost_post_retry_task: Optional[asyncio.Task] = None
     link_love_task: Optional[asyncio.Task] = None
@@ -2580,10 +2589,7 @@ async def lifespan(app: FastAPI):
     agent = get_agent()
     print(f"   Loaded {len(agent.skills)} skills")
     office_manager_contract: Optional[dict[str, Any]] = None
-    if (
-        settings.ROO_SURFACE == "public"
-        and settings.OFFICE_MANAGER_ACTIONS_ENABLED
-    ):
+    if settings.ROO_SURFACE == "public":
         from .clients.mlai_backend import MLAIBackendClient
 
         office_manager_backend = MLAIBackendClient(
@@ -2597,6 +2603,9 @@ async def lifespan(app: FastAPI):
         office_manager_contract = _validate_office_manager_backend_contract(
             office_manager_contract,
             timezone_name=settings.TIMEZONE,
+        )
+        app.state.office_manager_backend_contract = dict(
+            office_manager_contract
         )
     if settings.ROO_SURFACE == "public":
         # Retention is independent of whether new Office Manager clicks are
@@ -2810,6 +2819,17 @@ async def readiness_check():
             "timezone": settings.TIMEZONE,
         }
         readiness_errors: list[str] = []
+        backend_contract = getattr(
+            app.state,
+            "office_manager_backend_contract",
+            None,
+        )
+        if isinstance(backend_contract, dict):
+            office_manager_readiness["backend_contract"] = dict(
+                backend_contract
+            )
+        else:
+            readiness_errors.append("office_manager_backend_contract_unverified")
         if settings.OFFICE_MANAGER_ACTIONS_ENABLED:
             worker_state = getattr(
                 app.state,
@@ -2829,9 +2849,12 @@ async def readiness_check():
                     readiness_errors.append("office_manager_worker_stale")
                 if worker_state.get("last_error"):
                     readiness_errors.append("office_manager_worker_error")
-                office_manager_readiness["backend_contract"] = dict(
-                    worker_state.get("backend_contract") or {}
-                )
+                if dict(worker_state.get("backend_contract") or {}) != dict(
+                    backend_contract or {}
+                ):
+                    readiness_errors.append(
+                        "office_manager_worker_contract_mismatch"
+                    )
                 office_manager_readiness["worker_heartbeat_age_seconds"] = max(
                     0,
                     int(time.time() - heartbeat_at),
@@ -2849,8 +2872,12 @@ async def readiness_check():
                 oldest_due = snapshot.get("oldest_due_age_seconds")
                 if oldest_due is not None and float(oldest_due) > 60:
                     readiness_errors.append("office_manager_due_backlog_stale")
+                if int(snapshot.get("authentication_failure_count") or 0) > 0:
+                    readiness_errors.append("office_manager_backend_auth_failed")
                 if int(snapshot.get("terminal_failure_count") or 0) > 0:
-                    readiness_errors.append("office_manager_terminal_failures")
+                    office_manager_readiness["warnings"] = [
+                        "office_manager_terminal_failures"
+                    ]
             except Exception:
                 readiness_errors.append("office_manager_outbox_unavailable")
         if readiness_errors:
@@ -5350,12 +5377,47 @@ class OfficeManagerClaimUncertainError(RuntimeError):
     """The backend result is unknown and the durable outbox must retry it."""
 
 
+class OfficeManagerClaimAuthenticationError(OfficeManagerClaimUncertainError):
+    """The backend rejected Roo's credential and the claim must stay pending."""
+
+
+OFFICE_MANAGER_BOUND_TERMINAL_ERROR_CODES = {
+    "already_claimed",
+    "announcement_superseded",
+    "attempt_payload_conflict",
+    "attempt_superseded",
+    "claim_closed",
+    "member_not_eligible",
+    "office_manager_day_not_found",
+    "refund_unavailable",
+}
+
+
+def _office_manager_claim_generation_echo_required() -> bool:
+    worker_state = getattr(
+        app.state,
+        "office_manager_action_worker_state",
+        None,
+    )
+    contract = (
+        worker_state.get("backend_contract")
+        if isinstance(worker_state, dict)
+        else None
+    )
+    return bool(
+        isinstance(contract, dict)
+        and contract.get("claim_generation_required") is True
+    )
+
+
 def _office_manager_claim_success_message(
     result: Any,
     *,
     expected_user_id: str,
     expected_booking_date: str,
     expected_attempt_id: Optional[str] = None,
+    expected_generation: int = 1,
+    generation_echo_required: bool = False,
 ) -> str:
     def invalid(reason: str) -> None:
         print(f"OFFICE_MANAGER_CLAIM_RESPONSE_INVALID reason={reason}")
@@ -5372,6 +5434,19 @@ def _office_manager_claim_success_message(
 
     if str(result.get("date") or "").strip() != expected_booking_date:
         invalid("date_mismatch")
+    echoed_generation = result.get("generation")
+    if echoed_generation is None:
+        if generation_echo_required or expected_generation != 1:
+            invalid("generation_missing")
+    else:
+        try:
+            echoed_generation = canonical_office_manager_generation(
+                echoed_generation
+            )
+        except ValueError:
+            invalid("generation_invalid")
+        if echoed_generation != expected_generation:
+            invalid("generation_mismatch")
     if expected_attempt_id is not None and (
         str(result.get("attempt_id") or "").strip() != expected_attempt_id
     ):
@@ -5433,31 +5508,35 @@ def _office_manager_claim_success_message(
         )
         if points_refunded:
             message += (
-                f" The {points_refunded} Roo points charged for that date "
-                "remain returned."
+                f" At processing time, Roo returned the {points_refunded} "
+                "points charged for that date."
             )
         return message
 
     if claim_status == "already_claimed_by_you":
         message = (
-            "You are already today's Office Manager. Roo has kept your "
-            "zero-point booking in place."
+            f"Roo had already accepted your Office Manager request for "
+            f"{expected_booking_date} and found the zero-point booking in place. "
+            "Check the latest daily announcement: a later cancellation or "
+            "replacement takes precedence over this processing result."
         )
         if points_refunded:
             message += (
-                f" The {points_refunded} Roo points previously charged for "
-                "today remain returned."
+                f" At processing time, the {points_refunded} Roo points "
+                "previously charged had been returned."
             )
         return message
 
     message = (
-        "You are today's Office Manager. Roo booked you in without "
-        "deducting Roo points. Check your DMs for the responsibilities."
+        f"Roo accepted your Office Manager request for {expected_booking_date} "
+        "and created a zero-point booking. Check the latest daily announcement: "
+        "a later cancellation or replacement takes precedence over this "
+        "processing result."
     )
     if points_refunded:
         message += (
-            f" Roo also returned the {points_refunded} Roo points "
-            "previously charged for today."
+            f" At processing time, Roo also returned the {points_refunded} "
+            "points previously charged."
         )
     return message
 
@@ -5507,7 +5586,7 @@ async def _send_office_manager_private_feedback(
                 client_msg_id=str(staged["feedback_client_msg_id"]),
                 redact_logs=True,
             )
-            if response and response.get("ok"):
+            if _office_manager_slack_delivery_accepted(response):
                 return
             error_code = _slack_error_code(response)
             if error_code in PERMANENT_TARGET_NOTIFICATION_ERRORS:
@@ -5518,6 +5597,8 @@ async def _send_office_manager_private_feedback(
         except Exception as exc:
             if isinstance(exc, OfficeManagerActionPermanentError):
                 raise
+            if _office_manager_slack_delivery_accepted(exc):
+                return
             error_code = _slack_error_code(exc)
             if error_code in PERMANENT_TARGET_NOTIFICATION_ERRORS:
                 raise OfficeManagerActionPermanentError(
@@ -5539,7 +5620,7 @@ async def _send_office_manager_private_feedback(
                 client_msg_id=client_msg_id,
                 redact_logs=True,
             )
-            if response and response.get("ok"):
+            if _office_manager_slack_delivery_accepted(response):
                 return
             error_code = _slack_error_code(response)
             if error_code in PERMANENT_TARGET_NOTIFICATION_ERRORS:
@@ -5550,6 +5631,8 @@ async def _send_office_manager_private_feedback(
         except Exception as exc:
             if isinstance(exc, OfficeManagerActionPermanentError):
                 raise
+            if _office_manager_slack_delivery_accepted(exc):
+                return
             error_code = _slack_error_code(exc)
             if error_code in PERMANENT_TARGET_NOTIFICATION_ERRORS:
                 raise OfficeManagerActionPermanentError(
@@ -5615,6 +5698,8 @@ async def _claim_office_manager_from_action(
     replace_staged = False
     feedback_client_msg_id: Optional[str] = None
     current: Optional[dict[str, Any]] = None
+    staged_message = ""
+    generation = 1
     is_current_booking_date = booking_date == get_current_date().isoformat()
     if action is not None and store is not None:
         current = await asyncio.to_thread(store.get, int(action["id"]))
@@ -5626,12 +5711,23 @@ async def _claim_office_manager_from_action(
             raise OfficeManagerActionLeaseLostError(
                 "office_manager_claim_lease_lost"
             )
-        message = str(current.get("feedback_text") or "")
+        try:
+            generation = canonical_office_manager_generation(
+                current.get("generation", 1)
+            )
+        except ValueError as exc:
+            raise OfficeManagerActionPermanentError(
+                "office_manager_generation_invalid"
+            ) from exc
+        staged_message = str(current.get("feedback_text") or "")
+        message = staged_message
         outcome = str(current.get("feedback_outcome") or "")
-        if message and outcome in {"claimed", "already_claimed_by_you"}:
-            # Cancellation can supersede a backend success after its feedback
-            # was staged but before Slack accepted it. Re-read that immutable
-            # attempt instead of treating the cached delivery payload as truth.
+        if message:
+            # Cancellation can supersede any current-generation backend outcome,
+            # including an already-claimed rejection, after feedback was staged
+            # but before Slack accepted it. Re-read the attempt on every feedback
+            # retry instead of treating the staged delivery payload as lifecycle
+            # truth.
             message = ""
 
     if not message:
@@ -5642,6 +5738,7 @@ async def _claim_office_manager_from_action(
                     user_id,
                     booking_date,
                     str(action["attempt_id"]),
+                    generation,
                 )
             else:
                 # This branch exists for isolated callers and tests. The routed
@@ -5658,6 +5755,13 @@ async def _claim_office_manager_from_action(
                 str(action["attempt_id"]) if action is not None else ""
             )
             echoed_attempt_id = str(payload.get("attempt_id") or "").strip()
+            if int(exc.response.status_code) in {401, 403} and not (
+                int(exc.response.status_code) == 403
+                and code == "member_not_eligible"
+            ):
+                raise OfficeManagerClaimAuthenticationError(
+                    "office_manager_claim_authentication_failed"
+                ) from exc
             if (
                 expected_attempt_id
                 and echoed_attempt_id
@@ -5670,13 +5774,32 @@ async def _claim_office_manager_from_action(
                 raise OfficeManagerClaimUncertainError(
                     "office_manager_claim_result_uncertain"
                 ) from exc
-            if code in {"attempt_superseded", "attempt_payload_conflict"} and (
-                not expected_attempt_id
-                or echoed_attempt_id != expected_attempt_id
-            ):
+            if code not in OFFICE_MANAGER_BOUND_TERMINAL_ERROR_CODES:
+                # An arbitrary proxy/WAF/router 4xx is not an authoritative
+                # Office Manager business outcome. Completing it as
+                # ``claim_rejected`` would permanently cache a result for an
+                # attempt the backend may never have observed.
                 raise OfficeManagerClaimUncertainError(
-                    "office_manager_claim_attempt_missing"
+                    "office_manager_claim_result_unbound"
                 ) from exc
+            if expected_attempt_id and code in OFFICE_MANAGER_BOUND_TERMINAL_ERROR_CODES:
+                if echoed_attempt_id != expected_attempt_id:
+                    raise OfficeManagerClaimUncertainError(
+                        "office_manager_claim_attempt_missing"
+                    ) from exc
+                echoed_generation = payload.get("generation")
+                try:
+                    echoed_generation = canonical_office_manager_generation(
+                        echoed_generation
+                    )
+                except ValueError as generation_exc:
+                    raise OfficeManagerClaimUncertainError(
+                        "office_manager_claim_generation_invalid"
+                    ) from generation_exc
+                if echoed_generation != generation:
+                    raise OfficeManagerClaimUncertainError(
+                        "office_manager_claim_generation_mismatch"
+                    ) from exc
             if code == "attempt_superseded":
                 if str(payload.get("status") or "").strip() != "superseded":
                     raise OfficeManagerClaimUncertainError(
@@ -5769,8 +5892,22 @@ async def _claim_office_manager_from_action(
                 expected_attempt_id=(
                     str(action["attempt_id"]) if action is not None else None
                 ),
+                expected_generation=generation,
+                generation_echo_required=(
+                    _office_manager_claim_generation_echo_required()
+                ),
             )
             outcome = str(result.get("status") or "")
+
+    if staged_message and message != staged_message and not replace_staged:
+        replace_staged = True
+        feedback_client_msg_id = (
+            build_office_manager_reconciled_feedback_client_msg_id(
+                str(action["attempt_id"]),
+                booking_date=booking_date,
+                outcome=outcome,
+            )
+        )
 
     await _send_office_manager_private_feedback(
         channel_id=channel_id,
@@ -5789,11 +5926,24 @@ def _slack_delivery_succeeded(response: Any) -> bool:
 
 
 def _slack_error_code(value: Any) -> str:
-    response = value if isinstance(value, dict) else getattr(value, "response", None)
+    response = (
+        value
+        if callable(getattr(value, "get", None))
+        else getattr(value, "response", None)
+    )
     try:
         return str(response.get("error") or "") if response else ""
     except (AttributeError, TypeError):
         return ""
+
+
+def _office_manager_slack_delivery_accepted(value: Any) -> bool:
+    """Treat Slack's deterministic replay response as accepted delivery."""
+    try:
+        succeeded = _slack_delivery_succeeded(value)
+    except (AttributeError, TypeError):
+        succeeded = False
+    return succeeded or _slack_error_code(value) == "duplicate_message"
 
 
 PERMANENT_TARGET_NOTIFICATION_ERRORS = {
@@ -6910,6 +7060,12 @@ async def slack_actions(
             action_value = {}
         booking_date = str(action_value.get("date") or "").strip()
         try:
+            generation = canonical_office_manager_generation(
+                action_value.get("generation", 1)
+            )
+        except ValueError:
+            generation = None
+        try:
             is_current_booking_date = (
                 date.fromisoformat(booking_date) == get_current_date()
             )
@@ -6928,14 +7084,16 @@ async def slack_actions(
                 action_ts=action_ts,
                 message_ts=early_action_message_ts,
                 booking_date=booking_date,
+                generation=generation,
             )
-            if action_ts
+            if action_ts and generation is not None
             else None
         )
         if (
             user_id
             and channel_id
             and booking_date
+            and generation is not None
             and not is_current_booking_date
             and request_fingerprint
         ):
@@ -6958,6 +7116,7 @@ async def slack_actions(
                 and str(existing_action["slack_user_id"]) == str(user_id)
                 and str(existing_action["channel_id"]) == str(channel_id)
                 and str(existing_action["booking_date"]) == booking_date
+                and int(existing_action.get("generation") or 1) == generation
             ):
                 start_slack_action(
                     process_office_manager_action(
@@ -6971,6 +7130,7 @@ async def slack_actions(
             not user_id
             or not channel_id
             or not booking_date
+            or generation is None
             or not is_current_booking_date
         ):
             if is_duplicate_request:
@@ -6998,6 +7158,7 @@ async def slack_actions(
                 slack_user_id=str(user_id),
                 channel_id=str(channel_id),
                 booking_date=booking_date,
+                generation=generation,
                 request_fingerprint=request_fingerprint,
                 action_occurrence_key=action_occurrence_key,
             )

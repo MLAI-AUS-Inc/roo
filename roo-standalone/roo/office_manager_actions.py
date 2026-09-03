@@ -19,6 +19,7 @@ DEFAULT_RETRY_POLL_SECONDS = 5.0
 DEFAULT_HOUSEKEEPING_POLL_SECONDS = 60 * 60.0
 COMPLETED_RETENTION_SECONDS = 90 * 24 * 60 * 60
 TERMINAL_FAILURE_RETENTION_SECONDS = 7 * 24 * 60 * 60
+MAX_OFFICE_MANAGER_GENERATION = (2**31) - 1
 
 
 def _retry_delay(attempt_count: int) -> float:
@@ -39,6 +40,17 @@ def _canonical_attempt_id(value: str) -> str:
     return candidate
 
 
+def canonical_office_manager_generation(value: Any = 1) -> int:
+    """Return a positive PostgreSQL-int4-safe generation or reject the value."""
+    if (
+        type(value) is not int
+        or value < 1
+        or value > MAX_OFFICE_MANAGER_GENERATION
+    ):
+        raise ValueError("generation must be a positive canonical integer")
+    return value
+
+
 def build_office_manager_feedback_client_msg_id(attempt_id: str) -> str:
     """Return the stable Slack message identity for one terminal result."""
     return str(
@@ -55,6 +67,24 @@ def build_office_manager_supersession_client_msg_id(attempt_id: str) -> str:
         uuid5(
             NAMESPACE_URL,
             f"{_canonical_attempt_id(attempt_id)}:supersession-feedback",
+        )
+    )
+
+
+def build_office_manager_reconciled_feedback_client_msg_id(
+    attempt_id: str,
+    *,
+    booking_date: str,
+    outcome: str,
+) -> str:
+    """Return a stable identity for corrected feedback after a backend re-read."""
+    return str(
+        uuid5(
+            NAMESPACE_URL,
+            (
+                f"{_canonical_attempt_id(attempt_id)}:reconciled-feedback:"
+                f"{str(booking_date).strip()}:{str(outcome).strip()}"
+            ),
         )
     )
 
@@ -78,21 +108,29 @@ def build_office_manager_action_occurrence_key(
     action_ts: str,
     message_ts: str,
     booking_date: str,
+    generation: int = 1,
 ) -> str:
     """Hash immutable Slack action fields into one logical click identity."""
     canonical_action_ts = str(action_ts or "").strip()
     if not canonical_action_ts:
         raise ValueError("action_ts is required for a logical action identity")
+    canonical_generation = canonical_office_manager_generation(generation)
+    identity = {
+        "action_id": str(action_id or "").strip(),
+        "action_ts": canonical_action_ts,
+        "booking_date": str(booking_date or "").strip(),
+        "channel_id": str(channel_id or "").strip(),
+        "message_ts": str(message_ts or "").strip(),
+        "slack_team_id": str(slack_team_id or "").strip(),
+        "slack_user_id": str(slack_user_id or "").strip(),
+    }
+    # Generation 1 predates the explicit epoch field. Preserve its historical
+    # occurrence hash so a resigned retry after rollout cannot create a second
+    # durable attempt. Reopened generation 2+ announcements bind the epoch.
+    if canonical_generation > 1:
+        identity["generation"] = canonical_generation
     canonical = json.dumps(
-        {
-            "action_id": str(action_id or "").strip(),
-            "action_ts": canonical_action_ts,
-            "booking_date": str(booking_date or "").strip(),
-            "channel_id": str(channel_id or "").strip(),
-            "message_ts": str(message_ts or "").strip(),
-            "slack_team_id": str(slack_team_id or "").strip(),
-            "slack_user_id": str(slack_user_id or "").strip(),
-        },
+        identity,
         sort_keys=True,
         separators=(",", ":"),
     )
@@ -178,6 +216,7 @@ class OfficeManagerActionStore:
                         slack_user_id TEXT NOT NULL,
                         channel_id TEXT NOT NULL,
                         booking_date TEXT NOT NULL,
+                        generation INTEGER NOT NULL DEFAULT 1,
                         status TEXT NOT NULL,
                         attempt_count INTEGER NOT NULL DEFAULT 0,
                         next_attempt_at REAL NOT NULL,
@@ -261,6 +300,13 @@ class OfficeManagerActionStore:
                         ADD COLUMN uncertainty_notice_attempted_at REAL
                         """
                     )
+                if "generation" not in columns:
+                    connection.execute(
+                        """
+                        ALTER TABLE office_manager_action_outbox
+                        ADD COLUMN generation INTEGER NOT NULL DEFAULT 1
+                        """
+                    )
                 for column_name, column_type in (
                     ("feedback_text", "TEXT"),
                     ("feedback_client_msg_id", "TEXT"),
@@ -284,6 +330,11 @@ class OfficeManagerActionStore:
                 SELECT
                     SUM(CASE WHEN status IN ('pending', 'processing') THEN 1 ELSE 0 END)
                         AS non_terminal_count,
+                    SUM(CASE
+                        WHEN status IN ('pending', 'processing')
+                         AND last_error = 'OfficeManagerClaimAuthenticationError'
+                        THEN 1 ELSE 0
+                    END) AS authentication_failure_count,
                     SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END)
                         AS terminal_failure_count,
                     MIN(CASE
@@ -301,6 +352,9 @@ class OfficeManagerActionStore:
         )
         return {
             "non_terminal_count": int((row or {})["non_terminal_count"] or 0),
+            "authentication_failure_count": int(
+                (row or {})["authentication_failure_count"] or 0
+            ),
             "terminal_failure_count": int(
                 (row or {})["terminal_failure_count"] or 0
             ),
@@ -321,6 +375,7 @@ class OfficeManagerActionStore:
         slack_user_id: str,
         channel_id: str,
         booking_date: str,
+        generation: int = 1,
         request_fingerprint: Optional[str] = None,
         action_occurrence_key: Optional[str] = None,
     ) -> tuple[dict[str, Any], bool]:
@@ -330,6 +385,7 @@ class OfficeManagerActionStore:
         slack_user_id = str(slack_user_id).strip()
         channel_id = str(channel_id).strip()
         booking_date = str(booking_date).strip()
+        generation = canonical_office_manager_generation(generation)
         if request_fingerprint is None:
             request_fingerprint = uuid4().hex
         request_fingerprint = str(request_fingerprint).strip()
@@ -358,6 +414,15 @@ class OfficeManagerActionStore:
                         """,
                         (request_fingerprint,),
                     ).fetchone()
+                if (
+                    existing is not None
+                    and canonical_office_manager_generation(existing["generation"])
+                    != generation
+                ):
+                    connection.rollback()
+                    raise ValueError(
+                        "generation does not match the persisted action identity"
+                    )
                 should_process = existing is None
                 if existing is None:
                     attempt_id = str(uuid4())
@@ -371,12 +436,13 @@ class OfficeManagerActionStore:
                             slack_user_id,
                             channel_id,
                             booking_date,
+                            generation,
                             status,
                             next_attempt_at,
                             created_at,
                             updated_at
                         )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)
                         """,
                         (
                             attempt_id,
@@ -386,6 +452,7 @@ class OfficeManagerActionStore:
                             slack_user_id,
                             channel_id,
                             booking_date,
+                            generation,
                             current_time,
                             current_time,
                             current_time,

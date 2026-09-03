@@ -277,6 +277,7 @@ async def test_claim_office_manager_day_uses_verified_actor_payload(monkeypatch)
             "slack_user_id": "UVERIFIED",
             "date": "2026-08-03",
             "attempt_id": "11111111-1111-4111-8111-111111111111",
+            "generation": 1,
         },
     }
 
@@ -325,6 +326,32 @@ async def test_claim_office_manager_day_rejects_noncanonical_attempt_id(monkeypa
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("generation", (0, -1, True, 1.0, "2", None, 2**63))
+async def test_claim_office_manager_day_rejects_noncanonical_generation(
+    monkeypatch,
+    generation,
+):
+    client = MLAIBackendClient(
+        base_url="https://backend.test",
+        api_key="roo-api-key",
+        internal_api_key="roo-api-key",
+    )
+
+    async def unexpected_request(*args, **kwargs):
+        pytest.fail("invalid generation reached the backend transport")
+
+    monkeypatch.setattr(client, "_request", unexpected_request)
+
+    with pytest.raises(ValueError, match="positive canonical integer"):
+        await client.claim_office_manager_day(
+            "UVERIFIED",
+            "2026-08-03",
+            "11111111-1111-4111-8111-111111111111",
+            generation,
+        )
+
+
+@pytest.mark.asyncio
 async def test_office_manager_preflight_uses_exact_authenticated_route(monkeypatch):
     captured = {}
 
@@ -339,6 +366,8 @@ async def test_office_manager_preflight_uses_exact_authenticated_route(monkeypat
                 "contract": "office-manager-v1",
                 "credential_scope": "strict_roo",
                 "timezone": "Australia/Melbourne",
+                "claim_generation_supported": True,
+                "claim_generation_required": True,
                 "enabled": True,
             },
         )

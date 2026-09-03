@@ -5,6 +5,14 @@ the Day workflow. Roo does not choose the winner or mutate points locally: it
 durably records each click, sends a stable `attempt_id` to `mlai-backend`, and
 delivers the backend's authoritative result privately.
 
+Each current announcement encodes a positive integer claim epoch in its button
+value, for example `{"date":"2026-08-03","generation":2}`. Buttons created
+before the epoch field existed are generation 1. Roo rejects booleans, strings,
+floats, zero, negative values, and integers outside SQLite's signed range. It
+persists the validated generation with the attempt and sends that exact value
+on every retry; a reopened day therefore cannot accept a click from an older
+announcement.
+
 ## Configuration
 
 - `OFFICE_MANAGER_ACTIONS_ENABLED` is the Public Roo action-consumer gate. It
@@ -14,6 +22,9 @@ delivers the backend's authoritative result privately.
 - `MLAI_BACKEND_URL` must be the backend's root origin with no path, query, or
   fragment, for example `https://api.mlai.au`. Roo appends the versioned Office
   Manager claim path itself; do not configure a value ending in `/api/v1`.
+- In production, credentialed Meeting Room and Office Manager mutations are
+  restricted to the reviewed `https://api.mlai.au` authority. Roo refuses to
+  start rather than sending `ROO_API_KEY` to an arbitrary host.
 - Public Roo must use the same Slack application that owns the Office Manager
   button. Do not put this action or its credential on Admin Roo.
 
@@ -21,21 +32,38 @@ The readiness endpoint exposes a non-secret `office_manager` contract with the
 gate state, backend base URL, claim path, authenticated backend contract,
 worker heartbeat, and content-free outbox health. Startup calls the exact
 backend preflight with `ROO_API_KEY`; a wrong credential, route, contract, or
-timezone fails closed before the action worker starts.
+timezone fails closed before the action worker starts. A credential rejection
+seen after startup keeps the original action pending and makes readiness fail
+with `office_manager_backend_auth_failed` until that attempt recovers. A
+permanent, redacted Slack-target failure remains visible as an Office Manager
+warning, but does not take core Roo readiness offline.
+
+The `office-manager-v1` preflight must advertise both
+`claim_generation_supported: true` and `claim_generation_required: true`.
+This Roo release always sends the persisted `generation`, and the backend
+rejects claims that omit it. Roo requires every successful response and every
+recognized terminal error to echo the exact persisted `attempt_id` and integer
+`generation`. A missing or mismatched binding remains pending for authoritative
+reconciliation.
 
 ## Rollout
 
-1. Deploy and approve the backend migrations and claim endpoint with
-   `OFFICE_MANAGER_ENABLED=false`. Complete the backend's historical migration
-   audit before changing persistent databases.
+1. Disable Office Manager actions, then deploy and approve the backend
+   migrations and claim endpoint with `OFFICE_MANAGER_ENABLED=false`. Confirm
+   preflight reports both generation capabilities as `true`; older Roo
+   instances cannot claim through this strict contract during the rollout.
+   Complete the backend's historical migration audit before changing persistent
+   databases.
 2. Configure the backend's Public Roo Slack token and coworking channel, and
    configure Roo with its dedicated `ROO_API_KEY` and the intended
    `MLAI_BACKEND_URL`.
 3. Deploy this Roo release with `OFFICE_MANAGER_ACTIONS_ENABLED=false` and
    verify `/healthz/ready` reports the expected Office Manager contract.
 4. Set the repository variable `OFFICE_MANAGER_ACTIONS_ENABLED=true` and
-   redeploy Roo. The authenticated preflight may report the backend creation
-   gate disabled during this staged interval; retries remain durable.
+   redeploy Roo. Deployment builds the candidate image and runs its exact
+   authenticated Office Manager preflight before replacing the running Roo
+   container. The preflight may report the backend creation gate disabled
+   during this staged interval; retries remain durable.
 5. Enable `OFFICE_MANAGER_ENABLED` on the backend only after Roo is ready.
    Verify the backend preflight accepts the real Slack app/channel and the Roo
    readiness contract, then smoke-test one signed volunteer click, an exact
@@ -62,6 +90,7 @@ pytest roo/tests/test_office_manager_actions.py \
   roo/tests/test_mlai_backend_client.py -q
 ```
 
-These tests cover replay identity, response loss, restart recovery, lease
-expiry, date rollover, feature disable/re-enable, private result delivery, and
-redacted logging without contacting Slack or the backend.
+These tests cover replay identity, response loss followed by Slack's
+`duplicate_message` acknowledgement, restart recovery, lease expiry, date
+rollover and generation fencing, feature disable/re-enable, private result
+delivery, and redacted logging without contacting Slack or the backend.

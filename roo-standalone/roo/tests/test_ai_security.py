@@ -241,6 +241,8 @@ def test_production_dotenv_does_not_mount_docs_or_schema(tmp_path):
         "SLACK_BOT_TOKEN=test\n"
         "SLACK_SIGNING_SECRET=test\n"
         "OPENAI_API_KEY=test\n"
+        "MLAI_BACKEND_URL=https://api.mlai.au\n"
+        "ROO_API_KEY=roo-test-key\n"
     )
     code = (
         "from roo.main import app; "
@@ -460,6 +462,14 @@ def test_deploy_workflow_requires_and_secretly_upserts_security_values():
     assert workflow.index(
         'upsert_env "MEETING_ROOM_BOOKING_ENABLED"'
     ) < workflow.index("docker compose up")
+    preflight = (
+        "MLAIBackendClient().get_office_manager_preflight()"
+    )
+    assert "docker compose build roo" in workflow
+    assert preflight in workflow
+    assert "_validate_office_manager_backend_contract" in workflow
+    assert workflow.index("docker compose build roo") < workflow.index(preflight)
+    assert workflow.index(preflight) < workflow.index("docker compose up")
     assert "systemctl restart slack-bridge.service" in workflow
     assert "docker compose -f docker-compose.bridge.yml up -d --build" in workflow
     assert "Slack bridge readiness check timed out" in workflow

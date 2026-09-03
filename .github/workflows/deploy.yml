@@ -242,8 +242,15 @@ jobs:
             upsert_env "OFFICE_MANAGER_ACTIONS_ENABLED" "$OFFICE_MANAGER_ACTIONS_ENABLED"
             upsert_env "LINEAR_CHANNEL_ISSUE_WRITES_ENABLED" "$LINEAR_CHANNEL_ISSUE_WRITES_ENABLED"
             
-            # Restart the app
-            docker compose up -d --build --remove-orphans
+            # Build without replacing the running release. Every candidate must
+            # authenticate to the exact Office Manager backend contract even
+            # while action processing is staged off.
+            docker compose build roo
+            echo "Preflighting the Office Manager backend contract before cutover..."
+            docker compose run --rm --no-deps roo python -c 'import asyncio; from roo.clients.mlai_backend import MLAIBackendClient; from roo.config import get_settings; from roo.main import _validate_office_manager_backend_contract; settings = get_settings(); payload = asyncio.run(MLAIBackendClient().get_office_manager_preflight()); _validate_office_manager_backend_contract(payload, timezone_name=settings.TIMEZONE)'
+
+            # Replace the app only after all enabled-feature preflights pass.
+            docker compose up -d --remove-orphans
 
             # Bounded readiness check. Never wait forever on a broken release.
             ready_attempt=0
@@ -264,7 +271,7 @@ jobs:
 
             if [ "$OFFICE_MANAGER_ACTIONS_ENABLED" = "true" ]; then
               echo "Verifying Office Manager actions are enabled on Public Roo..."
-              docker compose exec -T roo python -c 'from urllib.parse import urlparse; from roo.config import get_settings; settings = get_settings(); backend_url = urlparse(str(settings.MLAI_BACKEND_URL or "")); assert settings.ROO_SURFACE == "public"; assert settings.OFFICE_MANAGER_ACTIONS_ENABLED is True; assert backend_url.scheme in {"http", "https"} and backend_url.hostname and backend_url.path in {"", "/"} and not backend_url.params and not backend_url.query and not backend_url.fragment; assert settings.ROO_API_KEY'
+              docker compose exec -T roo python -c 'from roo.config import PRODUCTION_MUTATION_BACKEND_AUTHORITIES, backend_authority, get_settings; settings = get_settings(); assert settings.ROO_SURFACE == "public"; assert settings.OFFICE_MANAGER_ACTIONS_ENABLED is True; assert backend_authority(str(settings.MLAI_BACKEND_URL or "")) in PRODUCTION_MUTATION_BACKEND_AUTHORITIES; assert settings.ROO_API_KEY'
             fi
 
             # The cross-workspace Slack bridge is a separate Compose project.

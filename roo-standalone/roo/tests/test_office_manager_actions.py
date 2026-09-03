@@ -97,6 +97,7 @@ def _successful_claim_payload(
     payload = {
         "status": status,
         "date": "2026-08-03",
+        "generation": 1,
         "office_manager_slack_user_id": "UVERIFIED",
         "assignment_id": 42,
         "booking": {
@@ -186,6 +187,7 @@ def test_signed_button_uses_payload_actor_and_deduplicates_delivery(
         configured.SLACK_RECEIPTS_DB_PATH
     )
     assert action_store.get(1)["status"] == "pending"
+    assert action_store.get(1)["generation"] == 1
 
     asyncio.run(scheduled[0])
     assert captured == {
@@ -196,6 +198,7 @@ def test_signed_button_uses_payload_actor_and_deduplicates_delivery(
         "store": action_store,
     }
     assert captured["action"]["locked_by"]
+    assert captured["action"]["generation"] == 1
     assert action_store.get(1)["status"] == "completed"
 
     completed_replay = client.post(
@@ -247,6 +250,59 @@ def test_resigned_retry_with_same_action_ts_reuses_durable_attempt(
     assert first_record["action_occurrence_key"]
     assert store.get(2) is None
     scheduled[0].close()
+
+
+def test_action_occurrence_identity_preserves_legacy_gen1_and_fences_gen2():
+    identity = {
+        "slack_team_id": "TMLAI",
+        "slack_user_id": "UVERIFIED",
+        "channel_id": "CCOWORK",
+        "action_id": OFFICE_MANAGER_VOLUNTEER_ACTION_ID,
+        "action_ts": "1.000001",
+        "message_ts": "2.000002",
+        "booking_date": "2026-08-03",
+    }
+
+    legacy = action_module.build_office_manager_action_occurrence_key(**identity)
+    explicit_gen1 = action_module.build_office_manager_action_occurrence_key(
+        **identity,
+        generation=1,
+    )
+    reopened_gen2 = action_module.build_office_manager_action_occurrence_key(
+        **identity,
+        generation=2,
+    )
+    historical_payload = json.dumps(
+        identity,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    historical_key = hashlib.sha256(
+        historical_payload.encode("utf-8")
+    ).hexdigest()
+
+    assert explicit_gen1 == legacy == historical_key
+    assert reopened_gen2 != legacy
+
+
+def test_generation_mismatch_cannot_reuse_persisted_request_identity(tmp_path):
+    store = action_module.OfficeManagerActionStore(tmp_path / "actions.db")
+    store.record_action(
+        slack_user_id="UVERIFIED",
+        channel_id="CCOWORK",
+        booking_date="2026-08-03",
+        generation=1,
+        request_fingerprint="a" * 64,
+    )
+
+    with pytest.raises(ValueError, match="persisted action identity"):
+        store.record_action(
+            slack_user_id="UVERIFIED",
+            channel_id="CCOWORK",
+            booking_date="2026-08-03",
+            generation=2,
+            request_fingerprint="a" * 64,
+        )
 
 
 def test_persistence_failure_is_retried_after_generic_receipt_is_committed(
@@ -560,6 +616,38 @@ def test_office_manager_actions_fail_closed_without_dedicated_configuration(
         _settings(tmp_path, **overrides)
 
 
+def test_production_office_manager_rejects_unreviewed_backend_authority(tmp_path):
+    with pytest.raises(ValueError, match="reviewed MLAI production backend"):
+        _settings(
+            tmp_path,
+            ROO_ENVIRONMENT="production",
+            MLAI_BACKEND_URL="https://attacker.example",
+        )
+
+
+def test_production_public_preflight_rejects_unreviewed_backend_when_gates_off(
+    tmp_path,
+):
+    with pytest.raises(ValueError, match="reviewed MLAI production backend"):
+        _settings(
+            tmp_path,
+            ROO_ENVIRONMENT="production",
+            MLAI_BACKEND_URL="https://attacker.example",
+            MEETING_ROOM_BOOKING_ENABLED=False,
+            OFFICE_MANAGER_ACTIONS_ENABLED=False,
+        )
+
+
+def test_production_office_manager_accepts_reviewed_backend_authority(tmp_path):
+    configured = _settings(
+        tmp_path,
+        ROO_ENVIRONMENT="production",
+        MLAI_BACKEND_URL="https://api.mlai.au",
+    )
+
+    assert configured.OFFICE_MANAGER_ACTIONS_ENABLED is True
+
+
 def test_office_manager_kill_switch_acknowledges_without_persisting(
     tmp_path,
     monkeypatch,
@@ -596,6 +684,15 @@ def test_public_readiness_exposes_non_secret_office_manager_contract(
     configured = _settings(tmp_path)
     monkeypatch.setattr(main_module, "get_settings", lambda: configured)
     main_module.app.state.startup_complete = True
+    main_module.app.state.office_manager_backend_contract = {
+        "status": "ok",
+        "contract": "office-manager-v1",
+        "credential_scope": "strict_roo",
+        "timezone": "Australia/Melbourne",
+        "claim_generation_supported": True,
+        "claim_generation_required": True,
+        "enabled": True,
+    }
     main_module.app.state.office_manager_action_worker_state = {
         "heartbeat_at": time.time(),
         "last_error": None,
@@ -604,6 +701,8 @@ def test_public_readiness_exposes_non_secret_office_manager_contract(
             "contract": "office-manager-v1",
             "credential_scope": "strict_roo",
             "timezone": "Australia/Melbourne",
+            "claim_generation_supported": True,
+            "claim_generation_required": True,
             "enabled": True,
         },
     }
@@ -634,6 +733,8 @@ def test_office_manager_backend_contract_fails_closed_on_mismatch():
                 "contract": "office-manager-v1",
                 "credential_scope": "strict_roo",
                 "timezone": "UTC",
+                "claim_generation_supported": True,
+                "claim_generation_required": True,
                 "enabled": False,
             },
             timezone_name="Australia/Melbourne",
@@ -647,12 +748,36 @@ def test_office_manager_backend_contract_accepts_staged_disabled_gate():
             "contract": "office-manager-v1",
             "credential_scope": "strict_roo",
             "timezone": "Australia/Melbourne",
+            "claim_generation_supported": True,
+            "claim_generation_required": True,
             "enabled": False,
         },
         timezone_name="Australia/Melbourne",
     )
 
     assert payload["enabled"] is False
+    assert payload["claim_generation_supported"] is True
+    assert payload["claim_generation_required"] is True
+
+
+@pytest.mark.parametrize("capability", (None, False, 1, "true"))
+def test_office_manager_backend_contract_requires_generation_support(capability):
+    payload = {
+        "status": "ok",
+        "contract": "office-manager-v1",
+        "credential_scope": "strict_roo",
+        "timezone": "Australia/Melbourne",
+        "enabled": False,
+        "claim_generation_required": True,
+    }
+    if capability is not None:
+        payload["claim_generation_supported"] = capability
+
+    with pytest.raises(RuntimeError, match="contract mismatch"):
+        main_module._validate_office_manager_backend_contract(
+            payload,
+            timezone_name="Australia/Melbourne",
+        )
 
 
 def test_public_readiness_fails_when_office_manager_worker_is_stale(
@@ -662,6 +787,15 @@ def test_public_readiness_fails_when_office_manager_worker_is_stale(
     configured = _settings(tmp_path)
     monkeypatch.setattr(main_module, "get_settings", lambda: configured)
     main_module.app.state.startup_complete = True
+    main_module.app.state.office_manager_backend_contract = {
+        "status": "ok",
+        "contract": "office-manager-v1",
+        "credential_scope": "strict_roo",
+        "timezone": "Australia/Melbourne",
+        "claim_generation_supported": True,
+        "claim_generation_required": True,
+        "enabled": True,
+    }
     main_module.app.state.office_manager_action_worker_state = {
         "heartbeat_at": time.time() - 61,
         "last_error": None,
@@ -681,6 +815,52 @@ def test_public_readiness_fails_when_office_manager_worker_is_stale(
     assert response.status_code == 503
     assert payload["status"] == "not_ready"
     assert "office_manager_worker_stale" in payload["office_manager"]["errors"]
+
+
+def test_permanent_target_failure_is_warning_not_core_readiness_failure(
+    tmp_path,
+    monkeypatch,
+):
+    configured = _settings(tmp_path)
+    monkeypatch.setattr(main_module, "get_settings", lambda: configured)
+    store = action_module.OfficeManagerActionStore(
+        configured.SLACK_RECEIPTS_DB_PATH
+    )
+    action, _ = store.record_action(
+        slack_user_id="UDELETED",
+        channel_id="CCOWORK",
+        booking_date="2026-08-03",
+    )
+    leased = store.reserve(action["id"], owner="terminal-worker")
+    assert leased is not None
+    assert store.mark_terminal_failure(
+        action["id"],
+        owner="terminal-worker",
+        reason="slack_target:user_not_found",
+    )
+    main_module.app.state.startup_complete = True
+    main_module.app.state.office_manager_action_worker_state = {
+        "heartbeat_at": time.time(),
+        "last_error": None,
+        "backend_contract": dict(
+            main_module.app.state.office_manager_backend_contract
+        ),
+    }
+
+    class RunningTask:
+        @staticmethod
+        def done():
+            return False
+
+    main_module.app.state.office_manager_action_retry_task = RunningTask()
+
+    payload = asyncio.run(main_module.readiness_check())
+
+    assert payload["status"] == "ok"
+    assert payload["office_manager"]["outbox"]["terminal_failure_count"] == 1
+    assert payload["office_manager"]["warnings"] == [
+        "office_manager_terminal_failures"
+    ]
 
 
 def test_malformed_button_is_acknowledged_with_private_feedback(
@@ -722,6 +902,117 @@ def test_malformed_button_is_acknowledged_with_private_feedback(
                 "Please use Roo's latest Office Manager announcement."
             ),
         }
+    ]
+
+
+@pytest.mark.parametrize(
+    "generation",
+    (0, -1, True, 1.0, "2", None, 2**31, 2**63),
+)
+def test_malformed_generation_is_rejected_before_persistence(
+    tmp_path,
+    monkeypatch,
+    generation,
+):
+    configured = _settings(tmp_path)
+    main_module.app.dependency_overrides[get_settings] = lambda: configured
+    scheduled = []
+    feedback = []
+
+    async def capture_feedback(**kwargs):
+        feedback.append(kwargs)
+
+    monkeypatch.setattr(
+        main_module,
+        "_send_office_manager_private_feedback",
+        capture_feedback,
+    )
+    monkeypatch.setattr(main_module, "start_slack_action", scheduled.append)
+    body = _action_body(
+        value={"date": "2026-08-03", "generation": generation},
+    )
+
+    response = TestClient(main_module.app).post(
+        "/slack/actions",
+        content=body,
+        headers=_signed_headers(configured, body),
+    )
+
+    assert response.status_code == 200
+    store = action_module.get_office_manager_action_store(
+        configured.SLACK_RECEIPTS_DB_PATH
+    )
+    assert store.get(1) is None
+    assert len(scheduled) == 1
+    asyncio.run(scheduled[0])
+    assert len(feedback) == 1
+    assert "no longer valid" in feedback[0]["text"]
+
+
+def test_generation_two_is_persisted_and_sent_on_durable_claim(
+    tmp_path,
+    monkeypatch,
+):
+    configured = _settings(tmp_path)
+    main_module.app.dependency_overrides[get_settings] = lambda: configured
+    scheduled = []
+    backend_calls = []
+
+    class FakeClient:
+        async def claim_office_manager_day(
+            self,
+            slack_user_id,
+            booking_date,
+            attempt_id,
+            generation=1,
+        ):
+            backend_calls.append(
+                (slack_user_id, booking_date, attempt_id, generation)
+            )
+            return _successful_claim_payload(
+                attempt_id=attempt_id,
+                generation=generation,
+            )
+
+    monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeClient)
+    monkeypatch.setattr(
+        main_module,
+        "send_dm",
+        lambda *args, **kwargs: {"ok": True},
+    )
+    monkeypatch.setattr(main_module, "start_slack_action", scheduled.append)
+    body = _action_body(
+        value={"date": "2026-08-03", "generation": 2},
+        action_ts="2.000002",
+    )
+
+    response = TestClient(main_module.app).post(
+        "/slack/actions",
+        content=body,
+        headers=_signed_headers(configured, body),
+    )
+
+    assert response.status_code == 200
+    store = action_module.get_office_manager_action_store(
+        configured.SLACK_RECEIPTS_DB_PATH
+    )
+    pending = store.get(1)
+    assert pending["status"] == "pending"
+    assert pending["generation"] == 2
+    assert len(scheduled) == 1
+
+    asyncio.run(scheduled[0])
+
+    completed = store.get(1)
+    assert completed["status"] == "completed"
+    assert completed["generation"] == 2
+    assert backend_calls == [
+        (
+            "UVERIFIED",
+            "2026-08-03",
+            completed["attempt_id"],
+            2,
+        )
     ]
 
 
@@ -878,8 +1169,8 @@ async def test_claim_success_reports_zero_charge_and_refund_privately(monkeypatc
     )
 
     assert len(feedback) == 1
-    assert "without deducting Roo points" in feedback[0]["text"]
-    assert "returned the 8 Roo points" in feedback[0]["text"]
+    assert "created a zero-point booking" in feedback[0]["text"]
+    assert "returned the 8 points previously charged" in feedback[0]["text"]
 
 
 @pytest.mark.asyncio
@@ -906,7 +1197,7 @@ async def test_already_claimed_by_member_is_the_only_idempotent_success(monkeypa
         booking_date="2026-08-03",
     )
 
-    assert "already today's Office Manager" in feedback[0]["text"]
+    assert "had already accepted your Office Manager request" in feedback[0]["text"]
 
 
 @pytest.mark.asyncio
@@ -1004,6 +1295,57 @@ async def test_mismatched_success_contract_is_retried_without_feedback(
     assert feedback == []
 
 
+@pytest.mark.parametrize(
+    ("expected_generation", "echoed_generation", "echo_required"),
+    (
+        (1, None, True),
+        (2, None, False),
+        (2, 1, True),
+        (2, "2", True),
+        (2, True, True),
+    ),
+)
+def test_claim_success_requires_exact_canonical_generation_echo(
+    expected_generation,
+    echoed_generation,
+    echo_required,
+):
+    payload = _successful_claim_payload(attempt_id="attempt-1")
+    if echoed_generation is None:
+        payload.pop("generation")
+    else:
+        payload["generation"] = echoed_generation
+
+    with pytest.raises(
+        main_module.OfficeManagerClaimUncertainError,
+        match="response_invalid",
+    ):
+        main_module._office_manager_claim_success_message(
+            payload,
+            expected_user_id="UVERIFIED",
+            expected_booking_date="2026-08-03",
+            expected_attempt_id="attempt-1",
+            expected_generation=expected_generation,
+            generation_echo_required=echo_required,
+        )
+
+
+def test_legacy_generation_one_success_can_omit_echo_without_capability():
+    payload = _successful_claim_payload(attempt_id="attempt-1")
+    payload.pop("generation")
+
+    message = main_module._office_manager_claim_success_message(
+        payload,
+        expected_user_id="UVERIFIED",
+        expected_booking_date="2026-08-03",
+        expected_attempt_id="attempt-1",
+        expected_generation=1,
+        generation_echo_required=False,
+    )
+
+    assert "created a zero-point booking" in message
+
+
 @pytest.mark.asyncio
 async def test_success_without_matching_attempt_id_stays_pending(
     tmp_path,
@@ -1015,6 +1357,7 @@ async def test_success_without_matching_attempt_id_stays_pending(
             slack_user_id,
             booking_date,
             attempt_id,
+            generation=1,
         ):
             return _successful_claim_payload()
 
@@ -1109,10 +1452,11 @@ async def test_claim_rejections_are_private_and_specific(
             slack_user_id,
             booking_date,
             attempt_id=None,
+            generation=1,
         ):
             request = httpx.Request("POST", "https://backend.test/claim")
             response = httpx.Response(
-                409,
+                403 if code == "member_not_eligible" else 409,
                 request=request,
                 json={"code": code, **payload},
             )
@@ -1172,6 +1516,7 @@ async def test_attempt_supersession_errors_are_terminal_and_private(
             slack_user_id,
             booking_date,
             attempt_id,
+            generation=1,
         ):
             request = httpx.Request("POST", "https://backend.test/claim")
             response = httpx.Response(
@@ -1180,6 +1525,7 @@ async def test_attempt_supersession_errors_are_terminal_and_private(
                 json={
                     "code": code,
                     "attempt_id": attempt_id,
+                    "generation": generation,
                     **extra_payload,
                 },
             )
@@ -1217,6 +1563,127 @@ async def test_attempt_supersession_errors_are_terminal_and_private(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("missing_field", ("attempt_id", "generation"))
+async def test_terminal_error_missing_attempt_binding_stays_pending(
+    tmp_path,
+    monkeypatch,
+    missing_field,
+):
+    class FakeClient:
+        async def claim_office_manager_day(
+            self,
+            slack_user_id,
+            booking_date,
+            attempt_id,
+            generation=1,
+        ):
+            payload = {
+                "code": "already_claimed",
+                "attempt_id": attempt_id,
+                "generation": generation,
+            }
+            payload.pop(missing_field)
+            request = httpx.Request("POST", "https://backend.test/claim")
+            response = httpx.Response(409, request=request, json=payload)
+            raise httpx.HTTPStatusError(
+                "unbound terminal result",
+                request=request,
+                response=response,
+            )
+
+    delivered = []
+    monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeClient)
+    monkeypatch.setattr(
+        main_module,
+        "send_dm",
+        lambda user_id, text, **kwargs: delivered.append(text) or {"ok": True},
+    )
+    store = action_module.OfficeManagerActionStore(tmp_path / "actions.db")
+    action, _ = store.record_action(
+        slack_user_id="UVERIFIED",
+        channel_id="CCOWORK",
+        booking_date="2026-08-03",
+        generation=2,
+    )
+
+    await action_module.process_office_manager_action(
+        action["id"],
+        store=store,
+        processor=main_module._process_office_manager_action_record,
+    )
+
+    assert store.get(action["id"])["status"] == "pending"
+    assert delivered and "still confirming" in delivered[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status_code", "response_kwargs"),
+    (
+        (404, {"text": "<html>not found</html>"}),
+        (400, {"json": {}}),
+        (400, {"json": {"code": "unknown_contract_error"}}),
+        (409, {"json": {"code": "wrong_contract"}}),
+    ),
+)
+async def test_unbound_unknown_4xx_remains_retryable_for_authoritative_recovery(
+    tmp_path,
+    monkeypatch,
+    status_code,
+    response_kwargs,
+):
+    class FakeClient:
+        async def claim_office_manager_day(
+            self,
+            slack_user_id,
+            booking_date,
+            attempt_id,
+            generation=1,
+        ):
+            request = httpx.Request("POST", "https://backend.test/claim")
+            response = httpx.Response(
+                status_code,
+                request=request,
+                **response_kwargs,
+            )
+            raise httpx.HTTPStatusError(
+                "non-authoritative rejection",
+                request=request,
+                response=response,
+            )
+
+    delivered = []
+    monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeClient)
+    monkeypatch.setattr(
+        main_module,
+        "send_dm",
+        lambda user_id, text, **kwargs: (
+            delivered.append((user_id, text, kwargs)) or {"ok": True}
+        ),
+    )
+    store = action_module.OfficeManagerActionStore(tmp_path / "actions.db")
+    action, _ = store.record_action(
+        slack_user_id="UVERIFIED",
+        channel_id="CCOWORK",
+        booking_date="2026-08-03",
+        generation=2,
+    )
+
+    await action_module.process_office_manager_action(
+        action["id"],
+        store=store,
+        processor=main_module._process_office_manager_action_record,
+    )
+
+    persisted = store.get(action["id"])
+    assert persisted["status"] == "pending"
+    assert persisted["slack_user_id"] == "UVERIFIED"
+    assert persisted["channel_id"] == "CCOWORK"
+    assert persisted["booking_date"] == "2026-08-03"
+    assert delivered and "still confirming" in delivered[0][1]
+
+
+@pytest.mark.asyncio
 async def test_mismatched_error_attempt_id_stays_pending_for_reconciliation(
     tmp_path,
     monkeypatch,
@@ -1227,6 +1694,7 @@ async def test_mismatched_error_attempt_id_stays_pending_for_reconciliation(
             slack_user_id,
             booking_date,
             attempt_id,
+            generation=1,
         ):
             request = httpx.Request("POST", "https://backend.test/claim")
             response = httpx.Response(
@@ -1272,6 +1740,65 @@ async def test_mismatched_error_attempt_id_stays_pending_for_reconciliation(
 
 
 @pytest.mark.asyncio
+async def test_mismatched_terminal_error_generation_stays_pending(
+    tmp_path,
+    monkeypatch,
+):
+    class FakeClient:
+        async def claim_office_manager_day(
+            self,
+            slack_user_id,
+            booking_date,
+            attempt_id,
+            generation=1,
+        ):
+            assert generation == 2
+            request = httpx.Request("POST", "https://backend.test/claim")
+            response = httpx.Response(
+                409,
+                request=request,
+                json={
+                    "code": "attempt_superseded",
+                    "status": "superseded",
+                    "attempt_id": attempt_id,
+                    "generation": 1,
+                },
+            )
+            raise httpx.HTTPStatusError(
+                "wrong generation",
+                request=request,
+                response=response,
+            )
+
+    delivered = []
+    monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeClient)
+    monkeypatch.setattr(
+        main_module,
+        "send_dm",
+        lambda user_id, text, **kwargs: (
+            delivered.append(text)
+            or {"ok": True}
+        ),
+    )
+    store = action_module.OfficeManagerActionStore(tmp_path / "actions.db")
+    action, _ = store.record_action(
+        slack_user_id="UVERIFIED",
+        channel_id="CCOWORK",
+        booking_date="2026-08-03",
+        generation=2,
+    )
+
+    await action_module.process_office_manager_action(
+        action["id"],
+        store=store,
+        processor=main_module._process_office_manager_action_record,
+    )
+
+    assert store.get(action["id"])["status"] == "pending"
+    assert delivered and "still confirming" in delivered[0]
+
+
+@pytest.mark.asyncio
 async def test_unknown_backend_failure_is_reported_and_raised_for_durable_retry(
     monkeypatch,
 ):
@@ -1303,6 +1830,108 @@ async def test_unknown_backend_failure_is_reported_and_raised_for_durable_retry(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("status_code", (401, 403))
+async def test_backend_auth_drift_stays_pending_and_marks_readiness_until_recovery(
+    tmp_path,
+    monkeypatch,
+    status_code,
+):
+    current_time = [1_500.0]
+    monkeypatch.setattr(action_module.time, "time", lambda: current_time[0])
+    configured = _settings(tmp_path)
+    monkeypatch.setattr(main_module, "get_settings", lambda: configured)
+    backend_calls = []
+
+    class FakeClient:
+        async def claim_office_manager_day(
+            self,
+            slack_user_id,
+            booking_date,
+            attempt_id,
+            generation=1,
+        ):
+            backend_calls.append(attempt_id)
+            if len(backend_calls) == 1:
+                request = httpx.Request("POST", "https://backend.test/claim")
+                response = httpx.Response(
+                    status_code,
+                    request=request,
+                    json={"detail": "Authentication credentials were not provided."},
+                )
+                raise httpx.HTTPStatusError(
+                    "credential rejected",
+                    request=request,
+                    response=response,
+                )
+            return _successful_claim_payload(
+                status="already_claimed_by_you",
+                attempt_id=attempt_id,
+            )
+
+    delivered = []
+
+    def capture_dm(user_id, text, **kwargs):
+        delivered.append((text, kwargs["client_msg_id"]))
+        return {"ok": True}
+
+    monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeClient)
+    monkeypatch.setattr(main_module, "send_dm", capture_dm)
+    store = action_module.OfficeManagerActionStore(
+        configured.SLACK_RECEIPTS_DB_PATH
+    )
+    action, _ = store.record_action(
+        slack_user_id="UVERIFIED",
+        channel_id="CCOWORK",
+        booking_date="2026-08-03",
+    )
+
+    await action_module.process_office_manager_action(
+        action["id"],
+        store=store,
+        processor=main_module._process_office_manager_action_record,
+    )
+
+    pending = store.get(action["id"])
+    assert pending["status"] == "pending"
+    assert pending["last_error"] == "OfficeManagerClaimAuthenticationError"
+    assert store.operability_snapshot()["authentication_failure_count"] == 1
+    assert len(delivered) == 1
+    assert "still confirming" in delivered[0][0]
+
+    main_module.app.state.startup_complete = True
+    main_module.app.state.office_manager_action_worker_state = {
+        "heartbeat_at": time.time(),
+        "last_error": None,
+        "backend_contract": {"contract": "office-manager-v1"},
+    }
+
+    class RunningTask:
+        @staticmethod
+        def done():
+            return False
+
+    main_module.app.state.office_manager_action_retry_task = RunningTask()
+    response = await main_module.readiness_check()
+    payload = json.loads(response.body)
+    assert response.status_code == 503
+    assert "office_manager_backend_auth_failed" in (
+        payload["office_manager"]["errors"]
+    )
+
+    current_time[0] = 1_505.0
+    assert await action_module.process_due_office_manager_actions(
+        store=store,
+        processor=main_module._process_office_manager_action_record,
+    ) == 1
+
+    assert backend_calls == [action["attempt_id"], action["attempt_id"]]
+    assert store.get(action["id"])["status"] == "completed"
+    assert store.operability_snapshot()["authentication_failure_count"] == 0
+    assert len(delivered) == 2
+    assert "had already accepted your Office Manager request" in delivered[1][0]
+
+
+@pytest.mark.asyncio
 async def test_cancellation_while_reporting_uncertain_claim_is_not_masked(
     tmp_path,
     monkeypatch,
@@ -1313,6 +1942,7 @@ async def test_cancellation_while_reporting_uncertain_claim_is_not_masked(
             slack_user_id,
             booking_date,
             attempt_id=None,
+            generation=1,
         ):
             request = httpx.Request("POST", "https://backend.test/claim")
             response = httpx.Response(502, request=request)
@@ -1363,6 +1993,7 @@ async def test_transient_claim_failure_retries_then_recovers_idempotent_result(
             slack_user_id,
             booking_date,
             attempt_id=None,
+            generation=1,
         ):
             calls.append((slack_user_id, booking_date))
             if len(calls) == 1:
@@ -1413,7 +2044,7 @@ async def test_transient_claim_failure_retries_then_recovers_idempotent_result(
     assert store.get(action["id"])["status"] == "completed"
     assert len(calls) == 2
     assert "still confirming" in delivered[0]
-    assert "already today's Office Manager" in delivered[1]
+    assert "had already accepted your Office Manager request" in delivered[1]
 
 
 @pytest.mark.asyncio
@@ -1434,6 +2065,7 @@ async def test_commit_response_loss_restart_and_rollover_reuse_attempt(
             slack_user_id,
             booking_date,
             attempt_id,
+            generation=1,
         ):
             backend_attempts.append(attempt_id)
             if len(backend_attempts) == 1:
@@ -1505,6 +2137,7 @@ async def test_repeated_transient_failures_send_one_uncertainty_notice(
             slack_user_id,
             booking_date,
             attempt_id=None,
+            generation=1,
         ):
             backend_calls.append((slack_user_id, booking_date, current_time[0]))
             request = httpx.Request("POST", "https://backend.test/claim")
@@ -1560,6 +2193,48 @@ async def test_repeated_transient_failures_send_one_uncertainty_notice(
 
 
 @pytest.mark.asyncio
+async def test_uncertainty_notice_response_loss_replay_accepts_slack_duplicate(
+    monkeypatch,
+):
+    attempt_id = "11111111-1111-4111-8111-111111111111"
+    client_msg_id = action_module.build_office_manager_uncertainty_client_msg_id(
+        attempt_id
+    )
+    slack_attempts = []
+
+    def lose_response_then_report_duplicate(user_id, text, **kwargs):
+        slack_attempts.append(kwargs["client_msg_id"])
+        if len(slack_attempts) == 1:
+            raise RuntimeError("accepted response lost")
+        return {"ok": False, "error": "duplicate_message"}
+
+    monkeypatch.setattr(
+        main_module,
+        "send_dm",
+        lose_response_then_report_duplicate,
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="office_manager_private_feedback_failed",
+    ):
+        await main_module._send_office_manager_private_feedback(
+            channel_id="CCOWORK",
+            user_id="UVERIFIED",
+            text="Roo is still confirming your request.",
+            client_msg_id=client_msg_id,
+        )
+    await main_module._send_office_manager_private_feedback(
+        channel_id="CCOWORK",
+        user_id="UVERIFIED",
+        text="Roo is still confirming your request.",
+        client_msg_id=client_msg_id,
+    )
+
+    assert slack_attempts == [client_msg_id, client_msg_id]
+
+
+@pytest.mark.asyncio
 async def test_failed_uncertainty_notice_is_not_repeated(
     tmp_path,
     monkeypatch,
@@ -1575,6 +2250,7 @@ async def test_failed_uncertainty_notice_is_not_repeated(
             slack_user_id,
             booking_date,
             attempt_id=None,
+            generation=1,
         ):
             backend_calls.append(current_time[0])
             request = httpx.Request("POST", "https://backend.test/claim")
@@ -1655,6 +2331,7 @@ def test_existing_outbox_schema_adds_uncertainty_notice_column(tmp_path):
     assert action["feedback_client_msg_id"] is None
     assert action["feedback_prepared_at"] is None
     assert action["action_occurrence_key"] is None
+    assert action["generation"] == 1
 
 
 def test_concurrent_processes_serialize_legacy_schema_upgrade(tmp_path):
@@ -1700,10 +2377,11 @@ def test_concurrent_processes_serialize_legacy_schema_upgrade(tmp_path):
     assert all(row["feedback_text"] is None for row in upgraded)
     assert all(row["feedback_client_msg_id"] is None for row in upgraded)
     assert all(row["action_occurrence_key"] is None for row in upgraded)
+    assert all(row["generation"] == 1 for row in upgraded)
 
 
 @pytest.mark.asyncio
-async def test_terminal_feedback_is_staged_and_retried_with_same_message_id(
+async def test_staged_success_crossing_midnight_uses_correction_message_id(
     tmp_path,
     monkeypatch,
 ):
@@ -1718,11 +2396,12 @@ async def test_terminal_feedback_is_staged_and_retried_with_same_message_id(
             slack_user_id,
             booking_date,
             attempt_id=None,
+            generation=1,
         ):
             backend_calls.append((slack_user_id, booking_date))
             return _successful_claim_payload(attempt_id=attempt_id)
 
-    def response_lost_then_duplicate_safe_success(user_id, text, **kwargs):
+    def response_lost_then_correction_success(user_id, text, **kwargs):
         slack_attempts.append((user_id, text, kwargs["client_msg_id"]))
         if len(slack_attempts) == 1:
             raise RuntimeError("accepted response lost")
@@ -1732,7 +2411,7 @@ async def test_terminal_feedback_is_staged_and_retried_with_same_message_id(
     monkeypatch.setattr(
         main_module,
         "send_dm",
-        response_lost_then_duplicate_safe_success,
+        response_lost_then_correction_success,
     )
     database_path = tmp_path / "actions.db"
     store = action_module.OfficeManagerActionStore(database_path)
@@ -1767,10 +2446,158 @@ async def test_terminal_feedback_is_staged_and_retried_with_same_message_id(
     # A staged success is re-read from the backend before retrying delivery so
     # a cancellation that superseded this attempt cannot leak stale success.
     assert len(backend_calls) == 2
-    assert [attempt[2] for attempt in slack_attempts] == [
-        slack_attempts[0][2],
-        slack_attempts[0][2],
-    ]
+    assert "Office Manager request for 2026-08-03" in slack_attempts[0][1]
+    assert "historical confirmation only" in slack_attempts[1][1]
+    assert slack_attempts[0][2] != slack_attempts[1][2]
+    assert slack_attempts[1][2] == (
+        action_module.build_office_manager_reconciled_feedback_client_msg_id(
+            action["attempt_id"],
+            booking_date="2026-08-03",
+            outcome="claimed",
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_terminal_feedback_response_loss_replay_accepts_slack_duplicate(
+    tmp_path,
+    monkeypatch,
+):
+    current_time = [5_250.0]
+    monkeypatch.setattr(action_module.time, "time", lambda: current_time[0])
+    backend_calls = []
+    slack_attempts = []
+
+    class FakeClient:
+        async def claim_office_manager_day(
+            self,
+            slack_user_id,
+            booking_date,
+            attempt_id,
+            generation=1,
+        ):
+            backend_calls.append(attempt_id)
+            return _successful_claim_payload(attempt_id=attempt_id)
+
+    def lose_response_then_report_duplicate(user_id, text, **kwargs):
+        slack_attempts.append(kwargs["client_msg_id"])
+        if len(slack_attempts) == 1:
+            raise RuntimeError("accepted response lost")
+        return {"ok": False, "error": "duplicate_message"}
+
+    monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeClient)
+    monkeypatch.setattr(
+        main_module,
+        "send_dm",
+        lose_response_then_report_duplicate,
+    )
+    store = action_module.OfficeManagerActionStore(tmp_path / "actions.db")
+    action, _ = store.record_action(
+        slack_user_id="UVERIFIED",
+        channel_id="CCOWORK",
+        booking_date="2026-08-03",
+    )
+
+    await action_module.process_office_manager_action(
+        action["id"],
+        store=store,
+        processor=main_module._process_office_manager_action_record,
+    )
+    assert store.get(action["id"])["status"] == "pending"
+
+    current_time[0] = 5_255.0
+    assert await action_module.process_due_office_manager_actions(
+        store=store,
+        processor=main_module._process_office_manager_action_record,
+    ) == 1
+
+    assert backend_calls == [action["attempt_id"], action["attempt_id"]]
+    expected_client_msg_id = (
+        action_module.build_office_manager_feedback_client_msg_id(
+            action["attempt_id"]
+        )
+    )
+    assert slack_attempts == [expected_client_msg_id, expected_client_msg_id]
+    assert store.get(action["id"])["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_legacy_null_staged_outcome_is_reconciled_before_delivery(
+    tmp_path,
+    monkeypatch,
+):
+    current_time = [5_500.0]
+    monkeypatch.setattr(action_module.time, "time", lambda: current_time[0])
+    backend_calls = []
+
+    class FakeClient:
+        async def claim_office_manager_day(
+            self,
+            slack_user_id,
+            booking_date,
+            attempt_id,
+            generation=1,
+        ):
+            backend_calls.append(attempt_id)
+            if len(backend_calls) == 1:
+                return _successful_claim_payload(attempt_id=attempt_id)
+            request = httpx.Request("POST", "https://backend.test/claim")
+            response = httpx.Response(
+                409,
+                request=request,
+                json={
+                    "code": "attempt_superseded",
+                    "status": "superseded",
+                    "attempt_id": attempt_id,
+                    "generation": generation,
+                },
+            )
+            raise httpx.HTTPStatusError(
+                "superseded",
+                request=request,
+                response=response,
+            )
+
+    slack_attempts = []
+
+    def lose_then_succeed(user_id, text, **kwargs):
+        slack_attempts.append((text, kwargs["client_msg_id"]))
+        if len(slack_attempts) == 1:
+            raise RuntimeError("accepted response lost")
+        return {"ok": True}
+
+    monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeClient)
+    monkeypatch.setattr(main_module, "send_dm", lose_then_succeed)
+    database_path = tmp_path / "actions.db"
+    store = action_module.OfficeManagerActionStore(database_path)
+    action, _ = store.record_action(
+        slack_user_id="UVERIFIED",
+        channel_id="CCOWORK",
+        booking_date="2026-08-03",
+    )
+
+    await action_module.process_office_manager_action(
+        action["id"],
+        store=store,
+        processor=main_module._process_office_manager_action_record,
+    )
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "UPDATE office_manager_action_outbox SET feedback_outcome = NULL "
+            "WHERE id = ?",
+            (action["id"],),
+        )
+
+    current_time[0] = 5_505.0
+    assert await action_module.process_due_office_manager_actions(
+        store=action_module.OfficeManagerActionStore(database_path),
+        processor=main_module._process_office_manager_action_record,
+    ) == 1
+
+    assert len(backend_calls) == 2
+    assert "did not recreate the assignment" in slack_attempts[1][0]
+    assert slack_attempts[0][1] != slack_attempts[1][1]
+    assert store.get(action["id"])["status"] == "completed"
 
 
 @pytest.mark.asyncio
@@ -1876,6 +2703,7 @@ async def test_private_feedback_failure_keeps_action_pending_until_delivered(
             slack_user_id,
             booking_date,
             attempt_id=None,
+            generation=1,
         ):
             backend_calls.append((slack_user_id, booking_date))
             status = "claimed" if len(backend_calls) == 1 else "already_claimed_by_you"
@@ -1932,6 +2760,7 @@ async def test_cancelled_attempt_supersedes_staged_success_before_retry(
             slack_user_id,
             booking_date,
             attempt_id,
+            generation=1,
         ):
             backend_calls.append(attempt_id)
             if len(backend_calls) == 1:
@@ -1947,6 +2776,7 @@ async def test_cancelled_attempt_supersedes_staged_success_before_retry(
                     "code": "attempt_superseded",
                     "status": "superseded",
                     "attempt_id": attempt_id,
+                    "generation": generation,
                 },
             )
             raise httpx.HTTPStatusError(
@@ -1957,14 +2787,23 @@ async def test_cancelled_attempt_supersedes_staged_success_before_retry(
 
     slack_attempts = []
 
-    def lose_first_response(user_id, text, **kwargs):
+    class DuplicateMessageError(RuntimeError):
+        def __init__(self):
+            super().__init__("duplicate message")
+            self.response = {"ok": False, "error": "duplicate_message"}
+
+    def lose_feedback_responses_then_report_duplicate(user_id, text, **kwargs):
         slack_attempts.append((text, kwargs["client_msg_id"]))
-        if len(slack_attempts) == 1:
+        if len(slack_attempts) <= 2:
             raise RuntimeError("accepted response lost")
-        return {"ok": True}
+        raise DuplicateMessageError()
 
     monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeClient)
-    monkeypatch.setattr(main_module, "send_dm", lose_first_response)
+    monkeypatch.setattr(
+        main_module,
+        "send_dm",
+        lose_feedback_responses_then_report_duplicate,
+    )
     store = action_module.OfficeManagerActionStore(tmp_path / "actions.db")
     action, _ = store.record_action(
         slack_user_id="UVERIFIED",
@@ -1984,6 +2823,15 @@ async def test_cancelled_attempt_supersedes_staged_success_before_retry(
         store=store,
         processor=main_module._process_office_manager_action_record,
     )
+    pending_correction = store.get(action["id"])
+    assert pending_correction["status"] == "pending"
+    assert pending_correction["feedback_outcome"] == "attempt_superseded"
+
+    current_time[0] = 3_015.0
+    await action_module.process_due_office_manager_actions(
+        store=store,
+        processor=main_module._process_office_manager_action_record,
+    )
 
     assert store.get(action["id"])["status"] == "completed"
     assert "did not recreate the assignment" in slack_attempts[1][0]
@@ -1993,6 +2841,83 @@ async def test_cancelled_attempt_supersedes_staged_success_before_retry(
             action["attempt_id"]
         )
     )
+    assert slack_attempts[2][1] == slack_attempts[1][1]
+    # Every staged terminal delivery is re-read immediately before each send,
+    # including the exact retry after a lost Slack response.
+    assert len(backend_calls) == 3
+
+
+@pytest.mark.asyncio
+async def test_cancellation_supersedes_staged_already_claimed_before_retry(
+    tmp_path,
+    monkeypatch,
+):
+    current_time = [3_500.0]
+    monkeypatch.setattr(action_module.time, "time", lambda: current_time[0])
+    backend_calls = []
+
+    class FakeClient:
+        async def claim_office_manager_day(
+            self,
+            slack_user_id,
+            booking_date,
+            attempt_id,
+            generation=1,
+        ):
+            backend_calls.append(attempt_id)
+            request = httpx.Request("POST", "https://backend.test/claim")
+            payload = {
+                "attempt_id": attempt_id,
+                "generation": generation,
+            }
+            if len(backend_calls) == 1:
+                payload["code"] = "already_claimed"
+            else:
+                payload.update(
+                    code="attempt_superseded",
+                    status="superseded",
+                )
+            response = httpx.Response(409, request=request, json=payload)
+            raise httpx.HTTPStatusError(
+                "terminal attempt state",
+                request=request,
+                response=response,
+            )
+
+    messages = []
+
+    def fail_then_succeed(user_id, text, **kwargs):
+        messages.append(text)
+        if len(messages) == 1:
+            raise RuntimeError("response lost")
+        return {"ok": True}
+
+    monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeClient)
+    monkeypatch.setattr(main_module, "send_dm", fail_then_succeed)
+    store = action_module.OfficeManagerActionStore(tmp_path / "actions.db")
+    action, _ = store.record_action(
+        slack_user_id="UVERIFIED",
+        channel_id="CCOWORK",
+        booking_date="2026-08-03",
+        generation=2,
+    )
+
+    await action_module.process_office_manager_action(
+        action["id"],
+        store=store,
+        processor=main_module._process_office_manager_action_record,
+    )
+    assert store.get(action["id"])["feedback_outcome"] == "already_claimed"
+
+    current_time[0] = 3_505.0
+    await action_module.process_due_office_manager_actions(
+        store=store,
+        processor=main_module._process_office_manager_action_record,
+    )
+
+    assert store.get(action["id"])["status"] == "completed"
+    assert "did not recreate the assignment" in messages[-1]
+    assert backend_calls == [action["attempt_id"], action["attempt_id"]]
 
 
 @pytest.mark.asyncio
@@ -2006,6 +2931,7 @@ async def test_permanent_slack_target_failure_is_terminal_and_redacted(
             slack_user_id,
             booking_date,
             attempt_id,
+            generation=1,
         ):
             return _successful_claim_payload(
                 attempt_id=attempt_id,
@@ -2066,6 +2992,7 @@ async def test_backend_disable_then_reenable_keeps_attempt_recoverable(
             slack_user_id,
             booking_date,
             attempt_id,
+            generation=1,
         ):
             backend_calls.append(attempt_id)
             if len(backend_calls) == 1:
@@ -2120,7 +3047,7 @@ async def test_backend_disable_then_reenable_keeps_attempt_recoverable(
     assert backend_calls == [action["attempt_id"], action["attempt_id"]]
     assert reenabled_store.get(action["id"])["status"] == "completed"
     assert "still confirming" in delivered[0]
-    assert "today's Office Manager" in delivered[1]
+    assert "Office Manager request for 2026-08-03" in delivered[1]
 
 
 @pytest.mark.asyncio
@@ -2266,13 +3193,14 @@ async def test_pending_action_is_recovered_after_restart(tmp_path):
         slack_user_id="UVERIFIED",
         channel_id="CCOWORK",
         booking_date="2026-08-03",
+        generation=2,
     )
     assert should_process is True
     recovered_store = action_module.OfficeManagerActionStore(database_path)
     processed = []
 
     async def processor(record, _store):
-        processed.append(record["attempt_id"])
+        processed.append((record["attempt_id"], record["generation"]))
 
     count = await action_module.process_due_office_manager_actions(
         store=recovered_store,
@@ -2280,8 +3208,10 @@ async def test_pending_action_is_recovered_after_restart(tmp_path):
     )
 
     assert count == 1
-    assert processed == [action["attempt_id"]]
-    assert recovered_store.get(action["id"])["status"] == "completed"
+    assert processed == [(action["attempt_id"], 2)]
+    completed = recovered_store.get(action["id"])
+    assert completed["status"] == "completed"
+    assert completed["generation"] == 2
 
 
 @pytest.mark.asyncio
@@ -2365,6 +3295,7 @@ async def test_prior_date_accepted_action_recovers_backend_result_privately(
             slack_user_id,
             booking_date,
             attempt_id,
+            generation=1,
         ):
             backend_calls.append((slack_user_id, booking_date, attempt_id))
             return _successful_claim_payload(

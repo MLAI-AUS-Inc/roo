@@ -25,6 +25,7 @@ from ..backend_identity import (
     get_backend_actor_context,
 )
 from ..config import get_settings
+from ..office_manager_actions import canonical_office_manager_generation
 
 CONTENT_FACTORY_REQUEST_SOURCE = "roo_slackbot"
 FULL_POINTS_ADMIN_ROLES = {"admin", "committee", "portfolio_lead"}
@@ -2426,6 +2427,7 @@ class MLAIBackendClient:
         slack_user_id: str,
         booking_date: str,
         attempt_id: str = "",
+        generation: int = 1,
     ) -> dict:
         """Claim today's Office Manager role using the verified Slack actor."""
         if not self.roo_api_key:
@@ -2439,6 +2441,7 @@ class MLAIBackendClient:
             raise ValueError("attempt_id must be a canonical UUID") from exc
         if str(parsed_attempt_id) != attempt_id:
             raise ValueError("attempt_id must be a canonical UUID")
+        generation = canonical_office_manager_generation(generation)
         response = await self._request(
             "POST",
             f"{self._points_base}/coworking/office-manager/claim/",
@@ -2446,6 +2449,7 @@ class MLAIBackendClient:
                 "slack_user_id": self._clean_slack_id(slack_user_id),
                 "date": str(booking_date or "").strip(),
                 "attempt_id": attempt_id,
+                "generation": generation,
             },
             timeout=15.0,
             transport_retries=1,
