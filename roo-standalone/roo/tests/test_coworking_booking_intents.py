@@ -268,6 +268,67 @@ async def test_discounted_retry_omits_monthly_update_and_link_guidance(
 
 
 @pytest.mark.asyncio
+async def test_historical_unknown_pricing_suppresses_discount_guidance(
+    tmp_path,
+    monkeypatch,
+):
+    store, _intent, leased = leased_intent(tmp_path)
+    historical_result = booking_result(cost=4, discount_applied=True)
+    historical_result.update(
+        {
+            "standard_points_cost": 4,
+            "monthly_update_discount_applied": False,
+            "pricing_state_historical_unknown": True,
+        }
+    )
+    client = FakeClient(result=historical_result)
+    direct_messages, _channel_messages, _ephemeral = capture_delivery(monkeypatch)
+
+    result = await coworking.process_coworking_booking_intent(
+        leased,
+        store=store,
+        client=client,
+        notify=True,
+    )
+
+    assert result["status"] == "confirmed"
+    assert "Cost: 4 points" in direct_messages[0]["text"]
+    assert "monthly update" not in direct_messages[0]["text"]
+    assert "`@Roo link`" not in direct_messages[0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_replayed_cancelled_booking_does_not_send_fresh_confirmation(
+    tmp_path,
+    monkeypatch,
+):
+    store, _intent, leased = leased_intent(tmp_path)
+    replayed_result = booking_result(cost=8, discount_applied=False)
+    replayed_result.update(
+        {
+            "operation_replayed": True,
+            "operation_booking_current_status": "cancelled",
+        }
+    )
+    client = FakeClient(result=replayed_result)
+    direct_messages, channel_messages, _ephemeral = capture_delivery(monkeypatch)
+
+    result = await coworking.process_coworking_booking_intent(
+        leased,
+        store=store,
+        client=client,
+        notify=True,
+    )
+
+    assert result["status"] == "confirmed"
+    assert client.balance_calls == []
+    assert "since been cancelled" in direct_messages[0]["text"]
+    assert "did not create a new booking" in direct_messages[0]["text"]
+    assert "Booked you in" not in direct_messages[0]["text"]
+    assert "No new booking" in channel_messages[0]["text"]
+
+
+@pytest.mark.asyncio
 async def test_explicitly_linked_nonqualifying_retry_does_not_offer_relink(
     tmp_path,
     monkeypatch,
@@ -982,7 +1043,7 @@ def test_v3_quarantine_has_fenced_audited_recovery(
                         "id": "legacy-booking-1",
                         "date": "2026-04-22",
                         "status": "booked",
-                        "points_cost": 8,
+                        "points_cost": 4,
                     }
                 ),
             ),
@@ -1010,6 +1071,7 @@ def test_v3_quarantine_has_fenced_audited_recovery(
         normalized = json.loads(reconciled["backend_result_json"])
         UUID(normalized["id"])
         assert normalized["founder_tools_account_linked"] is False
+        assert normalized["pricing_state_historical_unknown"] is True
     with pytest.raises(ValueError, match="does not require reconciliation"):
         reconciliation_module.reconcile_coworking_notification(
             db_path,

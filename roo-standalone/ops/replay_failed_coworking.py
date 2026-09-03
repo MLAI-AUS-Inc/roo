@@ -246,19 +246,20 @@ async def execute_replay(
                     ),
                 )
             else:
-                backend_result = await client.book_coworking(
-                    candidate.slack_user_id,
-                    candidate.booking_date,
-                    candidate.channel_id,
-                )
-                result["status"] = "booked"
-                result["backend_result"] = backend_result
+                # A missing active booking is ambiguous: the original request
+                # may never have committed, or it may have committed and then
+                # been intentionally cancelled/refunded. The legacy log has no
+                # durable operation identity that can distinguish those cases.
+                # Never turn incident recovery into a new booking or charge.
+                result["status"] = "manual_reconciliation_required"
                 post_message(
                     channel=candidate.channel_id,
                     thread_ts=candidate.thread_ts,
                     text=(
-                        "Roo is back. I replayed the coworking booking request "
-                        f"that timed out earlier and confirmed {candidate.booking_date}."
+                        "I checked the earlier timed-out coworking request for "
+                        f"{candidate.booking_date}, but there is no active booking. "
+                        "I did not create a new booking or charge any Roo Points; "
+                        "support must verify the historical lifecycle first."
                     ),
                 )
         except Exception as exc:
@@ -277,15 +278,19 @@ async def execute_replay(
         results.append(result)
 
     if summary_channel_id:
-        booked = sum(1 for item in results if item.get("status") == "booked")
         already_booked = sum(1 for item in results if item.get("status") == "already_booked")
+        manual = sum(
+            1
+            for item in results
+            if item.get("status") == "manual_reconciliation_required"
+        )
         failed = sum(1 for item in results if item.get("status") == "failed")
         post_message(
             channel=summary_channel_id,
             text=(
                 "Roo is back and processed the coworking booking incident replay. "
-                f"replay_run_id={replay_run_id} booked={booked} "
-                f"already_booked={already_booked} failed={failed}"
+                f"replay_run_id={replay_run_id} already_booked={already_booked} "
+                f"manual_reconciliation_required={manual} failed={failed}"
             ),
         )
 
@@ -311,7 +316,12 @@ def build_manifest(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Replay failed Roo coworking booking intents from logs.")
+    parser = argparse.ArgumentParser(
+        description=(
+            "Audit legacy failed Roo coworking requests. Missing bookings are "
+            "quarantined for manual reconciliation and are never recreated."
+        )
+    )
     parser.add_argument("--log-file", required=True, type=Path)
     parser.add_argument("--incident-id", default="coworking-timeout-2026-04-22")
     parser.add_argument("--incident-local-date", default=date.today().isoformat())
@@ -320,7 +330,7 @@ def main() -> int:
     parser.add_argument(
         "--constraint-verified",
         action="store_true",
-        help="Required with --execute after verifying unique_active_booking_per_user_date exists in the live DB.",
+        help="Required with --execute before querying live booking state.",
     )
     parser.add_argument("--execute", action="store_true")
     args = parser.parse_args()
@@ -328,8 +338,8 @@ def main() -> int:
     if args.execute and not args.constraint_verified:
         parser.error(
             "--execute requires --constraint-verified after applying and validating "
-            "the unique_active_booking_per_user_date DB constraint. That DB "
-            "constraint is the concurrency guard during replay."
+            "the unique_active_booking_per_user_date DB constraint. Execution "
+            "only audits live state; it no longer creates bookings."
         )
 
     incident_local_date = date.fromisoformat(args.incident_local_date)

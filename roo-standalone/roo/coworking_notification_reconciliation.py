@@ -48,11 +48,15 @@ def _normalized_retry_payload(row: sqlite3.Row) -> str:
         normalized_id = str(uuid5(NAMESPACE_URL, f"roo:legacy-booking:{raw_id}"))
         payload["legacy_booking_reference"] = raw_id
     standard_cost = payload.get("standard_points_cost")
-    if (
-        not isinstance(standard_cost, int)
-        or isinstance(standard_cost, bool)
-        or standard_cost < points_cost
-    ):
+    recorded_discount = payload.get("monthly_update_discount_applied")
+    pricing_state_known = bool(
+        isinstance(standard_cost, int)
+        and not isinstance(standard_cost, bool)
+        and standard_cost >= points_cost
+        and isinstance(recorded_discount, bool)
+        and recorded_discount is (points_cost < standard_cost)
+    )
+    if not pricing_state_known:
         standard_cost = points_cost
     connection_type = payload.get("founder_tools_connection_type")
     account_linked = payload.get("founder_tools_account_linked")
@@ -71,6 +75,7 @@ def _normalized_retry_payload(row: sqlite3.Row) -> str:
             "id": normalized_id,
             "standard_points_cost": standard_cost,
             "monthly_update_discount_applied": points_cost < standard_cost,
+            "pricing_state_historical_unknown": not pricing_state_known,
             "founder_tools_connection_type": connection_type,
             "founder_tools_account_linked": connection_type is not None,
             "founder_tools_explicitly_linked": connection_type == "explicit",

@@ -277,6 +277,16 @@ class CoworkingBookingIntentStore:
         encoded_targets = json.dumps(targets, separators=(",", ":"))
         with self._lock:
             with self._connect() as conn:
+                prior = conn.execute(
+                    "SELECT status FROM coworking_booking_intents "
+                    "WHERE idempotency_key = ?",
+                    (idempotency_key,),
+                ).fetchone()
+                # A completed or rejected batch is one finished lifecycle.
+                # A later admin action must use a fresh backend operation so a
+                # genuine cancel/rebook remains possible.
+                if prior and prior["status"] in {"batch_confirmed", "batch_blocked"}:
+                    idempotency_key = f"{idempotency_key}:{uuid4().hex}"
                 conn.execute(
                     """
                     INSERT INTO coworking_booking_intents (
@@ -914,16 +924,28 @@ class CoworkingBookingIntentStore:
                     }
                     child_key = build_coworking_intent_key(slack_user_id, booking_date)
                     existing = conn.execute(
-                        "SELECT status, notification_status FROM coworking_booking_intents "
+                        "SELECT status, notification_status, backend_booking_id "
+                        "FROM coworking_booking_intents "
                         "WHERE idempotency_key = ?",
                         (child_key,),
                     ).fetchone()
+                    same_booking = bool(
+                        existing
+                        and str(existing["backend_booking_id"] or "")
+                        == str(booking_result["id"])
+                    )
                     preserve_notification = bool(
                         existing
+                        and same_booking
                         and existing["status"] == "confirmed"
                         and existing["notification_status"]
                         in {"delivered", "delivering", "reconciliation_required"}
                     )
+                    if existing and not same_booking:
+                        # A new backend booking is a new notification lifecycle,
+                        # even when the member/date tuple is unchanged.
+                        child_key = f"{child_key}:{uuid4().hex}"
+                        existing = None
                     conn.execute(
                         """
                         INSERT INTO coworking_booking_intents (

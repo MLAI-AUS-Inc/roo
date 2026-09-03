@@ -8,10 +8,12 @@ v2 will not rerun a corrected v2 body, so startup now requires schema version
 
 ## Migration
 
-Deploy the companion backend migration that creates durable coworking
-operation receipts before deploying this Roo build. The backend keeps
-`operation_id` optional during the rolling upgrade, so the old Roo remains
-compatible; the new Roo must not go live until the receipt table is present.
+Deploy the companion backend migration and receipt-aware backend code before
+deploying this Roo build. The backend keeps `operation_id` optional during the
+upgrade, so the old Roo remains compatible. The new Roo must not go live until
+the receipt table is present **and every serving backend instance** runs the
+receipt-aware release. Drain or replace all old backend instances and verify
+the active deployment revision; merely observing the table is not sufficient.
 
 Take a volume snapshot and stop every Roo process that can write the shared
 SQLite volume. From `roo-standalone`, run:

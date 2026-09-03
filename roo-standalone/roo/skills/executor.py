@@ -14260,7 +14260,7 @@ Chunk {index} source: {label}
         cost: int,
         new_balance: Optional[int],
         admin_checkin: bool,
-        discount_applied: bool = False,
+        discount_applied: Optional[bool] = None,
         include_balance: bool = True,
         founder_tools_explicitly_linked: Optional[bool] = None,
     ) -> str:
@@ -14288,7 +14288,7 @@ Chunk {index} source: {label}
             f"See you there, legend!"
         )
 
-        if not discount_applied:
+        if discount_applied is False:
             message += (
                 "\n\n💡 Startup founders may qualify for 4-point coworking after "
                 "submitting an eligible monthly update. Submit yours here: "
@@ -14322,9 +14322,40 @@ Chunk {index} source: {label}
             backend_result,
             expected_date=booking_date,
         )
+        current_status = backend_result.get("operation_booking_current_status")
+        if current_status in {"cancelled", "deleted"}:
+            state_text = "cancelled" if current_status == "cancelled" else "removed"
+            private_message = (
+                f"I recovered an earlier coworking request for **{booking_date}**. "
+                f"It did commit, but that booking has since been {state_text}. "
+                "I did not create a new booking or charge any Roo Points during this retry."
+            )
+            public_message = (
+                f"I recovered the earlier coworking request for <@{target_user_id}> "
+                f"on **{booking_date}**, but that booking has since been {state_text}. "
+                "No new booking or Roo Points charge was created by this retry."
+                if admin_checkin
+                else (
+                    f"I recovered your earlier coworking request for **{booking_date}**, "
+                    f"but that booking has since been {state_text}. No new booking or "
+                    "Roo Points charge was created by this retry."
+                )
+            )
+            return self._deliver_personal_points_message(
+                recipient_user_id=target_user_id,
+                requester_user_id=requested_by_user_id,
+                channel_id=channel_id,
+                thread_ts=thread_ts,
+                private_message=private_message,
+                public_message=public_message,
+                action="book_coworking_replay_inactive",
+                client_msg_id=client_msg_id,
+            )
         cost = backend_result["points_cost"]
-        discount_applied = bool(
-            backend_result.get("monthly_update_discount_applied", False)
+        discount_applied = (
+            None
+            if backend_result.get("pricing_state_historical_unknown") is True
+            else backend_result["monthly_update_discount_applied"]
         )
         raw_explicit_link_state = backend_result.get(
             "founder_tools_explicitly_linked"
@@ -14466,6 +14497,20 @@ Chunk {index} source: {label}
         batch_result: dict,
     ) -> str:
         target_count = int(batch_result.get("target_count") or 0)
+        if batch_result.get("operation_replayed") is True:
+            current_statuses = [
+                str(row.get("booking", {}).get("operation_booking_current_status") or "")
+                for row in batch_result.get("results", [])
+                if isinstance(row, dict) and isinstance(row.get("booking"), dict)
+            ]
+            active_count = sum(status == "booked" for status in current_statuses)
+            inactive_count = len(current_statuses) - active_count
+            return (
+                f"I recovered the earlier coworking batch for **{booking_date}**. "
+                f"Current state: {active_count} active, {inactive_count} cancelled or removed. "
+                "No new bookings or Roo Points charges were created by this retry; "
+                "each member will receive the accurate current state privately."
+            )
         return (
             "You beauty! 🎉\n\n"
             f"Processed **{target_count}** coworking check-ins for **{booking_date}**. "

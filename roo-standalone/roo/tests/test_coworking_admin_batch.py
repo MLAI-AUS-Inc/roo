@@ -156,7 +156,8 @@ async def test_admin_checkin_coworking_batches_deduped_targets(batch_runtime):
         text="<@UROO> check <@U1> <@U2> <@U1> in today",
     )
 
-    UUID(client.batch_calls[0].pop("operation_id"))
+    first_operation_id = client.batch_calls[0].pop("operation_id")
+    UUID(first_operation_id)
     assert client.batch_calls == [
         {
             "admin_slack_user_id": "UADMIN",
@@ -180,9 +181,32 @@ async def test_admin_checkin_coworking_batches_deduped_targets(batch_runtime):
         action="admin_checkin_coworking",
         text="check <@U2> <@U1> in today",
     )
-    assert "already processed" in duplicate_result
-    assert len(client.batch_calls) == 1
+    assert "Processed **2** coworking check-ins" in duplicate_result
+    assert len(client.batch_calls) == 2
+    assert first_operation_id != client.batch_calls[1]["operation_id"]
+    # The backend returned the same booking identities, so their delivered
+    # notifications remain deduplicated across the new request lifecycle.
     assert len(batch_runtime["direct_messages"]) == 2
+
+    changed_result = _batch_result()
+    changed_result["results"][0]["booking"]["id"] = (
+        "00000000-0000-4000-8000-000000000011"
+    )
+    changed_result["results"][1]["booking"]["id"] = (
+        "00000000-0000-4000-8000-000000000012"
+    )
+    client.batch_result = changed_result
+
+    rebooked_result = await _run_points_action(
+        client,
+        action="admin_checkin_coworking",
+        text="check <@U1> <@U2> in today after cancellation",
+    )
+
+    assert "Processed **2** coworking check-ins" in rebooked_result
+    assert len(client.batch_calls) == 3
+    # A different backend booking ID is a new delivery obligation.
+    assert len(batch_runtime["direct_messages"]) == 4
 
 
 @pytest.mark.asyncio
@@ -199,6 +223,36 @@ async def test_non_admin_tagged_booking_is_denied_before_booking_call():
     assert "full Points Admin" in result
     assert client.batch_calls == []
     assert client.single_calls == []
+
+
+@pytest.mark.asyncio
+async def test_replayed_cancelled_batch_reports_current_state(batch_runtime):
+    replayed = _batch_result()
+    replayed["operation_replayed"] = True
+    replayed["results"][0]["booking"][
+        "operation_booking_current_status"
+    ] = "cancelled"
+    replayed["results"][1]["booking"][
+        "operation_booking_current_status"
+    ] = "deleted"
+    client = FakeCoworkingClient(
+        admin_details={"role": "admin"}, batch_result=replayed
+    )
+
+    result = await _run_points_action(
+        client,
+        action="admin_checkin_coworking",
+        text="check <@U1> <@U2> in today",
+    )
+
+    assert "0 active, 2 cancelled or removed" in result
+    assert "No new bookings or Roo Points charges" in result
+    assert len(batch_runtime["direct_messages"]) == 2
+    assert all(
+        "did not create a new booking" in message["text"]
+        and "Checked" not in message["text"]
+        for message in batch_runtime["direct_messages"]
+    )
 
 
 @pytest.mark.asyncio
