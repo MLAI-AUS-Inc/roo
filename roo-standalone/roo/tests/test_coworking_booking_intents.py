@@ -424,9 +424,15 @@ async def test_retry_dm_failure_never_exposes_link_guidance_publicly(
 
 
 @pytest.mark.asyncio
-async def test_delayed_notification_refreshes_cancelled_booking_state(
+@pytest.mark.parametrize(
+    ("current_status", "state_text"),
+    [("cancelled", "cancelled"), ("deleted", "removed")],
+)
+async def test_delayed_notification_refreshes_inactive_booking_state(
     tmp_path,
     monkeypatch,
+    current_status,
+    state_text,
 ):
     store, intent, leased = leased_intent(tmp_path)
     client = FakeClient(result=booking_result())
@@ -440,7 +446,7 @@ async def test_delayed_notification_refreshes_cancelled_booking_state(
     )
     assert first["notification_status"] == "pending_retry"
 
-    client.result["operation_booking_current_status"] = "cancelled"
+    client.result["operation_booking_current_status"] = current_status
     retry_dms, _retry_channel, _retry_ephemeral = capture_delivery(monkeypatch)
     due = store.claim_due_notifications(owner="cancelled-notification-worker")
     recovered = await coworking.deliver_coworking_booking_notification(
@@ -451,7 +457,7 @@ async def test_delayed_notification_refreshes_cancelled_booking_state(
 
     assert recovered["notification_status"] == "delivered"
     assert store.get(intent["id"])["notification_status"] == "delivered"
-    assert "since been cancelled" in retry_dms[0]["text"]
+    assert f"since been {state_text}" in retry_dms[0]["text"]
     assert "Booked you in" not in retry_dms[0]["text"]
 
 
@@ -1080,7 +1086,11 @@ def test_v3_quarantine_has_fenced_audited_recovery(
                 "not_required",
                 json.dumps(
                     {
-                        "id": "legacy-booking-1",
+                        "id": (
+                            "00000000-0000-4000-8000-000000000003"
+                            if outcome == "retry"
+                            else "legacy-booking-1"
+                        ),
                         "date": "2026-04-22",
                         "status": "booked",
                         "points_cost": 4,
@@ -1120,6 +1130,54 @@ def test_v3_quarantine_has_fenced_audited_recovery(
             operator_reference="INC-648-evidence-2",
             now=1001.0,
         )
+
+
+def test_retry_reconciliation_fails_closed_for_non_uuid_booking_reference(tmp_path):
+    db_path = tmp_path / "legacy-booking-reference.db"
+    v2_schema_module.migrate_coworking_booking_intents_v2(db_path)
+    with sqlite3.connect(db_path) as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO coworking_booking_intents (
+                idempotency_key, slack_user_id, booking_date, status,
+                next_attempt_at, created_at, updated_at, confirmed_at,
+                notification_status, backend_result_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "legacy-booking-reference",
+                "U123",
+                "2026-04-22",
+                "confirmed",
+                0.0,
+                1.0,
+                2.0,
+                2.0,
+                "not_required",
+                json.dumps(
+                    {
+                        "id": "legacy-booking-1",
+                        "date": "2026-04-22",
+                        "status": "booked",
+                        "points_cost": 4,
+                    }
+                ),
+            ),
+        )
+        intent_id = cursor.lastrowid
+    schema_module.migrate_coworking_booking_intents_v3(db_path)
+
+    with pytest.raises(ValueError, match="UUID booking id"):
+        reconciliation_module.reconcile_coworking_notification(
+            db_path,
+            intent_id=intent_id,
+            outcome="retry",
+            operator_reference="INC-648-legacy-reference",
+        )
+
+    intent = coworking.CoworkingBookingIntentStore(db_path).get(intent_id)
+    assert intent["notification_status"] == "reconciliation_required"
+    assert intent["notification_reconciliation_outcome"] is None
 
 
 def test_reconciliation_does_not_create_a_missing_database(tmp_path):

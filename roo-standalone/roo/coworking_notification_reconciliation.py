@@ -6,7 +6,7 @@ import sqlite3
 import time
 from pathlib import Path
 from typing import Optional
-from uuid import NAMESPACE_URL, UUID, uuid5
+from uuid import UUID
 
 from .coworking_booking_schema_v3 import SCHEMA_VERSION, TABLE_NAME
 
@@ -44,9 +44,11 @@ def _normalized_retry_payload(row: sqlite3.Row) -> str:
         )
     try:
         normalized_id = str(UUID(raw_id))
-    except ValueError:
-        normalized_id = str(uuid5(NAMESPACE_URL, f"roo:legacy-booking:{raw_id}"))
-        payload["legacy_booking_reference"] = raw_id
+    except ValueError as exc:
+        raise ValueError(
+            "retry requires a UUID booking id that can be checked against the backend; "
+            "choose delivered or not_required"
+        ) from exc
     standard_cost = payload.get("standard_points_cost")
     recorded_discount = payload.get("monthly_update_discount_applied")
     pricing_state_known = bool(
