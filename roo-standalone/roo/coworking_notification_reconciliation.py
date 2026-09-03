@@ -55,7 +55,16 @@ def _normalized_retry_payload(row: sqlite3.Row) -> str:
     ):
         standard_cost = points_cost
     connection_type = payload.get("founder_tools_connection_type")
-    if connection_type not in {None, "direct", "explicit"}:
+    account_linked = payload.get("founder_tools_account_linked")
+    explicitly_linked = payload.get("founder_tools_explicitly_linked")
+    link_state_known = (
+        connection_type in {None, "direct", "explicit"}
+        and isinstance(account_linked, bool)
+        and isinstance(explicitly_linked, bool)
+        and account_linked is (connection_type is not None)
+        and explicitly_linked is (connection_type == "explicit")
+    )
+    if not link_state_known:
         connection_type = None
     payload.update(
         {
@@ -65,9 +74,7 @@ def _normalized_retry_payload(row: sqlite3.Row) -> str:
             "founder_tools_connection_type": connection_type,
             "founder_tools_account_linked": connection_type is not None,
             "founder_tools_explicitly_linked": connection_type == "explicit",
-            "founder_tools_link_state_historical_unknown": (
-                "founder_tools_connection_type" not in payload
-            ),
+            "founder_tools_link_state_historical_unknown": not link_state_known,
         }
     )
     return json.dumps(payload, separators=(",", ":"), sort_keys=True)
