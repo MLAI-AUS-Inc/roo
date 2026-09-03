@@ -401,7 +401,7 @@ async def test_fast_coworking_booking_surfaces_terminal_backend_reason(
         def __init__(self, *args, **kwargs):
             pass
 
-        async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None):
+        async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None, *, operation_id=None):
             request = httpx.Request(
                 "POST",
                 "https://backend.test/api/v1/points/coworking/book/",
@@ -472,7 +472,7 @@ class CoworkingClient:
     def __init__(self, *, balance=9):
         self.balance = balance
 
-    async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None):
+    async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None, *, operation_id=None):
         return {
             "id": "00000000-0000-4000-8000-000000000003",
             "date": booking_date,

@@ -2724,7 +2724,7 @@ async def test_book_coworking_still_succeeds_when_balance_refresh_times_out(tmp_
     store = coworking_intent_store(tmp_path / "intents.db")
 
     class FakeCoworkingClient:
-        async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None):
+        async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None, *, operation_id=None):
             return complete_coworking_booking_result(
                 booking_date,
                 cost=4,
@@ -2766,7 +2766,7 @@ async def test_book_coworking_defaults_missing_date_to_today(tmp_path, monkeypat
             self.book_args = None
             self.balance_args = None
 
-        async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None):
+        async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None, *, operation_id=None):
             self.book_args = (slack_user_id, booking_date, slack_channel_id)
             return complete_coworking_booking_result(booking_date, cost=1)
 
@@ -2819,7 +2819,7 @@ class FakeAdminCheckinCoworkingClient:
             return None
         return {"slack_user_id": slack_user_id, "role": self.role}
 
-    async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None):
+    async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None, *, operation_id=None):
         self.book_args = (slack_user_id, booking_date, slack_channel_id)
         if self.book_exception:
             raise self.book_exception
@@ -3533,7 +3533,7 @@ async def test_book_coworking_persists_intent_and_queues_backend_timeout(tmp_pat
     store = coworking_intent_store(tmp_path / "intents.db")
 
     class TimeoutCoworkingClient:
-        async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None):
+        async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None, *, operation_id=None):
             raise backend_module.MLAIBackendUnavailableError("backend unavailable")
 
     executor = SkillExecutor()
@@ -3589,7 +3589,7 @@ async def test_immediate_coworking_stale_worker_cannot_overwrite_winner(
     )
 
     class RacingCoworkingClient:
-        async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None):
+        async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None, *, operation_id=None):
             intent = store.get_by_key(f"coworking:{slack_user_id}:{booking_date}")
             replacement = original_reserve(
                 intent["id"],
@@ -3644,7 +3644,7 @@ async def test_book_coworking_surfaces_terminal_backend_reason_instead_of_outage
         def __init__(self):
             self.calls = 0
 
-        async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None):
+        async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None, *, operation_id=None):
             self.calls += 1
             request = httpx.Request(
                 "POST",
@@ -3703,7 +3703,7 @@ async def test_terminal_coworking_rejection_survives_delivery_crash(
     store = coworking_intent_store(tmp_path / "intents.db")
 
     class RejectedCoworkingClient:
-        async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None):
+        async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None, *, operation_id=None):
             request = httpx.Request("POST", "https://backend.test/coworking")
             response = httpx.Response(400, request=request, json={"error": "Rejected"})
             raise httpx.HTTPStatusError(
@@ -3755,7 +3755,7 @@ async def test_book_coworking_redacts_balance_rejection_in_channel(
     posted_messages = []
 
     class InsufficientBalanceCoworkingClient:
-        async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None):
+        async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None, *, operation_id=None):
             request = httpx.Request(
                 "POST",
                 "https://backend.test/api/v1/points/coworking/book/",
@@ -3931,7 +3931,7 @@ async def test_book_coworking_nudges_founder_when_charged_standard_price(tmp_pat
     store = coworking_intent_store(tmp_path / "intents.db")
 
     class FakeCoworkingClient:
-        async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None):
+        async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None, *, operation_id=None):
             result = complete_coworking_booking_result(booking_date)
             result.update(
                 {
@@ -3984,7 +3984,7 @@ async def test_book_coworking_treats_missing_link_state_as_commit_uncertain(
 ):
     store = coworking_intent_store(tmp_path / "intents.db")
     class FakeCoworkingClient:
-        async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None):
+        async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None, *, operation_id=None):
             return {
                 "points_cost": 8,
                 "monthly_update_discount_applied": False,
@@ -4019,7 +4019,7 @@ async def test_book_coworking_omits_nudge_when_discount_applied(tmp_path, monkey
     store = coworking_intent_store(tmp_path / "intents.db")
 
     class FakeCoworkingClient:
-        async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None):
+        async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None, *, operation_id=None):
             result = complete_coworking_booking_result(
                 booking_date,
                 cost=4,
@@ -4067,7 +4067,7 @@ async def test_book_coworking_omits_link_nudge_when_accounts_are_linked(
     store = coworking_intent_store(tmp_path / "intents.db")
 
     class FakeCoworkingClient:
-        async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None):
+        async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None, *, operation_id=None):
             return complete_coworking_booking_result(
                 booking_date,
                 explicitly_linked=True,
