@@ -658,7 +658,7 @@ async def test_slack_events_boost_thread_reply_triggers_link_love_handler(monkey
 async def test_slack_events_non_qualifying_messages_do_not_trigger_link_love(event, monkeypatch):
     handled_events = []
 
-    def fake_create_task(coro):
+    def fake_start_event_task(_request, coro):
         coro.close()
         return None
 
@@ -679,7 +679,7 @@ async def test_slack_events_non_qualifying_messages_do_not_trigger_link_love(eve
         lambda name: "CSTART" if name == "_start-here" else "CBOOST",
     )
     monkeypatch.setattr(main_module, "handle_link_love_reply", fake_handle_link_love_reply)
-    monkeypatch.setattr(main_module.asyncio, "create_task", fake_create_task)
+    monkeypatch.setattr(main_module, "_start_slack_event_task", fake_start_event_task)
 
     class FakeRequest:
         async def json(self):

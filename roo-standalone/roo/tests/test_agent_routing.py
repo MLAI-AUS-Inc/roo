@@ -8,6 +8,7 @@ that used to live here were ported to roo/routing_eval/cases/ when the
 regex/keyword funnel was deleted (Phase 3 of the routing redesign).
 """
 import asyncio
+import json
 import sys
 import types
 from pathlib import Path
@@ -63,6 +64,158 @@ def _patch_route(monkeypatch, decision: RouteDecision, captured: dict):
         return decision
 
     monkeypatch.setattr(RooAgent, "_route_v2", fake_route)
+
+
+def test_founder_account_link_fast_path_is_exact_and_avoids_collisions():
+    agent = _make_agent()
+
+    assert agent._match_fast_path("link") == "link_founder_account"
+    assert agent._match_fast_path(" LINK ") == "link_founder_account"
+    assert agent._match_fast_path("link my github account") is None
+    assert agent._match_fast_path("connect me with a founder") is None
+
+
+def test_founder_account_link_fast_path_executes_with_event_context(monkeypatch):
+    agent = _make_agent()
+    captured = {}
+
+    async def fake_execute(user_id, action, **kwargs):
+        captured.update({"user_id": user_id, "action": action, **kwargs})
+        return {
+            "message": "sent privately",
+            "data": {"action": action},
+        }
+
+    monkeypatch.setattr(agent, "_execute_fast_points", fake_execute)
+
+    result = asyncio.run(
+        agent._try_fast_path(
+            "link",
+            "U123",
+            channel_id="C123",
+            thread_ts="111.222",
+        )
+    )
+
+    assert result["message"] == "sent privately"
+    assert captured == {
+        "user_id": "U123",
+        "action": "link_founder_account",
+        "text": "link",
+        "channel_id": "C123",
+        "thread_ts": "111.222",
+    }
+
+
+def test_account_link_routing_logs_redact_ingress_identity_and_token_sentinels(
+    monkeypatch,
+    capsys,
+):
+    agent = _make_agent()
+    captured = {}
+    agent.skill_executor = _CaptureExecutor(captured)
+    token = "AUniqueAccountLinkToken_12345678901234567890"
+    email = "private-link@example.com"
+    slack_user_id = "UACCOUNT123"
+    channel_id = "CSECRET123"
+    thread_ts = "1758000000.123456"
+    text = (
+        "link https://mlai.au/founder-tools/link-roo?token="
+        f"{token} for {email} <@{slack_user_id}>"
+    )
+
+    _patch_route(
+        monkeypatch,
+        RouteDecision(
+            skill="mlai-points",
+            action="link_founder_account",
+            params={
+                "token": token,
+                "email": email,
+                "slack_user_id": slack_user_id,
+            },
+        ),
+        captured,
+    )
+    def fail_thread_history(**kwargs):
+        del kwargs
+        raise RuntimeError(
+            f"thread failed {token} {email} {slack_user_id} {channel_id} {thread_ts}"
+        )
+
+    monkeypatch.setattr("roo.agent.get_thread_messages", fail_thread_history)
+
+    result = asyncio.run(
+        agent.handle_mention(
+            text=text,
+            user_id=slack_user_id,
+            channel_id=channel_id,
+            thread_ts=thread_ts,
+        )
+    )
+
+    assert result["skill_used"] == "mlai-points"
+    output = capsys.readouterr().out
+    for sentinel in (token, email, slack_user_id, channel_id, thread_ts):
+        assert sentinel not in output
+    routing_line = next(
+        line.removeprefix("ROUTING_DECISION ")
+        for line in output.splitlines()
+        if line.startswith("ROUTING_DECISION ")
+    )
+    routing_payload = json.loads(routing_line)
+    assert routing_payload["text"] == "[account-link request]"
+    assert routing_payload["params"] == {}
+    assert routing_payload["destination_type"] == "channel"
+    assert routing_payload["in_thread"] is True
+    assert "channel_id" not in routing_payload
+    assert "thread_ts" not in routing_payload
+
+
+def test_bare_link_in_roo_dm_uses_secure_implicit_action(monkeypatch):
+    agent = _make_agent()
+    captured = {}
+
+    async def fake_execute(user_id, action, **kwargs):
+        captured.update({"user_id": user_id, "action": action, **kwargs})
+        return {
+            "message": "Founder Tools link sent",
+            "data": {"action": action},
+        }
+
+    async def router_must_not_run(*args, **kwargs):
+        raise AssertionError("The exact DM link command must not reach the model router")
+
+    monkeypatch.setattr(agent, "_execute_fast_points", fake_execute)
+    monkeypatch.setattr(agent, "_route_v2", router_must_not_run)
+    monkeypatch.setattr("roo.agent.get_thread_messages", lambda **kwargs: [])
+    monkeypatch.setattr(
+        "roo.agent.get_settings",
+        lambda: SimpleNamespace(
+            implicit_action_allowlist=frozenset(
+                {"mlai-points:link_founder_account"}
+            )
+        ),
+    )
+
+    result = asyncio.run(
+        agent.handle_mention(
+            text="link",
+            user_id="U123",
+            channel_id="D123",
+            thread_ts="111.222",
+            implicit_addressing=True,
+        )
+    )
+
+    assert result["message"] == "Founder Tools link sent"
+    assert captured == {
+        "user_id": "U123",
+        "action": "link_founder_account",
+        "text": "link",
+        "channel_id": "D123",
+        "thread_ts": "111.222",
+    }
 
 
 def test_handle_mention_normalizes_slack_link_and_passes_scan_params(monkeypatch):

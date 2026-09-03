@@ -47,6 +47,7 @@ class Settings(BaseSettings):
     SLACK_SIGNING_SECRET: Optional[str] = None
     SLACK_REQUEST_MAX_AGE_SECONDS: int = 300
     SLACK_RECEIPT_TTL_SECONDS: int = 10 * 60
+    SLACK_EVENT_PROCESSING_LEASE_SECONDS: int = 45
     SLACK_RECEIPTS_DB_PATH: str = "data/slack_request_receipts.db"
     SLACK_CONTEXTUAL_STATE_DB_PATH: str = "data/slack_contextual_responses.db"
     SLACK_MODERATOR_USER_TOKEN: Optional[str] = None
@@ -67,7 +68,7 @@ class Settings(BaseSettings):
     ROO_CONTEXTUAL_MODEL: Optional[str] = None
     ROO_IMPLICIT_ACTION_ALLOWLIST: str = (
         "respond_in_chat,mlai-points:balance,mlai-points:topup_points,"
-        "mlai-points:link_account"
+        "mlai-points:link_founder_account"
     )
     
     # LLM Providers (at least one required)
@@ -159,10 +160,13 @@ class Settings(BaseSettings):
     LINEAR_CONTEXTUAL_AUTO_CREATE_ENABLED: bool = True
     COWORKING_INTENTS_DB_PATH: str = "data/coworking_booking_intents.db"
     COWORKING_RETRY_POLL_SECONDS: float = 30.0
+    COWORKING_INTENT_RETENTION_DAYS: int = 30
+    FOUNDER_ACCOUNT_LINK_ENABLED: bool = False
     ROO_POINTS_TOPUP_ENABLED: bool = False
     ROO_POINTS_TOPUP_BUTTONS_ENABLED: bool = False
     ROO_POINTS_STRIPE_CHECKOUT_HOSTS: str = "checkout.stripe.com"
     MEETING_ROOM_BOOKING_ENABLED: bool = False
+    FOUNDER_TOOLS_LINK_ORIGINS: str = ""
     BOOST_LINK_LOVE_ENABLED: bool = True
     BOOST_LINK_LOVE_CHANNEL_NAME: str = "boost-my-startup"
     BOOST_LINK_LOVE_CHANNEL_ID: str = ""
@@ -258,7 +262,10 @@ class Settings(BaseSettings):
 
     @property
     def implicit_action_allowlist(self) -> frozenset[str]:
-        return self._split_configured_values(self.ROO_IMPLICIT_ACTION_ALLOWLIST)
+        allowed = set(self._split_configured_values(self.ROO_IMPLICIT_ACTION_ALLOWLIST))
+        if not self.FOUNDER_ACCOUNT_LINK_ENABLED:
+            allowed.discard("mlai-points:link_founder_account")
+        return frozenset(allowed)
 
     @property
     def roo_points_stripe_checkout_hosts(self) -> frozenset[str]:
@@ -268,6 +275,10 @@ class Settings(BaseSettings):
                 self.ROO_POINTS_STRIPE_CHECKOUT_HOSTS
             )
         )
+
+    @property
+    def founder_tools_link_origins(self) -> frozenset[str]:
+        return self._split_configured_values(self.FOUNDER_TOOLS_LINK_ORIGINS)
 
     @property
     def victor_ai_slack_channel_name(self) -> str:
@@ -310,10 +321,19 @@ class Settings(BaseSettings):
             raise ValueError(
                 "SLACK_RECEIPT_TTL_SECONDS must be at least SLACK_REQUEST_MAX_AGE_SECONDS"
             )
+        if not 5 <= self.SLACK_EVENT_PROCESSING_LEASE_SECONDS < self.SLACK_RECEIPT_TTL_SECONDS:
+            raise ValueError(
+                "SLACK_EVENT_PROCESSING_LEASE_SECONDS must be at least 5 seconds "
+                "and shorter than SLACK_RECEIPT_TTL_SECONDS"
+            )
         if not str(self.SLACK_RECEIPTS_DB_PATH or "").strip():
             raise ValueError("SLACK_RECEIPTS_DB_PATH is required")
         if not str(self.SLACK_CONTEXTUAL_STATE_DB_PATH or "").strip():
             raise ValueError("SLACK_CONTEXTUAL_STATE_DB_PATH is required")
+        if not 1 <= self.COWORKING_INTENT_RETENTION_DAYS <= 365:
+            raise ValueError(
+                "COWORKING_INTENT_RETENTION_DAYS must be between 1 and 365"
+            )
         if not 0.5 <= self.ROO_CONTEXTUAL_MIN_CONFIDENCE <= 1.0:
             raise ValueError("ROO_CONTEXTUAL_MIN_CONFIDENCE must be between 0.5 and 1.0")
         if not 0.5 <= self.ROO_CONTEXTUAL_INDIRECT_MENTION_CONFIDENCE <= 1.0:
@@ -350,6 +370,54 @@ class Settings(BaseSettings):
             raise ValueError(
                 "ROO_POINTS_STRIPE_CHECKOUT_HOSTS is required when top-up buttons are enabled"
             )
+        if (
+            self.ROO_SURFACE == "public"
+            and self.is_production
+            and self.FOUNDER_ACCOUNT_LINK_ENABLED
+            and not self.founder_tools_link_origins
+        ):
+            raise ValueError(
+                "FOUNDER_TOOLS_LINK_ORIGINS must contain an allowed origin in production"
+            )
+        for configured_origin in self.founder_tools_link_origins:
+            try:
+                parsed_origin = urlparse(configured_origin)
+                origin_port = parsed_origin.port
+            except ValueError as exc:
+                raise ValueError(
+                    "FOUNDER_TOOLS_LINK_ORIGINS contains an invalid origin"
+                ) from exc
+            hostname = str(parsed_origin.hostname or "")
+            normalized_hostname = hostname.lower()
+            is_localhost = normalized_hostname in {"localhost", "127.0.0.1", "::1"}
+            if (
+                not hostname
+                or hostname.endswith(".")
+                or parsed_origin.username
+                or parsed_origin.password
+                or parsed_origin.query
+                or parsed_origin.fragment
+                or parsed_origin.path not in {"", "/"}
+                or origin_port is None and parsed_origin.netloc.endswith(":")
+            ):
+                raise ValueError(
+                    "FOUNDER_TOOLS_LINK_ORIGINS contains an invalid origin"
+                )
+            try:
+                hostname.encode("ascii")
+            except UnicodeEncodeError as exc:
+                raise ValueError(
+                    "FOUNDER_TOOLS_LINK_ORIGINS must use ASCII hostnames"
+                ) from exc
+            if is_localhost:
+                if self.is_production or parsed_origin.scheme != "http":
+                    raise ValueError(
+                        "Founder Tools localhost origins are allowed only over HTTP outside production"
+                    )
+            elif parsed_origin.scheme != "https" or origin_port not in {None, 443}:
+                raise ValueError(
+                    "Founder Tools origins must use HTTPS on the default port"
+                )
         if self.VICTOR_AI_SKILL_ENABLED:
             if self.ROO_SURFACE != "public":
                 raise ValueError(

@@ -14,11 +14,41 @@ sys.modules.pop("roo.skills.executor", None)
 
 backend_module = importlib.import_module("roo.clients.mlai_backend")
 coworking_module = importlib.import_module("roo.coworking_booking_intents")
+coworking_schema_module = importlib.import_module("roo.coworking_booking_schema_v3")
 main_module = importlib.import_module("roo.main")
 approval_module = importlib.import_module("roo.points_request_approval")
 slack_client_module = importlib.import_module("roo.slack_client")
 executor_module = importlib.import_module("roo.skills.executor")
 SkillExecutor = executor_module.SkillExecutor
+
+
+def coworking_intent_store(db_path):
+    coworking_schema_module.migrate_coworking_booking_intents_v3(db_path)
+    return coworking_module.CoworkingBookingIntentStore(db_path)
+
+
+def complete_coworking_booking_result(
+    booking_date,
+    *,
+    cost=8,
+    discount_applied=None,
+    explicitly_linked=False,
+):
+    if discount_applied is None:
+        discount_applied = cost < 8
+    return {
+        "id": "00000000-0000-4000-8000-000000000001",
+        "date": booking_date,
+        "status": "booked",
+        "points_cost": cost,
+        "standard_points_cost": 8,
+        "monthly_update_discount_applied": discount_applied,
+        "founder_tools_account_linked": explicitly_linked,
+        "founder_tools_connection_type": (
+            "explicit" if explicitly_linked else None
+        ),
+        "founder_tools_explicitly_linked": explicitly_linked,
+    }
 
 
 @pytest.fixture(autouse=True)
@@ -2217,7 +2247,7 @@ async def test_slack_events_start_here_message_edit_rechecks_intro(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_slack_events_dedupes_retried_app_mention(monkeypatch):
+async def test_direct_slack_event_handler_leaves_deduplication_to_middleware(monkeypatch):
     handled_events = []
     scheduled_tasks = []
     real_create_task = asyncio.create_task
@@ -2255,7 +2285,7 @@ async def test_slack_events_dedupes_retried_app_mention(monkeypatch):
     assert response_1.status_code == 200
     assert response_2.status_code == 200
     await asyncio.gather(*scheduled_tasks)
-    assert handled_events == [payload["event"]]
+    assert handled_events == [payload["event"], payload["event"]]
     main_module._recent_app_mention_events.clear()
 
 
@@ -2691,11 +2721,18 @@ async def test_execute_mlai_points_returns_backend_unavailable_message(monkeypat
 @pytest.mark.asyncio
 async def test_book_coworking_still_succeeds_when_balance_refresh_times_out(tmp_path):
     monkeypatch = pytest.MonkeyPatch()
-    store = coworking_module.CoworkingBookingIntentStore(tmp_path / "intents.db")
+    store = coworking_intent_store(tmp_path / "intents.db")
 
     class FakeCoworkingClient:
-        async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None):
-            return {"points_cost": 4}
+        async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None, *, operation_id=None):
+            return complete_coworking_booking_result(
+                booking_date,
+                cost=4,
+                discount_applied=True,
+            )
+
+        async def get_my_bookings(self, slack_user_id, *, booking_id=None):
+            return [{"id": booking_id, "status": "booked"}]
 
         async def get_balance(self, slack_user_id):
             raise backend_module.MLAIBackendUnavailableError("backend unavailable")
@@ -2725,16 +2762,19 @@ async def test_book_coworking_still_succeeds_when_balance_refresh_times_out(tmp_
 
 @pytest.mark.asyncio
 async def test_book_coworking_defaults_missing_date_to_today(tmp_path, monkeypatch):
-    store = coworking_module.CoworkingBookingIntentStore(tmp_path / "intents.db")
+    store = coworking_intent_store(tmp_path / "intents.db")
 
     class FakeCoworkingClient:
         def __init__(self):
             self.book_args = None
             self.balance_args = None
 
-        async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None):
+        async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None, *, operation_id=None):
             self.book_args = (slack_user_id, booking_date, slack_channel_id)
-            return {"points_cost": 1}
+            return complete_coworking_booking_result(booking_date, cost=1)
+
+        async def get_my_bookings(self, slack_user_id, *, booking_id=None):
+            return [{"id": booking_id, "status": "booked"}]
 
         async def get_balance(self, slack_user_id):
             self.balance_args = slack_user_id
@@ -2785,11 +2825,14 @@ class FakeAdminCheckinCoworkingClient:
             return None
         return {"slack_user_id": slack_user_id, "role": self.role}
 
-    async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None):
+    async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None, *, operation_id=None):
         self.book_args = (slack_user_id, booking_date, slack_channel_id)
         if self.book_exception:
             raise self.book_exception
-        return {"points_cost": 1}
+        return complete_coworking_booking_result(booking_date, cost=1)
+
+    async def get_my_bookings(self, slack_user_id, *, booking_id=None):
+        return [{"id": booking_id, "status": "booked"}]
 
     async def get_balance(self, slack_user_id):
         self.balance_args = slack_user_id
@@ -2798,7 +2841,7 @@ class FakeAdminCheckinCoworkingClient:
 
 @pytest.mark.asyncio
 async def test_admin_checkin_books_target_for_today(tmp_path, monkeypatch):
-    store = coworking_module.CoworkingBookingIntentStore(tmp_path / "intents.db")
+    store = coworking_intent_store(tmp_path / "intents.db")
     client = FakeAdminCheckinCoworkingClient(balance=13)
     executor = SkillExecutor()
     monkeypatch.setattr("roo.utils.get_current_date", lambda: date(2026, 5, 4))
@@ -2834,7 +2877,7 @@ async def test_admin_checkin_books_target_for_today(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_admin_checkin_book_mention_phrase_books_target_for_today(tmp_path, monkeypatch):
-    store = coworking_module.CoworkingBookingIntentStore(tmp_path / "intents.db")
+    store = coworking_intent_store(tmp_path / "intents.db")
     client = FakeAdminCheckinCoworkingClient(balance=13)
     executor = SkillExecutor()
     monkeypatch.setattr("roo.utils.get_current_date", lambda: date(2026, 5, 4))
@@ -2868,7 +2911,7 @@ async def test_admin_checkin_book_mention_phrase_books_target_for_today(tmp_path
 
 @pytest.mark.asyncio
 async def test_admin_checkin_honors_explicit_date(tmp_path, monkeypatch):
-    store = coworking_module.CoworkingBookingIntentStore(tmp_path / "intents.db")
+    store = coworking_intent_store(tmp_path / "intents.db")
     client = FakeAdminCheckinCoworkingClient()
     executor = SkillExecutor()
     monkeypatch.setattr(executor_module, "get_coworking_intent_store", lambda: store)
@@ -2893,7 +2936,7 @@ async def test_admin_checkin_honors_explicit_date(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_admin_checkin_denies_partner_without_booking(tmp_path, monkeypatch):
-    store = coworking_module.CoworkingBookingIntentStore(tmp_path / "intents.db")
+    store = coworking_intent_store(tmp_path / "intents.db")
     client = FakeAdminCheckinCoworkingClient(role="partner")
     executor = SkillExecutor()
     monkeypatch.setattr("roo.utils.get_current_date", lambda: date(2026, 5, 4))
@@ -2917,7 +2960,7 @@ async def test_admin_checkin_denies_partner_without_booking(tmp_path, monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_admin_checkin_requires_exactly_one_target(monkeypatch):
+async def test_admin_checkin_requires_at_least_one_target(monkeypatch):
     executor = SkillExecutor()
     client = FakeAdminCheckinCoworkingClient()
     monkeypatch.setattr(slack_client_module, "get_bot_user_id", lambda: "UROO")
@@ -2932,25 +2975,14 @@ async def test_admin_checkin_requires_exactly_one_target(monkeypatch):
         thread_ts="111.222",
         skill=SimpleNamespace(name="mlai-points"),
     )
-    multiple_result = await executor._handle_points_action(
-        client=client,
-        action="admin_checkin_coworking",
-        params={},
-        text="book <@UONE> and <@UTWO> in today",
-        user_id="UADMIN",
-        channel_id="C123",
-        thread_ts="111.222",
-        skill=SimpleNamespace(name="mlai-points"),
-    )
-
-    assert "Mention exactly one user" in missing_result
-    assert "Tag exactly one user" in multiple_result
+    assert "Who should I check in?" in missing_result
+    assert "Mention one or more users" in missing_result
     assert client.book_args is None
 
 
 @pytest.mark.asyncio
-async def test_book_coworking_with_target_mention_refuses_self_booking(tmp_path, monkeypatch):
-    store = coworking_module.CoworkingBookingIntentStore(tmp_path / "intents.db")
+async def test_book_coworking_with_target_mention_uses_admin_checkin(tmp_path, monkeypatch):
+    store = coworking_intent_store(tmp_path / "intents.db")
     client = FakeAdminCheckinCoworkingClient()
     executor = SkillExecutor()
     monkeypatch.setattr("roo.utils.get_current_date", lambda: date(2026, 5, 4))
@@ -2969,9 +3001,9 @@ async def test_book_coworking_with_target_mention_refuses_self_booking(tmp_path,
         skill=SimpleNamespace(name="mlai-points"),
     )
 
-    assert "I saw a tagged user" in result
-    assert client.book_args is None
-    assert store.counts_by_status() == {}
+    assert "Checked <@UTARGET> in" in result["message"]
+    assert client.book_args[0] == "UTARGET"
+    assert store.get_by_key("coworking:UTARGET:2026-05-04")["status"] == "confirmed"
 
 
 @pytest.mark.asyncio
@@ -2982,7 +3014,7 @@ async def test_admin_checkin_insufficient_balance_message_names_target(tmp_path,
         request=request,
         json={"detail": "Insufficient balance: need 1 point"},
     )
-    store = coworking_module.CoworkingBookingIntentStore(tmp_path / "intents.db")
+    store = coworking_intent_store(tmp_path / "intents.db")
     client = FakeAdminCheckinCoworkingClient(
         book_exception=httpx.HTTPStatusError("bad request", request=request, response=response),
         balance=0,
@@ -3407,7 +3439,7 @@ async def test_coworking_report_trends_and_recommendations_use_gpt54(monkeypatch
         skill=SimpleNamespace(name="mlai-points"),
     )
 
-    assert captured["kwargs"]["model"] == "gpt-5.4"
+    assert captured["kwargs"]["model"] == executor_module.get_settings().ROUTER_MODEL
     assert "active coworking bookings" in captured["messages"][1]["content"]
     assert "*Interpretation*" in result
     assert "Usage is concentrated mid-week." in result
@@ -3507,10 +3539,10 @@ async def test_execute_mlai_points_html_500_uses_backend_unavailable_message(mon
 
 @pytest.mark.asyncio
 async def test_book_coworking_persists_intent_and_queues_backend_timeout(tmp_path, monkeypatch):
-    store = coworking_module.CoworkingBookingIntentStore(tmp_path / "intents.db")
+    store = coworking_intent_store(tmp_path / "intents.db")
 
     class TimeoutCoworkingClient:
-        async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None):
+        async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None, *, operation_id=None):
             raise backend_module.MLAIBackendUnavailableError("backend unavailable")
 
     executor = SkillExecutor()
@@ -3534,7 +3566,79 @@ async def test_book_coworking_persists_intent_and_queues_backend_timeout(tmp_pat
     assert intent["booking_date"] == "2026-04-22"
     assert intent["channel_id"] == "C123"
     assert intent["thread_ts"] == "111.222"
-    assert "backend unavailable" in intent["last_error"]
+    assert intent["last_error"] == "backend_unavailable"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stale_outcome", ["success", "retry", "block"])
+async def test_immediate_coworking_stale_worker_cannot_overwrite_winner(
+    tmp_path,
+    monkeypatch,
+    stale_outcome,
+):
+    store = coworking_intent_store(tmp_path / "intents.db")
+    original_reserve = store.reserve_for_processing
+
+    def reserve_with_expired_sync_lease(intent_id, *, owner=None, lease_seconds=90):
+        if str(owner or "").startswith("roo-sync-"):
+            lease_seconds = 0
+        return original_reserve(
+            intent_id,
+            owner=owner,
+            lease_seconds=lease_seconds,
+        )
+
+    monkeypatch.setattr(store, "reserve_for_processing", reserve_with_expired_sync_lease)
+    monkeypatch.setattr(executor_module, "get_coworking_intent_store", lambda: store)
+
+    winner_result = complete_coworking_booking_result(
+        "2026-04-22",
+        cost=4,
+        discount_applied=True,
+    )
+
+    class RacingCoworkingClient:
+        async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None, *, operation_id=None):
+            intent = store.get_by_key(f"coworking:{slack_user_id}:{booking_date}")
+            replacement = original_reserve(
+                intent["id"],
+                owner="replacement-worker",
+            )
+            confirmed = store.mark_confirmed(
+                intent["id"],
+                owner=replacement["locked_by"],
+                backend_result=winner_result,
+                notification_required=True,
+            )
+            assert confirmed is not None
+            if stale_outcome == "retry":
+                raise backend_module.MLAIBackendUnavailableError("late timeout")
+            if stale_outcome == "block":
+                request = httpx.Request("POST", "https://backend.test/coworking")
+                response = httpx.Response(400, request=request)
+                raise httpx.HTTPStatusError(
+                    "late rejection",
+                    request=request,
+                    response=response,
+                )
+            return complete_coworking_booking_result("2026-04-22", cost=8)
+
+    result = await SkillExecutor()._book_coworking_with_intent(
+        client=RacingCoworkingClient(),
+        target_user_id="U123",
+        requested_by_user_id="U123",
+        booking_date="2026-04-22",
+        channel_id="C123",
+        thread_ts="111.222",
+        admin_checkin=False,
+    )
+
+    stored = store.get_by_key("coworking:U123:2026-04-22")
+    assert "queued, processing, or completed" in result
+    assert stored["status"] == "confirmed"
+    assert stored["notification_status"] == "pending"
+    assert stored["last_error"] is None
+    assert stored["backend_result_json"]
 
 
 @pytest.mark.asyncio
@@ -3542,13 +3646,14 @@ async def test_book_coworking_surfaces_terminal_backend_reason_instead_of_outage
     tmp_path,
     monkeypatch,
 ):
-    store = coworking_module.CoworkingBookingIntentStore(tmp_path / "intents.db")
+    store = coworking_intent_store(tmp_path / "intents.db")
+    posted_messages = []
 
     class UnlinkedCoworkingClient:
         def __init__(self):
             self.calls = 0
 
-        async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None):
+        async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None, *, operation_id=None):
             self.calls += 1
             request = httpx.Request(
                 "POST",
@@ -3568,6 +3673,11 @@ async def test_book_coworking_surfaces_terminal_backend_reason_instead_of_outage
     client = UnlinkedCoworkingClient()
     executor = SkillExecutor()
     monkeypatch.setattr(executor_module, "get_coworking_intent_store", lambda: store)
+    monkeypatch.setattr(
+        coworking_module,
+        "_safe_post_message",
+        lambda **kwargs: posted_messages.append(kwargs) or True,
+    )
 
     result = await executor._handle_points_action(
         client=client,
@@ -3581,14 +3691,67 @@ async def test_book_coworking_surfaces_terminal_backend_reason_instead_of_outage
     )
 
     intent = store.get_by_key("coworking:U123:2026-08-25")
-    assert result == (
+    assert result["message"] == ""
+    assert result["suppress_post"] is True
+    assert posted_messages[0]["text"] == (
         "🛑 I couldn't book you in for **2026-08-25**: "
         "Please link your Slack account first"
     )
-    assert "connecting" not in result
+    assert "connecting" not in posted_messages[0]["text"]
     assert client.calls == 1
     assert intent["status"] == "blocked"
     assert intent["attempt_count"] == 1
+    assert intent["notification_status"] == "delivered"
+
+
+@pytest.mark.asyncio
+async def test_terminal_coworking_rejection_survives_delivery_crash(
+    tmp_path,
+    monkeypatch,
+):
+    store = coworking_intent_store(tmp_path / "intents.db")
+
+    class RejectedCoworkingClient:
+        async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None, *, operation_id=None):
+            request = httpx.Request("POST", "https://backend.test/coworking")
+            response = httpx.Response(400, request=request, json={"error": "Rejected"})
+            raise httpx.HTTPStatusError(
+                "bad request",
+                request=request,
+                response=response,
+            )
+
+    def fail_delivery(**kwargs):
+        raise RuntimeError("Slack unavailable")
+
+    monkeypatch.setattr(executor_module, "get_coworking_intent_store", lambda: store)
+    monkeypatch.setattr(coworking_module, "_safe_post_message", fail_delivery)
+
+    result = await SkillExecutor()._handle_points_action(
+        client=RejectedCoworkingClient(),
+        action="book_coworking",
+        params={"date": "2026-08-25"},
+        text="book me in",
+        user_id="U123",
+        channel_id="C123",
+        thread_ts="111.222",
+        skill=SimpleNamespace(name="mlai-points"),
+    )
+
+    intent = store.get_by_key("coworking:U123:2026-08-25")
+    assert result["suppress_post"] is True
+    assert intent["status"] == "blocked"
+    assert intent["notification_status"] == "pending_retry"
+    assert intent["notification_delivered_at"] is None
+
+    with store._connect() as conn:
+        conn.execute(
+            "UPDATE coworking_booking_intents "
+            "SET notification_next_attempt_at = 0 WHERE id = ?",
+            (intent["id"],),
+        )
+    due = store.claim_due_notifications(owner="restarted-worker", limit=10)
+    assert [row["id"] for row in due] == [intent["id"]]
 
 
 @pytest.mark.asyncio
@@ -3596,11 +3759,12 @@ async def test_book_coworking_redacts_balance_rejection_in_channel(
     tmp_path,
     monkeypatch,
 ):
-    store = coworking_module.CoworkingBookingIntentStore(tmp_path / "intents.db")
+    store = coworking_intent_store(tmp_path / "intents.db")
     direct_messages = []
+    posted_messages = []
 
     class InsufficientBalanceCoworkingClient:
-        async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None):
+        async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None, *, operation_id=None):
             request = httpx.Request(
                 "POST",
                 "https://backend.test/api/v1/points/coworking/book/",
@@ -3626,6 +3790,11 @@ async def test_book_coworking_redacts_balance_rejection_in_channel(
         lambda user_id, text, **kwargs: direct_messages.append((user_id, text))
         or {"ok": True},
     )
+    monkeypatch.setattr(
+        coworking_module,
+        "_safe_post_message",
+        lambda **kwargs: posted_messages.append(kwargs) or True,
+    )
 
     result = await SkillExecutor()._handle_points_action(
         client=InsufficientBalanceCoworkingClient(),
@@ -3638,12 +3807,14 @@ async def test_book_coworking_redacts_balance_rejection_in_channel(
         skill=SimpleNamespace(name="mlai-points"),
     )
 
-    assert result["message"] == (
+    assert result["message"] == ""
+    assert result["suppress_post"] is True
+    assert posted_messages[0]["text"] == (
         "🛑 I couldn't book you in for **2026-08-25**: "
         "There are not enough Roo Points for this action."
     )
-    assert "balance: 0" not in result["message"]
-    assert "< 8" not in result["message"]
+    assert "balance: 0" not in posted_messages[0]["text"]
+    assert "< 8" not in posted_messages[0]["text"]
     assert direct_messages == [
         (
             "U123",
@@ -3652,7 +3823,9 @@ async def test_book_coworking_redacts_balance_rejection_in_channel(
             "Your current balance is **0 Roo Points**.",
         )
     ]
-    assert store.get_by_key("coworking:U123:2026-08-25")["status"] == "blocked"
+    stored = store.get_by_key("coworking:U123:2026-08-25")
+    assert stored["status"] == "blocked"
+    assert stored["notification_status"] == "delivered"
 
 
 @pytest.mark.asyncio
@@ -3675,6 +3848,7 @@ async def test_dependency_health_check_reports_degraded_backend(monkeypatch):
             MLAI_API_KEY="api-key",
             ROO_API_KEY="roo-api-key",
             INTERNAL_API_KEY="internal-key",
+            FOUNDER_ACCOUNT_LINK_ENABLED=False,
         ),
     )
     monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeBackendClient)
@@ -3686,6 +3860,43 @@ async def test_dependency_health_check_reports_degraded_backend(monkeypatch):
     assert result["dependencies"]["mlai_backend"]["status"] == "degraded"
     assert result["dependencies"]["mlai_backend"]["readiness"]["status"] == "ok"
     assert "points_error" in result["dependencies"]["mlai_backend"]
+
+
+@pytest.mark.asyncio
+async def test_dependency_health_requires_founder_link_contract_when_enabled(monkeypatch):
+    class FakeBackendClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def get_backend_readiness(self):
+            return {"status": "ok"}
+
+        async def get_points_health(self):
+            return {"status": "ok"}
+
+        async def get_founder_account_link_health(self):
+            raise backend_module.MLAIBackendUnavailableError("link contract unavailable")
+
+    monkeypatch.setattr(
+        main_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            MLAI_BACKEND_URL="https://backend.test",
+            MLAI_API_KEY="api-key",
+            ROO_API_KEY="roo-api-key",
+            INTERNAL_API_KEY="internal-key",
+            FOUNDER_ACCOUNT_LINK_ENABLED=True,
+        ),
+    )
+    monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeBackendClient)
+    main_module.app.state.startup_complete = True
+
+    result = await main_module.dependency_health_check()
+
+    assert result["status"] == "degraded"
+    backend = result["dependencies"]["mlai_backend"]
+    assert backend["status"] == "degraded"
+    assert "founder_account_link_error" in backend
 
 
 @pytest.mark.asyncio
@@ -3726,19 +3937,36 @@ async def test_check_coworking_passes_slack_user_id_for_per_user_pricing():
 
 @pytest.mark.asyncio
 async def test_book_coworking_nudges_founder_when_charged_standard_price(tmp_path, monkeypatch):
-    store = coworking_module.CoworkingBookingIntentStore(tmp_path / "intents.db")
+    store = coworking_intent_store(tmp_path / "intents.db")
 
     class FakeCoworkingClient:
-        async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None):
-            return {"points_cost": 8, "monthly_update_discount_applied": False}
+        async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None, *, operation_id=None):
+            result = complete_coworking_booking_result(booking_date)
+            result.update(
+                {
+                    "founder_tools_account_linked": True,
+                    "founder_tools_connection_type": "direct",
+                }
+            )
+            return result
+
+        async def get_my_bookings(self, slack_user_id, *, booking_id=None):
+            return [{"id": booking_id, "status": "booked"}]
 
         async def get_balance(self, slack_user_id):
             return {"balance": 12}
 
     executor = SkillExecutor()
+    delivered = {}
     monkeypatch.setattr("roo.utils.get_current_date", lambda: date(2026, 5, 4))
     monkeypatch.setattr(executor_module, "get_coworking_intent_store", lambda: store)
-    monkeypatch.setattr(executor_module, "send_dm", lambda *args, **kwargs: {"ok": True})
+    monkeypatch.setattr(
+        executor_module,
+        "send_dm",
+        lambda user_id, text, **kwargs: (
+            delivered.update({"user_id": user_id, "text": text}) or {"ok": True}
+        ),
+    )
 
     result = await executor._handle_points_action(
         client=FakeCoworkingClient(),
@@ -3754,17 +3982,71 @@ async def test_book_coworking_nudges_founder_when_charged_standard_price(tmp_pat
     assert "Booked you in for **2026-05-04**" in result["message"]
     assert "Cost: 8 points" in result["message"]
     assert "Balance remaining" not in result["message"]
-    assert "submit a monthly update" in result["message"]
-    assert "https://mlai.au/platform/login?app=founder-tools&next=/founder-tools" in result["message"]
+    assert "may qualify for 4-point coworking" in result["message"]
+    assert "app=founder-tools&next=/founder-tools" in result["message"]
+    assert "@Roo link" not in result["message"]
+    assert "\n\nAlready submitted using a different MLAI account?" in delivered["text"]
+    assert "`@Roo link`" in delivered["text"]
+
+
+@pytest.mark.asyncio
+async def test_book_coworking_treats_missing_link_state_as_commit_uncertain(
+    tmp_path,
+    monkeypatch,
+):
+    store = coworking_intent_store(tmp_path / "intents.db")
+    class FakeCoworkingClient:
+        async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None, *, operation_id=None):
+            return {
+                "points_cost": 8,
+                "monthly_update_discount_applied": False,
+            }
+
+        async def get_balance(self, slack_user_id):
+            return {"balance": 12}
+
+    executor = SkillExecutor()
+    monkeypatch.setattr("roo.utils.get_current_date", lambda: date(2026, 5, 4))
+    monkeypatch.setattr(executor_module, "get_coworking_intent_store", lambda: store)
+
+    result = await executor._handle_points_action(
+        client=FakeCoworkingClient(),
+        action="book_coworking",
+        params={"date": "2026-05-04"},
+        text="book coworking today",
+        user_id="U123",
+        channel_id="C123",
+        thread_ts="111.222",
+        skill=SimpleNamespace(name="mlai-points"),
+    )
+
+    assert "queued it and will keep retrying automatically" in result
+    intent = store.get_by_key("coworking:U123:2026-05-04")
+    assert intent["status"] == "pending_retry"
+    assert intent["confirmed_at"] is None
 
 
 @pytest.mark.asyncio
 async def test_book_coworking_omits_nudge_when_discount_applied(tmp_path, monkeypatch):
-    store = coworking_module.CoworkingBookingIntentStore(tmp_path / "intents.db")
+    store = coworking_intent_store(tmp_path / "intents.db")
 
     class FakeCoworkingClient:
-        async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None):
-            return {"points_cost": 4, "monthly_update_discount_applied": True}
+        async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None, *, operation_id=None):
+            result = complete_coworking_booking_result(
+                booking_date,
+                cost=4,
+                discount_applied=True,
+            )
+            result.update(
+                {
+                    "founder_tools_account_linked": True,
+                    "founder_tools_connection_type": "direct",
+                }
+            )
+            return result
+
+        async def get_my_bookings(self, slack_user_id, *, booking_id=None):
+            return [{"id": booking_id, "status": "booked"}]
 
         async def get_balance(self, slack_user_id):
             return {"balance": 12}
@@ -3788,5 +4070,47 @@ async def test_book_coworking_omits_nudge_when_discount_applied(tmp_path, monkey
     assert "Booked you in for **2026-05-04**" in result["message"]
     assert "Cost: 4 points" in result["message"]
     assert "Balance remaining" not in result["message"]
-    assert "submit a monthly update" not in result["message"]
-    assert "founder-tools" not in result["message"]
+    assert "may qualify for 4-point coworking" not in result["message"]
+    assert "@Roo link" not in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_book_coworking_omits_link_nudge_when_accounts_are_linked(
+    tmp_path,
+    monkeypatch,
+):
+    store = coworking_intent_store(tmp_path / "intents.db")
+
+    class FakeCoworkingClient:
+        async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None, *, operation_id=None):
+            return complete_coworking_booking_result(
+                booking_date,
+                explicitly_linked=True,
+            )
+
+        async def get_my_bookings(self, slack_user_id, *, booking_id=None):
+            return [{"id": booking_id, "status": "booked"}]
+
+        async def get_balance(self, slack_user_id):
+            return {"balance": 12}
+
+    executor = SkillExecutor()
+    monkeypatch.setattr("roo.utils.get_current_date", lambda: date(2026, 5, 4))
+    monkeypatch.setattr(executor_module, "get_coworking_intent_store", lambda: store)
+    monkeypatch.setattr(executor_module, "send_dm", lambda *args, **kwargs: {"ok": True})
+
+    result = await executor._handle_points_action(
+        client=FakeCoworkingClient(),
+        action="book_coworking",
+        params={"date": "2026-05-04"},
+        text="book coworking today",
+        user_id="U123",
+        channel_id="C123",
+        thread_ts="111.222",
+        skill=SimpleNamespace(name="mlai-points"),
+    )
+
+    assert "Cost: 8 points" in result["message"]
+    assert "may qualify for 4-point coworking" in result["message"]
+    assert "app=founder-tools&next=/founder-tools" in result["message"]
+    assert "@Roo link" not in result["message"]

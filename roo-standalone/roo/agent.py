@@ -28,6 +28,11 @@ from .content_intent import (
     normalize_slack_text,
 )
 from .llm import chat
+from .logging_safety import (
+    redact_log_text,
+    sanitize_log_value,
+    slack_destination_type,
+)
 from .skills.loader import Skill, load_skills
 from .skills.executor import SkillExecutor
 from .slack_client import get_thread_messages
@@ -152,7 +157,7 @@ class RooAgent:
             requested_by_slack_user_id != effective_slack_user_id
         )
 
-        print(f"🔍 Processing: {clean_text[:100]}...")
+        print(f"🔍 Processing: {redact_log_text(clean_text, max_length=100)}...")
         
         # 0. Fetch Thread Context (if available)
         thread_history = []
@@ -179,7 +184,10 @@ class RooAgent:
                 # Let's just pass the raw list to the executor/selector to handle filtering if needed.
                 thread_history = raw_thread_history[-10:] if raw_thread_history else []
             except Exception as e:
-                print(f"⚠️ Failed to fetch thread history: {e}")
+                print(
+                    "⚠️ Failed to fetch thread history "
+                    f"error_type={e.__class__.__name__}"
+                )
 
         # 1. Try Fast Path (Direct Command Execution)
         fast_action = self._match_fast_path(clean_text)
@@ -519,7 +527,11 @@ class RooAgent:
                     get_channel_id(settings.victor_ai_slack_channel_name) == channel_id
                 )
             except Exception as exc:
-                print(f"⚠️ Victor AI channel lookup failed for {channel_id}: {exc}")
+                print(
+                    "⚠️ Victor AI channel lookup failed "
+                    f"destination_type={slack_destination_type(channel_id)} "
+                    f"error_type={exc.__class__.__name__}"
+                )
         return [
             skill
             for skill in self.skills
@@ -734,8 +746,9 @@ class RooAgent:
         observed in production get copied into roo/routing_eval/cases/.
         """
         try:
-            safe_params = {
-                key: value
+            is_account_link = action == "link_founder_account"
+            safe_params = {} if is_account_link else {
+                redact_log_text(key): sanitize_log_value(value)
                 for key, value in (params or {}).items()
                 if key not in ("requested_by_slack_user_id", "effective_slack_user_id")
             }
@@ -745,18 +758,25 @@ class RooAgent:
                 "skill": skill_name,
                 "action": action,
                 "params": safe_params,
-                "channel_id": channel_id,
-                "thread_ts": thread_ts,
+                "destination_type": slack_destination_type(channel_id),
+                "in_thread": bool(thread_ts),
                 "latency_ms": (
                     round((time.monotonic() - started_at) * 1000)
                     if started_at is not None
                     else None
                 ),
-                "text": (text or "")[:300],
+                "text": (
+                    "[account-link request]"
+                    if is_account_link
+                    else redact_log_text(text)
+                ),
             }
             print("ROUTING_DECISION " + json.dumps(payload, ensure_ascii=False, default=str))
         except Exception as exc:
-            print(f"⚠️ Failed to log routing decision: {exc}")
+            print(
+                "⚠️ Failed to log routing decision "
+                f"error_type={exc.__class__.__name__}"
+            )
 
     def _safe_channel_name(self, channel_id: Optional[str]) -> Optional[str]:
         """Resolve a channel name without ever raising (Slack may be unavailable)."""
@@ -766,7 +786,11 @@ class RooAgent:
             from .slack_client import get_channel_name
             return get_channel_name(channel_id)
         except Exception as exc:
-            print(f"⚠️ Channel name lookup failed for {channel_id}: {exc}")
+            print(
+                "⚠️ Channel name lookup failed "
+                f"destination_type={slack_destination_type(channel_id)} "
+                f"error_type={exc.__class__.__name__}"
+            )
             return None
 
 
@@ -841,7 +865,7 @@ class RooAgent:
             r"(?:link|link (?:my )?(?:mlai |slack )?account|link my slack)",
             text_lower,
         ):
-            return "link_account"
+            return "link_founder_account"
 
         # 2. Explicit opt-in contribution total and owner-only deletion.
         if re.match(
@@ -955,18 +979,19 @@ class RooAgent:
                 thread_ts=thread_ts,
             )
 
-        if action == "link_account":
-            return await self._execute_fast_points(
-                user_id,
-                action,
-                channel_id=channel_id,
-                thread_ts=thread_ts,
-            )
-
         if action == "balance":
             return await self._execute_fast_points(
                 user_id,
                 "balance",
+                channel_id=channel_id,
+                thread_ts=thread_ts,
+            )
+
+        if action == "link_founder_account":
+            return await self._execute_fast_points(
+                user_id,
+                "link_founder_account",
+                text=text,
                 channel_id=channel_id,
                 thread_ts=thread_ts,
             )
@@ -1022,7 +1047,7 @@ class RooAgent:
         skill = next((s for s in self.skills if s.name == "mlai-points"), None)
         if not skill:
             return None
-            
+
         ClientClass = skill.get_client_class("MLAIBackendClient")
         if not ClientClass:
             return None
@@ -1035,7 +1060,7 @@ class RooAgent:
                 internal_api_key=settings.INTERNAL_API_KEY or settings.ROO_API_KEY or settings.MLAI_API_KEY,
             )
             
-            if action in {"flex_points", "delete_flex", "link_account"}:
+            if action in {"flex_points", "delete_flex"}:
                 msg = await self.skill_executor._handle_points_action(
                     client=client,
                     action=action,
@@ -1043,11 +1068,7 @@ class RooAgent:
                     text=(
                         "flex my points"
                         if action == "flex_points"
-                        else (
-                            "delete my flex"
-                            if action == "delete_flex"
-                            else "link"
-                        )
+                        else "delete my flex"
                     ),
                     user_id=user_id,
                     channel_id=kwargs.get("channel_id"),
@@ -1066,7 +1087,19 @@ class RooAgent:
                     thread_ts=kwargs.get("thread_ts"),
                     skill=skill,
                 )
-                
+
+            elif action == "link_founder_account":
+                msg = await self.skill_executor._handle_points_action(
+                    client=client,
+                    action="link_founder_account",
+                    params={},
+                    text=kwargs.get("text", "link"),
+                    user_id=user_id,
+                    channel_id=kwargs.get("channel_id"),
+                    thread_ts=kwargs.get("thread_ts"),
+                    skill=skill,
+                )
+
             elif action == "list_tasks":
                 msg = await self.skill_executor._handle_points_action(
                     client=client,

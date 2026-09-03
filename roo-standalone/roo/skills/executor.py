@@ -12,12 +12,12 @@ import json
 import re
 import asyncio
 import calendar
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlsplit
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Optional, List
 from difflib import SequenceMatcher
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid4, uuid5
 import httpx
 
 from .loader import Skill
@@ -92,8 +92,15 @@ from ..admin_brain import (
     build_admin_action_response,
     build_admin_brain_response,
 )
-from ..clients.mlai_backend import MLAIBackendClient, MLAIBackendUnavailableError
+from ..clients.mlai_backend import (
+    MLAIBackendClient,
+    MLAIBackendUnavailableError,
+    validate_coworking_booking_result,
+)
 from ..coworking_booking_intents import (
+    build_coworking_operation_id,
+    coworking_failure_code,
+    deliver_coworking_booking_notification,
     get_coworking_intent_store,
     is_retryable_coworking_exception,
 )
@@ -125,6 +132,7 @@ VICTOR_AI_ACCESS_UNAVAILABLE_MESSAGE = (
     "Victor application data is not available in this conversation."
 )
 LINEAR_MEETING_TIMEOUT_RECOVERY_OVERLAP_CHARS = 300
+FOUNDER_ACCOUNT_LINK_MAX_FUTURE_SECONDS = 35 * 60
 
 
 class LinearMeetingExtractionDeadlineError(RuntimeError):
@@ -12507,6 +12515,257 @@ Chunk {index} source: {label}
             "data": response_data,
         }
 
+    @staticmethod
+    def _url_origin_parts(raw_url: str) -> Optional[tuple[str, str, int]]:
+        try:
+            parsed = urlsplit(raw_url)
+            port = parsed.port
+        except (TypeError, ValueError):
+            return None
+        hostname = str(parsed.hostname or "")
+        if (
+            not hostname
+            or hostname.endswith(".")
+            or parsed.username
+            or parsed.password
+            or parsed.path not in {"", "/"}
+            or parsed.query
+            or parsed.fragment
+            or "\\" in str(raw_url)
+        ):
+            return None
+        try:
+            hostname.encode("ascii")
+        except UnicodeEncodeError:
+            return None
+        scheme = parsed.scheme.lower()
+        if scheme == "https":
+            return scheme, hostname.lower(), port or 443
+        if scheme == "http":
+            return scheme, hostname.lower(), port or 80
+        return None
+
+    @classmethod
+    def _is_safe_founder_account_link_url(cls, link_url: str, *, settings: Any) -> bool:
+        if not link_url or "\\" in link_url or any(ord(char) < 32 for char in link_url):
+            return False
+        try:
+            parsed = urlsplit(link_url)
+            port = parsed.port
+            query = parse_qsl(
+                parsed.query,
+                keep_blank_values=True,
+                strict_parsing=True,
+            )
+        except (TypeError, ValueError):
+            return False
+        hostname = str(parsed.hostname or "")
+        if (
+            not hostname
+            or hostname.endswith(".")
+            or parsed.username
+            or parsed.password
+            or parsed.path != "/founder-tools/link-roo"
+            or parsed.fragment
+            or port is None and parsed.netloc.endswith(":")
+            or len(query) != 1
+            or query[0][0] != "token"
+            or not query[0][1]
+            or not re.fullmatch(r"[A-Za-z0-9_-]{43}", query[0][1])
+        ):
+            return False
+        try:
+            hostname.encode("ascii")
+        except UnicodeEncodeError:
+            return False
+
+        scheme = parsed.scheme.lower()
+        effective_port = port or (443 if scheme == "https" else 80 if scheme == "http" else -1)
+        requested_origin = (scheme, hostname.lower(), effective_port)
+        allowed_origins = {
+            origin
+            for configured_origin in (
+                getattr(settings, "founder_tools_link_origins", frozenset()) or frozenset()
+            )
+            if (origin := cls._url_origin_parts(str(configured_origin))) is not None
+        }
+        if requested_origin not in allowed_origins:
+            return False
+
+        is_localhost = requested_origin[1] in {"localhost", "127.0.0.1", "::1"}
+        if is_localhost:
+            return not bool(getattr(settings, "is_production", False)) and scheme == "http"
+        return (
+            scheme == "https"
+            and effective_port == 443
+        )
+
+    @staticmethod
+    def _founder_account_link_expiry_timestamp(raw_expires_at: Any) -> Optional[int]:
+        try:
+            expires_at = datetime.fromisoformat(
+                str(raw_expires_at or "").strip().replace("Z", "+00:00")
+            )
+        except ValueError:
+            return None
+        if expires_at.tzinfo is None:
+            return None
+        expires_at = expires_at.astimezone(timezone.utc)
+        now = datetime.now(timezone.utc)
+        if (
+            expires_at <= now
+            or expires_at > now + timedelta(seconds=FOUNDER_ACCOUNT_LINK_MAX_FUTURE_SECONDS)
+        ):
+            return None
+        return int(expires_at.timestamp())
+
+    @staticmethod
+    def _is_direct_message_channel(channel_id: Optional[str]) -> bool:
+        return bool(re.fullmatch(r"D[A-Z0-9]+", str(channel_id or "").strip()))
+
+    @staticmethod
+    def _slack_delivery_succeeded(response: Any) -> bool:
+        """Accept Slack SDK responses while rejecting malformed delivery results."""
+        if response is None:
+            return False
+        try:
+            return response.get("ok") is True
+        except (AttributeError, TypeError):
+            return False
+
+    def _founder_account_link_button_response(
+        self,
+        *,
+        link_url: str,
+        expires_at_timestamp: int,
+        user_id: str,
+        channel_id: Optional[str],
+    ) -> dict:
+        message = (
+            "Connect Roo to the Founder Tools account you use for Monthly Updates. "
+            "Your Roo Points, bookings, and points history will stay on this Slack account."
+        )
+        blocks = [
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": message},
+            },
+            {
+                "type": "actions",
+                "elements": [
+                    {
+                        "type": "button",
+                        "text": {
+                            "type": "plain_text",
+                            "text": "Link Founder Tools account",
+                            "emoji": True,
+                        },
+                        "url": link_url,
+                        "action_id": "roo_link_founder_account",
+                        "style": "primary",
+                        "accessibility_label": (
+                            "Link this Roo Slack account to your Founder Tools account"
+                        ),
+                    }
+                ],
+            },
+            {
+                "type": "context",
+                "elements": [
+                    {
+                        "type": "mrkdwn",
+                        "text": (
+                            "This private, one-time Founder Tools link expires "
+                            f"<!date^{expires_at_timestamp}^{{date_short_pretty}} at {{time}}|at its stated expiry time>. "
+                            "Only continue if you requested it."
+                        ),
+                    }
+                ],
+            },
+        ]
+        response_data = {
+            "action": "link_founder_account",
+            "delivery": "direct_message",
+        }
+        if not self._is_direct_message_channel(channel_id):
+            try:
+                dm_response = send_dm(user_id, message, blocks=blocks)
+            except Exception as exc:
+                print(
+                    "Founder Tools account-link DM failed "
+                    f"exc_type={exc.__class__.__name__}"
+                )
+                dm_response = None
+            if not self._slack_delivery_succeeded(dm_response):
+                return {
+                    "message": (
+                        f"I couldn't confirm a private Slack DM was delivered to <@{user_id}>. "
+                        "Please DM Roo `link` and I'll create a fresh Founder Tools "
+                        "account-link button there."
+                    ),
+                    "data": {
+                        **response_data,
+                        "delivery_failed": True,
+                    },
+                    "suppress_post": False,
+                }
+            return {
+                "message": (
+                    f"I sent <@{user_id}> a private Founder Tools account-link button. "
+                    "Check your DMs."
+                ),
+                "data": response_data,
+                "suppress_post": False,
+            }
+        return {
+            "message": message,
+            "blocks": blocks,
+            "data": response_data,
+        }
+
+    @staticmethod
+    def _founder_account_link_status_response(
+        *,
+        message: str,
+        user_id: str,
+        channel_id: Optional[str],
+    ) -> Any:
+        if SkillExecutor._is_direct_message_channel(channel_id):
+            return message
+
+        try:
+            dm_response = send_dm(user_id, message)
+        except Exception as exc:
+            print(
+                "Founder Tools account-link status DM failed "
+                f"exc_type={exc.__class__.__name__}"
+            )
+            dm_response = None
+        if not SkillExecutor._slack_delivery_succeeded(dm_response):
+            return {
+                "message": (
+                    f"I couldn't confirm a private Slack DM was delivered to <@{user_id}>. "
+                    "Please DM Roo `link` to check your Founder Tools account-link status."
+                ),
+                "data": {
+                    "action": "link_founder_account",
+                    "delivery": "direct_message",
+                    "delivery_failed": True,
+                },
+                "suppress_post": False,
+            }
+        return {
+            "message": (
+                f"I sent <@{user_id}> a private Founder Tools account-link status. "
+                "Check your DMs."
+            ),
+            "data": {
+                "action": "link_founder_account",
+                "delivery": "direct_message",
+            },
+            "suppress_post": False,
+        }
+
     def _normalize_points_routing_text(self, text: str) -> str:
         """Normalize common Slack typo variants before deterministic routing."""
         text_lower = str(text or "").lower()
@@ -13015,6 +13274,7 @@ Chunk {index} source: {label}
         private_failure_ack: str = (
             "I couldn't send you a DM. DM Roo `points` to view your points privately."
         ),
+        client_msg_id: Optional[str] = None,
     ) -> dict:
         """Deliver personal points data without a shared-channel fallback."""
         result_data = {
@@ -13034,14 +13294,36 @@ Chunk {index} source: {label}
             }
 
         try:
-            response = send_dm(recipient_user_id, private_message)
+            delivery_options = {}
+            if client_msg_id:
+                delivery_options = {
+                    "client_msg_id": client_msg_id,
+                    "raise_on_error": True,
+                }
+            response = send_dm(
+                recipient_user_id,
+                private_message,
+                **delivery_options,
+            )
             dm_delivered = bool(response and response.get("ok"))
         except Exception as exc:
-            print(
-                "⚠️ Private Roo Points delivery failed "
-                f"action={action} exc_type={exc.__class__.__name__}"
-            )
-            dm_delivered = False
+            error_response = getattr(exc, "response", None)
+            try:
+                duplicate_message = bool(
+                    client_msg_id
+                    and error_response is not None
+                    and error_response.get("error") == "duplicate_message"
+                )
+            except (AttributeError, TypeError):
+                duplicate_message = False
+            if duplicate_message:
+                dm_delivered = True
+            else:
+                print(
+                    "⚠️ Private Roo Points delivery failed "
+                    f"action={action} exc_type={exc.__class__.__name__}"
+                )
+                dm_delivered = False
         result_data["dm_delivered"] = dm_delivered
 
         if public_message is not None:
@@ -13396,7 +13678,7 @@ Chunk {index} source: {label}
             return "gpt-5.4"
 
     async def _extract_coworking_report_intent_with_llm(self, text: str, params: dict) -> dict:
-        """Use GPT-5.4 to extract date/comparison hints for flexible report requests."""
+        """Use the configured router model to extract flexible report hints."""
         if not self._coworking_request_needs_llm_intent(text):
             return {}
 
@@ -13957,12 +14239,13 @@ Chunk {index} source: {label}
         if admin_checkin:
             return (
                 f"I already have a coworking check-in request for <@{target_user_id}> "
-                f"on **{booking_date}** queued or in progress. I'll confirm in this thread "
-                "when it completes."
+                f"on **{booking_date}** queued, processing, or completed. I won't create "
+                "another booking, and Roo will deliver the confirmation when it is ready."
             )
         return (
             f"I already have your coworking booking request for **{booking_date}** "
-            "queued or in progress. I'll confirm in this thread when it completes."
+            "queued, processing, or completed. I won't create another booking, and Roo "
+            "will deliver the confirmation when it is ready."
         )
 
     def _coworking_booking_queued_for_retry_message(
@@ -13988,8 +14271,9 @@ Chunk {index} source: {label}
         cost: int,
         new_balance: Optional[int],
         admin_checkin: bool,
-        discount_applied: bool = False,
+        discount_applied: Optional[bool] = None,
         include_balance: bool = True,
+        founder_tools_explicitly_linked: Optional[bool] = None,
     ) -> str:
         point_word = "point" if cost == 1 else "points"
         if admin_checkin:
@@ -14015,17 +14299,128 @@ Chunk {index} source: {label}
             f"See you there, legend!"
         )
 
-        # Nudge founders who paid the standard (undiscounted) price: submitting a
-        # monthly startup update lowers the coworking cost for that month. The
-        # backend tells us whether the discount already applied.
-        if not discount_applied:
+        if discount_applied is False:
             message += (
-                "\n\n💡 Startup founders get a discount on coworking bookings when they "
-                "submit a monthly update for their startup. Submit yours here: "
+                "\n\n💡 Startup founders may qualify for 4-point coworking after "
+                "submitting an eligible monthly update. Submit yours here: "
                 "https://mlai.au/platform/login?app=founder-tools&next=/founder-tools"
             )
 
+            if founder_tools_explicitly_linked is False:
+                message += (
+                    "\n\nAlready submitted using a different MLAI account? Type "
+                    "`@Roo link` to securely link your accounts for future eligible "
+                    "bookings."
+                )
+
         return message
+
+    async def _deliver_coworking_booking_success(
+        self,
+        *,
+        client,
+        backend_result: dict,
+        booking_date: str,
+        target_user_id: str,
+        requested_by_user_id: str,
+        channel_id: Optional[str],
+        thread_ts: Optional[str],
+        admin_checkin: bool,
+        client_msg_id: Optional[str] = None,
+    ) -> dict:
+        """Render and privately deliver the backend's complete booking result."""
+        backend_result = validate_coworking_booking_result(
+            backend_result,
+            expected_date=booking_date,
+        )
+        current_status = backend_result.get("operation_booking_current_status")
+        if current_status in {"cancelled", "deleted"}:
+            state_text = "cancelled" if current_status == "cancelled" else "removed"
+            private_message = (
+                f"I recovered an earlier coworking request for **{booking_date}**. "
+                f"It did commit, but that booking has since been {state_text}. "
+                "I did not create a new booking or charge any Roo Points during this retry."
+            )
+            public_message = (
+                f"I recovered the earlier coworking request for <@{target_user_id}> "
+                f"on **{booking_date}**, but that booking has since been {state_text}. "
+                "No new booking or Roo Points charge was created by this retry."
+                if admin_checkin
+                else (
+                    f"I recovered your earlier coworking request for **{booking_date}**, "
+                    f"but that booking has since been {state_text}. No new booking or "
+                    "Roo Points charge was created by this retry."
+                )
+            )
+            return self._deliver_personal_points_message(
+                recipient_user_id=target_user_id,
+                requester_user_id=requested_by_user_id,
+                channel_id=channel_id,
+                thread_ts=thread_ts,
+                private_message=private_message,
+                public_message=public_message,
+                action="book_coworking_replay_inactive",
+                client_msg_id=client_msg_id,
+            )
+        cost = backend_result["points_cost"]
+        discount_applied = (
+            None
+            if backend_result.get("pricing_state_historical_unknown") is True
+            else backend_result["monthly_update_discount_applied"]
+        )
+        raw_explicit_link_state = backend_result.get(
+            "founder_tools_explicitly_linked"
+        )
+        founder_tools_explicitly_linked = (
+            None
+            if backend_result.get("founder_tools_link_state_historical_unknown") is True
+            else (
+                raw_explicit_link_state
+                if isinstance(raw_explicit_link_state, bool)
+                else None
+            )
+        )
+
+        new_balance = None
+        try:
+            balance_data = await client.get_balance(target_user_id)
+            new_balance = balance_data.get("balance", 0)
+        except Exception as exc:
+            print(
+                "🏢 coworking_confirmation_balance_lookup_failed "
+                f"exc_type={exc.__class__.__name__}"
+            )
+
+        private_message = self._format_coworking_booking_success(
+            booking_date=booking_date,
+            target_user_id=target_user_id,
+            cost=cost,
+            new_balance=new_balance,
+            admin_checkin=False,
+            discount_applied=discount_applied,
+            founder_tools_explicitly_linked=founder_tools_explicitly_linked,
+        )
+        public_message = self._format_coworking_booking_success(
+            booking_date=booking_date,
+            target_user_id=target_user_id,
+            cost=cost,
+            new_balance=None,
+            admin_checkin=admin_checkin,
+            discount_applied=discount_applied,
+            include_balance=False,
+            # Cross-account guidance belongs in the member's private DM.
+            founder_tools_explicitly_linked=None,
+        )
+        return self._deliver_personal_points_message(
+            recipient_user_id=target_user_id,
+            requester_user_id=requested_by_user_id,
+            channel_id=channel_id,
+            thread_ts=thread_ts,
+            private_message=private_message,
+            public_message=public_message,
+            action="book_coworking",
+            client_msg_id=client_msg_id,
+        )
 
     async def _format_admin_coworking_bad_request(
         self,
@@ -14050,6 +14445,7 @@ Chunk {index} source: {label}
         thread_ts: Optional[str],
         admin_checkin: bool,
         exc: httpx.HTTPStatusError,
+        client_msg_id: Optional[str] = None,
     ) -> Any:
         """Render a terminal backend rejection without calling it an outage."""
         status_code = exc.response.status_code
@@ -14102,6 +14498,7 @@ Chunk {index} source: {label}
             public_message=public_message,
             action="book_coworking_error",
             private_ack=public_message,
+            client_msg_id=client_msg_id,
         )
 
     def _format_admin_coworking_batch_success(
@@ -14110,38 +14507,28 @@ Chunk {index} source: {label}
         booking_date: str,
         batch_result: dict,
     ) -> str:
-        results = batch_result.get("results") or []
-        created_count = int(batch_result.get("created_count") or 0)
-        already_booked_count = int(batch_result.get("already_booked_count") or 0)
-
-        lines = [
-            "You beauty! 🎉",
-            "",
-            f"Checked **{len(results)}** people for coworking on **{booking_date}**.",
-        ]
-        if created_count or already_booked_count:
-            lines.append(
-                f"Created: **{created_count}** · Already booked: **{already_booked_count}**"
+        target_count = int(batch_result.get("target_count") or 0)
+        if batch_result.get("operation_replayed") is True:
+            current_statuses = [
+                str(row.get("booking", {}).get("operation_booking_current_status") or "")
+                for row in batch_result.get("results", [])
+                if isinstance(row, dict) and isinstance(row.get("booking"), dict)
+            ]
+            active_count = sum(status == "booked" for status in current_statuses)
+            inactive_count = len(current_statuses) - active_count
+            return (
+                f"I recovered the earlier coworking batch for **{booking_date}**. "
+                f"Current state: {active_count} active, {inactive_count} cancelled or removed. "
+                "No new bookings or Roo Points charges were created by this retry; "
+                "each member will receive the accurate current state privately."
             )
-
-        for result in results:
-            slack_user_id = str(result.get("slack_user_id") or "").strip()
-            if not slack_user_id:
-                booking = result.get("booking") or {}
-                slack_user_id = str(booking.get("slack_id") or booking.get("slack_user_id") or "").strip()
-            if not slack_user_id:
-                continue
-
-            status = "already booked" if result.get("already_booked") else "booked"
-            points_cost = result.get("points_cost")
-            cost_text = f" · {points_cost} pts" if points_cost is not None else ""
-            lines.append(f"• <@{slack_user_id}>: {status}{cost_text}")
-
-        lines.extend([
-            "",
-            "Admin Roo Points were not charged; each target user's Roo Points were used.",
-        ])
-        return "\n".join(lines)
+        return (
+            "You beauty! 🎉\n\n"
+            f"Processed **{target_count}** coworking check-ins for **{booking_date}**. "
+            "Each member will receive their booking and Roo Points details privately; "
+            "any failed delivery is queued for retry.\n\n"
+            "Admin Roo Points were not charged."
+        )
 
     def _format_admin_coworking_batch_bad_request(
         self,
@@ -14188,40 +14575,115 @@ Chunk {index} source: {label}
         target_user_ids: list[str],
         booking_date: str,
         channel_id: Optional[str],
+        thread_ts: Optional[str],
     ) -> Any:
+        try:
+            store = get_coworking_intent_store()
+            intent = store.record_batch_intent(
+                admin_slack_user_id=admin_user_id,
+                target_slack_user_ids=target_user_ids,
+                booking_date=booking_date,
+                channel_id=channel_id,
+                thread_ts=thread_ts,
+            )
+            leased_intent = store.reserve_batch_for_processing(
+                int(intent["id"]), owner=f"roo-sync-batch-{uuid4().hex}"
+            )
+        except Exception as exc:
+            print("🏢 coworking_batch_intent_persist_failed " f"exc_type={exc.__class__.__name__}")
+            return (
+                "I couldn't safely queue that multi-person coworking check-in, "
+                "so I didn't send it to MLAI backend. Please try again in a moment."
+            )
+        if not leased_intent:
+            if str(intent.get("status") or "") == "batch_confirmed":
+                return (
+                    f"That coworking batch for **{booking_date}** was already processed. "
+                    "No one was charged twice."
+                )
+            return (
+                f"That coworking batch for **{booking_date}** is already queued or processing. "
+                "Roo will retry it safely and send each member their details privately."
+            )
+        owner = str(leased_intent.get("locked_by") or "")
         try:
             result = await client.book_coworking_many(
                 admin_slack_user_id=admin_user_id,
                 target_slack_user_ids=target_user_ids,
                 booking_date=booking_date,
                 slack_channel_id=channel_id,
+                operation_id=build_coworking_operation_id(
+                    str(leased_intent["idempotency_key"])
+                ),
             )
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 400:
+                store.mark_batch_blocked(
+                    int(leased_intent["id"]),
+                    owner=owner,
+                    error=coworking_failure_code(exc),
+                    notification_required=False,
+                )
                 return self._format_admin_coworking_batch_bad_request(
                     booking_date=booking_date,
                     exc=exc,
                 )
             if exc.response.status_code == 403:
+                store.mark_batch_blocked(
+                    int(leased_intent["id"]),
+                    owner=owner,
+                    error=coworking_failure_code(exc),
+                    notification_required=False,
+                )
                 return self._full_points_admin_denial(None, "check people in for coworking")
             if is_retryable_coworking_exception(exc):
-                return (
-                    "I couldn't confirm that multi-person coworking check-in because MLAI backend "
-                    "didn't respond cleanly. Please retry the same command; existing bookings are "
-                    "treated as already booked and won't be charged twice."
+                store.mark_batch_retryable_failure(
+                    int(leased_intent["id"]), owner=owner, error=coworking_failure_code(exc)
                 )
+                return (
+                    "MLAI backend didn't confirm that multi-person coworking check-in cleanly. "
+                    "I've queued the same atomic batch for automatic retry; existing bookings "
+                    "won't be charged twice."
+                )
+            store.mark_batch_blocked(
+                int(leased_intent["id"]), owner=owner, error=coworking_failure_code(exc)
+            )
             raise
         except Exception as exc:
             if is_retryable_coworking_exception(exc):
-                return (
-                    "I couldn't confirm that multi-person coworking check-in because MLAI backend "
-                    "didn't respond cleanly. Please retry the same command; existing bookings are "
-                    "treated as already booked and won't be charged twice."
+                store.mark_batch_retryable_failure(
+                    int(leased_intent["id"]), owner=owner, error=coworking_failure_code(exc)
                 )
+                return (
+                    "MLAI backend didn't confirm that multi-person coworking check-in cleanly. "
+                    "I've queued the same atomic batch for automatic retry; existing bookings "
+                    "won't be charged twice."
+                )
+            store.mark_batch_blocked(
+                int(leased_intent["id"]), owner=owner, error=coworking_failure_code(exc)
+            )
             raise
 
+        confirmed = store.mark_batch_confirmed(
+            int(leased_intent["id"]), owner=owner, backend_result=result
+        )
+        if confirmed is None:
+            return (
+                f"That coworking batch for **{booking_date}** is already being reconciled. "
+                "Roo will send each member their details privately."
+            )
+        for child_intent_id in confirmed["child_intent_ids"]:
+            notification = store.reserve_notification(
+                int(child_intent_id), owner=f"roo-sync-batch-notification-{uuid4().hex}"
+            )
+            if notification is not None:
+                await deliver_coworking_booking_notification(
+                    notification, store=store, client=client, executor=self,
+                    post_public_message=False,
+                )
+
         return self._format_admin_coworking_batch_success(
-            booking_date=str(result.get("date") or booking_date),
+            booking_date=str(result["date"]),
             batch_result=result,
         )
 
@@ -14232,16 +14694,13 @@ Chunk {index} source: {label}
         target_user_id: str,
         requested_by_user_id: str,
         booking_date: str,
-        text: str,
+        text: Optional[str] = None,
         channel_id: Optional[str],
         thread_ts: Optional[str],
         admin_checkin: bool,
     ) -> Any:
-        print(
-            "🏢 coworking_booking_execute "
-            f"requested_by_user_id={requested_by_user_id} target_user_id={target_user_id} "
-            f"booking_date={booking_date} admin_checkin={admin_checkin}"
-        )
+        # Keep caller compatibility while deliberately discarding raw Slack text.
+        del text
         try:
             store = get_coworking_intent_store()
             intent = store.record_intent(
@@ -14250,7 +14709,6 @@ Chunk {index} source: {label}
                 booking_date=booking_date,
                 channel_id=channel_id,
                 thread_ts=thread_ts,
-                request_text=text,
             )
             leased_intent = store.reserve_for_processing(
                 int(intent["id"]),
@@ -14259,8 +14717,7 @@ Chunk {index} source: {label}
         except Exception as exc:
             print(
                 "🏢 coworking_intent_persist_failed "
-                f"slack_user_id={target_user_id} requested_by={requested_by_user_id} "
-                f"booking_date={booking_date} exc_type={exc.__class__.__name__} exc={exc}"
+                f"exc_type={exc.__class__.__name__}"
             )
             return (
                 "I couldn't safely queue that coworking booking request just now, "
@@ -14274,25 +14731,106 @@ Chunk {index} source: {label}
                 admin_checkin=admin_checkin,
             )
 
+        mutation_owner = str(leased_intent.get("locked_by") or "")
+        if not mutation_owner:
+            return self._coworking_booking_already_queued_message(
+                booking_date=booking_date,
+                target_user_id=target_user_id,
+                admin_checkin=admin_checkin,
+            )
         try:
-            result = await client.book_coworking(target_user_id, booking_date, channel_id)
-            store.mark_confirmed(int(leased_intent["id"]), backend_result=result)
+            result = await client.book_coworking(
+                target_user_id,
+                booking_date,
+                channel_id,
+                operation_id=build_coworking_operation_id(
+                    str(leased_intent["idempotency_key"])
+                ),
+            )
+            result = validate_coworking_booking_result(
+                result,
+                expected_date=booking_date,
+            )
+            confirmed = store.mark_confirmed(
+                int(leased_intent["id"]),
+                owner=mutation_owner,
+                backend_result=result,
+                notification_required=True,
+            )
+            if confirmed is None:
+                return self._coworking_booking_already_queued_message(
+                    booking_date=booking_date,
+                    target_user_id=target_user_id,
+                    admin_checkin=admin_checkin,
+                )
         except Exception as exc:
-            error = f"{exc.__class__.__name__}: {exc}"
+            error = coworking_failure_code(exc)
             if is_retryable_coworking_exception(exc):
-                store.mark_retryable_failure(int(leased_intent["id"]), error=error)
+                updated = store.mark_retryable_failure(
+                    int(leased_intent["id"]),
+                    owner=mutation_owner,
+                    error=error,
+                )
+                if updated is None:
+                    return self._coworking_booking_already_queued_message(
+                        booking_date=booking_date,
+                        target_user_id=target_user_id,
+                        admin_checkin=admin_checkin,
+                    )
                 return self._coworking_booking_queued_for_retry_message(
                     booking_date=booking_date,
                     target_user_id=target_user_id,
                     admin_checkin=admin_checkin,
                 )
-            store.mark_blocked(int(leased_intent["id"]), error=error)
+            blocked = store.mark_blocked(
+                int(leased_intent["id"]),
+                owner=mutation_owner,
+                error=error,
+                notification_required=not admin_checkin,
+            )
+            if blocked is None:
+                return self._coworking_booking_already_queued_message(
+                    booking_date=booking_date,
+                    target_user_id=target_user_id,
+                    admin_checkin=admin_checkin,
+                )
             if isinstance(exc, httpx.HTTPStatusError):
                 print(
                     "🏢 coworking_booking_terminal_rejection "
                     f"status={exc.response.status_code}"
                 )
-                return await self._format_coworking_booking_rejection(
+                if admin_checkin:
+                    return await self._format_coworking_booking_rejection(
+                        client=client,
+                        target_user_id=target_user_id,
+                        requested_by_user_id=requested_by_user_id,
+                        booking_date=booking_date,
+                        channel_id=channel_id,
+                        thread_ts=thread_ts,
+                        admin_checkin=True,
+                        exc=exc,
+                    )
+                notification = store.reserve_notification(
+                    int(leased_intent["id"]),
+                    owner=f"roo-sync-rejection-{uuid4().hex}",
+                )
+                if notification is None:
+                    return {
+                        "message": "",
+                        "suppress_post": True,
+                        "data": {
+                            "action": "book_coworking",
+                            "booking_blocked": True,
+                            "notification_status": blocked.get("notification_status"),
+                        },
+                    }
+                rejection_client_msg_id = str(
+                    uuid5(
+                        NAMESPACE_URL,
+                        f"roo:coworking-rejection:{leased_intent['id']}:{error}",
+                    )
+                )
+                rendered_rejection = await self._format_coworking_booking_rejection(
                     client=client,
                     target_user_id=target_user_id,
                     requested_by_user_id=requested_by_user_id,
@@ -14301,48 +14839,74 @@ Chunk {index} source: {label}
                     thread_ts=thread_ts,
                     admin_checkin=admin_checkin,
                     exc=exc,
+                    client_msg_id=rejection_client_msg_id,
                 )
+                rejection_message = (
+                    str(rendered_rejection.get("message") or "")
+                    if isinstance(rendered_rejection, dict)
+                    else str(rendered_rejection or "")
+                )
+                notification_result = await deliver_coworking_booking_notification(
+                    notification,
+                    store=store,
+                    client=client,
+                    executor=self,
+                    blocked_message=rejection_message,
+                )
+                return {
+                    "message": "",
+                    "suppress_post": True,
+                    "data": {
+                        "action": "book_coworking",
+                        "booking_blocked": True,
+                        "notification_status": notification_result.get(
+                            "notification_status"
+                        ),
+                    },
+                }
             raise
 
-        cost = result.get("points_cost", 1)
-        # The backend is the single source of truth for whether the
-        # monthly-update discount applied; we only render the nudge off this.
-        discount_applied = bool(result.get("monthly_update_discount_applied", False))
-        from roo.clients.mlai_backend import MLAIBackendUnavailableError
+        notification = store.reserve_notification(
+            int(leased_intent["id"]),
+            owner=f"roo-sync-notification-{uuid4().hex}",
+        )
+        if notification is None:
+            return {
+                "message": "",
+                "suppress_post": True,
+                "data": {
+                    "action": "book_coworking",
+                    "booking_confirmed": True,
+                    "notification_status": confirmed.get("notification_status"),
+                },
+            }
 
-        new_balance = None
-        try:
-            balance_data = await client.get_balance(target_user_id)
-            new_balance = balance_data.get("balance", 0)
-        except MLAIBackendUnavailableError:
-            pass
-
-        private_message = self._format_coworking_booking_success(
-            booking_date=booking_date,
-            target_user_id=target_user_id,
-            cost=cost,
-            new_balance=new_balance,
-            admin_checkin=False,
-            discount_applied=discount_applied,
+        notification_result = await deliver_coworking_booking_notification(
+            notification,
+            store=store,
+            client=client,
+            executor=self,
+            post_public_message=False,
         )
-        public_message = self._format_coworking_booking_success(
-            booking_date=booking_date,
-            target_user_id=target_user_id,
-            cost=cost,
-            new_balance=None,
-            admin_checkin=admin_checkin,
-            discount_applied=discount_applied,
-            include_balance=False,
-        )
-        return self._deliver_personal_points_message(
-            recipient_user_id=target_user_id,
-            requester_user_id=requested_by_user_id,
-            channel_id=channel_id,
-            thread_ts=thread_ts,
-            private_message=private_message,
-            public_message=public_message,
-            action="book_coworking",
-        )
+        delivery = notification_result.get("delivery")
+        if isinstance(delivery, dict):
+            delivery_data = delivery.get("data")
+            if (
+                isinstance(delivery_data, dict)
+                and delivery_data.get("delivery") != "current_direct_message"
+            ):
+                return delivery
+        return {
+            "message": "",
+            "suppress_post": True,
+            "data": {
+                "action": "book_coworking",
+                "booking_confirmed": True,
+                "notification_status": notification_result.get(
+                    "notification_status"
+                ),
+            },
+        }
 
     async def _handle_points_action(
         self,
@@ -14362,76 +14926,105 @@ Chunk {index} source: {label}
         # Member Actions
         # =====================================================================
 
-        if action == "link_account":
-            from ..slack_client import (
-                SlackIdentityLookupError,
-                get_verified_user_email,
-            )
-
-            try:
-                email = get_verified_user_email(user_id)
-            except SlackIdentityLookupError:
-                private_message = (
-                    "I couldn't verify an email for your Slack profile, so I didn't "
-                    "change any account link. Ask an MLAI admin to check your Slack "
-                    "profile email and try again."
+        if action == "link_founder_account":
+            if not bool(getattr(get_settings(), "FOUNDER_ACCOUNT_LINK_ENABLED", False)):
+                return (
+                    "Founder Tools account linking is not available yet. "
+                    "Please try again after the MLAI team enables it."
                 )
-            else:
+            try:
+                result = await client.start_founder_account_link(user_id)
+            except MLAIBackendUnavailableError:
+                return (
+                    "I couldn't confirm whether a Founder Tools account link was "
+                    "created right now. Please try `link` again; a fresh request "
+                    "safely replaces any incomplete link."
+                )
+            except httpx.HTTPStatusError as exc:
+                if 500 <= exc.response.status_code < 600:
+                    return (
+                        "I couldn't confirm whether a Founder Tools account link was "
+                        "created right now. Please try `link` again; a fresh request "
+                        "safely replaces any incomplete link."
+                    )
                 try:
-                    linked_user_id = await client.link_slack_user(user_id, email)
-                except httpx.HTTPStatusError as exc:
-                    if exc.response.status_code == 409:
-                        private_message = (
-                            "That MLAI account is already linked to another Slack "
-                            "profile, so I didn't change either account. Ask an MLAI "
-                            "admin to resolve the existing link."
-                        )
-                    else:
-                        print(
-                            "Slack account link failed "
-                            f"status={exc.response.status_code}"
-                        )
-                        private_message = (
-                            "I couldn't safely link your Slack and MLAI accounts right now. "
-                            "Nothing was confirmed—please try `link` again in a moment."
-                        )
-                except Exception as exc:
-                    print(
-                        "Slack account link failed "
-                        f"exc_type={exc.__class__.__name__}"
+                    error_code = str(exc.response.json().get("code") or "")
+                except (AttributeError, ValueError):
+                    error_code = ""
+                if (
+                    exc.response.status_code == 404
+                    and error_code == "slack_user_not_found"
+                ):
+                    return (
+                        "I couldn't verify your Slack account for Founder Tools linking. "
+                        "Please try `link` again; if this continues, contact the MLAI team."
                     )
-                    private_message = (
-                        "I couldn't safely link your Slack and MLAI accounts right now. "
-                        "Nothing was confirmed—please try `link` again in a moment."
+                if (
+                    exc.response.status_code == 429
+                    and error_code == "link_rate_limited"
+                ):
+                    try:
+                        retry_after = int(
+                            exc.response.json().get("retry_after_seconds") or 0
+                        )
+                    except (AttributeError, TypeError, ValueError):
+                        retry_after = 0
+                    wait_copy = (
+                        f" Wait about {retry_after} seconds"
+                        if retry_after > 0
+                        else " Wait a few minutes"
                     )
-                else:
-                    if linked_user_id is None:
-                        private_message = (
-                            "I couldn't find an existing MLAI account with the same "
-                            "email as your Slack profile. Sign in to MLAI with that "
-                            "email, or ask an MLAI admin to update your account email, "
-                            "then try `link` again."
-                        )
-                    else:
-                        private_message = (
-                            "✅ Your Slack profile is linked to your MLAI account. "
-                            "You can now try `book me in` again."
-                        )
+                    return (
+                        "You've requested several Founder Tools account links recently."
+                        f"{wait_copy}, then try `link` again. Your latest link remains valid."
+                    )
+                return (
+                    "I couldn't create a Founder Tools account link right now. "
+                    "Please try `link` again shortly."
+                )
 
-            return self._deliver_personal_points_message(
-                recipient_user_id=user_id,
-                requester_user_id=user_id,
-                channel_id=channel_id,
-                thread_ts=thread_ts,
-                private_message=private_message,
-                action="link_account",
-                private_ack="I've sent your account-link result privately.",
-                private_failure_ack=(
-                    "I couldn't send you a DM. Open Roo's direct messages and "
-                    "run `link` there to see the result privately."
-                ),
+            if not isinstance(result, dict):
+                return (
+                    "I couldn't create a trusted Founder Tools account link right now. "
+                    "Please try `link` again shortly."
+                )
+
+            if result.get("status") == "already_linked":
+                return self._founder_account_link_status_response(
+                    message=(
+                        "Your Roo Slack account is already linked to a Founder Tools account. "
+                        "If that is the wrong account, contact the MLAI team for help; Roo "
+                        "cannot relink accounts yet."
+                    ),
+                    user_id=user_id,
+                    channel_id=channel_id,
+                )
+
+            link_url = str(result.get("link_url") or "").strip()
+            expires_at_timestamp = self._founder_account_link_expiry_timestamp(
+                result.get("expires_at")
             )
-        
+            settings = get_settings()
+            if (
+                result.get("status") != "link_required"
+                or expires_at_timestamp is None
+                or not self._is_safe_founder_account_link_url(
+                    link_url,
+                    settings=settings,
+                )
+            ):
+                return (
+                    "I couldn't create a trusted Founder Tools account link right now. "
+                    "Please try `link` again shortly."
+                )
+
+            return self._founder_account_link_button_response(
+                link_url=link_url,
+                expires_at_timestamp=expires_at_timestamp,
+                user_id=user_id,
+                channel_id=channel_id,
+            )
+
         if action == "topup_points":
             settings = get_settings()
             if not getattr(settings, "ROO_POINTS_TOPUP_ENABLED", False):
@@ -15134,6 +15727,7 @@ Chunk {index} source: {label}
                     target_user_ids=target_slack_ids,
                     booking_date=booking_date,
                     channel_id=channel_id,
+                    thread_ts=thread_ts,
                 )
 
             target_user_id = target_slack_ids[0]
@@ -15143,7 +15737,6 @@ Chunk {index} source: {label}
                     target_user_id=target_user_id,
                     requested_by_user_id=user_id,
                     booking_date=booking_date,
-                    text=text,
                     channel_id=channel_id,
                     thread_ts=thread_ts,
                     admin_checkin=True,
@@ -15206,6 +15799,7 @@ Chunk {index} source: {label}
                         target_user_ids=target_slack_ids,
                         booking_date=booking_date,
                         channel_id=channel_id,
+                        thread_ts=thread_ts,
                     )
 
                 target_user_id = target_slack_ids[0]
@@ -15215,7 +15809,6 @@ Chunk {index} source: {label}
                         target_user_id=target_user_id,
                         requested_by_user_id=user_id,
                         booking_date=booking_date,
-                        text=text,
                         channel_id=channel_id,
                         thread_ts=thread_ts,
                         admin_checkin=True,
@@ -15239,7 +15832,6 @@ Chunk {index} source: {label}
                 target_user_id=user_id,
                 requested_by_user_id=user_id,
                 booking_date=booking_date,
-                text=text,
                 channel_id=channel_id,
                 thread_ts=thread_ts,
                 admin_checkin=False,

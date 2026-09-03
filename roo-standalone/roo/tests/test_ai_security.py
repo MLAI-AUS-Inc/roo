@@ -8,6 +8,7 @@ import sys
 import hashlib
 import hmac
 import time
+import textwrap
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -414,6 +415,11 @@ def test_deploy_workflow_requires_and_secretly_upserts_security_values():
     assert "roo/tests/test_ai_security.py" in workflow
     assert "roo/tests/test_victor_ai_applications.py" in workflow
     assert "bridge/tests" in workflow
+    assert workflow.count("roo/tests/test_agent_routing.py") == 1
+    assert workflow.count("roo/tests/test_routing_eval_gate.py") == 1
+    assert workflow.count("roo/tests/test_meeting_room_booking.py") == 1
+    assert workflow.count("roo/tests/test_meeting_room_clarifications.py") == 1
+    assert workflow.count("roo/tests/test_meeting_room_actions.py") == 1
     assert "python -m compileall -q roo bridge" in workflow
     assert "docker compose config --quiet" in workflow
     assert "docker compose -f docker-compose.bridge.yml config --quiet" in workflow
@@ -426,7 +432,8 @@ def test_deploy_workflow_requires_and_secretly_upserts_security_values():
     assert (
         "envs: SIM_PATIENT_API_KEY,SIM_PATIENT_SAFETY_SALT,ROO_API_KEY,"
         "VICTOR_AI_ROO_SIGNING_SECRET,ROO_PRIVATE_BASE_URL,"
-        "MEETING_ROOM_BOOKING_ENABLED"
+        "MEETING_ROOM_BOOKING_ENABLED,LINEAR_CHANNEL_ISSUE_WRITES_ENABLED,"
+        "FOUNDER_ACCOUNT_LINK_ENABLED,COWORKING_INTENTS_V3_MIGRATION_APPROVED"
     ) in workflow
     assert 'upsert_env "ROO_ENVIRONMENT" "production"' in workflow
     assert 'upsert_env "SIM_PATIENT_API_KEY" "$SIM_PATIENT_API_KEY"' in workflow
@@ -446,6 +453,14 @@ def test_deploy_workflow_requires_and_secretly_upserts_security_values():
         'upsert_env "MEETING_ROOM_BOOKING_ENABLED" '
         '"$MEETING_ROOM_BOOKING_ENABLED"'
     ) in workflow
+    assert (
+        'implicit_actions="respond_in_chat,mlai-points:balance,'
+        'mlai-points:topup_points"'
+    ) in workflow
+    assert 'if [ "$FOUNDER_ACCOUNT_LINK_ENABLED" = "true" ]; then' in workflow
+    assert 'upsert_env "FOUNDER_ACCOUNT_LINK_ENABLED"' in workflow
+    assert 'slack-founder-link-v1' in workflow
+    assert 'assert "mlai-points:link_account" not in actions' in workflow
     assert 'assert settings.MEETING_ROOM_BOOKING_ENABLED is True' in workflow
     assert (
         "python -c 'from roo.config import get_settings; settings = get_settings();"
@@ -453,22 +468,30 @@ def test_deploy_workflow_requires_and_secretly_upserts_security_values():
     assert 'assert "meeting-room-booking" in settings.enabled_skill_names' in workflow
     assert 'if [ "${#ROO_API_KEY}" -lt 32 ]' in workflow
     assert 'if [ "${#VICTOR_AI_ROO_SIGNING_SECRET}" -lt 32 ]' in workflow
-    assert workflow.index('upsert_env "ROO_API_KEY"') < workflow.index("docker compose up")
-    assert workflow.index('upsert_env "VICTOR_AI_SKILL_ENABLED"') < workflow.index(
-        "docker compose up"
-    )
+    deploy_start = workflow.index("docker compose up -d --no-build")
+    assert workflow.index('upsert_env "ROO_API_KEY"') < deploy_start
+    assert workflow.index('upsert_env "VICTOR_AI_SKILL_ENABLED"') < deploy_start
     assert workflow.index(
         'upsert_env "MEETING_ROOM_BOOKING_ENABLED"'
-    ) < workflow.index("docker compose up")
+    ) < deploy_start
     assert "systemctl restart slack-bridge.service" in workflow
     assert "docker compose -f docker-compose.bridge.yml up -d --build" in workflow
     assert "Slack bridge readiness check timed out" in workflow
-    assert workflow.index("upsert_env \"SIM_PATIENT_API_KEY\"") < workflow.index("docker compose up")
+    assert workflow.index("upsert_env \"SIM_PATIENT_API_KEY\"") < deploy_start
     assert 'echo "$SIM_PATIENT_API_KEY"' not in workflow
     assert 'echo "$SIM_PATIENT_SAFETY_SALT"' not in workflow
     assert 'echo "$ROO_API_KEY"' not in workflow
     assert 'echo "$VICTOR_AI_ROO_SIGNING_SECRET"' not in workflow
     assert "http://127.0.0.1/healthz/ready" in workflow
+    assert "migrate_coworking_booking_intents_v3.py" in workflow
+    assert "COWORKING_INTENTS_V3_MIGRATION_APPROVED" in workflow
+    assert "restore_previous_release" in workflow
+    migration_start = workflow.index("schema_migration_started=1")
+    assert workflow.index("docker compose stop roo", migration_start - 200) < migration_start
+    assert workflow.index("keeping Roo safely stopped") < workflow.index(
+        "restoring the previous Roo release"
+    )
+    assert workflow.rindex("trap - ERR") > workflow.index("healthz/dependencies")
     assert "vars.ROO_PRIVATE_BASE_URL" in workflow
     assert '"${ROO_PRIVATE_BASE_URL%/}/api/sim-patient"' in workflow
     assert "http://10.126.0.5/api/sim-patient" not in workflow
@@ -477,6 +500,38 @@ def test_deploy_workflow_requires_and_secretly_upserts_security_values():
     assert "expect_status 404 GET /docs" in workflow
     assert "expect_status 404 POST /api/mention" in workflow
     assert "expect_status 403 POST /api/sim-patient" in workflow
+
+
+def test_post_migration_deploy_failure_stops_roo_without_v1_rollback():
+    workflow = (REPO_ROOT / ".github/workflows/deploy.yml").read_text()
+    function_start = workflow.index("            restore_previous_release() {")
+    function_end = workflow.index(
+        "\n            }\n            trap restore_previous_release ERR",
+        function_start,
+    ) + len("\n            }")
+    recovery_function = textwrap.dedent(workflow[function_start:function_end])
+    probe = recovery_function + r'''
+schema_migration_started=1
+previous_env_backup="$(mktemp)"
+docker_log="$(mktemp)"
+docker() {
+    printf '%s\n' "$*" >> "$docker_log"
+}
+trap restore_previous_release ERR
+false
+grep -Fx 'compose stop roo' "$docker_log"
+'''
+
+    completed = subprocess.run(
+        ["bash", "-c", probe],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "keeping Roo safely stopped" in completed.stdout
+    assert "restoring the previous Roo release" not in completed.stdout
 
 
 def test_nginx_exposes_only_slack_health_and_vpc_service_routes():

@@ -33,6 +33,201 @@ FULL_POINTS_ADMIN_ROLES = {"admin", "committee", "portfolio_lead"}
 class MLAIBackendUnavailableError(RuntimeError):
     """Raised when Roo cannot reach mlai-backend reliably."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        reason_code: str = "backend_unavailable",
+    ) -> None:
+        super().__init__(message)
+        self.reason_code = reason_code
+
+
+def validate_coworking_booking_result(
+    payload: Any,
+    *,
+    expected_date: Optional[str] = None,
+) -> dict:
+    """Validate a successful booking response before treating it as committed."""
+    if not isinstance(payload, dict):
+        raise MLAIBackendUnavailableError(
+            "MLAI backend returned an invalid coworking booking result",
+            reason_code="invalid_backend_response",
+        )
+
+    booking_id = payload.get("id")
+    booking_date = payload.get("date")
+    status = payload.get("status")
+    points_cost = payload.get("points_cost")
+    standard_points_cost = payload.get("standard_points_cost")
+    discount_applied = payload.get("monthly_update_discount_applied")
+    explicitly_linked = payload.get("founder_tools_explicitly_linked")
+    connection_type = payload.get("founder_tools_connection_type")
+    account_linked = payload.get("founder_tools_account_linked")
+    operation_replayed = payload.get("operation_replayed")
+    booking_state_refreshed = payload.get("booking_state_refreshed")
+    current_status = payload.get("operation_booking_current_status")
+    valid_replay_state = (
+        operation_replayed is None
+        and booking_state_refreshed is None
+        and current_status is None
+    ) or (
+        (operation_replayed is True or booking_state_refreshed is True)
+        and (operation_replayed is None or operation_replayed is True)
+        and (booking_state_refreshed is None or booking_state_refreshed is True)
+        and current_status in {"booked", "cancelled", "deleted"}
+    )
+
+    valid_booking_id = False
+    if isinstance(booking_id, str):
+        try:
+            valid_booking_id = str(UUID(booking_id.strip())) == booking_id.strip().lower()
+        except (ValueError, AttributeError):
+            valid_booking_id = False
+
+    complete = (
+        valid_booking_id
+        and isinstance(booking_date, str)
+        and bool(booking_date.strip())
+        and status == "booked"
+        and isinstance(points_cost, int)
+        and not isinstance(points_cost, bool)
+        and points_cost >= 0
+        and isinstance(standard_points_cost, int)
+        and not isinstance(standard_points_cost, bool)
+        and standard_points_cost >= points_cost
+        and isinstance(discount_applied, bool)
+        and isinstance(explicitly_linked, bool)
+        and isinstance(account_linked, bool)
+        and connection_type in {None, "direct", "explicit"}
+        and discount_applied is (points_cost < standard_points_cost)
+        and account_linked is (connection_type is not None)
+        and explicitly_linked is (connection_type == "explicit")
+        and valid_replay_state
+    )
+    if expected_date is not None:
+        complete = complete and booking_date == str(expected_date)
+    if not complete:
+        raise MLAIBackendUnavailableError(
+            "MLAI backend returned an incomplete coworking booking result",
+            reason_code="invalid_backend_response",
+        )
+    return payload
+
+
+def validate_coworking_booking_batch_result(
+    payload: Any,
+    *,
+    expected_date: str,
+    expected_admin_slack_user_id: str,
+    expected_target_slack_user_ids: List[str],
+) -> dict:
+    """Validate a complete batch result before treating it as committed."""
+
+    def invalid(message: str) -> None:
+        raise MLAIBackendUnavailableError(message, reason_code="invalid_backend_response")
+
+    if not isinstance(payload, dict):
+        invalid("MLAI backend returned an invalid coworking batch result")
+
+    expected_targets = [str(value).strip() for value in expected_target_slack_user_ids]
+    if (
+        not expected_targets
+        or any(not value for value in expected_targets)
+        or len(set(expected_targets)) != len(expected_targets)
+    ):
+        invalid("Coworking batch validation received invalid expected targets")
+
+    results = payload.get("results")
+    created_count = payload.get("created_count")
+    already_booked_count = payload.get("already_booked_count")
+    target_count = payload.get("target_count")
+    standard_points_cost = payload.get("standard_points_cost")
+    operation_replayed = payload.get("operation_replayed")
+    if operation_replayed is not None and operation_replayed is not True:
+        invalid("MLAI backend returned an invalid coworking batch replay state")
+    if not (
+        payload.get("date") == str(expected_date)
+        and payload.get("admin_slack_user_id")
+        == str(expected_admin_slack_user_id).strip()
+        and isinstance(results, list)
+        and len(results) == len(expected_targets)
+        and isinstance(target_count, int)
+        and not isinstance(target_count, bool)
+        and target_count == len(expected_targets)
+        and isinstance(created_count, int)
+        and not isinstance(created_count, bool)
+        and isinstance(already_booked_count, int)
+        and not isinstance(already_booked_count, bool)
+        and created_count >= 0
+        and already_booked_count >= 0
+        and created_count + already_booked_count == len(expected_targets)
+        and isinstance(standard_points_cost, int)
+        and not isinstance(standard_points_cost, bool)
+        and standard_points_cost >= 0
+    ):
+        invalid("MLAI backend returned an incomplete coworking batch result")
+
+    seen_targets: set[str] = set()
+    observed_created = 0
+    for row in results:
+        if not isinstance(row, dict):
+            invalid("MLAI backend returned an invalid coworking batch row")
+        slack_user_id = row.get("slack_user_id")
+        created = row.get("created")
+        already_booked = row.get("already_booked")
+        booking = row.get("booking")
+        points_cost = row.get("points_cost")
+        row_standard_cost = row.get("standard_points_cost")
+        discount_applied = row.get("monthly_update_discount_applied")
+        explicitly_linked = row.get("founder_tools_explicitly_linked")
+        connection_type = row.get("founder_tools_connection_type")
+        account_linked = row.get("founder_tools_account_linked")
+        if not (
+            isinstance(slack_user_id, str)
+            and slack_user_id in expected_targets
+            and slack_user_id not in seen_targets
+            and isinstance(created, bool)
+            and isinstance(already_booked, bool)
+            and already_booked is (not created)
+            and isinstance(booking, dict)
+            and isinstance(points_cost, int)
+            and not isinstance(points_cost, bool)
+            and points_cost >= 0
+            and booking.get("points_cost") == points_cost
+            and isinstance(row_standard_cost, int)
+            and not isinstance(row_standard_cost, bool)
+            and row_standard_cost == standard_points_cost
+            and row_standard_cost >= points_cost
+            and isinstance(discount_applied, bool)
+            and discount_applied is (points_cost < row_standard_cost)
+            and isinstance(explicitly_linked, bool)
+            and isinstance(account_linked, bool)
+            and connection_type in {None, "direct", "explicit"}
+            and account_linked is (connection_type is not None)
+            and explicitly_linked is (connection_type == "explicit")
+        ):
+            invalid("MLAI backend returned a contradictory coworking batch row")
+
+        validate_coworking_booking_result(
+            {
+                **booking,
+                "standard_points_cost": row_standard_cost,
+                "monthly_update_discount_applied": discount_applied,
+                "founder_tools_explicitly_linked": explicitly_linked,
+                "founder_tools_connection_type": connection_type,
+                "founder_tools_account_linked": account_linked,
+                "operation_replayed": operation_replayed,
+            },
+            expected_date=expected_date,
+        )
+        seen_targets.add(slack_user_id)
+        observed_created += int(created)
+
+    if seen_targets != set(expected_targets) or observed_created != created_count:
+        invalid("MLAI backend returned incomplete coworking batch target data")
+    return payload
+
 
 class MLAIBackendClient:
     """Client for mlai-backend API."""
@@ -485,6 +680,16 @@ class MLAIBackendClient:
         prefix = "" if base_path.endswith("/api/v1") else "/api/v1"
         return f"{prefix}/org-memory/{suffix}"
 
+    def _api_v1_endpoint(self, suffix: str) -> str:
+        """Build an API endpoint for either supported backend base URL form."""
+
+        raw_suffix = str(suffix or "")
+        suffix = raw_suffix.strip("/")
+        base_path = urlparse(self.base_url).path.rstrip("/")
+        prefix = "" if base_path.endswith("/api/v1") else "/api/v1"
+        trailing_slash = "/" if raw_suffix.endswith("/") else ""
+        return f"{prefix}/{suffix}{trailing_slash}"
+
     def _linear_channel_endpoint(self, suffix: str) -> str:
         """Support backend base URLs with or without an /api/v1 suffix."""
 
@@ -914,8 +1119,15 @@ class MLAIBackendClient:
         detail = str(exc).strip()
         return detail or exc.__class__.__name__
 
-    def _raise_for_status_or_backend_unavailable(self, response: httpx.Response) -> None:
-        if response.status_code == 503:
+    def _raise_for_status_or_backend_unavailable(
+        self,
+        response: httpx.Response,
+        *,
+        all_server_errors: bool = False,
+    ) -> None:
+        if response.status_code == 503 or (
+            all_server_errors and 500 <= response.status_code < 600
+        ):
             try:
                 payload = response.json()
             except ValueError:
@@ -2345,7 +2557,14 @@ class MLAIBackendClient:
         self._raise_for_status_or_backend_unavailable(response)
         return response.json()
 
-    async def book_coworking(self, slack_user_id: str, booking_date: str, slack_channel_id: Optional[str] = None) -> dict:
+    async def book_coworking(
+        self,
+        slack_user_id: str,
+        booking_date: str,
+        slack_channel_id: Optional[str] = None,
+        *,
+        operation_id: Optional[str] = None,
+    ) -> dict:
         """Book a coworking day."""
         try:
             from datetime import datetime
@@ -2357,6 +2576,8 @@ class MLAIBackendClient:
             "date": booking_date,
             "current_time": current_time,
         }
+        if operation_id:
+            payload["operation_id"] = str(operation_id).strip()
         if slack_channel_id:
             payload["slack_channel_id"] = slack_channel_id
         response = await self._request(
@@ -2369,7 +2590,17 @@ class MLAIBackendClient:
             circuit_breaker=True,
         )
         response.raise_for_status()
-        return response.json()
+        try:
+            result = response.json()
+        except ValueError as exc:
+            raise MLAIBackendUnavailableError(
+                "MLAI backend returned invalid JSON after coworking booking",
+                reason_code="invalid_backend_response",
+            ) from exc
+        return validate_coworking_booking_result(
+            result,
+            expected_date=booking_date,
+        )
 
     async def book_coworking_many(
         self,
@@ -2377,6 +2608,8 @@ class MLAIBackendClient:
         target_slack_user_ids: List[str],
         booking_date: str,
         slack_channel_id: Optional[str] = None,
+        *,
+        operation_id: Optional[str] = None,
     ) -> dict:
         """Book multiple coworking days as a full Points Admin."""
         try:
@@ -2397,6 +2630,8 @@ class MLAIBackendClient:
             "date": booking_date,
             "current_time": current_time,
         }
+        if operation_id:
+            payload["operation_id"] = str(operation_id).strip()
         if slack_channel_id:
             payload["slack_channel_id"] = slack_channel_id
 
@@ -2410,8 +2645,49 @@ class MLAIBackendClient:
             circuit_breaker=True,
         )
         response.raise_for_status()
-        return response.json()
-    
+        try:
+            result = response.json()
+        except ValueError as exc:
+            raise MLAIBackendUnavailableError(
+                "MLAI backend returned invalid JSON after coworking batch booking",
+                reason_code="invalid_backend_response",
+            ) from exc
+        return validate_coworking_booking_batch_result(
+            result,
+            expected_date=booking_date,
+            expected_admin_slack_user_id=payload["admin_slack_user_id"],
+            expected_target_slack_user_ids=cleaned_targets,
+        )
+
+    async def start_founder_account_link(self, slack_user_id: str) -> dict:
+        """Create a short-lived Founder Tools link for the current Slack user."""
+        response = await self._request(
+            "POST",
+            self._api_v1_endpoint("users/slack-founder-link/start/"),
+            json={"slack_user_id": self._clean_slack_id(slack_user_id)},
+            timeout=15.0,
+            # Creating a link invalidates older tokens, so an ambiguous POST
+            # outcome must be retried by the member as a fresh operation.
+            transport_retries=0,
+            circuit_breaker=True,
+            use_admin_headers=False,
+        )
+        self._raise_for_status_or_backend_unavailable(
+            response,
+            all_server_errors=True,
+        )
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise MLAIBackendUnavailableError(
+                "mlai-backend returned an invalid account-link response"
+            ) from exc
+        if not isinstance(payload, dict):
+            raise MLAIBackendUnavailableError(
+                "mlai-backend returned an invalid account-link response"
+            )
+        return payload
+
     async def get_github_auth_url(self, slack_user_id: str, domain: Optional[str] = None) -> dict:
         """Get the GitHub OAuth URL for a user from the backend."""
         params = {"slack_user_id": slack_user_id}
@@ -2440,6 +2716,28 @@ class MLAIBackendClient:
         )
         response.raise_for_status()
         return response.json()
+
+    async def get_founder_account_link_health(self) -> dict:
+        """Verify the exact backend contract required before link activation."""
+        response = await self._request(
+            "GET",
+            self._api_v1_endpoint("users/slack-founder-link/health/"),
+            timeout=5.0,
+            transport_retries=1,
+            retry_backoff_seconds=0.25,
+            circuit_breaker=False,
+            use_admin_headers=False,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict) or payload != {
+            "status": "ok",
+            "contract": "slack-founder-link-v1",
+        }:
+            raise MLAIBackendUnavailableError(
+                "mlai-backend returned an incompatible account-link health contract"
+            )
+        return payload
 
     async def get_points_health(self) -> dict:
         response = await self._request(
@@ -2827,12 +3125,20 @@ class MLAIBackendClient:
         response.raise_for_status()
         return response.json()
 
-    async def get_my_bookings(self, slack_user_id: str) -> List[dict]:
+    async def get_my_bookings(
+        self,
+        slack_user_id: str,
+        *,
+        booking_id: Optional[str] = None,
+    ) -> List[dict]:
         """Get user's coworking bookings."""
+        params = {"slack_user_id": slack_user_id}
+        if booking_id is not None:
+            params["booking_id"] = str(booking_id)
         response = await self._request(
             "GET",
             f"{self._points_base}/coworking/my-bookings/",
-            params={"slack_user_id": slack_user_id},
+            params=params,
             timeout=10.0,
             transport_retries=1,
             retry_backoff_seconds=0.25,

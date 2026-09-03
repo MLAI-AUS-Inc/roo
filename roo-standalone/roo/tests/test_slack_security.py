@@ -1,9 +1,11 @@
+import asyncio
 import hashlib
 import hmac
 import json
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.parse import urlencode
 
 import pytest
@@ -12,7 +14,9 @@ from fastapi.testclient import TestClient
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from roo import main as main_module
+from roo import slack_client as slack_client_module
 from roo.config import Settings, get_settings
+from roo.logging_safety import sanitize_log_value
 from roo.slack_security import (
     SlackRequestReceiptStore,
     SlackRequestVerificationError,
@@ -48,6 +52,25 @@ def _settings(tmp_path, **overrides):
     }
     values.update(overrides)
     return Settings(**values)
+
+
+def test_recursive_log_sanitizer_redacts_keys_values_and_workspace_ids():
+    email = "private-link@example.com"
+    token = "AUniqueAccountLinkToken_12345678901234567890"
+    workspace_id = "TWORKSPACE123"
+
+    sanitized = json.dumps(
+        sanitize_log_value(
+            {
+                email: {
+                    token: [workspace_id],
+                }
+            }
+        )
+    )
+
+    for sentinel in (email, token, workspace_id):
+        assert sentinel not in sanitized
 
 
 @pytest.fixture(autouse=True)
@@ -99,6 +122,225 @@ def test_receipt_store_deduplicates_across_instances_and_expires(tmp_path):
     assert first_store.claim(fingerprint, now=1000, ttl_seconds=600)
     assert not second_store.claim(fingerprint, now=1001, ttl_seconds=600)
     assert second_store.claim(fingerprint, now=1601, ttl_seconds=600)
+
+
+def test_event_processing_lease_recovers_crash_and_fences_stale_completion(tmp_path):
+    fingerprint = "b" * 64
+    store = SlackRequestReceiptStore(tmp_path / "event-receipts.db")
+
+    first_claim = store.claim_lease(fingerprint, now=1000, lease_seconds=45)
+    assert first_claim == 1000
+    assert store.claim_event(fingerprint, now=1001, lease_seconds=45) == (
+        "processing",
+        None,
+    )
+    assert store.renew(
+        fingerprint,
+        claim_token=first_claim,
+        lease_seconds=45,
+        now=1030,
+    )
+    assert store.claim_lease(fingerprint, now=1046, lease_seconds=45) is None
+
+    recovered_claim = store.claim_lease(fingerprint, now=1076, lease_seconds=45)
+    assert recovered_claim == 1076
+    assert not store.complete(
+        fingerprint,
+        claim_token=first_claim,
+        ttl_seconds=600,
+        now=1077,
+    )
+    assert store.complete(
+        fingerprint,
+        claim_token=recovered_claim,
+        ttl_seconds=600,
+        now=1077,
+    )
+    assert store.claim_event(fingerprint, now=1100, lease_seconds=45) == (
+        "completed",
+        None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_account_link_task_completes_receipt_only_after_work_finishes(tmp_path):
+    configured = _settings(tmp_path)
+    fingerprint = "c" * 64
+    store = get_slack_receipt_store(configured.SLACK_RECEIPTS_DB_PATH)
+    claim_token = store.claim_lease(fingerprint, lease_seconds=45)
+    request = SimpleNamespace(
+        state=SimpleNamespace(
+            slack_event_fingerprint=fingerprint,
+            slack_event_claim_token=claim_token,
+            roo_settings=configured,
+        )
+    )
+    work_finished = False
+
+    async def work():
+        nonlocal work_finished
+        work_finished = True
+
+    await main_module._start_slack_event_task(request, work())
+
+    assert work_finished
+    assert store.claim_lease(fingerprint, lease_seconds=45) is None
+
+
+@pytest.mark.asyncio
+async def test_failed_account_link_task_releases_receipt_for_retry(tmp_path):
+    configured = _settings(tmp_path)
+    fingerprint = "d" * 64
+    store = get_slack_receipt_store(configured.SLACK_RECEIPTS_DB_PATH)
+    claim_token = store.claim_lease(fingerprint, lease_seconds=45)
+    request = SimpleNamespace(
+        state=SimpleNamespace(
+            slack_event_fingerprint=fingerprint,
+            slack_event_claim_token=claim_token,
+            roo_settings=configured,
+        )
+    )
+
+    async def fail():
+        raise RuntimeError("simulated worker failure")
+
+    with pytest.raises(RuntimeError, match="simulated worker failure"):
+        await main_module._start_slack_event_task(request, fail())
+
+    assert store.claim_lease(fingerprint, lease_seconds=45) is not None
+
+
+@pytest.mark.parametrize(
+    ("event", "expected"),
+    [
+        ({"type": "message", "user": "U123", "text": "hello"}, True),
+        ({"type": "message", "user": "U123", "text": "connect my Roo account"}, True),
+        ({"type": "app_mention", "user": "U123", "text": "hello"}, True),
+        ({"type": "message", "bot_id": "B123", "text": "hello"}, False),
+        ({"type": "reaction_added", "user": "U123"}, False),
+    ],
+)
+def test_all_async_user_message_events_use_recoverable_receipts(event, expected):
+    body = json.dumps(
+        {
+            "type": "event_callback",
+            "event_id": "Ev123",
+            "team_id": "T123",
+            "event": event,
+        }
+    ).encode()
+
+    fingerprint = main_module._retry_managed_slack_event_fingerprint(
+        body,
+        "a" * 64,
+    )
+    assert (fingerprint is not None) is expected
+    if expected:
+        assert fingerprint == hashlib.sha256(
+            b"slack-event:T123:Ev123"
+        ).hexdigest()
+
+
+def test_semantic_account_link_event_is_retried_until_async_work_completes(
+    tmp_path,
+    monkeypatch,
+):
+    configured = _settings(tmp_path)
+    main_module.app.dependency_overrides[get_settings] = lambda: configured
+    client = TestClient(main_module.app)
+    scheduled = []
+    handled = []
+
+    async def handle(event):
+        handled.append(event["text"])
+
+    monkeypatch.setattr(main_module, "_handle_mention", handle)
+    monkeypatch.setattr(main_module, "start_slack_action", scheduled.append)
+    body = json.dumps(
+        {
+            "type": "event_callback",
+            "event_id": "EvSemanticLink",
+            "team_id": "T123",
+            "event": {
+                "type": "message",
+                "channel_type": "im",
+                "channel": "D123",
+                "user": "U123",
+                "text": "please connect my Roo account",
+            },
+        },
+        separators=(",", ":"),
+    ).encode()
+    timestamp = int(time.time())
+    headers = _signed_headers(
+        configured.SLACK_SIGNING_SECRET,
+        timestamp,
+        body,
+        "application/json",
+    )
+
+    first = client.post("/slack/events", content=body, headers=headers)
+    duplicate_while_processing = client.post(
+        "/slack/events",
+        content=body,
+        headers=headers,
+    )
+
+    assert first.status_code == 503
+    assert duplicate_while_processing.status_code == 503
+    assert len(scheduled) == 1
+    asyncio.run(scheduled.pop())
+
+    completed_retry = client.post("/slack/events", content=body, headers=headers)
+    assert completed_retry.status_code == 200
+    assert handled == ["please connect my Roo account"]
+
+
+def test_failed_async_event_is_released_for_a_fresh_retry(tmp_path, monkeypatch):
+    configured = _settings(tmp_path)
+    main_module.app.dependency_overrides[get_settings] = lambda: configured
+    client = TestClient(main_module.app)
+    scheduled = []
+    should_fail = True
+
+    async def handle(_event):
+        if should_fail:
+            raise RuntimeError("simulated crash")
+
+    monkeypatch.setattr(main_module, "_handle_mention", handle)
+    monkeypatch.setattr(main_module, "start_slack_action", scheduled.append)
+    body = json.dumps(
+        {
+            "type": "event_callback",
+            "event_id": "EvRetryAfterCrash",
+            "team_id": "T123",
+            "event": {
+                "type": "message",
+                "channel_type": "im",
+                "channel": "D123",
+                "user": "U123",
+                "text": "connect my Founder Tools account",
+            },
+        },
+        separators=(",", ":"),
+    ).encode()
+    timestamp = int(time.time())
+    headers = _signed_headers(
+        configured.SLACK_SIGNING_SECRET,
+        timestamp,
+        body,
+        "application/json",
+    )
+
+    assert client.post("/slack/events", content=body, headers=headers).status_code == 503
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        asyncio.run(scheduled.pop())
+
+    should_fail = False
+    assert client.post("/slack/events", content=body, headers=headers).status_code == 503
+    assert len(scheduled) == 1
+    asyncio.run(scheduled.pop())
+    assert client.post("/slack/events", content=body, headers=headers).status_code == 200
 
 
 @pytest.mark.parametrize(
@@ -157,6 +399,27 @@ def test_signed_url_verification_returns_challenge(tmp_path):
 
     assert response.status_code == 200
     assert response.json() == {"challenge": "challenge-1"}
+
+
+def test_signed_malformed_event_json_returns_bad_request(tmp_path):
+    configured = _settings(tmp_path)
+    main_module.app.dependency_overrides[get_settings] = lambda: configured
+    client = TestClient(main_module.app)
+    body = b"{not-json"
+    timestamp = int(time.time())
+
+    response = client.post(
+        "/slack/events",
+        content=body,
+        headers=_signed_headers(
+            configured.SLACK_SIGNING_SECRET,
+            timestamp,
+            body,
+            "application/json",
+        ),
+    )
+
+    assert response.status_code == 400
 
 
 def test_duplicate_signed_command_is_acknowledged_without_reexecution(tmp_path):
@@ -264,3 +527,312 @@ def test_internal_mention_endpoint_is_disabled_or_bearer_authenticated(tmp_path,
         headers={"Authorization": "Bearer internal-mention-key"},
     )
     assert admin_response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_account_link_mention_ingress_logs_no_identity_or_token_sentinels(
+    monkeypatch,
+    capsys,
+):
+    token = "AUniqueAccountLinkToken_12345678901234567890"
+    email = "private-link@example.com"
+    slack_user_id = "UACCOUNT123"
+    channel_id = "CSECRET123"
+    thread_ts = "1758000000.123456"
+    text = (
+        "<@UROOBOT123> link https://mlai.au/founder-tools/link-roo?token="
+        f"{token} for {email} <@{slack_user_id}>"
+    )
+
+    class FakeAgent:
+        async def handle_mention(self, **kwargs):
+            assert kwargs["user_id"] == slack_user_id
+            assert kwargs["channel_id"] == channel_id
+            return {
+                "message": "",
+                "skill_used": "mlai-points",
+                "data": {"action": "link_founder_account"},
+                "suppress_post": True,
+            }
+
+    monkeypatch.setattr(main_module, "get_agent", lambda: FakeAgent())
+
+    result = await main_module._handle_mention(
+        {
+            "user": slack_user_id,
+            "channel": channel_id,
+            "thread_ts": thread_ts,
+            "ts": thread_ts,
+            "text": text,
+        }
+    )
+
+    assert result["result"]["data"]["action"] == "link_founder_account"
+    output = capsys.readouterr().out
+    for sentinel in (token, email, slack_user_id, channel_id, thread_ts):
+        assert sentinel not in output
+    assert "destination_type=channel" in output
+    assert "[url]" in output
+
+
+def test_account_link_button_click_log_excludes_slack_identity(tmp_path, capsys):
+    configured = _settings(tmp_path, FOUNDER_ACCOUNT_LINK_ENABLED=True)
+    main_module.app.dependency_overrides[get_settings] = lambda: configured
+    client = TestClient(main_module.app)
+    slack_user_id = "UACCOUNTLINKSENTINEL"
+    payload = {
+        "type": "block_actions",
+        "user": {"id": slack_user_id},
+        "channel": {"id": "DPRIVATE123"},
+        "team": {"id": "TWORKSPACE123"},
+        "message": {"ts": "1758000000.123456"},
+        "actions": [{"action_id": "roo_link_founder_account"}],
+    }
+    body = urlencode({"payload": json.dumps(payload)}).encode("utf-8")
+    timestamp = int(time.time())
+
+    response = client.post(
+        "/slack/actions",
+        content=body,
+        headers=_signed_headers(
+            configured.SLACK_SIGNING_SECRET,
+            timestamp,
+            body,
+            "application/x-www-form-urlencoded",
+        ),
+    )
+
+    assert response.status_code == 200
+    output = capsys.readouterr().out
+    assert "FOUNDER_ACCOUNT_LINK_BUTTON_CLICKED" in output
+    assert slack_user_id not in output
+
+
+@pytest.mark.parametrize(
+    "channel_payload",
+    [
+        {"id": "CPUBLIC123"},
+        {"id": "GPRIVATE123"},
+        {"id": ""},
+        None,
+        "DFAKE123",
+    ],
+)
+def test_send_dm_never_posts_to_a_non_dm_channel(monkeypatch, channel_payload):
+    class FakeSlackClient:
+        def conversations_open(self, **kwargs):
+            return {"ok": True, "channel": channel_payload}
+
+    posted = []
+    monkeypatch.setattr(
+        slack_client_module,
+        "get_slack_client",
+        lambda: FakeSlackClient(),
+    )
+    monkeypatch.setattr(
+        slack_client_module,
+        "post_message",
+        lambda *args, **kwargs: posted.append((args, kwargs)),
+    )
+
+    result = slack_client_module.send_dm("U123", "private")
+
+    assert result is None
+    assert posted == []
+
+
+def test_send_dm_posts_only_after_validating_a_dm_channel(monkeypatch):
+    class FakeSlackClient:
+        def conversations_open(self, **kwargs):
+            return {"ok": True, "channel": {"id": "DPRIVATE123"}}
+
+    posted = []
+    monkeypatch.setattr(
+        slack_client_module,
+        "get_slack_client",
+        lambda: FakeSlackClient(),
+    )
+    monkeypatch.setattr(
+        slack_client_module,
+        "post_message",
+        lambda *args, **kwargs: posted.append((args, kwargs)) or {"ok": True},
+    )
+
+    result = slack_client_module.send_dm("U123", "private", blocks=[])
+
+    assert result == {"ok": True}
+    assert posted == [
+        (
+            ("DPRIVATE123", "private"),
+            {"_redact_destination": True, "blocks": []},
+        )
+    ]
+
+
+def test_send_dm_open_failure_logs_no_identity_or_external_error(monkeypatch, capsys):
+    class FakeSlackClient:
+        def conversations_open(self, **kwargs):
+            raise RuntimeError("Slack failed for UPRIVATE1 private@example.com\nforged")
+
+    monkeypatch.setattr(
+        slack_client_module,
+        "get_slack_client",
+        lambda: FakeSlackClient(),
+    )
+
+    assert slack_client_module.send_dm("UPRIVATE1", "private") is None
+
+    output = capsys.readouterr().out
+    assert "UPRIVATE1" not in output
+    assert "private@example.com" not in output
+    assert "forged" not in output
+    assert "error_type=RuntimeError" in output
+
+
+def test_send_dm_post_failure_logs_no_dm_channel_or_error_payload(
+    monkeypatch,
+    capsys,
+):
+    class FakeSlackClient:
+        def conversations_open(self, **kwargs):
+            return {"ok": True, "channel": {"id": "DPRIVATE123"}}
+
+        def chat_postMessage(self, **kwargs):
+            return {
+                "ok": False,
+                "error": "ratelimited UPRIVATE1 private@example.com\nforged",
+            }
+
+    monkeypatch.setattr(
+        slack_client_module,
+        "get_slack_client",
+        lambda: FakeSlackClient(),
+    )
+
+    response = slack_client_module.send_dm("UPRIVATE1", "private")
+
+    assert response["ok"] is False
+    output = capsys.readouterr().out
+    assert "DPRIVATE123" not in output
+    assert "UPRIVATE1" not in output
+    assert "private@example.com" not in output
+    assert "ratelimited" not in output
+    assert "forged" not in output
+    assert "reason_code=slack_api_error" in output
+
+
+@pytest.mark.parametrize("outcome", ["success", "api_error", "exception"])
+def test_shared_message_logging_never_exposes_destination_or_transport_payload(
+    monkeypatch,
+    capsys,
+    outcome,
+):
+    channel_id = "CSECRET123"
+    thread_ts = "1758000000.123456"
+    slack_user_id = "UACCOUNT123"
+    email = "private-link@example.com"
+    token = "AUniqueAccountLinkToken_12345678901234567890"
+
+    class FakeSlackClient:
+        def chat_postMessage(self, **kwargs):
+            if outcome == "success":
+                return {"ok": True}
+            if outcome == "api_error":
+                return {
+                    "ok": False,
+                    "error": f"failed {slack_user_id} {email} {token}",
+                }
+            raise RuntimeError(f"failed {slack_user_id} {email} {token}")
+
+    monkeypatch.setattr(
+        slack_client_module,
+        "get_slack_client",
+        lambda: FakeSlackClient(),
+    )
+
+    if outcome == "exception":
+        with pytest.raises(RuntimeError):
+            slack_client_module.post_message(
+                channel_id,
+                "sensitive body",
+                thread_ts=thread_ts,
+            )
+    else:
+        slack_client_module.post_message(
+            channel_id,
+            "sensitive body",
+            thread_ts=thread_ts,
+        )
+
+    output = capsys.readouterr().out
+    for sentinel in (
+        channel_id,
+        thread_ts,
+        slack_user_id,
+        email,
+        token,
+    ):
+        assert sentinel not in output
+    assert "destination_type=channel" in output or "Slack message failed" in output
+
+
+def test_shared_ephemeral_logging_never_exposes_identity_or_error_payload(
+    monkeypatch,
+    capsys,
+):
+    channel_id = "CSECRET123"
+    slack_user_id = "UACCOUNT123"
+    thread_ts = "1758000000.123456"
+    token = "AUniqueAccountLinkToken_12345678901234567890"
+
+    class FakeSlackClient:
+        def chat_postEphemeral(self, **kwargs):
+            return {
+                "ok": False,
+                "error": f"failed {slack_user_id} {token}",
+            }
+
+    monkeypatch.setattr(
+        slack_client_module,
+        "get_slack_client",
+        lambda: FakeSlackClient(),
+    )
+
+    slack_client_module.post_ephemeral(
+        channel_id,
+        slack_user_id,
+        "private text",
+        thread_ts=thread_ts,
+    )
+
+    output = capsys.readouterr().out
+    for sentinel in (channel_id, slack_user_id, thread_ts, token):
+        assert sentinel not in output
+    assert "reason_code=slack_api_error" in output
+
+
+def test_channel_context_failure_logs_no_destination_or_error_payload(
+    monkeypatch,
+    capsys,
+):
+    channel_id = "CSECRETCONTEXT123"
+    slack_user_id = "UACCOUNT123"
+    token = "AUniqueAccountLinkToken_12345678901234567890"
+
+    class FakeSlackClient:
+        def conversations_info(self, **kwargs):
+            raise RuntimeError(f"failed {slack_user_id} {token}")
+
+    slack_client_module._channel_context_cache.clear()
+    monkeypatch.setattr(
+        slack_client_module,
+        "get_slack_client",
+        lambda: FakeSlackClient(),
+    )
+
+    assert slack_client_module.get_channel_context(channel_id) == {}
+
+    output = capsys.readouterr().out
+    for sentinel in (channel_id, slack_user_id, token):
+        assert sentinel not in output
+    assert "error_type=RuntimeError" in output
