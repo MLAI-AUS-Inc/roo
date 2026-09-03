@@ -485,6 +485,14 @@ def test_deploy_workflow_requires_and_secretly_upserts_security_values():
     assert "systemctl restart slack-bridge.service" in workflow
     assert "docker compose -f docker-compose.bridge.yml up -d --build" in workflow
     assert "Slack bridge readiness check timed out" in workflow
+    assert workflow.index("previous_bridge_mode=") < workflow.index(
+        "rollback_release()"
+    )
+    rollback_body = workflow.split("rollback_release() {", 1)[1].split(
+        "trap rollback_release EXIT", 1
+    )[0]
+    assert "restart_bridge_for_checkout" in rollback_body
+    assert "Slack bridge rollback failed" in rollback_body
     assert workflow.index("upsert_env \"SIM_PATIENT_API_KEY\"") < workflow.index("docker compose up")
     assert 'echo "$SIM_PATIENT_API_KEY"' not in workflow
     assert 'echo "$SIM_PATIENT_SAFETY_SALT"' not in workflow

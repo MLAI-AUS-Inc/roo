@@ -725,6 +725,11 @@ async def test_development_public_lifespan_skips_backend_preflight_when_gates_of
         "office_manager_action_housekeeping_loop",
         idle_loop,
     )
+    monkeypatch.setattr(
+        main_module,
+        "office_manager_action_retry_loop",
+        idle_loop,
+    )
 
     class UnexpectedBackendClient:
         def __init__(self, *args, **kwargs):
@@ -735,6 +740,8 @@ async def test_development_public_lifespan_skips_backend_preflight_when_gates_of
     async with main_module.lifespan(main_module.app):
         assert main_module.app.state.startup_complete is True
         assert main_module.app.state.office_manager_backend_contract is None
+        assert main_module.app.state.office_manager_action_retry_task is not None
+        assert main_module.app.state.office_manager_action_worker_state is not None
 
 
 def test_production_office_manager_accepts_reviewed_backend_authority(tmp_path):
@@ -773,6 +780,40 @@ def test_office_manager_kill_switch_acknowledges_without_persisting(
         configured.SLACK_RECEIPTS_DB_PATH
     )
     assert action_store.get(1) is None
+    scheduled[0].close()
+
+
+def test_disabled_ingress_resumes_exact_preexisting_action(
+    tmp_path,
+    monkeypatch,
+):
+    enabled = _settings(tmp_path, OFFICE_MANAGER_ACTIONS_ENABLED=True)
+    main_module.app.dependency_overrides[get_settings] = lambda: enabled
+    scheduled = []
+    monkeypatch.setattr(main_module, "start_slack_action", scheduled.append)
+    monkeypatch.setattr(main_module, "get_current_date", lambda: date(2026, 8, 3))
+    body = _action_body()
+    headers = _signed_headers(enabled, body)
+    client = TestClient(main_module.app)
+
+    assert client.post(
+        "/slack/actions", content=body, headers=headers
+    ).status_code == 200
+    assert len(scheduled) == 1
+    scheduled.pop().close()
+
+    disabled = _settings(tmp_path, OFFICE_MANAGER_ACTIONS_ENABLED=False)
+    main_module.app.dependency_overrides[get_settings] = lambda: disabled
+    assert client.post(
+        "/slack/actions", content=body, headers=headers
+    ).status_code == 200
+
+    assert len(scheduled) == 1
+    store = action_module.get_office_manager_action_store(
+        disabled.SLACK_RECEIPTS_DB_PATH
+    )
+    assert store.get(1)["status"] == "pending"
+    assert store.get(2) is None
     scheduled[0].close()
 
 
@@ -2131,6 +2172,69 @@ async def test_backend_auth_drift_stays_pending_and_marks_readiness_until_recove
 
 
 @pytest.mark.asyncio
+async def test_slack_app_auth_failure_stays_pending_and_fails_readiness(
+    tmp_path,
+    monkeypatch,
+):
+    configured = _settings(tmp_path)
+    monkeypatch.setattr(main_module, "get_settings", lambda: configured)
+    store = action_module.OfficeManagerActionStore(
+        configured.SLACK_RECEIPTS_DB_PATH
+    )
+    action, _ = store.record_action(
+        slack_user_id="UVERIFIED",
+        channel_id="CCOWORK",
+        booking_date="2026-08-03",
+    )
+
+    def rejected_dm(*args, **kwargs):
+        return {"ok": False, "error": "account_inactive"}
+
+    async def deliver(record, current_store):
+        await main_module._send_office_manager_private_feedback(
+            channel_id=str(record["channel_id"]),
+            user_id=str(record["slack_user_id"]),
+            text="Private terminal result",
+            action=record,
+            store=current_store,
+        )
+
+    monkeypatch.setattr(main_module, "send_dm", rejected_dm)
+    await action_module.process_office_manager_action(
+        action["id"],
+        store=store,
+        processor=deliver,
+    )
+
+    pending = store.get(action["id"])
+    assert pending["status"] == "pending"
+    assert pending["last_error"] == "OfficeManagerSlackAuthenticationError"
+    assert store.operability_snapshot()["authentication_failure_count"] == 1
+
+    main_module.app.state.startup_complete = True
+    main_module.app.state.office_manager_backend_contract = None
+    main_module.app.state.slack_app_identity = None
+    main_module.app.state.office_manager_action_worker_state = {
+        "heartbeat_at": time.time(),
+        "last_error": None,
+        "backend_contract": {},
+    }
+
+    class RunningTask:
+        @staticmethod
+        def done():
+            return False
+
+    main_module.app.state.office_manager_action_retry_task = RunningTask()
+    response = await main_module.readiness_check()
+    payload = json.loads(response.body)
+    assert response.status_code == 503
+    assert "office_manager_slack_auth_failed" in (
+        payload["office_manager"]["errors"]
+    )
+
+
+@pytest.mark.asyncio
 async def test_cancellation_while_reporting_uncertain_claim_is_not_masked(
     tmp_path,
     monkeypatch,
@@ -2945,6 +3049,75 @@ async def test_inflight_slack_send_holds_delivery_fence_after_heartbeat_failure(
     assert store.reserve(action["id"], owner="replacement") is None
     allow_send_to_finish.set()
     assert await asyncio.to_thread(send_finished.wait, 1)
+
+
+def test_heartbeat_renewal_never_shortens_slack_delivery_fence(tmp_path):
+    store = action_module.OfficeManagerActionStore(tmp_path / "actions.db")
+    action, _ = store.record_action(
+        slack_user_id="UVERIFIED",
+        channel_id="CCOWORK",
+        booking_date="2026-08-03",
+    )
+    leased = store.reserve(action["id"], owner="delivery-worker")
+    assert leased is not None
+    assert store.renew_for_slack_delivery(
+        action["id"], owner="delivery-worker"
+    )
+    delivery_fence = store.get(action["id"])["locked_until"]
+
+    assert store.renew(action["id"], owner="delivery-worker")
+    assert store.get(action["id"])["locked_until"] >= delivery_fence
+
+
+@pytest.mark.asyncio
+async def test_shutdown_after_heartbeat_preserves_full_slack_delivery_fence(
+    tmp_path,
+    monkeypatch,
+):
+    store = action_module.OfficeManagerActionStore(tmp_path / "actions.db")
+    action, _ = store.record_action(
+        slack_user_id="UVERIFIED",
+        channel_id="CCOWORK",
+        booking_date="2026-08-03",
+    )
+    send_started = threading.Event()
+    allow_send_to_finish = threading.Event()
+
+    def blocking_send(*args, **kwargs):
+        send_started.set()
+        assert allow_send_to_finish.wait(timeout=2)
+        return {"ok": True}
+
+    async def deliver(record, current_store):
+        await main_module._send_office_manager_private_feedback(
+            channel_id=str(record["channel_id"]),
+            user_id=str(record["slack_user_id"]),
+            text="Private terminal result",
+            action=record,
+            store=current_store,
+        )
+
+    monkeypatch.setattr(action_module, "DEFAULT_PROCESSING_LEASE_SECONDS", 0.03)
+    monkeypatch.setattr(main_module, "send_dm", blocking_send)
+    task = asyncio.create_task(
+        action_module.process_office_manager_action(
+            action["id"],
+            store=store,
+            processor=deliver,
+        )
+    )
+    assert await asyncio.to_thread(send_started.wait, 1)
+    # Allow several ordinary heartbeat renewals to run during the blocked send.
+    await asyncio.sleep(0.06)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    current = store.get(action["id"])
+    assert current["status"] == "processing"
+    assert current["locked_until"] > time.time() + 240
+    assert store.reserve(action["id"], owner="replacement") is None
+    allow_send_to_finish.set()
 
 
 @pytest.mark.asyncio

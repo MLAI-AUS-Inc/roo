@@ -16,8 +16,9 @@ announcement.
 
 ## Configuration
 
-- `OFFICE_MANAGER_ACTIONS_ENABLED` is the Public Roo action-consumer gate. It
-  defaults to `false`.
+- `OFFICE_MANAGER_ACTIONS_ENABLED` gates admission of new Public Roo clicks and
+  defaults to `false`. The durable retry worker still runs while disabled so
+  previously accepted attempts and staged private results can finish.
 - `ROO_API_KEY` must be Roo's dedicated backend credential. It must not equal
   the backend's internal or MLAI service keys.
 - `MLAI_BACKEND_URL` must be the backend's root origin with no path, query, or
@@ -37,6 +38,9 @@ backend preflight with `ROO_API_KEY`; a wrong credential, route, contract, or
 timezone fails closed before the action worker starts. A credential rejection
 seen after startup keeps the original action pending and makes readiness fail
 with `office_manager_backend_auth_failed` until that attempt recovers. A
+Slack app credential rejection behaves the same way and reports
+`office_manager_slack_auth_failed`; it is not discarded as a member-specific
+target failure. A
 permanent, redacted Slack-target failure remains visible as an Office Manager
 warning, but does not take core Roo readiness offline.
 
@@ -75,10 +79,12 @@ reconciliation.
 
 To roll back, disable new backend Office Manager creation and Roo actions, but
 leave the backend scheduler running until committed Slack retractions have
-drained. Existing non-terminal Roo action records remain durable while the
-gate is disabled. When re-enabled, Roo reconciles them with their original
-attempt ID even after the Melbourne-local date changes; historical results
-name the original date and explicitly say that no current action is required.
+drained. Roo continues reconciling existing non-terminal action records with
+their original attempt ID while the gate is disabled, including after the
+Melbourne-local date changes; historical results name the original date and
+explicitly say that no current action is required. Deployment rollback also
+restores and health-checks the separate Slack bridge from the previous source
+revision before declaring rollback complete.
 
 ## Local verification
 

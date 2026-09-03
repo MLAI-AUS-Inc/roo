@@ -337,9 +337,22 @@ class OfficeManagerActionStore:
                         AS non_terminal_count,
                     SUM(CASE
                         WHEN status IN ('pending', 'processing')
-                         AND last_error = 'OfficeManagerClaimAuthenticationError'
+                         AND last_error IN (
+                            'OfficeManagerClaimAuthenticationError',
+                            'OfficeManagerSlackAuthenticationError'
+                         )
                         THEN 1 ELSE 0
                     END) AS authentication_failure_count,
+                    SUM(CASE
+                        WHEN status IN ('pending', 'processing')
+                         AND last_error = 'OfficeManagerClaimAuthenticationError'
+                        THEN 1 ELSE 0
+                    END) AS backend_authentication_failure_count,
+                    SUM(CASE
+                        WHEN status IN ('pending', 'processing')
+                         AND last_error = 'OfficeManagerSlackAuthenticationError'
+                        THEN 1 ELSE 0
+                    END) AS slack_authentication_failure_count,
                     SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END)
                         AS terminal_failure_count,
                     MIN(CASE
@@ -359,6 +372,12 @@ class OfficeManagerActionStore:
             "non_terminal_count": int((row or {})["non_terminal_count"] or 0),
             "authentication_failure_count": int(
                 (row or {})["authentication_failure_count"] or 0
+            ),
+            "backend_authentication_failure_count": int(
+                (row or {})["backend_authentication_failure_count"] or 0
+            ),
+            "slack_authentication_failure_count": int(
+                (row or {})["slack_authentication_failure_count"] or 0
             ),
             "terminal_failure_count": int(
                 (row or {})["terminal_failure_count"] or 0
@@ -578,7 +597,7 @@ class OfficeManagerActionStore:
                 cursor = connection.execute(
                     """
                     UPDATE office_manager_action_outbox
-                    SET locked_until = ?, updated_at = ?
+                    SET locked_until = MAX(locked_until, ?), updated_at = ?
                     WHERE id = ? AND status = 'processing' AND locked_by = ?
                       AND locked_until IS NOT NULL
                       AND locked_until > ?

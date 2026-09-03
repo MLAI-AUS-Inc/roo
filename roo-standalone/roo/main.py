@@ -2640,28 +2640,29 @@ async def lifespan(app: FastAPI):
                 )
             )
             app.state.meeting_room_action_retry_task = meeting_room_action_retry_task
-        if settings.OFFICE_MANAGER_ACTIONS_ENABLED:
-            assert office_manager_contract is not None
-            office_manager_worker_state = {
-                "started_at": time.time(),
-                "heartbeat_at": time.time(),
-                "last_success_at": None,
-                "last_error": None,
-                "backend_contract": dict(office_manager_contract),
-            }
-            app.state.office_manager_action_worker_state = (
-                office_manager_worker_state
+        # The flag controls admission of new clicks, not recovery of durable
+        # attempts accepted before a restart or rollback. Always run the
+        # recovery worker on Public Roo and expose its health.
+        office_manager_worker_state = {
+            "started_at": time.time(),
+            "heartbeat_at": time.time(),
+            "last_success_at": None,
+            "last_error": None,
+            "backend_contract": dict(office_manager_contract or {}),
+        }
+        app.state.office_manager_action_worker_state = (
+            office_manager_worker_state
+        )
+        office_manager_action_retry_task = asyncio.create_task(
+            office_manager_action_retry_loop(
+                store=office_manager_action_store,
+                processor=_process_office_manager_action_record,
+                health_state=office_manager_worker_state,
             )
-            office_manager_action_retry_task = asyncio.create_task(
-                office_manager_action_retry_loop(
-                    store=office_manager_action_store,
-                    processor=_process_office_manager_action_record,
-                    health_state=office_manager_worker_state,
-                )
-            )
-            app.state.office_manager_action_retry_task = (
-                office_manager_action_retry_task
-            )
+        )
+        app.state.office_manager_action_retry_task = (
+            office_manager_action_retry_task
+        )
         if settings.BOOST_LINK_LOVE_ENABLED:
             link_love_task = asyncio.create_task(link_love_retry_loop())
             app.state.link_love_task = link_love_task
@@ -2845,7 +2846,9 @@ async def readiness_check():
                 )
             else:
                 readiness_errors.append("slack_app_identity_unverified")
-        if settings.OFFICE_MANAGER_ACTIONS_ENABLED:
+        # Recovery correctness remains part of readiness while admission of
+        # new Office Manager actions is disabled.
+        if settings.ROO_SURFACE == "public":
             worker_state = getattr(
                 app.state,
                 "office_manager_action_worker_state",
@@ -2887,8 +2890,14 @@ async def readiness_check():
                 oldest_due = snapshot.get("oldest_due_age_seconds")
                 if oldest_due is not None and float(oldest_due) > 60:
                     readiness_errors.append("office_manager_due_backlog_stale")
-                if int(snapshot.get("authentication_failure_count") or 0) > 0:
+                if int(
+                    snapshot.get("backend_authentication_failure_count") or 0
+                ) > 0:
                     readiness_errors.append("office_manager_backend_auth_failed")
+                if int(
+                    snapshot.get("slack_authentication_failure_count") or 0
+                ) > 0:
+                    readiness_errors.append("office_manager_slack_auth_failed")
                 if int(snapshot.get("terminal_failure_count") or 0) > 0:
                     office_manager_readiness["warnings"] = [
                         "office_manager_terminal_failures"
@@ -5396,6 +5405,10 @@ class OfficeManagerClaimAuthenticationError(OfficeManagerClaimUncertainError):
     """The backend rejected Roo's credential and the claim must stay pending."""
 
 
+class OfficeManagerSlackAuthenticationError(RuntimeError):
+    """Slack rejected Roo's app credential; recovery must remain pending."""
+
+
 OFFICE_MANAGER_BOUND_TERMINAL_ERROR_CODES = {
     "already_claimed",
     "announcement_superseded",
@@ -5612,6 +5625,10 @@ async def _send_office_manager_private_feedback(
             if _office_manager_slack_delivery_accepted(response):
                 return
             error_code = _slack_error_code(response)
+            if error_code in OFFICE_MANAGER_SLACK_AUTHENTICATION_ERRORS:
+                raise OfficeManagerSlackAuthenticationError(
+                    f"slack_auth:{error_code}"
+                )
             if error_code in PERMANENT_TARGET_NOTIFICATION_ERRORS:
                 raise OfficeManagerActionPermanentError(
                     f"slack_target:{error_code}"
@@ -5620,9 +5637,15 @@ async def _send_office_manager_private_feedback(
         except Exception as exc:
             if isinstance(exc, OfficeManagerActionPermanentError):
                 raise
+            if isinstance(exc, OfficeManagerSlackAuthenticationError):
+                raise
             if _office_manager_slack_delivery_accepted(exc):
                 return
             error_code = _slack_error_code(exc)
+            if error_code in OFFICE_MANAGER_SLACK_AUTHENTICATION_ERRORS:
+                raise OfficeManagerSlackAuthenticationError(
+                    f"slack_auth:{error_code}"
+                ) from exc
             if error_code in PERMANENT_TARGET_NOTIFICATION_ERRORS:
                 raise OfficeManagerActionPermanentError(
                     f"slack_target:{error_code}"
@@ -5970,9 +5993,17 @@ def _office_manager_slack_delivery_accepted(value: Any) -> bool:
 
 
 PERMANENT_TARGET_NOTIFICATION_ERRORS = {
-    "account_inactive",
     "user_not_found",
     "users_not_found",
+}
+
+OFFICE_MANAGER_SLACK_AUTHENTICATION_ERRORS = {
+    "account_inactive",
+    "invalid_auth",
+    "missing_scope",
+    "not_allowed_token_type",
+    "not_authed",
+    "token_revoked",
 }
 
 
@@ -7060,19 +7091,6 @@ async def slack_actions(
         if settings.ROO_SURFACE != "public":
             print("Ignoring Office Manager action outside Public Roo")
             return JSONResponse(status_code=200, content={})
-        if not settings.OFFICE_MANAGER_ACTIONS_ENABLED:
-            if is_duplicate_request:
-                print("↩️ Ignoring duplicate disabled Office Manager action request")
-                return JSONResponse(status_code=200, content={})
-            if user_id and channel_id:
-                start_slack_action(
-                    _send_office_manager_private_feedback(
-                        channel_id=str(channel_id),
-                        user_id=str(user_id),
-                        text="Office Manager volunteering is temporarily unavailable.",
-                    )
-                )
-            return JSONResponse(status_code=200, content={})
         try:
             action_value = json.loads(
                 str(office_manager_action.get("value") or "{}")
@@ -7114,6 +7132,52 @@ async def slack_actions(
             if action_ts and generation is not None
             else None
         )
+        if not settings.OFFICE_MANAGER_ACTIONS_ENABLED:
+            action_store = get_office_manager_action_store(
+                settings.SLACK_RECEIPTS_DB_PATH
+            )
+            existing_action = None
+            if action_occurrence_key:
+                existing_action = await asyncio.to_thread(
+                    action_store.get_by_action_occurrence_key,
+                    action_occurrence_key,
+                )
+            if existing_action is None and request_fingerprint:
+                existing_action = await asyncio.to_thread(
+                    action_store.get_by_request_fingerprint,
+                    request_fingerprint,
+                )
+            exact_existing_action = bool(
+                existing_action is not None
+                and str(existing_action["slack_user_id"]) == str(user_id)
+                and str(existing_action["channel_id"]) == str(channel_id)
+                and str(existing_action["booking_date"]) == booking_date
+                and int(existing_action.get("generation") or 1) == generation
+            )
+            if exact_existing_action:
+                start_slack_action(
+                    process_office_manager_action(
+                        int(existing_action["id"]),
+                        store=action_store,
+                        processor=_process_office_manager_action_record,
+                    )
+                )
+            elif not is_duplicate_request and user_id and channel_id:
+                start_slack_action(
+                    _send_office_manager_private_feedback(
+                        channel_id=str(channel_id),
+                        user_id=str(user_id),
+                        text=(
+                            "Office Manager volunteering is temporarily "
+                            "unavailable."
+                        ),
+                    )
+                )
+            else:
+                print(
+                    "↩️ Ignoring duplicate disabled Office Manager action request"
+                )
+            return JSONResponse(status_code=200, content={})
         if (
             user_id
             and channel_id

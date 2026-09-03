@@ -219,6 +219,43 @@ jobs:
               previous_image_id="$(docker inspect --format '{{.Image}}' "$previous_container_id")"
               previous_image_ref="$(docker inspect --format '{{.Config.Image}}' "$previous_container_id")"
             fi
+            previous_bridge_mode="none"
+            if command -v systemctl >/dev/null 2>&1 \
+              && systemctl is-active --quiet slack-bridge.service; then
+              previous_bridge_mode="systemd"
+            elif docker compose -f docker-compose.bridge.yml ps \
+              --services --status running | grep -qx slack-bridge; then
+              previous_bridge_mode="compose"
+            fi
+
+            restart_bridge_for_checkout() {
+              case "$previous_bridge_mode" in
+                systemd)
+                  systemctl restart slack-bridge.service
+                  ;;
+                compose)
+                  docker compose -f docker-compose.bridge.yml up -d --build \
+                    --force-recreate
+                  ;;
+                none)
+                  return 0
+                  ;;
+              esac
+              bridge_attempt=0
+              until bridge_container_id="$(docker compose \
+                -f docker-compose.bridge.yml ps -q slack-bridge)" \
+                && [ -n "$bridge_container_id" ] \
+                && [ "$(docker inspect --format \
+                  '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' \
+                  "$bridge_container_id")" = "healthy" ]; do
+                bridge_attempt=$((bridge_attempt + 1))
+                if [ "$bridge_attempt" -ge 18 ]; then
+                  echo "Slack bridge readiness check timed out" >&2
+                  return 1
+                fi
+                sleep 5
+              done
+            }
 
             rollback_release() {
               status="$?"
@@ -237,6 +274,14 @@ jobs:
                 if [ -n "$previous_image_id" ] && [ -n "$previous_image_ref" ]; then
                   docker image tag "$previous_image_id" "$previous_image_ref" || true
                   docker compose --ansi never up -d --no-build --force-recreate --remove-orphans || true
+                fi
+                # The bridge is built from the same checkout but supervised
+                # separately. Restore and verify it after returning to the
+                # previous source revision so a rejected candidate cannot stay
+                # live beside a rolled-back Roo service.
+                if ! restart_bridge_for_checkout; then
+                  echo "Slack bridge rollback failed" >&2
+                  status=1
                 fi
               fi
               rm -f "$previous_env_backup"
@@ -320,31 +365,8 @@ jobs:
             # The cross-workspace Slack bridge is a separate Compose project.
             # Rebuild it when it is already deployed, preserving its current
             # supervisor instead of silently leaving old mention logic live.
-            bridge_restarted=0
-            if command -v systemctl >/dev/null 2>&1 \
-              && systemctl is-active --quiet slack-bridge.service; then
-              systemctl restart slack-bridge.service
-              bridge_restarted=1
-            elif docker compose -f docker-compose.bridge.yml ps \
-              --services --status running | grep -qx slack-bridge; then
-              docker compose -f docker-compose.bridge.yml up -d --build
-              bridge_restarted=1
-            fi
-            if [ "$bridge_restarted" -eq 1 ]; then
-              bridge_attempt=0
-              until bridge_container_id="$(docker compose \
-                -f docker-compose.bridge.yml ps -q slack-bridge)" \
-                && [ -n "$bridge_container_id" ] \
-                && [ "$(docker inspect --format \
-                  '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' \
-                  "$bridge_container_id")" = "healthy" ]; do
-                bridge_attempt=$((bridge_attempt + 1))
-                if [ "$bridge_attempt" -ge 18 ]; then
-                  echo "Slack bridge readiness check timed out" >&2
-                  exit 1
-                fi
-                sleep 5
-              done
+            if [ "$previous_bridge_mode" != "none" ]; then
+              restart_bridge_for_checkout
             else
               echo "Slack bridge is not deployed on this host; skipping restart"
             fi
