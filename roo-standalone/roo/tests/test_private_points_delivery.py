@@ -474,13 +474,15 @@ class CoworkingClient:
 
     async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None):
         return {
-            "id": "booking-private-delivery",
+            "id": "00000000-0000-4000-8000-000000000003",
             "date": booking_date,
             "status": "booked",
             "points_cost": 4,
             "standard_points_cost": 8,
             "monthly_update_discount_applied": True,
             "founder_tools_explicitly_linked": False,
+            "founder_tools_connection_type": None,
+            "founder_tools_account_linked": False,
         }
 
     async def get_balance(self, slack_user_id):

@@ -567,7 +567,7 @@ class CoworkingBookingIntentStore:
                         notification_locked_by = ?,
                         updated_at = ?
                     WHERE id = ?
-                      AND status IN ('confirmed', 'blocked')
+                      AND status IN ('confirmed', 'blocked', 'batch_blocked')
                       AND (
                         notification_status IN ('pending', 'pending_retry')
                         OR (
@@ -605,7 +605,7 @@ class CoworkingBookingIntentStore:
                     """
                     SELECT id
                     FROM coworking_booking_intents
-                    WHERE status IN ('confirmed', 'blocked')
+                    WHERE status IN ('confirmed', 'blocked', 'batch_blocked')
                       AND (
                         (
                             notification_status IN ('pending', 'pending_retry')
@@ -658,7 +658,7 @@ class CoworkingBookingIntentStore:
                         notification_delivered_at = ?,
                         updated_at = ?
                     WHERE id = ?
-                      AND status IN ('confirmed', 'blocked')
+                      AND status IN ('confirmed', 'blocked', 'batch_blocked')
                       AND notification_status = 'delivering'
                       AND notification_locked_by = ?
                     """,
@@ -699,7 +699,7 @@ class CoworkingBookingIntentStore:
                         notification_last_error = ?,
                         updated_at = ?
                     WHERE id = ?
-                      AND status IN ('confirmed', 'blocked')
+                      AND status IN ('confirmed', 'blocked', 'batch_blocked')
                       AND notification_status = 'delivering'
                       AND notification_locked_by = ?
                     """,
@@ -814,11 +814,19 @@ class CoworkingBookingIntentStore:
                     UPDATE coworking_booking_intents
                     SET status = 'batch_blocked', locked_until = NULL,
                         locked_by = NULL, last_error = ?,
-                        notification_status = 'not_required',
-                        notification_next_attempt_at = NULL, updated_at = ?
+                        notification_status = 'pending',
+                        notification_next_attempt_at = ?,
+                        notification_locked_until = NULL,
+                        notification_locked_by = NULL,
+                        notification_last_error = NULL,
+                        notification_delivered_at = NULL,
+                        updated_at = ?
                     WHERE id = ? AND status = 'batch_processing' AND locked_by = ?
                     """,
-                    (str(error), current_time, int(intent_id), str(owner)),
+                    (
+                        str(error), current_time, current_time,
+                        int(intent_id), str(owner),
+                    ),
                 )
                 if cursor.rowcount != 1:
                     return None
@@ -877,6 +885,12 @@ class CoworkingBookingIntentStore:
                         ],
                         "founder_tools_explicitly_linked": result[
                             "founder_tools_explicitly_linked"
+                        ],
+                        "founder_tools_connection_type": result[
+                            "founder_tools_connection_type"
+                        ],
+                        "founder_tools_account_linked": result[
+                            "founder_tools_account_linked"
                         ],
                     }
                     child_key = build_coworking_intent_key(slack_user_id, booking_date)
@@ -1130,6 +1144,44 @@ def _safe_post_message(
     return True
 
 
+def _safe_send_dm(
+    *,
+    user_id: str,
+    text: str,
+    client_msg_id: str,
+) -> bool:
+    if not user_id or not text:
+        return False
+    from .slack_client import send_dm
+
+    try:
+        response = send_dm(
+            user_id,
+            text,
+            client_msg_id=client_msg_id,
+            raise_on_error=True,
+        )
+    except Exception as exc:
+        error_response = getattr(exc, "response", None)
+        try:
+            duplicate_message = bool(
+                error_response is not None
+                and error_response.get("error") == "duplicate_message"
+            )
+        except (AttributeError, TypeError):
+            duplicate_message = False
+        if duplicate_message:
+            return True
+        raise
+    return bool(
+        response
+        and (
+            response.get("ok")
+            or response.get("error") == "duplicate_message"
+        )
+    )
+
+
 async def _deliver_coworking_retry_confirmation(
     *,
     client: Any,
@@ -1219,7 +1271,27 @@ async def deliver_coworking_booking_notification(
     mutation_status = str(intent.get("status") or "")
     delivery = None
     try:
-        if mutation_status == "blocked":
+        if mutation_status == "batch_blocked":
+            error_code = str(intent.get("last_error") or "unexpected_error")
+            delivered = _safe_send_dm(
+                user_id=requested_by_slack_id,
+                text=_coworking_batch_retry_blocked_message(
+                    booking_date=booking_date,
+                ),
+                client_msg_id=str(
+                    uuid5(
+                        NAMESPACE_URL,
+                        f"roo:coworking-batch-rejection:{intent_id}:{error_code}",
+                    )
+                ),
+            )
+            if not delivered:
+                raise RuntimeError(
+                    "Slack did not confirm coworking batch rejection delivery"
+                )
+            delivery = {"mode": "requester_direct_message"}
+            backend_result = None
+        elif mutation_status == "blocked":
             error_code = str(intent.get("last_error") or "unexpected_error")
             delivered = _safe_post_message(
                 channel_id=intent.get("channel_id"),
@@ -1341,6 +1413,15 @@ def _coworking_retry_blocked_message(
     return (
         "I retried your coworking booking request, but I still couldn't process it. "
         "No new booking was created. Please try again or contact an MLAI admin."
+    )
+
+
+def _coworking_batch_retry_blocked_message(*, booking_date: str) -> str:
+    return (
+        "I retried your queued multi-person coworking check-in for "
+        f"**{booking_date}**, but MLAI backend rejected it. No new bookings "
+        "were created. Please review availability, member balances, and your "
+        "admin access, then submit the batch again."
     )
 
 
@@ -1483,11 +1564,25 @@ async def process_coworking_booking_batch_intent(
                 return {"status": "stale", "intent_id": intent_id}
             return {"status": "batch_pending_retry", "error": error, "intent_id": intent_id}
         blocked = store.mark_batch_blocked(intent_id, owner=owner, error=error)
-        return {
-            "status": "batch_blocked" if blocked is not None else "stale",
-            "error": error,
-            "intent_id": intent_id,
-        }
+        if blocked is None:
+            return {"status": "stale", "error": error, "intent_id": intent_id}
+        notification = store.reserve_notification(
+            intent_id,
+            owner=f"roo-batch-rejection-{uuid4().hex}",
+        )
+        if notification is None:
+            return {
+                "status": "batch_blocked",
+                "notification_status": blocked.get("notification_status"),
+                "error": error,
+                "intent_id": intent_id,
+            }
+        return await deliver_coworking_booking_notification(
+            notification,
+            store=store,
+            client=client,
+            post_public_message=False,
+        )
     confirmed = store.mark_batch_confirmed(
         intent_id, owner=owner, backend_result=backend_result
     )

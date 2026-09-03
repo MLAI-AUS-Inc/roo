@@ -31,11 +31,13 @@ def complete_coworking_booking_result(
     booking_date,
     *,
     cost=8,
-    discount_applied=False,
+    discount_applied=None,
     explicitly_linked=False,
 ):
+    if discount_applied is None:
+        discount_applied = cost < 8
     return {
-        "id": "booking-1",
+        "id": "00000000-0000-4000-8000-000000000001",
         "date": booking_date,
         "status": "booked",
         "points_cost": cost,

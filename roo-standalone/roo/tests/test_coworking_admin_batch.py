@@ -36,8 +36,16 @@ def _batch_result(*, first_created=True, second_created=True):
         "date": "2026-07-04", "admin_slack_user_id": "UADMIN", "target_count": 2,
         "created_count": created_count, "already_booked_count": 2 - created_count,
         "standard_points_cost": 8,
-        "results": [_batch_row("U1", "booking-1", created=first_created),
-                    _batch_row("U2", "booking-2", created=second_created)],
+        "results": [
+            _batch_row(
+                "U1", "00000000-0000-4000-8000-000000000001",
+                created=first_created,
+            ),
+            _batch_row(
+                "U2", "00000000-0000-4000-8000-000000000002",
+                created=second_created,
+            ),
+        ],
     }
 
 
@@ -117,6 +125,18 @@ def batch_runtime(monkeypatch, tmp_path):
         direct_messages.append({"user": user_id, "text": text, **kwargs})
         return {"ok": True}
     monkeypatch.setattr(executor_module, "send_dm", send_dm)
+    monkeypatch.setattr(
+        coworking_module,
+        "_safe_send_dm",
+        lambda user_id, text, client_msg_id: direct_messages.append(
+            {
+                "user": user_id,
+                "text": text,
+                "client_msg_id": client_msg_id,
+            }
+        )
+        or True,
+    )
     return {"store": store, "db_path": db_path, "direct_messages": direct_messages}
 
 
@@ -259,6 +279,108 @@ async def test_malformed_batch_success_is_persisted_for_atomic_retry(
         )["notification_status"] == "pending"
         for target in ("U1", "U2")
     )
+
+
+@pytest.mark.asyncio
+async def test_retry_terminal_batch_failure_notifies_requester_privately(
+    monkeypatch, batch_runtime
+):
+    backend_module = importlib.import_module("roo.clients.mlai_backend")
+    client = FakeCoworkingClient(
+        admin_details={"role": "admin"},
+        batch_exc=backend_module.MLAIBackendUnavailableError(
+            "commit uncertain",
+            reason_code="invalid_backend_response",
+        ),
+    )
+    result = await _run_points_action(
+        client,
+        action="admin_checkin_coworking",
+        text="check <@U1> <@U2> in today",
+    )
+    assert "queued the same atomic batch" in result
+    batch_key = coworking_module.build_coworking_batch_intent_key(
+        "UADMIN", ["U1", "U2"], "2026-07-04"
+    )
+    batch = batch_runtime["store"].get_by_key(batch_key)
+
+    current_time = coworking_module._now()
+    monkeypatch.setattr(coworking_module, "_now", lambda: current_time + 60)
+    client.batch_exc = _batch_http_error(
+        {"error": "One or more users have insufficient Roo Points"}
+    )
+    due = batch_runtime["store"].claim_due_batches(
+        limit=10,
+        owner="terminal-batch-worker",
+    )
+    retry_result = await coworking_module.process_coworking_booking_batch_intent(
+        due[0],
+        store=batch_runtime["store"],
+        client=client,
+    )
+
+    assert retry_result["status"] == "batch_blocked"
+    assert retry_result["notification_status"] == "delivered"
+    assert batch_runtime["direct_messages"][-1]["user"] == "UADMIN"
+    assert "No new bookings were created" in batch_runtime["direct_messages"][-1]["text"]
+    stored = batch_runtime["store"].get(int(batch["id"]))
+    assert stored["status"] == "batch_blocked"
+    assert stored["notification_status"] == "delivered"
+
+
+@pytest.mark.asyncio
+async def test_terminal_batch_notification_retries_after_delivery_failure(
+    monkeypatch, batch_runtime
+):
+    client = FakeCoworkingClient(
+        admin_details={"role": "admin"},
+        batch_exc=_batch_http_error({"error": "capacity changed"}),
+    )
+    batch = batch_runtime["store"].record_batch_intent(
+        admin_slack_user_id="UADMIN",
+        target_slack_user_ids=["U1", "U2"],
+        booking_date="2026-07-04",
+        channel_id="C123",
+        thread_ts="111.222",
+    )
+    leased = batch_runtime["store"].reserve_batch_for_processing(
+        int(batch["id"]), owner="terminal-batch-worker"
+    )
+    monkeypatch.setattr(
+        coworking_module,
+        "_safe_send_dm",
+        lambda **kwargs: (_ for _ in ()).throw(RuntimeError("Slack down")),
+    )
+
+    retry_result = await coworking_module.process_coworking_booking_batch_intent(
+        leased,
+        store=batch_runtime["store"],
+        client=client,
+    )
+    assert retry_result["status"] == "batch_blocked"
+    assert retry_result["notification_status"] == "pending_retry"
+
+    current_time = coworking_module._now()
+    monkeypatch.setattr(coworking_module, "_now", lambda: current_time + 60)
+    delivered = []
+    monkeypatch.setattr(
+        coworking_module,
+        "_safe_send_dm",
+        lambda **kwargs: delivered.append(
+            (kwargs["user_id"], kwargs["text"], kwargs["client_msg_id"])
+        )
+        or True,
+    )
+    notification = batch_runtime["store"].claim_due_notifications(
+        limit=10, owner="terminal-notification-restart"
+    )[0]
+    recovered = await coworking_module.deliver_coworking_booking_notification(
+        notification,
+        store=batch_runtime["store"],
+        client=client,
+    )
+    assert recovered["notification_status"] == "delivered"
+    assert delivered[0][0] == "UADMIN"
 
 
 @pytest.mark.asyncio

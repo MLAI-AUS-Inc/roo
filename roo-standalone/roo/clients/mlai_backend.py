@@ -62,10 +62,18 @@ def validate_coworking_booking_result(
     standard_points_cost = payload.get("standard_points_cost")
     discount_applied = payload.get("monthly_update_discount_applied")
     explicitly_linked = payload.get("founder_tools_explicitly_linked")
+    connection_type = payload.get("founder_tools_connection_type")
+    account_linked = payload.get("founder_tools_account_linked")
+
+    valid_booking_id = False
+    if isinstance(booking_id, str):
+        try:
+            valid_booking_id = str(UUID(booking_id.strip())) == booking_id.strip().lower()
+        except (ValueError, AttributeError):
+            valid_booking_id = False
 
     complete = (
-        isinstance(booking_id, str)
-        and bool(booking_id.strip())
+        valid_booking_id
         and isinstance(booking_date, str)
         and bool(booking_date.strip())
         and status == "booked"
@@ -77,6 +85,11 @@ def validate_coworking_booking_result(
         and standard_points_cost >= points_cost
         and isinstance(discount_applied, bool)
         and isinstance(explicitly_linked, bool)
+        and isinstance(account_linked, bool)
+        and connection_type in {None, "direct", "explicit"}
+        and discount_applied is (points_cost < standard_points_cost)
+        and account_linked is (connection_type is not None)
+        and explicitly_linked is (connection_type == "explicit")
     )
     if expected_date is not None:
         complete = complete and booking_date == str(expected_date)
@@ -185,6 +198,8 @@ def validate_coworking_booking_batch_result(
                 "standard_points_cost": row_standard_cost,
                 "monthly_update_discount_applied": discount_applied,
                 "founder_tools_explicitly_linked": explicitly_linked,
+                "founder_tools_connection_type": connection_type,
+                "founder_tools_account_linked": account_linked,
             },
             expected_date=expected_date,
         )

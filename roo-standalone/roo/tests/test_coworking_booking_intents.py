@@ -30,13 +30,16 @@ def booking_result(
     already_booked=False,
 ):
     return {
-        "id": "booking-1",
+        "id": "00000000-0000-4000-8000-000000000001",
         "date": "2026-04-22",
         "status": "booked",
         "points_cost": cost,
         "standard_points_cost": 8,
         "monthly_update_discount_applied": discount_applied,
         "founder_tools_account_linked": explicitly_linked,
+        "founder_tools_connection_type": (
+            "explicit" if explicitly_linked else None
+        ),
         "founder_tools_explicitly_linked": explicitly_linked,
         "already_booked": already_booked,
         "idempotent": already_booked,

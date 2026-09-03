@@ -312,7 +312,10 @@ def valid_coworking_batch_result():
         "date": "2026-07-04", "admin_slack_user_id": "UADMIN",
         "target_count": 2, "created_count": 2, "already_booked_count": 0,
         "standard_points_cost": 8,
-        "results": [row("U1", "booking-1"), row("U2", "booking-2")],
+        "results": [
+            row("U1", "00000000-0000-4000-8000-000000000001"),
+            row("U2", "00000000-0000-4000-8000-000000000002"),
+        ],
     }
 
 
@@ -361,12 +364,14 @@ async def test_book_coworking_many_treats_malformed_2xx_as_commit_uncertain(
 
 def valid_coworking_booking_result():
     return {
-        "id": "booking-1",
+        "id": "00000000-0000-4000-8000-000000000001",
         "date": "2026-07-04",
         "status": "booked",
         "points_cost": 8,
         "standard_points_cost": 8,
         "monthly_update_discount_applied": False,
+        "founder_tools_connection_type": None,
+        "founder_tools_account_linked": False,
         "founder_tools_explicitly_linked": False,
     }
 
@@ -403,6 +408,18 @@ async def test_book_coworking_validates_complete_success_response(monkeypatch):
         b'{"id":"booking-1","date":"2026-07-05","status":"booked",'
         b'"points_cost":8,"standard_points_cost":8,'
         b'"monthly_update_discount_applied":false,'
+        b'"founder_tools_explicitly_linked":false}',
+        b'{"id":"00000000-0000-4000-8000-000000000001",'
+        b'"date":"2026-07-04","status":"booked","points_cost":4,'
+        b'"standard_points_cost":8,"monthly_update_discount_applied":false,'
+        b'"founder_tools_connection_type":"explicit",'
+        b'"founder_tools_account_linked":true,'
+        b'"founder_tools_explicitly_linked":true}',
+        b'{"id":"00000000-0000-4000-8000-000000000001",'
+        b'"date":"2026-07-04","status":"booked","points_cost":8,'
+        b'"standard_points_cost":8,"monthly_update_discount_applied":false,'
+        b'"founder_tools_connection_type":null,'
+        b'"founder_tools_account_linked":true,'
         b'"founder_tools_explicitly_linked":false}',
     ],
 )
