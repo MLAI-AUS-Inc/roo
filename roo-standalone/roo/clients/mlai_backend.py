@@ -25,6 +25,7 @@ from ..backend_identity import (
     get_backend_actor_context,
 )
 from ..config import get_settings
+from ..office_manager_actions import canonical_office_manager_generation
 
 CONTENT_FACTORY_REQUEST_SOURCE = "roo_slackbot"
 FULL_POINTS_ADMIN_ROLES = {"admin", "committee", "portfolio_lead"}
@@ -63,9 +64,10 @@ class MLAIBackendClient:
             settings = get_settings()
 
         self.base_url = base_url or (settings.MLAI_BACKEND_URL if settings else None)
-        self.api_key = api_key or (
+        self.roo_api_key = api_key or (
             settings.ROO_API_KEY if settings else None
-        ) or (
+        )
+        self.api_key = self.roo_api_key or (
             settings.MLAI_API_KEY if settings else None
         )
         self.internal_api_key = (
@@ -133,13 +135,19 @@ class MLAIBackendClient:
         duration_ms: float,
         circuit_open: bool,
         circuit_breaker: bool,
+        redact_logs: bool = False,
     ) -> None:
+        exception_detail = (
+            f"exc_type={exc.__class__.__name__}"
+            if redact_logs
+            else f"exc_type={exc.__class__.__name__} exc_repr={exc!r}"
+        )
         print(
             "🌐 MLAI request_failed "
             f"method={method.upper()} endpoint={endpoint} "
             f"attempt={attempt}/{total_attempts} timeout_bucket={timeout}s request_id={request_id} "
             f"duration_ms={duration_ms:.2f} "
-            f"exc_type={exc.__class__.__name__} exc_repr={exc!r} "
+            f"{exception_detail} "
             f"circuit_breaker={circuit_breaker} circuit_open={circuit_open}"
         )
 
@@ -270,6 +278,7 @@ class MLAIBackendClient:
         use_admin_headers: bool = False,
         use_org_memory_identity: bool = False,
         use_victor_ai_identity: bool = False,
+        redact_logs: bool = False,
     ) -> httpx.Response:
         if not self.base_url:
             raise ValueError("MLAI_BACKEND_URL not configured")
@@ -333,6 +342,7 @@ class MLAIBackendClient:
                     duration_ms=duration_ms,
                     circuit_open=circuit_open,
                     circuit_breaker=circuit_breaker,
+                    redact_logs=redact_logs,
                 )
                 if attempt < total_attempts:
                     await asyncio.sleep(retry_backoff_seconds * (2 ** (attempt - 1)))
@@ -2411,6 +2421,65 @@ class MLAIBackendClient:
         )
         response.raise_for_status()
         return response.json()
+
+    async def claim_office_manager_day(
+        self,
+        slack_user_id: str,
+        booking_date: str,
+        attempt_id: str = "",
+        generation: int = 1,
+    ) -> dict:
+        """Claim today's Office Manager role using the verified Slack actor."""
+        if not self.roo_api_key:
+            raise BackendIdentityError(
+                "ROO_API_KEY is required for Office Manager claims"
+            )
+        attempt_id = str(attempt_id or "").strip()
+        try:
+            parsed_attempt_id = UUID(attempt_id)
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise ValueError("attempt_id must be a canonical UUID") from exc
+        if str(parsed_attempt_id) != attempt_id:
+            raise ValueError("attempt_id must be a canonical UUID")
+        generation = canonical_office_manager_generation(generation)
+        response = await self._request(
+            "POST",
+            f"{self._points_base}/coworking/office-manager/claim/",
+            json={
+                "slack_user_id": self._clean_slack_id(slack_user_id),
+                "date": str(booking_date or "").strip(),
+                "attempt_id": attempt_id,
+                "generation": generation,
+            },
+            timeout=15.0,
+            transport_retries=1,
+            retry_backoff_seconds=0.5,
+            circuit_breaker=True,
+            redact_logs=True,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def get_office_manager_preflight(self) -> dict:
+        """Prove the exact Office Manager route accepts Roo's strict identity."""
+        if not self.roo_api_key:
+            raise BackendIdentityError(
+                "ROO_API_KEY is required for Office Manager preflight"
+            )
+        response = await self._request(
+            "GET",
+            f"{self._points_base}/coworking/office-manager/preflight/",
+            timeout=5.0,
+            transport_retries=1,
+            retry_backoff_seconds=0.25,
+            circuit_breaker=False,
+            redact_logs=True,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise ValueError("Office Manager preflight returned an invalid payload")
+        return payload
     
     async def get_github_auth_url(self, slack_user_id: str, domain: Optional[str] = None) -> dict:
         """Get the GitHub OAuth URL for a user from the backend."""

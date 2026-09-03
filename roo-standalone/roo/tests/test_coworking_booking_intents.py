@@ -89,7 +89,11 @@ async def test_process_intent_confirms_existing_booking_and_notifies(tmp_path, m
         {
             "channel": "C123",
             "thread_ts": "111.222",
-            "text": "I retried your queued coworking booking and confirmed 2026-04-22. You're booked.",
+            "text": (
+                "I retried your queued coworking booking and confirmed "
+                "2026-04-22. You're booked.\n\n"
+                "Reminder: no food is permitted in the coworking space."
+            ),
         }
     ]
 
@@ -135,10 +139,11 @@ async def test_process_admin_checkin_intent_names_target_user_in_retry_notificat
         {
             "channel": "C123",
             "thread_ts": "111.222",
-            "text": (
-                "I retried the queued coworking check-in for <@UTARGET> "
-                "and confirmed 2026-04-22. They're booked."
-            ),
+                "text": (
+                    "I retried the queued coworking check-in for <@UTARGET> "
+                    "and confirmed 2026-04-22. They're booked.\n\n"
+                    "Reminder: no food is permitted in the coworking space."
+                ),
         }
     ]
 

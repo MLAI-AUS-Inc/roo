@@ -241,6 +241,8 @@ def test_production_dotenv_does_not_mount_docs_or_schema(tmp_path):
         "SLACK_BOT_TOKEN=test\n"
         "SLACK_SIGNING_SECRET=test\n"
         "OPENAI_API_KEY=test\n"
+        "MLAI_BACKEND_URL=https://api.mlai.au\n"
+        "ROO_API_KEY=roo-test-key\n"
     )
     code = (
         "from roo.main import app; "
@@ -425,7 +427,7 @@ def test_deploy_workflow_requires_and_secretly_upserts_security_values():
     assert "envs: SIM_PATIENT_API_KEY,SIM_PATIENT_SAFETY_SALT" in workflow
     assert (
         "envs: SIM_PATIENT_API_KEY,SIM_PATIENT_SAFETY_SALT,ROO_API_KEY,"
-        "VICTOR_AI_ROO_SIGNING_SECRET,ROO_PRIVATE_BASE_URL,"
+        "VICTOR_AI_ROO_SIGNING_SECRET,ROO_PUBLIC_HOST,ROO_PRIVATE_BASE_URL,"
         "MEETING_ROOM_BOOKING_ENABLED"
     ) in workflow
     assert 'upsert_env "ROO_ENVIRONMENT" "production"' in workflow
@@ -460,9 +462,37 @@ def test_deploy_workflow_requires_and_secretly_upserts_security_values():
     assert workflow.index(
         'upsert_env "MEETING_ROOM_BOOKING_ENABLED"'
     ) < workflow.index("docker compose up")
+    preflight = (
+        "MLAIBackendClient().get_office_manager_preflight()"
+    )
+    assert "docker compose build roo" in workflow
+    assert preflight in workflow
+    assert "_validate_office_manager_backend_contract" in workflow
+    assert workflow.index("docker compose build roo") < workflow.index(preflight)
+    assert workflow.index(preflight) < workflow.index("docker compose up")
+    assert "rollback_release()" in workflow
+    assert "trap rollback_release EXIT" in workflow
+    assert 'git checkout --detach "$previous_release_sha"' in workflow
+    assert 'docker image tag "$previous_image_id" "$previous_image_ref"' in workflow
+    assert (
+        "docker compose --ansi never up -d --no-build --force-recreate "
+        "--remove-orphans"
+    ) in workflow
+    assert workflow.index("previous_image_id=") < workflow.index("docker compose build roo")
+    assert workflow.index("trap rollback_release EXIT") < workflow.index(
+        "docker compose up -d --remove-orphans"
+    )
     assert "systemctl restart slack-bridge.service" in workflow
     assert "docker compose -f docker-compose.bridge.yml up -d --build" in workflow
     assert "Slack bridge readiness check timed out" in workflow
+    assert workflow.index("previous_bridge_mode=") < workflow.index(
+        "rollback_release()"
+    )
+    rollback_body = workflow.split("rollback_release() {", 1)[1].split(
+        "trap rollback_release EXIT", 1
+    )[0]
+    assert "restart_bridge_for_checkout" in rollback_body
+    assert "Slack bridge rollback failed" in rollback_body
     assert workflow.index("upsert_env \"SIM_PATIENT_API_KEY\"") < workflow.index("docker compose up")
     assert 'echo "$SIM_PATIENT_API_KEY"' not in workflow
     assert 'echo "$SIM_PATIENT_SAFETY_SALT"' not in workflow
@@ -474,9 +504,15 @@ def test_deploy_workflow_requires_and_secretly_upserts_security_values():
     assert "http://10.126.0.5/api/sim-patient" not in workflow
     assert 'if [ "$private_status" != "422" ]' in workflow
     assert "Verify public Roo containment" in workflow
-    assert "expect_status 404 GET /docs" in workflow
-    assert "expect_status 404 POST /api/mention" in workflow
-    assert "expect_status 403 POST /api/sim-patient" in workflow
+    assert "expect_public_status 404 GET /docs" in workflow
+    assert "expect_public_status 404 POST /api/mention" in workflow
+    assert "expect_public_status 403 POST /api/sim-patient" in workflow
+    assert workflow.index("expect_public_status 200 GET /healthz/ready") < (
+        workflow.index("docker image prune -f")
+    )
+    assert workflow.index("expect_public_status 200 GET /healthz/ready") > (
+        workflow.index("trap rollback_release EXIT")
+    )
 
 
 def test_nginx_exposes_only_slack_health_and_vpc_service_routes():

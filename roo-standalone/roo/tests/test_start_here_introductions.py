@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 sys.modules.setdefault("frontmatter", SimpleNamespace(load=lambda *args, **kwargs: None))
 
 intro = importlib.import_module("roo.start_here_introductions")
+slack_client = importlib.import_module("roo.slack_client")
 
 
 class FakeLLMResponse:
@@ -89,6 +90,36 @@ def edit_event(*, ts="111.000", text=None):
             or "Hi, I'm Jordan, a product manager building software that helps tradies quote jobs.",
         },
     }
+
+
+def test_award_notification_does_not_include_coworking_rules(monkeypatch):
+    posted = []
+    monkeypatch.setattr(
+        slack_client,
+        "post_message",
+        lambda **kwargs: posted.append(kwargs),
+    )
+
+    intro.post_award_notification(
+        {
+            "channel_id": "CSTART",
+            "canonical_message_ts": "111.000",
+            "slack_user_id": "UNEW",
+            "points_awarded": 4,
+        }
+    )
+
+    assert posted == [
+        {
+            "channel": "CSTART",
+            "thread_ts": "111.000",
+            "text": (
+                "Welcome <@UNEW>! You've earned 4 Roo points for introducing "
+                "yourself or your startup."
+            ),
+        }
+    ]
+    assert "food" not in posted[0]["text"].lower()
 
 
 def test_normalize_intro_event_accepts_canonical_edits_and_rejects_threads_and_bots():
