@@ -63,6 +63,7 @@ from .points_flex import (
 from .slack_client import (
     delete_message,
     get_bot_user_id,
+    get_slack_app_identity,
     get_message,
     get_recent_channel_messages,
     get_thread_messages,
@@ -2572,6 +2573,7 @@ async def lifespan(app: FastAPI):
     app.state.startup_complete = False
     app.state.office_manager_action_worker_state = None
     app.state.office_manager_backend_contract = None
+    app.state.slack_app_identity = None
     coworking_retry_task: Optional[asyncio.Task] = None
     boost_post_retry_task: Optional[asyncio.Task] = None
     link_love_task: Optional[asyncio.Task] = None
@@ -2589,7 +2591,7 @@ async def lifespan(app: FastAPI):
     agent = get_agent()
     print(f"   Loaded {len(agent.skills)} skills")
     office_manager_contract: Optional[dict[str, Any]] = None
-    if settings.ROO_SURFACE == "public":
+    if settings.authenticated_backend_preflight_required:
         from .clients.mlai_backend import MLAIBackendClient
 
         office_manager_backend = MLAIBackendClient(
@@ -2606,6 +2608,9 @@ async def lifespan(app: FastAPI):
         )
         app.state.office_manager_backend_contract = dict(
             office_manager_contract
+        )
+        app.state.slack_app_identity = await asyncio.to_thread(
+            get_slack_app_identity
         )
     if settings.ROO_SURFACE == "public":
         # Retention is independent of whether new Office Manager clicks are
@@ -2824,12 +2829,22 @@ async def readiness_check():
             "office_manager_backend_contract",
             None,
         )
-        if isinstance(backend_contract, dict):
-            office_manager_readiness["backend_contract"] = dict(
-                backend_contract
-            )
-        else:
-            readiness_errors.append("office_manager_backend_contract_unverified")
+        slack_app_identity = getattr(app.state, "slack_app_identity", None)
+        if settings.authenticated_backend_preflight_required:
+            if isinstance(backend_contract, dict):
+                office_manager_readiness["backend_contract"] = dict(
+                    backend_contract
+                )
+            else:
+                readiness_errors.append(
+                    "office_manager_backend_contract_unverified"
+                )
+            if isinstance(slack_app_identity, dict):
+                office_manager_readiness["slack_identity"] = dict(
+                    slack_app_identity
+                )
+            else:
+                readiness_errors.append("slack_app_identity_unverified")
         if settings.OFFICE_MANAGER_ACTIONS_ENABLED:
             worker_state = getattr(
                 app.state,
@@ -5573,7 +5588,15 @@ async def _send_office_manager_private_feedback(
             raise OfficeManagerActionLeaseLostError(
                 "office_manager_feedback_lease_lost"
             )
-        if not await asyncio.to_thread(store.owns_lease, action_id, owner=owner):
+        # Extend the fence immediately before entering Slack's blocking client.
+        # If lease renewal is uncertain, this worker must not start a user-visible
+        # side effect. A replacement remains fenced while any already-started,
+        # bounded Slack call drains in its thread.
+        if not await asyncio.to_thread(
+            store.renew_for_slack_delivery,
+            action_id,
+            owner=owner,
+        ):
             raise OfficeManagerActionLeaseLostError(
                 "office_manager_feedback_lease_lost"
             )
@@ -7066,8 +7089,10 @@ async def slack_actions(
         except ValueError:
             generation = None
         try:
-            is_current_booking_date = (
-                date.fromisoformat(booking_date) == get_current_date()
+            parsed_booking_date = date.fromisoformat(booking_date)
+            is_current_booking_date = bool(
+                booking_date == parsed_booking_date.isoformat()
+                and parsed_booking_date == get_current_date()
             )
         except ValueError:
             is_current_booking_date = False

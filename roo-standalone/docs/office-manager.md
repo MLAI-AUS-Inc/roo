@@ -6,7 +6,8 @@ durably records each click, sends a stable `attempt_id` to `mlai-backend`, and
 delivers the backend's authoritative result privately.
 
 Each current announcement encodes a positive integer claim epoch in its button
-value, for example `{"date":"2026-08-03","generation":2}`. Buttons created
+value, for example `{"date":"2026-08-03","generation":2}`. Dates must use
+the exact `YYYY-MM-DD` representation. Buttons created
 before the epoch field existed are generation 1. Roo rejects booleans, strings,
 floats, zero, negative values, and integers outside SQLite's signed range. It
 persists the validated generation with the attempt and sends that exact value
@@ -30,6 +31,7 @@ announcement.
 
 The readiness endpoint exposes a non-secret `office_manager` contract with the
 gate state, backend base URL, claim path, authenticated backend contract,
+Slack `team_id`, `bot_id`, and bot `user_id`,
 worker heartbeat, and content-free outbox health. Startup calls the exact
 backend preflight with `ROO_API_KEY`; a wrong credential, route, contract, or
 timezone fails closed before the action worker starts. A credential rejection
@@ -65,7 +67,8 @@ reconciliation.
    container. The preflight may report the backend creation gate disabled
    during this staged interval; retries remain durable.
 5. Enable `OFFICE_MANAGER_ENABLED` on the backend only after Roo is ready.
-   Verify the backend preflight accepts the real Slack app/channel and the Roo
+   Verify the backend preflight accepts the real Slack app/channel, matches its
+   team and bot identity to Roo readiness, and accepts the Roo
    readiness contract, then smoke-test one signed volunteer click, an exact
    retry of that click, and a genuinely new click. Monitor pending action age
    and terminal failures.

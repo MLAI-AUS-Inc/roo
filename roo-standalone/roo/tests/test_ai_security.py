@@ -470,6 +470,18 @@ def test_deploy_workflow_requires_and_secretly_upserts_security_values():
     assert "_validate_office_manager_backend_contract" in workflow
     assert workflow.index("docker compose build roo") < workflow.index(preflight)
     assert workflow.index(preflight) < workflow.index("docker compose up")
+    assert "rollback_release()" in workflow
+    assert "trap rollback_release EXIT" in workflow
+    assert 'git checkout --detach "$previous_release_sha"' in workflow
+    assert 'docker image tag "$previous_image_id" "$previous_image_ref"' in workflow
+    assert (
+        "docker compose --ansi never up -d --no-build --force-recreate "
+        "--remove-orphans"
+    ) in workflow
+    assert workflow.index("previous_image_id=") < workflow.index("docker compose build roo")
+    assert workflow.index("trap rollback_release EXIT") < workflow.index(
+        "docker compose up -d --remove-orphans"
+    )
     assert "systemctl restart slack-bridge.service" in workflow
     assert "docker compose -f docker-compose.bridge.yml up -d --build" in workflow
     assert "Slack bridge readiness check timed out" in workflow

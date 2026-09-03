@@ -15260,7 +15260,32 @@ Chunk {index} source: {label}
                 else:
                     return "Which booking do you want to cancel? Give me the date (e.g., \"cancel coworking 2025-12-20\")"
             
-            result = await client.cancel_coworking(user_id, booking_id, booking_date)
+            if not booking_id:
+                # Resolve the user's human-friendly date to an immutable row
+                # identity before mutating. This prevents a delayed replay of
+                # an older date-based cancellation from cancelling a newer
+                # booking for the same day.
+                bookings = await client.get_my_bookings(user_id)
+                matching_bookings = [
+                    booking
+                    for booking in bookings
+                    if str(booking.get("date") or "") == str(booking_date)
+                    and str(booking.get("status") or "") == "booked"
+                    and booking.get("id")
+                ]
+                if not matching_bookings:
+                    return "I couldn't find an active booking for that date."
+                if len(matching_bookings) != 1:
+                    return (
+                        "I found more than one active booking for that date. "
+                        "Please contact the tech team so we can cancel the right one safely."
+                    )
+                booking_id = str(matching_bookings[0]["id"])
+
+            result = await client.cancel_coworking(
+                user_id,
+                booking_id=booking_id,
+            )
             refunded = result.get("refunded", False)
             refund_amount = result.get("refund_amount", 0)
             

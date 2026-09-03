@@ -327,6 +327,18 @@ class Settings(BaseSettings):
             return bool(user_id and user_id in self.allowed_dm_user_ids)
         return bool(channel_id and channel_id in self.allowed_channel_ids)
 
+    @property
+    def authenticated_backend_preflight_required(self) -> bool:
+        """Whether this runtime must verify Roo's strict backend contract."""
+        return bool(
+            self.ROO_SURFACE == "public"
+            and (
+                self.is_production
+                or self.MEETING_ROOM_BOOKING_ENABLED
+                or self.OFFICE_MANAGER_ACTIONS_ENABLED
+            )
+        )
+
     @model_validator(mode="after")
     def validate_contextual_responses(self):
         internal_admin = bool(
@@ -505,13 +517,8 @@ class Settings(BaseSettings):
                     "ROO_API_KEY is required when "
                     "MEETING_ROOM_BOOKING_ENABLED is true"
                 )
-        authenticated_backend_preflight = (
-            self.ROO_SURFACE == "public" and self.is_production
-        )
         if (
-            authenticated_backend_preflight
-            or self.MEETING_ROOM_BOOKING_ENABLED
-            or self.OFFICE_MANAGER_ACTIONS_ENABLED
+            self.authenticated_backend_preflight_required
         ):
             if not str(self.MLAI_BACKEND_URL or "").strip():
                 raise ValueError(

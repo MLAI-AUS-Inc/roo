@@ -202,6 +202,48 @@ jobs:
               git clone https://github.com/MLAI-AUS-Inc/roo.git "$DEPLOY_DIR"
             fi
             cd "$DEPLOY_DIR"
+            previous_release_sha="$(git rev-parse HEAD)"
+            cd "$DEPLOY_DIR/roo-standalone"
+            previous_env_backup="$(mktemp /root/roo-public-env.XXXXXX)"
+            previous_env_present=0
+            if [ -f .env ]; then
+              cp .env "$previous_env_backup"
+              chmod 600 "$previous_env_backup"
+              previous_env_present=1
+            fi
+            previous_container_id="$(docker compose ps -q roo 2>/dev/null || true)"
+            previous_image_id=""
+            previous_image_ref=""
+            if [ -n "$previous_container_id" ]; then
+              previous_image_id="$(docker inspect --format '{{.Image}}' "$previous_container_id")"
+              previous_image_ref="$(docker inspect --format '{{.Config.Image}}' "$previous_container_id")"
+            fi
+
+            rollback_release() {
+              status="$?"
+              trap - EXIT
+              if [ "$status" -ne 0 ]; then
+                echo "Roo rollout failed; restoring the previous release" >&2
+                if [ "$previous_env_present" -eq 1 ]; then
+                  cp "$previous_env_backup" "$DEPLOY_DIR/roo-standalone/.env"
+                  chmod 600 "$DEPLOY_DIR/roo-standalone/.env"
+                else
+                  rm -f "$DEPLOY_DIR/roo-standalone/.env"
+                fi
+                cd "$DEPLOY_DIR"
+                git checkout --detach "$previous_release_sha" || true
+                cd "$DEPLOY_DIR/roo-standalone"
+                if [ -n "$previous_image_id" ] && [ -n "$previous_image_ref" ]; then
+                  docker image tag "$previous_image_id" "$previous_image_ref" || true
+                  docker compose --ansi never up -d --no-build --force-recreate --remove-orphans || true
+                fi
+              fi
+              rm -f "$previous_env_backup"
+              exit "$status"
+            }
+            trap rollback_release EXIT
+
+            cd "$DEPLOY_DIR"
             git fetch origin main
             git cat-file -e "${RELEASE_SHA}^{commit}"
             git merge-base --is-ancestor "$RELEASE_SHA" origin/main

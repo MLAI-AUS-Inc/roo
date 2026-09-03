@@ -15,6 +15,11 @@ from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 
 DEFAULT_PROCESSING_LEASE_SECONDS = 90.0
+# A private Slack delivery can require both conversations.open and
+# chat.postMessage. Keep replacement workers fenced for longer than the
+# bounded Slack client calls, even if the ordinary lease heartbeat fails while
+# one of those calls is in flight.
+OFFICE_MANAGER_SLACK_DELIVERY_LEASE_SECONDS = 5 * 60.0
 DEFAULT_RETRY_POLL_SECONDS = 5.0
 DEFAULT_HOUSEKEEPING_POLL_SECONDS = 60 * 60.0
 COMPLETED_RETENTION_SECONDS = 90 * 24 * 60 * 60
@@ -575,15 +580,26 @@ class OfficeManagerActionStore:
                     UPDATE office_manager_action_outbox
                     SET locked_until = ?, updated_at = ?
                     WHERE id = ? AND status = 'processing' AND locked_by = ?
+                      AND locked_until IS NOT NULL
+                      AND locked_until > ?
                     """,
                     (
                         current_time + max(1.0, float(lease_seconds)),
                         current_time,
                         int(action_id),
                         str(owner),
+                        current_time,
                     ),
                 )
                 return cursor.rowcount == 1
+
+    def renew_for_slack_delivery(self, action_id: int, *, owner: str) -> bool:
+        """Fence replacement workers across one bounded private Slack send."""
+        return self.renew(
+            action_id,
+            owner=owner,
+            lease_seconds=OFFICE_MANAGER_SLACK_DELIVERY_LEASE_SECONDS,
+        )
 
     def owns_lease(self, action_id: int, *, owner: str) -> bool:
         """Return whether this worker still owns a live processing lease."""
@@ -914,6 +930,12 @@ async def _process_leased_action(
     action_id = int(action["id"])
     owner = str(action["locked_by"])
     lease_lost = asyncio.Event()
+    worker_task = asyncio.current_task()
+
+    def revoke_worker() -> None:
+        lease_lost.set()
+        if worker_task is not None and not worker_task.done():
+            worker_task.cancel()
 
     async def keep_lease_alive() -> None:
         while True:
@@ -929,12 +951,13 @@ async def _process_leased_action(
                     "OFFICE_MANAGER_ACTION_LEASE_RENEW_FAILED "
                     f"action_id={action_id} error_type={exc.__class__.__name__}"
                 )
-                # A transport/storage error does not prove another worker owns
-                # the lease. Stop heartbeating and let the processor's durable
-                # ownership fences decide whether it may publish and complete.
+                # We cannot prove continued ownership after a renewal error.
+                # Revoke this processor and leave the current lease in place;
+                # a replacement may recover it only after that lease expires.
+                revoke_worker()
                 return
             if not renewed:
-                lease_lost.set()
+                revoke_worker()
                 return
 
     heartbeat = asyncio.create_task(keep_lease_alive())
@@ -944,6 +967,9 @@ async def _process_leased_action(
         print(f"OFFICE_MANAGER_ACTION_LEASE_LOST action_id={action_id}")
         return
     except asyncio.CancelledError:
+        if lease_lost.is_set():
+            print(f"OFFICE_MANAGER_ACTION_LEASE_LOST action_id={action_id}")
+            return
         await asyncio.to_thread(
             store.release,
             action_id,
@@ -982,7 +1008,16 @@ async def _process_leased_action(
         try:
             await heartbeat
         except asyncio.CancelledError:
-            pass
+            current_task = asyncio.current_task()
+            if (
+                current_task is not None
+                and current_task.cancelling()
+                and not lease_lost.is_set()
+            ):
+                # The processor itself was cancelled (for example during
+                # shutdown). Do not confuse that with the expected
+                # cancellation of the heartbeat task we just requested.
+                raise
     if lease_lost.is_set():
         print(f"OFFICE_MANAGER_ACTION_LEASE_LOST action_id={action_id}")
         return
@@ -1036,27 +1071,41 @@ async def office_manager_action_retry_loop(
 ) -> None:
     """Continuously recover pending or abandoned Office Manager actions."""
     poll_seconds = max(0.05, float(poll_seconds))
-    while True:
-        if health_state is not None:
-            health_state["heartbeat_at"] = time.time()
+
+    async def pulse_health() -> None:
+        interval = min(10.0, poll_seconds)
+        while True:
+            if health_state is not None:
+                health_state["heartbeat_at"] = time.time()
+            await asyncio.sleep(interval)
+
+    health_task = asyncio.create_task(pulse_health())
+    try:
+        while True:
+            try:
+                await process_due_office_manager_actions(
+                    store=store,
+                    processor=processor,
+                )
+                if health_state is not None:
+                    health_state["last_success_at"] = time.time()
+                    health_state["last_error"] = None
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                if health_state is not None:
+                    health_state["last_error"] = exc.__class__.__name__
+                print(
+                    "OFFICE_MANAGER_ACTION_WORKER_FAILED "
+                    f"error_type={exc.__class__.__name__}"
+                )
+            await asyncio.sleep(poll_seconds)
+    finally:
+        health_task.cancel()
         try:
-            await process_due_office_manager_actions(
-                store=store,
-                processor=processor,
-            )
-            if health_state is not None:
-                health_state["last_success_at"] = time.time()
-                health_state["last_error"] = None
+            await health_task
         except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            if health_state is not None:
-                health_state["last_error"] = exc.__class__.__name__
-            print(
-                "OFFICE_MANAGER_ACTION_WORKER_FAILED "
-                f"error_type={exc.__class__.__name__}"
-            )
-        await asyncio.sleep(poll_seconds)
+            pass
 
 
 async def office_manager_action_housekeeping_loop(
