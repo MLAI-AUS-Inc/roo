@@ -1085,6 +1085,10 @@ async def test_retry_loop_runs_bounded_retention_cleanup(monkeypatch):
             calls.append(("mutations", limit, bool(owner)))
             return []
 
+        def claim_due_batches(self, *, limit, owner):
+            calls.append(("batches", limit, bool(owner)))
+            return []
+
         def claim_due_notifications(self, *, limit, owner):
             calls.append(("notifications", limit, bool(owner)))
             return []
@@ -1109,6 +1113,7 @@ async def test_retry_loop_runs_bounded_retention_cleanup(monkeypatch):
     assert calls == [
         ("purge", 14),
         ("mutations", 10, True),
+        ("batches", 10, True),
         ("notifications", 10, True),
     ]
     assert health[-1]["status"] == "ok"
@@ -1143,7 +1148,7 @@ async def test_retry_loop_failure_degrades_health_before_next_poll(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_admin_retry_notifies_target_privately_and_admin_in_original_thread(
+async def test_admin_retry_notifies_target_privately_without_shared_channel_details(
     tmp_path,
     monkeypatch,
 ):
@@ -1165,9 +1170,7 @@ async def test_admin_retry_notifies_target_privately_and_admin_in_original_threa
     assert result["status"] == "confirmed"
     assert direct_messages[0]["user_id"] == "UTARGET"
     assert "`@Roo link`" in direct_messages[0]["text"]
-    assert "Checked <@UTARGET> in" in channel_messages[0]["text"]
-    assert "Balance remaining" not in channel_messages[0]["text"]
-    assert "`@Roo link`" not in channel_messages[0]["text"]
+    assert channel_messages == []
 
 
 @pytest.mark.asyncio

@@ -13666,7 +13666,7 @@ Chunk {index} source: {label}
             return "gpt-5.4"
 
     async def _extract_coworking_report_intent_with_llm(self, text: str, params: dict) -> dict:
-        """Use GPT-5.4 to extract date/comparison hints for flexible report requests."""
+        """Use the configured router model to extract flexible report hints."""
         if not self._coworking_request_needs_llm_intent(text):
             return {}
 
@@ -14460,38 +14460,14 @@ Chunk {index} source: {label}
         booking_date: str,
         batch_result: dict,
     ) -> str:
-        results = batch_result.get("results") or []
-        created_count = int(batch_result.get("created_count") or 0)
-        already_booked_count = int(batch_result.get("already_booked_count") or 0)
-
-        lines = [
-            "You beauty! 🎉",
-            "",
-            f"Checked **{len(results)}** people for coworking on **{booking_date}**.",
-        ]
-        if created_count or already_booked_count:
-            lines.append(
-                f"Created: **{created_count}** · Already booked: **{already_booked_count}**"
-            )
-
-        for result in results:
-            slack_user_id = str(result.get("slack_user_id") or "").strip()
-            if not slack_user_id:
-                booking = result.get("booking") or {}
-                slack_user_id = str(booking.get("slack_id") or booking.get("slack_user_id") or "").strip()
-            if not slack_user_id:
-                continue
-
-            status = "already booked" if result.get("already_booked") else "booked"
-            points_cost = result.get("points_cost")
-            cost_text = f" · {points_cost} pts" if points_cost is not None else ""
-            lines.append(f"• <@{slack_user_id}>: {status}{cost_text}")
-
-        lines.extend([
-            "",
-            "Admin Roo Points were not charged; each target user's Roo Points were used.",
-        ])
-        return "\n".join(lines)
+        target_count = int(batch_result.get("target_count") or 0)
+        return (
+            "You beauty! 🎉\n\n"
+            f"Processed **{target_count}** coworking check-ins for **{booking_date}**. "
+            "Each member will receive their booking and Roo Points details privately; "
+            "any failed delivery is queued for retry.\n\n"
+            "Admin Roo Points were not charged."
+        )
 
     def _format_admin_coworking_batch_bad_request(
         self,
@@ -14538,7 +14514,37 @@ Chunk {index} source: {label}
         target_user_ids: list[str],
         booking_date: str,
         channel_id: Optional[str],
+        thread_ts: Optional[str],
     ) -> Any:
+        try:
+            store = get_coworking_intent_store()
+            intent = store.record_batch_intent(
+                admin_slack_user_id=admin_user_id,
+                target_slack_user_ids=target_user_ids,
+                booking_date=booking_date,
+                channel_id=channel_id,
+                thread_ts=thread_ts,
+            )
+            leased_intent = store.reserve_batch_for_processing(
+                int(intent["id"]), owner=f"roo-sync-batch-{uuid4().hex}"
+            )
+        except Exception as exc:
+            print("🏢 coworking_batch_intent_persist_failed " f"exc_type={exc.__class__.__name__}")
+            return (
+                "I couldn't safely queue that multi-person coworking check-in, "
+                "so I didn't send it to MLAI backend. Please try again in a moment."
+            )
+        if not leased_intent:
+            if str(intent.get("status") or "") == "batch_confirmed":
+                return (
+                    f"That coworking batch for **{booking_date}** was already processed. "
+                    "No one was charged twice."
+                )
+            return (
+                f"That coworking batch for **{booking_date}** is already queued or processing. "
+                "Roo will retry it safely and send each member their details privately."
+            )
+        owner = str(leased_intent.get("locked_by") or "")
         try:
             result = await client.book_coworking_many(
                 admin_slack_user_id=admin_user_id,
@@ -14548,30 +14554,66 @@ Chunk {index} source: {label}
             )
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 400:
+                store.mark_batch_blocked(
+                    int(leased_intent["id"]), owner=owner, error=coworking_failure_code(exc)
+                )
                 return self._format_admin_coworking_batch_bad_request(
                     booking_date=booking_date,
                     exc=exc,
                 )
             if exc.response.status_code == 403:
+                store.mark_batch_blocked(
+                    int(leased_intent["id"]), owner=owner, error=coworking_failure_code(exc)
+                )
                 return self._full_points_admin_denial(None, "check people in for coworking")
             if is_retryable_coworking_exception(exc):
-                return (
-                    "I couldn't confirm that multi-person coworking check-in because MLAI backend "
-                    "didn't respond cleanly. Please retry the same command; existing bookings are "
-                    "treated as already booked and won't be charged twice."
+                store.mark_batch_retryable_failure(
+                    int(leased_intent["id"]), owner=owner, error=coworking_failure_code(exc)
                 )
+                return (
+                    "MLAI backend didn't confirm that multi-person coworking check-in cleanly. "
+                    "I've queued the same atomic batch for automatic retry; existing bookings "
+                    "won't be charged twice."
+                )
+            store.mark_batch_blocked(
+                int(leased_intent["id"]), owner=owner, error=coworking_failure_code(exc)
+            )
             raise
         except Exception as exc:
             if is_retryable_coworking_exception(exc):
-                return (
-                    "I couldn't confirm that multi-person coworking check-in because MLAI backend "
-                    "didn't respond cleanly. Please retry the same command; existing bookings are "
-                    "treated as already booked and won't be charged twice."
+                store.mark_batch_retryable_failure(
+                    int(leased_intent["id"]), owner=owner, error=coworking_failure_code(exc)
                 )
+                return (
+                    "MLAI backend didn't confirm that multi-person coworking check-in cleanly. "
+                    "I've queued the same atomic batch for automatic retry; existing bookings "
+                    "won't be charged twice."
+                )
+            store.mark_batch_blocked(
+                int(leased_intent["id"]), owner=owner, error=coworking_failure_code(exc)
+            )
             raise
 
+        confirmed = store.mark_batch_confirmed(
+            int(leased_intent["id"]), owner=owner, backend_result=result
+        )
+        if confirmed is None:
+            return (
+                f"That coworking batch for **{booking_date}** is already being reconciled. "
+                "Roo will send each member their details privately."
+            )
+        for child_intent_id in confirmed["child_intent_ids"]:
+            notification = store.reserve_notification(
+                int(child_intent_id), owner=f"roo-sync-batch-notification-{uuid4().hex}"
+            )
+            if notification is not None:
+                await deliver_coworking_booking_notification(
+                    notification, store=store, client=client, executor=self,
+                    post_public_message=False,
+                )
+
         return self._format_admin_coworking_batch_success(
-            booking_date=str(result.get("date") or booking_date),
+            booking_date=str(result["date"]),
             batch_result=result,
         )
 
@@ -14667,7 +14709,7 @@ Chunk {index} source: {label}
                 int(leased_intent["id"]),
                 owner=mutation_owner,
                 error=error,
-                notification_required=True,
+                notification_required=not admin_checkin,
             )
             if blocked is None:
                 return self._coworking_booking_already_queued_message(
@@ -14680,6 +14722,17 @@ Chunk {index} source: {label}
                     "🏢 coworking_booking_terminal_rejection "
                     f"status={exc.response.status_code}"
                 )
+                if admin_checkin:
+                    return await self._format_coworking_booking_rejection(
+                        client=client,
+                        target_user_id=target_user_id,
+                        requested_by_user_id=requested_by_user_id,
+                        booking_date=booking_date,
+                        channel_id=channel_id,
+                        thread_ts=thread_ts,
+                        admin_checkin=True,
+                        exc=exc,
+                    )
                 notification = store.reserve_notification(
                     int(leased_intent["id"]),
                     owner=f"roo-sync-rejection-{uuid4().hex}",
@@ -15597,6 +15650,7 @@ Chunk {index} source: {label}
                     target_user_ids=target_slack_ids,
                     booking_date=booking_date,
                     channel_id=channel_id,
+                    thread_ts=thread_ts,
                 )
 
             target_user_id = target_slack_ids[0]
@@ -15668,6 +15722,7 @@ Chunk {index} source: {label}
                         target_user_ids=target_slack_ids,
                         booking_date=booking_date,
                         channel_id=channel_id,
+                        thread_ts=thread_ts,
                     )
 
                 target_user_id = target_slack_ids[0]

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import sqlite3
 import threading
@@ -28,6 +29,23 @@ TERMINAL_CLEANUP_INTERVAL_SECONDS = 24 * 60 * 60
 
 def build_coworking_intent_key(slack_user_id: str, booking_date: str) -> str:
     return f"coworking:{str(slack_user_id).strip()}:{str(booking_date).strip()}"
+
+
+def build_coworking_batch_intent_key(
+    admin_slack_user_id: str,
+    target_slack_user_ids: list[str],
+    booking_date: str,
+) -> str:
+    canonical = json.dumps(
+        {
+            "admin": str(admin_slack_user_id).strip(),
+            "date": str(booking_date).strip(),
+            "targets": sorted({str(value).strip() for value in target_slack_user_ids}),
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return f"coworking-batch:{hashlib.sha256(canonical.encode('utf-8')).hexdigest()}"
 
 
 def _now() -> float:
@@ -223,6 +241,174 @@ class CoworkingBookingIntentStore:
                     (idempotency_key,),
                 ).fetchone()
                 return dict(row)
+
+    def record_batch_intent(
+        self,
+        *,
+        admin_slack_user_id: str,
+        target_slack_user_ids: list[str],
+        booking_date: str,
+        channel_id: Optional[str],
+        thread_ts: Optional[str],
+    ) -> dict[str, Any]:
+        """Persist an atomic batch request before any backend mutation."""
+        self._ensure_schema()
+        current_time = _now()
+        admin_id = str(admin_slack_user_id).strip()
+        targets = sorted({str(value).strip() for value in target_slack_user_ids})
+        if not admin_id or not targets or any(not value for value in targets):
+            raise ValueError("A batch intent requires an admin and at least one target")
+        idempotency_key = build_coworking_batch_intent_key(admin_id, targets, booking_date)
+        encoded_targets = json.dumps(targets, separators=(",", ":"))
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO coworking_booking_intents (
+                        idempotency_key, slack_user_id, requested_by_slack_id,
+                        booking_date, channel_id, thread_ts, status,
+                        next_attempt_at, created_at, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, 'batch_pending', ?, ?, ?)
+                    ON CONFLICT(idempotency_key) DO UPDATE SET
+                        channel_id = excluded.channel_id,
+                        thread_ts = excluded.thread_ts,
+                        status = CASE
+                            WHEN coworking_booking_intents.status = 'batch_confirmed'
+                            THEN coworking_booking_intents.status
+                            WHEN coworking_booking_intents.status = 'batch_processing'
+                                 AND coworking_booking_intents.locked_until > ?
+                            THEN coworking_booking_intents.status
+                            ELSE 'batch_pending'
+                        END,
+                        next_attempt_at = CASE
+                            WHEN coworking_booking_intents.status = 'batch_confirmed'
+                            THEN coworking_booking_intents.next_attempt_at
+                            WHEN coworking_booking_intents.status = 'batch_processing'
+                                 AND coworking_booking_intents.locked_until > ?
+                            THEN coworking_booking_intents.next_attempt_at
+                            ELSE ?
+                        END,
+                        locked_until = CASE
+                            WHEN coworking_booking_intents.status = 'batch_processing'
+                                 AND coworking_booking_intents.locked_until > ?
+                            THEN coworking_booking_intents.locked_until
+                            ELSE NULL
+                        END,
+                        locked_by = CASE
+                            WHEN coworking_booking_intents.status = 'batch_processing'
+                                 AND coworking_booking_intents.locked_until > ?
+                            THEN coworking_booking_intents.locked_by
+                            ELSE NULL
+                        END,
+                        last_error = CASE
+                            WHEN coworking_booking_intents.status = 'batch_confirmed'
+                            THEN coworking_booking_intents.last_error
+                            ELSE NULL
+                        END,
+                        updated_at = ?
+                    """,
+                    (
+                        idempotency_key, encoded_targets, admin_id,
+                        str(booking_date).strip(), channel_id, thread_ts,
+                        current_time, current_time, current_time,
+                        current_time, current_time, current_time,
+                        current_time, current_time, current_time,
+                    ),
+                )
+                row = conn.execute(
+                    "SELECT * FROM coworking_booking_intents WHERE idempotency_key = ?",
+                    (idempotency_key,),
+                ).fetchone()
+                return dict(row)
+
+    @staticmethod
+    def batch_target_user_ids(intent: dict[str, Any]) -> list[str]:
+        try:
+            targets = json.loads(str(intent.get("slack_user_id") or ""))
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ValueError("Batch intent target data is invalid") from exc
+        if (
+            not isinstance(targets, list)
+            or not targets
+            or any(not isinstance(value, str) or not value.strip() for value in targets)
+            or len(set(targets)) != len(targets)
+        ):
+            raise ValueError("Batch intent target data is invalid")
+        return targets
+
+    def reserve_batch_for_processing(
+        self,
+        intent_id: int,
+        *,
+        owner: Optional[str] = None,
+        lease_seconds: float = DEFAULT_PROCESSING_LEASE_SECONDS,
+    ) -> Optional[dict[str, Any]]:
+        self._ensure_schema()
+        current_time = _now()
+        owner = owner or f"roo-batch-{uuid4().hex}"
+        locked_until = current_time + lease_seconds
+        with self._lock:
+            with self._connect() as conn:
+                cursor = conn.execute(
+                    """
+                    UPDATE coworking_booking_intents
+                    SET status = 'batch_processing',
+                        attempt_count = attempt_count + 1,
+                        locked_until = ?, locked_by = ?, updated_at = ?
+                    WHERE id = ?
+                      AND (
+                        status IN ('batch_pending', 'batch_pending_retry')
+                        OR (
+                            status = 'batch_processing'
+                            AND (locked_until IS NULL OR locked_until <= ?)
+                        )
+                      )
+                    """,
+                    (locked_until, owner, current_time, int(intent_id), current_time),
+                )
+                if cursor.rowcount != 1:
+                    return None
+                row = conn.execute(
+                    "SELECT * FROM coworking_booking_intents WHERE id = ?",
+                    (int(intent_id),),
+                ).fetchone()
+                return dict(row)
+
+    def claim_due_batches(
+        self,
+        *,
+        limit: int = 10,
+        owner: Optional[str] = None,
+        lease_seconds: float = DEFAULT_PROCESSING_LEASE_SECONDS,
+    ) -> list[dict[str, Any]]:
+        self._ensure_schema()
+        current_time = _now()
+        owner = owner or f"roo-batch-worker-{uuid4().hex}"
+        with self._lock:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT id FROM coworking_booking_intents
+                    WHERE (
+                        status IN ('batch_pending', 'batch_pending_retry')
+                        AND next_attempt_at <= ?
+                    ) OR (
+                        status = 'batch_processing'
+                        AND (locked_until IS NULL OR locked_until <= ?)
+                    )
+                    ORDER BY next_attempt_at ASC, id ASC LIMIT ?
+                    """,
+                    (current_time, current_time, int(limit)),
+                ).fetchall()
+        claimed: list[dict[str, Any]] = []
+        for row in rows:
+            reserved = self.reserve_batch_for_processing(
+                int(row["id"]), owner=owner, lease_seconds=lease_seconds
+            )
+            if reserved:
+                claimed.append(reserved)
+        return claimed
 
     def reserve_for_processing(
         self,
@@ -579,6 +765,197 @@ class CoworkingBookingIntentStore:
                 ).fetchone()
                 return dict(updated)
 
+    def mark_batch_retryable_failure(
+        self,
+        intent_id: int,
+        *,
+        owner: str,
+        error: str,
+        delay_seconds: Optional[float] = None,
+    ) -> Optional[dict[str, Any]]:
+        self._ensure_schema()
+        current_time = _now()
+        row = self.get(intent_id)
+        attempts = int(row.get("attempt_count") or 1) if row else 1
+        delay = retry_delay_seconds(attempts) if delay_seconds is None else delay_seconds
+        with self._lock:
+            with self._connect() as conn:
+                cursor = conn.execute(
+                    """
+                    UPDATE coworking_booking_intents
+                    SET status = 'batch_pending_retry', next_attempt_at = ?,
+                        locked_until = NULL, locked_by = NULL,
+                        last_error = ?, updated_at = ?
+                    WHERE id = ? AND status = 'batch_processing' AND locked_by = ?
+                    """,
+                    (current_time + delay, str(error), current_time, int(intent_id), str(owner)),
+                )
+                if cursor.rowcount != 1:
+                    return None
+                updated = conn.execute(
+                    "SELECT * FROM coworking_booking_intents WHERE id = ?",
+                    (int(intent_id),),
+                ).fetchone()
+                return dict(updated)
+
+    def mark_batch_blocked(
+        self,
+        intent_id: int,
+        *,
+        owner: str,
+        error: str,
+    ) -> Optional[dict[str, Any]]:
+        self._ensure_schema()
+        current_time = _now()
+        with self._lock:
+            with self._connect() as conn:
+                cursor = conn.execute(
+                    """
+                    UPDATE coworking_booking_intents
+                    SET status = 'batch_blocked', locked_until = NULL,
+                        locked_by = NULL, last_error = ?,
+                        notification_status = 'not_required',
+                        notification_next_attempt_at = NULL, updated_at = ?
+                    WHERE id = ? AND status = 'batch_processing' AND locked_by = ?
+                    """,
+                    (str(error), current_time, int(intent_id), str(owner)),
+                )
+                if cursor.rowcount != 1:
+                    return None
+                row = conn.execute(
+                    "SELECT * FROM coworking_booking_intents WHERE id = ?",
+                    (int(intent_id),),
+                ).fetchone()
+                return dict(row)
+
+    def mark_batch_confirmed(
+        self,
+        intent_id: int,
+        *,
+        owner: str,
+        backend_result: dict[str, Any],
+    ) -> Optional[dict[str, Any]]:
+        """Commit the batch outcome and every member notification atomically."""
+        self._ensure_schema()
+        current_time = _now()
+        results = backend_result.get("results")
+        if not isinstance(results, list):
+            raise ValueError("A validated batch result is required")
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                batch_row = conn.execute(
+                    "SELECT * FROM coworking_booking_intents WHERE id = ?", (int(intent_id),)
+                ).fetchone()
+                if (
+                    batch_row is None
+                    or batch_row["status"] != "batch_processing"
+                    or batch_row["locked_by"] != str(owner)
+                ):
+                    conn.rollback()
+                    return None
+                admin_id = str(batch_row["requested_by_slack_id"] or "")
+                booking_date = str(batch_row["booking_date"])
+                from .clients.mlai_backend import validate_coworking_booking_batch_result
+
+                backend_result = validate_coworking_booking_batch_result(
+                    backend_result,
+                    expected_date=booking_date,
+                    expected_admin_slack_user_id=admin_id,
+                    expected_target_slack_user_ids=self.batch_target_user_ids(
+                        dict(batch_row)
+                    ),
+                )
+                child_ids: list[int] = []
+                for result in results:
+                    slack_user_id = str(result["slack_user_id"])
+                    booking_result = {
+                        **dict(result["booking"]),
+                        "standard_points_cost": result["standard_points_cost"],
+                        "monthly_update_discount_applied": result[
+                            "monthly_update_discount_applied"
+                        ],
+                        "founder_tools_explicitly_linked": result[
+                            "founder_tools_explicitly_linked"
+                        ],
+                    }
+                    child_key = build_coworking_intent_key(slack_user_id, booking_date)
+                    existing = conn.execute(
+                        "SELECT status, notification_status FROM coworking_booking_intents "
+                        "WHERE idempotency_key = ?",
+                        (child_key,),
+                    ).fetchone()
+                    preserve_notification = bool(
+                        existing
+                        and existing["status"] == "confirmed"
+                        and existing["notification_status"]
+                        in {"delivered", "delivering", "reconciliation_required"}
+                    )
+                    conn.execute(
+                        """
+                        INSERT INTO coworking_booking_intents (
+                            idempotency_key, slack_user_id, requested_by_slack_id,
+                            booking_date, channel_id, thread_ts, status,
+                            next_attempt_at, backend_booking_id, backend_result_json,
+                            created_at, updated_at, confirmed_at,
+                            notification_status, notification_next_attempt_at
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, 'confirmed', ?, ?, ?, ?, ?, ?, 'pending', ?)
+                        ON CONFLICT(idempotency_key) DO UPDATE SET
+                            requested_by_slack_id = excluded.requested_by_slack_id,
+                            channel_id = excluded.channel_id,
+                            thread_ts = excluded.thread_ts,
+                            status = 'confirmed', locked_until = NULL, locked_by = NULL,
+                            last_error = NULL,
+                            backend_booking_id = excluded.backend_booking_id,
+                            backend_result_json = excluded.backend_result_json,
+                            confirmed_at = excluded.confirmed_at,
+                            notification_status = ?,
+                            notification_attempt_count = CASE WHEN ? THEN notification_attempt_count ELSE 0 END,
+                            notification_next_attempt_at = CASE WHEN ? THEN notification_next_attempt_at ELSE excluded.notification_next_attempt_at END,
+                            notification_locked_until = CASE WHEN ? AND notification_status = 'delivering' THEN notification_locked_until ELSE NULL END,
+                            notification_locked_by = CASE WHEN ? AND notification_status = 'delivering' THEN notification_locked_by ELSE NULL END,
+                            notification_last_error = CASE WHEN ? THEN notification_last_error ELSE NULL END,
+                            notification_delivered_at = CASE WHEN ? AND notification_status = 'delivered' THEN notification_delivered_at ELSE NULL END,
+                            updated_at = excluded.updated_at
+                        """,
+                        (
+                            child_key, slack_user_id, admin_id, booking_date,
+                            batch_row["channel_id"], batch_row["thread_ts"], current_time,
+                            str(booking_result["id"]), json.dumps(booking_result, sort_keys=True),
+                            current_time, current_time, current_time, current_time,
+                            existing["notification_status"] if preserve_notification else "pending",
+                            preserve_notification, preserve_notification, preserve_notification,
+                            preserve_notification, preserve_notification, preserve_notification,
+                        ),
+                    )
+                    child = conn.execute(
+                        "SELECT id FROM coworking_booking_intents WHERE idempotency_key = ?",
+                        (child_key,),
+                    ).fetchone()
+                    child_ids.append(int(child["id"]))
+                cursor = conn.execute(
+                    """
+                    UPDATE coworking_booking_intents
+                    SET status = 'batch_confirmed', locked_until = NULL,
+                        locked_by = NULL, last_error = NULL,
+                        backend_result_json = ?, confirmed_at = ?,
+                        notification_status = 'not_required',
+                        notification_next_attempt_at = NULL, updated_at = ?
+                    WHERE id = ? AND status = 'batch_processing' AND locked_by = ?
+                    """,
+                    (json.dumps(backend_result, sort_keys=True), current_time, current_time,
+                     int(intent_id), str(owner)),
+                )
+                if cursor.rowcount != 1:
+                    conn.rollback()
+                    return None
+                conn.commit()
+                batch = conn.execute(
+                    "SELECT * FROM coworking_booking_intents WHERE id = ?", (int(intent_id),)
+                ).fetchone()
+                return {"batch": dict(batch), "child_intent_ids": child_ids}
+
     def mark_blocked(
         self,
         intent_id: int,
@@ -647,6 +1024,7 @@ class CoworkingBookingIntentStore:
                       AND (
                         status IN ('blocked', 'confirmed')
                         AND notification_status IN ('delivered', 'not_required')
+                        OR status IN ('batch_blocked', 'batch_confirmed')
                       )
                     """,
                     (cutoff,),
@@ -880,9 +1258,13 @@ async def deliver_coworking_booking_notification(
                 )
             )
             should_post_public = (
-                int(intent.get("notification_attempt_count") or 0) <= 1
-                if post_public_message is None
-                else bool(post_public_message)
+                False
+                if requested_by_slack_id != slack_user_id
+                else (
+                    int(intent.get("notification_attempt_count") or 0) <= 1
+                    if post_public_message is None
+                    else bool(post_public_message)
+                )
             )
             delivery = await _deliver_coworking_retry_confirmation(
                 client=client,
@@ -1072,6 +1454,52 @@ async def process_coworking_booking_intent(
     )
 
 
+async def process_coworking_booking_batch_intent(
+    intent: dict[str, Any],
+    *,
+    store: Optional[CoworkingBookingIntentStore] = None,
+    client: Any = None,
+) -> dict[str, Any]:
+    """Retry one durable admin batch while preserving atomic backend semantics."""
+    store = store or get_coworking_intent_store()
+    client = client or _build_backend_client()
+    intent_id = int(intent["id"])
+    owner = str(intent.get("locked_by") or "")
+    if not owner:
+        return {"status": "stale", "intent_id": intent_id}
+    try:
+        targets = store.batch_target_user_ids(intent)
+        backend_result = await client.book_coworking_many(
+            admin_slack_user_id=str(intent.get("requested_by_slack_id") or ""),
+            target_slack_user_ids=targets,
+            booking_date=str(intent["booking_date"]),
+            slack_channel_id=intent.get("channel_id"),
+        )
+    except Exception as exc:
+        error = coworking_failure_code(exc)
+        if is_retryable_coworking_exception(exc):
+            updated = store.mark_batch_retryable_failure(intent_id, owner=owner, error=error)
+            if updated is None:
+                return {"status": "stale", "intent_id": intent_id}
+            return {"status": "batch_pending_retry", "error": error, "intent_id": intent_id}
+        blocked = store.mark_batch_blocked(intent_id, owner=owner, error=error)
+        return {
+            "status": "batch_blocked" if blocked is not None else "stale",
+            "error": error,
+            "intent_id": intent_id,
+        }
+    confirmed = store.mark_batch_confirmed(
+        intent_id, owner=owner, backend_result=backend_result
+    )
+    if confirmed is None:
+        return {"status": "stale", "intent_id": intent_id}
+    return {
+        "status": "batch_confirmed",
+        "intent_id": intent_id,
+        "child_intent_ids": confirmed["child_intent_ids"],
+    }
+
+
 async def coworking_booking_retry_loop(
     *,
     store: Optional[CoworkingBookingIntentStore] = None,
@@ -1112,6 +1540,9 @@ async def coworking_booking_retry_loop(
             due = store.claim_due(limit=10, owner=owner)
             for intent in due:
                 await process_coworking_booking_intent(intent, store=store, notify=True)
+            batch_due = store.claim_due_batches(limit=10, owner=f"{owner}-batches")
+            for intent in batch_due:
+                await process_coworking_booking_batch_intent(intent, store=store)
             notification_due = store.claim_due_notifications(
                 limit=10,
                 owner=f"{owner}-notifications",

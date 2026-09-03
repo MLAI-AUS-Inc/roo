@@ -2245,7 +2245,7 @@ async def test_slack_events_start_here_message_edit_rechecks_intro(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_slack_events_dedupes_retried_app_mention(monkeypatch):
+async def test_direct_slack_event_handler_leaves_deduplication_to_middleware(monkeypatch):
     handled_events = []
     scheduled_tasks = []
     real_create_task = asyncio.create_task
@@ -2283,7 +2283,7 @@ async def test_slack_events_dedupes_retried_app_mention(monkeypatch):
     assert response_1.status_code == 200
     assert response_2.status_code == 200
     await asyncio.gather(*scheduled_tasks)
-    assert handled_events == [payload["event"]]
+    assert handled_events == [payload["event"], payload["event"]]
     main_module._recent_app_mention_events.clear()
 
 
@@ -2701,7 +2701,6 @@ async def test_execute_mlai_points_returns_backend_unavailable_message(monkeypat
             MLAI_API_KEY="api-key",
             ROO_API_KEY="roo-api-key",
             INTERNAL_API_KEY="internal-key",
-            FOUNDER_ACCOUNT_LINK_ENABLED=False,
         ),
     )
 
@@ -2950,7 +2949,7 @@ async def test_admin_checkin_denies_partner_without_booking(tmp_path, monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_admin_checkin_requires_exactly_one_target(monkeypatch):
+async def test_admin_checkin_requires_at_least_one_target(monkeypatch):
     executor = SkillExecutor()
     client = FakeAdminCheckinCoworkingClient()
     monkeypatch.setattr(slack_client_module, "get_bot_user_id", lambda: "UROO")
@@ -2965,24 +2964,13 @@ async def test_admin_checkin_requires_exactly_one_target(monkeypatch):
         thread_ts="111.222",
         skill=SimpleNamespace(name="mlai-points"),
     )
-    multiple_result = await executor._handle_points_action(
-        client=client,
-        action="admin_checkin_coworking",
-        params={},
-        text="book <@UONE> and <@UTWO> in today",
-        user_id="UADMIN",
-        channel_id="C123",
-        thread_ts="111.222",
-        skill=SimpleNamespace(name="mlai-points"),
-    )
-
-    assert "Mention exactly one user" in missing_result
-    assert "Tag exactly one user" in multiple_result
+    assert "Who should I check in?" in missing_result
+    assert "Mention one or more users" in missing_result
     assert client.book_args is None
 
 
 @pytest.mark.asyncio
-async def test_book_coworking_with_target_mention_refuses_self_booking(tmp_path, monkeypatch):
+async def test_book_coworking_with_target_mention_uses_admin_checkin(tmp_path, monkeypatch):
     store = coworking_intent_store(tmp_path / "intents.db")
     client = FakeAdminCheckinCoworkingClient()
     executor = SkillExecutor()
@@ -3002,9 +2990,9 @@ async def test_book_coworking_with_target_mention_refuses_self_booking(tmp_path,
         skill=SimpleNamespace(name="mlai-points"),
     )
 
-    assert "I saw a tagged user" in result
-    assert client.book_args is None
-    assert store.counts_by_status() == {}
+    assert "Checked <@UTARGET> in" in result["message"]
+    assert client.book_args[0] == "UTARGET"
+    assert store.get_by_key("coworking:UTARGET:2026-05-04")["status"] == "confirmed"
 
 
 @pytest.mark.asyncio
@@ -3440,7 +3428,7 @@ async def test_coworking_report_trends_and_recommendations_use_gpt54(monkeypatch
         skill=SimpleNamespace(name="mlai-points"),
     )
 
-    assert captured["kwargs"]["model"] == "gpt-5.4"
+    assert captured["kwargs"]["model"] == executor_module.get_settings().ROUTER_MODEL
     assert "active coworking bookings" in captured["messages"][1]["content"]
     assert "*Interpretation*" in result
     assert "Usage is concentrated mid-week." in result
@@ -3849,6 +3837,7 @@ async def test_dependency_health_check_reports_degraded_backend(monkeypatch):
             MLAI_API_KEY="api-key",
             ROO_API_KEY="roo-api-key",
             INTERNAL_API_KEY="internal-key",
+            FOUNDER_ACCOUNT_LINK_ENABLED=False,
         ),
     )
     monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeBackendClient)

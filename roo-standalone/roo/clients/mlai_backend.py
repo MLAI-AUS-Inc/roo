@@ -88,6 +88,114 @@ def validate_coworking_booking_result(
     return payload
 
 
+def validate_coworking_booking_batch_result(
+    payload: Any,
+    *,
+    expected_date: str,
+    expected_admin_slack_user_id: str,
+    expected_target_slack_user_ids: List[str],
+) -> dict:
+    """Validate a complete batch result before treating it as committed."""
+
+    def invalid(message: str) -> None:
+        raise MLAIBackendUnavailableError(message, reason_code="invalid_backend_response")
+
+    if not isinstance(payload, dict):
+        invalid("MLAI backend returned an invalid coworking batch result")
+
+    expected_targets = [str(value).strip() for value in expected_target_slack_user_ids]
+    if (
+        not expected_targets
+        or any(not value for value in expected_targets)
+        or len(set(expected_targets)) != len(expected_targets)
+    ):
+        invalid("Coworking batch validation received invalid expected targets")
+
+    results = payload.get("results")
+    created_count = payload.get("created_count")
+    already_booked_count = payload.get("already_booked_count")
+    target_count = payload.get("target_count")
+    standard_points_cost = payload.get("standard_points_cost")
+    if not (
+        payload.get("date") == str(expected_date)
+        and payload.get("admin_slack_user_id")
+        == str(expected_admin_slack_user_id).strip()
+        and isinstance(results, list)
+        and len(results) == len(expected_targets)
+        and isinstance(target_count, int)
+        and not isinstance(target_count, bool)
+        and target_count == len(expected_targets)
+        and isinstance(created_count, int)
+        and not isinstance(created_count, bool)
+        and isinstance(already_booked_count, int)
+        and not isinstance(already_booked_count, bool)
+        and created_count >= 0
+        and already_booked_count >= 0
+        and created_count + already_booked_count == len(expected_targets)
+        and isinstance(standard_points_cost, int)
+        and not isinstance(standard_points_cost, bool)
+        and standard_points_cost >= 0
+    ):
+        invalid("MLAI backend returned an incomplete coworking batch result")
+
+    seen_targets: set[str] = set()
+    observed_created = 0
+    for row in results:
+        if not isinstance(row, dict):
+            invalid("MLAI backend returned an invalid coworking batch row")
+        slack_user_id = row.get("slack_user_id")
+        created = row.get("created")
+        already_booked = row.get("already_booked")
+        booking = row.get("booking")
+        points_cost = row.get("points_cost")
+        row_standard_cost = row.get("standard_points_cost")
+        discount_applied = row.get("monthly_update_discount_applied")
+        explicitly_linked = row.get("founder_tools_explicitly_linked")
+        connection_type = row.get("founder_tools_connection_type")
+        account_linked = row.get("founder_tools_account_linked")
+        if not (
+            isinstance(slack_user_id, str)
+            and slack_user_id in expected_targets
+            and slack_user_id not in seen_targets
+            and isinstance(created, bool)
+            and isinstance(already_booked, bool)
+            and already_booked is (not created)
+            and isinstance(booking, dict)
+            and isinstance(points_cost, int)
+            and not isinstance(points_cost, bool)
+            and points_cost >= 0
+            and booking.get("points_cost") == points_cost
+            and isinstance(row_standard_cost, int)
+            and not isinstance(row_standard_cost, bool)
+            and row_standard_cost == standard_points_cost
+            and row_standard_cost >= points_cost
+            and isinstance(discount_applied, bool)
+            and discount_applied is (points_cost < row_standard_cost)
+            and isinstance(explicitly_linked, bool)
+            and isinstance(account_linked, bool)
+            and connection_type in {None, "direct", "explicit"}
+            and account_linked is (connection_type is not None)
+            and explicitly_linked is (connection_type == "explicit")
+        ):
+            invalid("MLAI backend returned a contradictory coworking batch row")
+
+        validate_coworking_booking_result(
+            {
+                **booking,
+                "standard_points_cost": row_standard_cost,
+                "monthly_update_discount_applied": discount_applied,
+                "founder_tools_explicitly_linked": explicitly_linked,
+            },
+            expected_date=expected_date,
+        )
+        seen_targets.add(slack_user_id)
+        observed_created += int(created)
+
+    if seen_targets != set(expected_targets) or observed_created != created_count:
+        invalid("MLAI backend returned incomplete coworking batch target data")
+    return payload
+
+
 class MLAIBackendClient:
     """Client for mlai-backend API."""
 
@@ -2491,7 +2599,19 @@ class MLAIBackendClient:
             circuit_breaker=True,
         )
         response.raise_for_status()
-        return response.json()
+        try:
+            result = response.json()
+        except ValueError as exc:
+            raise MLAIBackendUnavailableError(
+                "MLAI backend returned invalid JSON after coworking batch booking",
+                reason_code="invalid_backend_response",
+            ) from exc
+        return validate_coworking_booking_batch_result(
+            result,
+            expected_date=booking_date,
+            expected_admin_slack_user_id=payload["admin_slack_user_id"],
+            expected_target_slack_user_ids=cleaned_targets,
+        )
 
     async def start_founder_account_link(self, slack_user_id: str) -> dict:
         """Create a short-lived Founder Tools link for the current Slack user."""

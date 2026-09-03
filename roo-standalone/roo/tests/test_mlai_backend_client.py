@@ -263,7 +263,7 @@ async def test_book_coworking_many_uses_canonical_endpoint_and_deduped_payload(m
         captured["endpoint"] = endpoint
         captured["json"] = kwargs["json"]
         request = httpx.Request(method, f"https://backend.test{endpoint}")
-        return httpx.Response(201, request=request, json={"created_count": 2, "results": []})
+        return httpx.Response(201, request=request, json=valid_coworking_batch_result())
 
     client = MLAIBackendClient(
         base_url="https://backend.test",
@@ -279,7 +279,7 @@ async def test_book_coworking_many_uses_canonical_endpoint_and_deduped_payload(m
         slack_channel_id="C123",
     )
 
-    assert result == {"created_count": 2, "results": []}
+    assert result == valid_coworking_batch_result()
     assert captured["method"] == "POST"
     assert captured["endpoint"] == "/api/v1/points/coworking/book-many/"
     assert captured["json"]["admin_slack_user_id"] == "UADMIN"
@@ -287,6 +287,76 @@ async def test_book_coworking_many_uses_canonical_endpoint_and_deduped_payload(m
     assert captured["json"]["date"] == "2026-07-04"
     assert captured["json"]["slack_channel_id"] == "C123"
     assert captured["json"]["current_time"]
+
+
+def valid_coworking_batch_result():
+    def row(slack_user_id, booking_id):
+        return {
+            "slack_user_id": slack_user_id,
+            "created": True,
+            "already_booked": False,
+            "booking": {
+                "id": booking_id,
+                "date": "2026-07-04",
+                "status": "booked",
+                "points_cost": 8,
+            },
+            "points_cost": 8,
+            "standard_points_cost": 8,
+            "monthly_update_discount_applied": False,
+            "founder_tools_connection_type": None,
+            "founder_tools_account_linked": False,
+            "founder_tools_explicitly_linked": False,
+        }
+    return {
+        "date": "2026-07-04", "admin_slack_user_id": "UADMIN",
+        "target_count": 2, "created_count": 2, "already_booked_count": 0,
+        "standard_points_cost": 8,
+        "results": [row("U1", "booking-1"), row("U2", "booking-2")],
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure_case",
+    ["invalid_json", "empty", "wrong_date", "missing_target",
+     "duplicate_target", "count_mismatch", "cost_mismatch"],
+)
+async def test_book_coworking_many_treats_malformed_2xx_as_commit_uncertain(
+    monkeypatch, failure_case
+):
+    payload = valid_coworking_batch_result()
+    if failure_case == "empty":
+        payload = {}
+    elif failure_case == "wrong_date":
+        payload["date"] = "2026-07-05"
+    elif failure_case == "missing_target":
+        payload["results"] = payload["results"][:1]
+    elif failure_case == "duplicate_target":
+        payload["results"][1]["slack_user_id"] = "U1"
+    elif failure_case == "count_mismatch":
+        payload["created_count"] = 1
+        payload["already_booked_count"] = 1
+    elif failure_case == "cost_mismatch":
+        payload["results"][0]["points_cost"] = 4
+
+    async def fake_request(method, endpoint, **kwargs):
+        request = httpx.Request(method, f"https://backend.test{endpoint}")
+        if failure_case == "invalid_json":
+            return httpx.Response(200, request=request, content=b"not-json")
+        return httpx.Response(200, request=request, json=payload)
+
+    client = MLAIBackendClient(
+        base_url="https://backend.test", api_key="roo-api-key",
+        internal_api_key="roo-api-key",
+    )
+    monkeypatch.setattr(client, "_request", fake_request)
+    with pytest.raises(MLAIBackendUnavailableError) as exc_info:
+        await client.book_coworking_many(
+            admin_slack_user_id="UADMIN", target_slack_user_ids=["U1", "U2"],
+            booking_date="2026-07-04",
+        )
+    assert exc_info.value.reason_code == "invalid_backend_response"
 
 
 def valid_coworking_booking_result():

@@ -12,21 +12,39 @@ sys.modules.setdefault("frontmatter", SimpleNamespace(load=lambda *args, **kwarg
 
 executor_module = importlib.import_module("roo.skills.executor")
 slack_client_module = importlib.import_module("roo.slack_client")
+coworking_module = importlib.import_module("roo.coworking_booking_intents")
+schema_module = importlib.import_module("roo.coworking_booking_schema_v3")
 SkillExecutor = executor_module.SkillExecutor
+
+
+def _batch_row(slack_user_id, booking_id, *, created=True):
+    return {
+        "slack_user_id": slack_user_id, "created": created,
+        "already_booked": not created,
+        "booking": {"id": booking_id, "date": "2026-07-04", "status": "booked", "points_cost": 8},
+        "points_cost": 8, "standard_points_cost": 8,
+        "monthly_update_discount_applied": False,
+        "founder_tools_connection_type": None,
+        "founder_tools_account_linked": False,
+        "founder_tools_explicitly_linked": False,
+    }
+
+
+def _batch_result(*, first_created=True, second_created=True):
+    created_count = int(first_created) + int(second_created)
+    return {
+        "date": "2026-07-04", "admin_slack_user_id": "UADMIN", "target_count": 2,
+        "created_count": created_count, "already_booked_count": 2 - created_count,
+        "standard_points_cost": 8,
+        "results": [_batch_row("U1", "booking-1", created=first_created),
+                    _batch_row("U2", "booking-2", created=second_created)],
+    }
 
 
 class FakeCoworkingClient:
     def __init__(self, *, admin_details=None, batch_result=None, batch_exc=None):
         self.admin_details = admin_details
-        self.batch_result = batch_result or {
-            "date": "2026-07-04",
-            "created_count": 2,
-            "already_booked_count": 0,
-            "results": [
-                {"slack_user_id": "U1", "created": True, "already_booked": False, "points_cost": 8},
-                {"slack_user_id": "U2", "created": True, "already_booked": False, "points_cost": 8},
-            ],
-        }
+        self.batch_result = batch_result or _batch_result()
         self.batch_exc = batch_exc
         self.admin_lookup_calls = []
         self.batch_calls = []
@@ -60,6 +78,9 @@ class FakeCoworkingClient:
         self.single_calls.append({"args": args, "kwargs": kwargs})
         raise AssertionError("single booking should not be called in this test")
 
+    async def get_balance(self, slack_user_id):
+        return {"balance": 12}
+
 
 def _batch_http_error(payload, status_code=400):
     request = httpx.Request(
@@ -85,23 +106,25 @@ async def _run_points_action(client, *, action, text, params=None, user_id="UADM
 
 
 @pytest.fixture(autouse=True)
-def bot_user(monkeypatch):
+def batch_runtime(monkeypatch, tmp_path):
     monkeypatch.setattr(slack_client_module, "get_bot_user_id", lambda: "UROO")
+    db_path = tmp_path / "coworking.db"
+    schema_module.migrate_coworking_booking_intents_v3(db_path)
+    store = coworking_module.CoworkingBookingIntentStore(db_path)
+    monkeypatch.setattr(executor_module, "get_coworking_intent_store", lambda: store)
+    direct_messages = []
+    def send_dm(user_id, text, **kwargs):
+        direct_messages.append({"user": user_id, "text": text, **kwargs})
+        return {"ok": True}
+    monkeypatch.setattr(executor_module, "send_dm", send_dm)
+    return {"store": store, "db_path": db_path, "direct_messages": direct_messages}
 
 
 @pytest.mark.asyncio
-async def test_admin_checkin_coworking_batches_deduped_targets():
+async def test_admin_checkin_coworking_batches_deduped_targets(batch_runtime):
     client = FakeCoworkingClient(
         admin_details={"role": "admin"},
-        batch_result={
-            "date": "2026-07-04",
-            "created_count": 1,
-            "already_booked_count": 1,
-            "results": [
-                {"slack_user_id": "U1", "created": True, "already_booked": False, "points_cost": 8},
-                {"slack_user_id": "U2", "created": False, "already_booked": True, "points_cost": 8},
-            ],
-        },
+        batch_result=_batch_result(second_created=False),
     )
 
     result = await _run_points_action(
@@ -119,9 +142,23 @@ async def test_admin_checkin_coworking_batches_deduped_targets():
         }
     ]
     assert client.single_calls == []
-    assert "<@U1>: booked" in result
-    assert "<@U2>: already booked" in result
+    assert "Processed **2** coworking check-ins" in result
+    assert "<@U1>" not in result and "<@U2>" not in result and "8" not in result
     assert "Admin Roo Points were not charged" in result
+    assert {message["user"] for message in batch_runtime["direct_messages"]} == {"U1", "U2"}
+    rows = [batch_runtime["store"].get_by_key(
+        coworking_module.build_coworking_intent_key(target, "2026-07-04"))
+        for target in ("U1", "U2")]
+    assert {row["notification_status"] for row in rows} == {"delivered"}
+
+    duplicate_result = await _run_points_action(
+        client,
+        action="admin_checkin_coworking",
+        text="check <@U2> <@U1> in today",
+    )
+    assert "already processed" in duplicate_result
+    assert len(client.batch_calls) == 1
+    assert len(batch_runtime["direct_messages"]) == 2
 
 
 @pytest.mark.asyncio
@@ -151,7 +188,7 @@ async def test_book_coworking_with_tagged_users_routes_to_admin_batch_flow():
     )
 
     assert client.batch_calls[0]["target_slack_user_ids"] == ["U1", "U2"]
-    assert "Checked **2** people" in result
+    assert "Processed **2** coworking check-ins" in result
     assert "Admin Roo Points were not charged" in result
 
 
@@ -180,3 +217,84 @@ async def test_backend_batch_failure_formats_no_bookings_created_response():
     assert "One or more users have insufficient Roo Points" in result
     assert "<@U2>: There are not enough Roo Points for this action" in result
     assert "4 < 8" not in result
+
+
+@pytest.mark.asyncio
+async def test_malformed_batch_success_is_persisted_for_atomic_retry(
+    monkeypatch, batch_runtime
+):
+    backend_module = importlib.import_module("roo.clients.mlai_backend")
+    client = FakeCoworkingClient(
+        admin_details={"role": "admin"},
+        batch_exc=backend_module.MLAIBackendUnavailableError(
+            "incomplete success response", reason_code="invalid_backend_response"
+        ),
+    )
+    result = await _run_points_action(
+        client, action="admin_checkin_coworking", text="check <@U1> <@U2> in today"
+    )
+    batch_key = coworking_module.build_coworking_batch_intent_key(
+        "UADMIN", ["U1", "U2"], "2026-07-04"
+    )
+    batch = batch_runtime["store"].get_by_key(batch_key)
+    assert batch["status"] == "batch_pending_retry"
+    assert batch["last_error"] == "invalid_backend_response"
+    assert "queued the same atomic batch" in result
+    assert client.single_calls == [] and batch_runtime["direct_messages"] == []
+
+    restart_store = coworking_module.CoworkingBookingIntentStore(batch_runtime["db_path"])
+    current_time = coworking_module._now()
+    monkeypatch.setattr(coworking_module, "_now", lambda: current_time + 60)
+    client.batch_exc = None
+    due = restart_store.claim_due_batches(limit=10, owner="batch-restart-worker")
+    assert len(due) == 1
+    retry_result = await coworking_module.process_coworking_booking_batch_intent(
+        due[0], store=restart_store, client=client
+    )
+    assert retry_result["status"] == "batch_confirmed"
+    assert restart_store.get(int(batch["id"]))["status"] == "batch_confirmed"
+    assert all(
+        restart_store.get_by_key(
+            coworking_module.build_coworking_intent_key(target, "2026-07-04")
+        )["notification_status"] == "pending"
+        for target in ("U1", "U2")
+    )
+
+
+@pytest.mark.asyncio
+async def test_batch_private_notifications_survive_delivery_failure_and_restart(
+    monkeypatch, batch_runtime
+):
+    failed_message_ids = []
+    def fail_dm(user_id, text, **kwargs):
+        failed_message_ids.append(kwargs.get("client_msg_id"))
+        raise RuntimeError("injected Slack failure")
+    monkeypatch.setattr(executor_module, "send_dm", fail_dm)
+    client = FakeCoworkingClient(admin_details={"role": "admin"})
+    result = await _run_points_action(
+        client, action="admin_checkin_coworking", text="check <@U1> <@U2> in today"
+    )
+    assert "failed delivery is queued for retry" in result
+    child_rows = [batch_runtime["store"].get_by_key(
+        coworking_module.build_coworking_intent_key(target, "2026-07-04"))
+        for target in ("U1", "U2")]
+    assert {row["notification_status"] for row in child_rows} == {"pending_retry"}
+
+    restart_store = coworking_module.CoworkingBookingIntentStore(batch_runtime["db_path"])
+    current_time = coworking_module._now()
+    monkeypatch.setattr(coworking_module, "_now", lambda: current_time + 60)
+    delivered = []
+    def deliver_dm(user_id, text, **kwargs):
+        delivered.append({"user": user_id, "client_msg_id": kwargs.get("client_msg_id")})
+        return {"ok": True}
+    monkeypatch.setattr(executor_module, "send_dm", deliver_dm)
+    due = restart_store.claim_due_notifications(limit=10, owner="restart-worker")
+    for notification in due:
+        await coworking_module.deliver_coworking_booking_notification(
+            notification, store=restart_store, client=client,
+            executor=SkillExecutor(), post_public_message=False,
+        )
+    assert {message["user"] for message in delivered} == {"U1", "U2"}
+    assert {message["client_msg_id"] for message in delivered} == set(failed_message_ids)
+    assert all(restart_store.get(int(row["id"]))["notification_status"] == "delivered"
+               for row in child_rows)

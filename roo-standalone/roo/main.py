@@ -6404,7 +6404,7 @@ async def slack_actions(
         print("↩️ Ignoring duplicate signed Slack action request")
         return JSONResponse(status_code=200, content={})
 
-    if settings.ROO_SURFACE == "admin":
+    if getattr(settings, "ROO_SURFACE", "public") == "admin":
         if payload_type == "view_submission":
             if not submission:
                 print("🔒 Admin Roo ignored an unsupported view submission")
@@ -6563,8 +6563,8 @@ async def slack_actions(
         return JSONResponse(status_code=200, content={})
 
     unified_admin = bool(
-        settings.ROO_SURFACE == "public"
-        and settings.ROO_UNIFIED_ADMIN_ROUTING_ENABLED
+        getattr(settings, "ROO_SURFACE", "public") == "public"
+        and getattr(settings, "ROO_UNIFIED_ADMIN_ROUTING_ENABLED", False)
     )
     if unified_admin and payload_type == "view_submission" and correction_submission:
         team_id = str(payload.get("team", {}).get("id") or "")
