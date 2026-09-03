@@ -70,6 +70,14 @@ class FakeClient:
         self.balance_calls.append(slack_user_id)
         return {"balance": self.balance}
 
+    async def get_my_bookings(self, slack_user_id, *, booking_id=None):
+        current_status = self.result.get(
+            "operation_booking_current_status", "booked"
+        )
+        if current_status == "deleted":
+            return []
+        return [{"id": booking_id, "status": current_status}]
+
 
 def leased_intent(
     tmp_path,
@@ -413,6 +421,38 @@ async def test_retry_dm_failure_never_exposes_link_guidance_publicly(
     assert retry_dms[0]["raise_on_error"] is True
     assert retry_channel_messages == []
     assert client.book_calls == [("U123", "2026-04-22", "C123")]
+
+
+@pytest.mark.asyncio
+async def test_delayed_notification_refreshes_cancelled_booking_state(
+    tmp_path,
+    monkeypatch,
+):
+    store, intent, leased = leased_intent(tmp_path)
+    client = FakeClient(result=booking_result())
+    capture_delivery(monkeypatch, dm_response={})
+    monkeypatch.setattr(coworking, "retry_delay_seconds", lambda _attempt: 0)
+    first = await coworking.process_coworking_booking_intent(
+        leased,
+        store=store,
+        client=client,
+        notify=True,
+    )
+    assert first["notification_status"] == "pending_retry"
+
+    client.result["operation_booking_current_status"] = "cancelled"
+    retry_dms, _retry_channel, _retry_ephemeral = capture_delivery(monkeypatch)
+    due = store.claim_due_notifications(owner="cancelled-notification-worker")
+    recovered = await coworking.deliver_coworking_booking_notification(
+        due[0],
+        store=store,
+        client=client,
+    )
+
+    assert recovered["notification_status"] == "delivered"
+    assert store.get(intent["id"])["notification_status"] == "delivered"
+    assert "since been cancelled" in retry_dms[0]["text"]
+    assert "Booked you in" not in retry_dms[0]["text"]
 
 
 @pytest.mark.asyncio

@@ -1392,6 +1392,28 @@ async def deliver_coworking_booking_notification(
                 backend_result,
                 expected_date=booking_date,
             )
+            current_rows = await client.get_my_bookings(
+                slack_user_id,
+                booking_id=str(backend_result["id"]),
+            )
+            if not isinstance(current_rows, list) or len(current_rows) > 1:
+                raise ValueError("Backend returned invalid current booking state")
+            if current_rows:
+                current_row = current_rows[0]
+                if (
+                    not isinstance(current_row, dict)
+                    or str(current_row.get("id") or "") != str(backend_result["id"])
+                    or current_row.get("status") not in {"booked", "cancelled"}
+                ):
+                    raise ValueError("Backend returned contradictory current booking state")
+                current_status = str(current_row["status"])
+            else:
+                current_status = "deleted"
+            backend_result = {
+                **backend_result,
+                "booking_state_refreshed": True,
+                "operation_booking_current_status": current_status,
+            }
             private_client_msg_id = str(
                 uuid5(
                     NAMESPACE_URL,

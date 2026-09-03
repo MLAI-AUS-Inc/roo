@@ -92,6 +92,19 @@ class FakeCoworkingClient:
     async def get_balance(self, slack_user_id):
         return {"balance": 12}
 
+    async def get_my_bookings(self, slack_user_id, *, booking_id=None):
+        for row in self.batch_result.get("results", []):
+            booking = row.get("booking", {})
+            if str(booking.get("id")) != str(booking_id):
+                continue
+            current_status = booking.get(
+                "operation_booking_current_status", "booked"
+            )
+            if current_status == "deleted":
+                return []
+            return [{"id": booking_id, "status": current_status}]
+        return []
+
 
 def _batch_http_error(payload, status_code=400):
     request = httpx.Request(

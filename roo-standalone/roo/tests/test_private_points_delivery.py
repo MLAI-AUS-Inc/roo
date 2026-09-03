@@ -485,6 +485,9 @@ class CoworkingClient:
             "founder_tools_account_linked": False,
         }
 
+    async def get_my_bookings(self, slack_user_id, *, booking_id=None):
+        return [{"id": booking_id, "status": "booked"}]
+
     async def get_balance(self, slack_user_id):
         return {"balance": self.balance}
 

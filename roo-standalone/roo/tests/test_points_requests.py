@@ -2731,6 +2731,9 @@ async def test_book_coworking_still_succeeds_when_balance_refresh_times_out(tmp_
                 discount_applied=True,
             )
 
+        async def get_my_bookings(self, slack_user_id, *, booking_id=None):
+            return [{"id": booking_id, "status": "booked"}]
+
         async def get_balance(self, slack_user_id):
             raise backend_module.MLAIBackendUnavailableError("backend unavailable")
 
@@ -2769,6 +2772,9 @@ async def test_book_coworking_defaults_missing_date_to_today(tmp_path, monkeypat
         async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None, *, operation_id=None):
             self.book_args = (slack_user_id, booking_date, slack_channel_id)
             return complete_coworking_booking_result(booking_date, cost=1)
+
+        async def get_my_bookings(self, slack_user_id, *, booking_id=None):
+            return [{"id": booking_id, "status": "booked"}]
 
         async def get_balance(self, slack_user_id):
             self.balance_args = slack_user_id
@@ -2824,6 +2830,9 @@ class FakeAdminCheckinCoworkingClient:
         if self.book_exception:
             raise self.book_exception
         return complete_coworking_booking_result(booking_date, cost=1)
+
+    async def get_my_bookings(self, slack_user_id, *, booking_id=None):
+        return [{"id": booking_id, "status": "booked"}]
 
     async def get_balance(self, slack_user_id):
         self.balance_args = slack_user_id
@@ -3941,6 +3950,9 @@ async def test_book_coworking_nudges_founder_when_charged_standard_price(tmp_pat
             )
             return result
 
+        async def get_my_bookings(self, slack_user_id, *, booking_id=None):
+            return [{"id": booking_id, "status": "booked"}]
+
         async def get_balance(self, slack_user_id):
             return {"balance": 12}
 
@@ -4033,6 +4045,9 @@ async def test_book_coworking_omits_nudge_when_discount_applied(tmp_path, monkey
             )
             return result
 
+        async def get_my_bookings(self, slack_user_id, *, booking_id=None):
+            return [{"id": booking_id, "status": "booked"}]
+
         async def get_balance(self, slack_user_id):
             return {"balance": 12}
 
@@ -4072,6 +4087,9 @@ async def test_book_coworking_omits_link_nudge_when_accounts_are_linked(
                 booking_date,
                 explicitly_linked=True,
             )
+
+        async def get_my_bookings(self, slack_user_id, *, booking_id=None):
+            return [{"id": booking_id, "status": "booked"}]
 
         async def get_balance(self, slack_user_id):
             return {"balance": 12}

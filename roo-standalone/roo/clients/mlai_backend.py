@@ -65,12 +65,16 @@ def validate_coworking_booking_result(
     connection_type = payload.get("founder_tools_connection_type")
     account_linked = payload.get("founder_tools_account_linked")
     operation_replayed = payload.get("operation_replayed")
+    booking_state_refreshed = payload.get("booking_state_refreshed")
     current_status = payload.get("operation_booking_current_status")
     valid_replay_state = (
         operation_replayed is None
+        and booking_state_refreshed is None
         and current_status is None
     ) or (
-        operation_replayed is True
+        (operation_replayed is True or booking_state_refreshed is True)
+        and (operation_replayed is None or operation_replayed is True)
+        and (booking_state_refreshed is None or booking_state_refreshed is True)
         and current_status in {"booked", "cancelled", "deleted"}
     )
 
@@ -3121,12 +3125,20 @@ class MLAIBackendClient:
         response.raise_for_status()
         return response.json()
 
-    async def get_my_bookings(self, slack_user_id: str) -> List[dict]:
+    async def get_my_bookings(
+        self,
+        slack_user_id: str,
+        *,
+        booking_id: Optional[str] = None,
+    ) -> List[dict]:
         """Get user's coworking bookings."""
+        params = {"slack_user_id": slack_user_id}
+        if booking_id is not None:
+            params["booking_id"] = str(booking_id)
         response = await self._request(
             "GET",
             f"{self._points_base}/coworking/my-bookings/",
-            params={"slack_user_id": slack_user_id},
+            params=params,
             timeout=10.0,
             transport_retries=1,
             retry_backoff_seconds=0.25,
