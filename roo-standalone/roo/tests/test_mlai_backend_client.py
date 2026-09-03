@@ -321,6 +321,21 @@ def valid_coworking_batch_result():
     }
 
 
+def test_batch_replay_requires_current_status_for_every_booking():
+    payload = valid_coworking_batch_result()
+    payload["operation_replayed"] = True
+
+    with pytest.raises(MLAIBackendUnavailableError) as exc_info:
+        backend_module.validate_coworking_booking_batch_result(
+            payload,
+            expected_date="2026-07-04",
+            expected_admin_slack_user_id="UADMIN",
+            expected_target_slack_user_ids=["U1", "U2"],
+        )
+
+    assert exc_info.value.reason_code == "invalid_backend_response"
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "failure_case",
@@ -376,6 +391,18 @@ def valid_coworking_booking_result():
         "founder_tools_account_linked": False,
         "founder_tools_explicitly_linked": False,
     }
+
+
+def test_single_replay_requires_current_booking_status():
+    payload = valid_coworking_booking_result()
+    payload["operation_replayed"] = True
+
+    with pytest.raises(MLAIBackendUnavailableError) as exc_info:
+        backend_module.validate_coworking_booking_result(
+            payload, expected_date="2026-07-04"
+        )
+
+    assert exc_info.value.reason_code == "invalid_backend_response"
 
 
 @pytest.mark.asyncio

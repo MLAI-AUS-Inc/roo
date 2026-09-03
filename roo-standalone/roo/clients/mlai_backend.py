@@ -64,6 +64,15 @@ def validate_coworking_booking_result(
     explicitly_linked = payload.get("founder_tools_explicitly_linked")
     connection_type = payload.get("founder_tools_connection_type")
     account_linked = payload.get("founder_tools_account_linked")
+    operation_replayed = payload.get("operation_replayed")
+    current_status = payload.get("operation_booking_current_status")
+    valid_replay_state = (
+        operation_replayed is None
+        and current_status is None
+    ) or (
+        operation_replayed is True
+        and current_status in {"booked", "cancelled", "deleted"}
+    )
 
     valid_booking_id = False
     if isinstance(booking_id, str):
@@ -90,6 +99,7 @@ def validate_coworking_booking_result(
         and discount_applied is (points_cost < standard_points_cost)
         and account_linked is (connection_type is not None)
         and explicitly_linked is (connection_type == "explicit")
+        and valid_replay_state
     )
     if expected_date is not None:
         complete = complete and booking_date == str(expected_date)
@@ -129,6 +139,9 @@ def validate_coworking_booking_batch_result(
     already_booked_count = payload.get("already_booked_count")
     target_count = payload.get("target_count")
     standard_points_cost = payload.get("standard_points_cost")
+    operation_replayed = payload.get("operation_replayed")
+    if operation_replayed is not None and operation_replayed is not True:
+        invalid("MLAI backend returned an invalid coworking batch replay state")
     if not (
         payload.get("date") == str(expected_date)
         and payload.get("admin_slack_user_id")
@@ -200,6 +213,7 @@ def validate_coworking_booking_batch_result(
                 "founder_tools_explicitly_linked": explicitly_linked,
                 "founder_tools_connection_type": connection_type,
                 "founder_tools_account_linked": account_linked,
+                "operation_replayed": operation_replayed,
             },
             expected_date=expected_date,
         )

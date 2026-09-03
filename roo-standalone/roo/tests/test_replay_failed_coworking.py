@@ -1,5 +1,6 @@
 import importlib
 import importlib.util
+import json
 import sys
 from datetime import date
 from pathlib import Path
@@ -40,6 +41,13 @@ def test_parser_keeps_latest_valid_failed_booking_per_user_date():
     assert valid[0].booking_date == "2026-04-22"
     assert valid[0].thread_ts == "111.333"
     assert valid[0].idempotency_key == "replay_coworking:U1:2026-04-22"
+    manifest = replay.build_manifest(
+        replay_run_id="INC-1",
+        valid=valid,
+        quarantined=quarantined,
+        execute=False,
+    )
+    assert "book me in today again" not in json.dumps(manifest)
 
 
 def test_parser_quarantines_failed_booking_without_thread_ts():
@@ -65,6 +73,7 @@ def test_parser_ignores_non_failed_booking_by_default():
         "🦘 ROO MENTION: from U1 in C1",
         "   Text: <@Roo> book me in today...",
         "   Extracted params: {'action': 'book_coworking', 'date': 'today'}",
+        "🌐 MLAI request method=POST endpoint=/api/v1/points/coworking/book/",
         "✅ Message posted to C1 (thread: 111.222)",
     ]
 
@@ -115,7 +124,6 @@ async def test_execute_never_rebooks_when_active_booking_is_missing(monkeypatch)
         thread_ts="111.222",
         booking_date="2026-04-22",
         source_line=1,
-        text="book me in",
         idempotency_key="replay_coworking:U1:2026-04-22",
     )
 

@@ -178,15 +178,23 @@ class CoworkingBookingIntentStore:
         with self._lock:
             with self._connect() as conn:
                 prior = conn.execute(
-                    "SELECT status FROM coworking_booking_intents "
-                    "WHERE idempotency_key = ?",
-                    (idempotency_key,),
+                    "SELECT idempotency_key, status FROM coworking_booking_intents "
+                    "WHERE idempotency_key = ? "
+                    "OR substr(idempotency_key, 1, ?) = ? "
+                    "ORDER BY id DESC LIMIT 1",
+                    (
+                        idempotency_key,
+                        len(f"{idempotency_key}:"),
+                        f"{idempotency_key}:",
+                    ),
                 ).fetchone()
                 # A completed or rejected intent is one finished lifecycle. A
                 # later user action must get a fresh backend operation so a
                 # genuine cancel/rebook can create a fresh debit and receipt.
                 if prior and prior["status"] in {"confirmed", "blocked"}:
                     idempotency_key = f"{idempotency_key}:{uuid4().hex}"
+                elif prior:
+                    idempotency_key = str(prior["idempotency_key"])
                 conn.execute(
                     """
                     INSERT INTO coworking_booking_intents (
@@ -278,15 +286,23 @@ class CoworkingBookingIntentStore:
         with self._lock:
             with self._connect() as conn:
                 prior = conn.execute(
-                    "SELECT status FROM coworking_booking_intents "
-                    "WHERE idempotency_key = ?",
-                    (idempotency_key,),
+                    "SELECT idempotency_key, status FROM coworking_booking_intents "
+                    "WHERE idempotency_key = ? "
+                    "OR substr(idempotency_key, 1, ?) = ? "
+                    "ORDER BY id DESC LIMIT 1",
+                    (
+                        idempotency_key,
+                        len(f"{idempotency_key}:"),
+                        f"{idempotency_key}:",
+                    ),
                 ).fetchone()
                 # A completed or rejected batch is one finished lifecycle.
                 # A later admin action must use a fresh backend operation so a
                 # genuine cancel/rebook remains possible.
                 if prior and prior["status"] in {"batch_confirmed", "batch_blocked"}:
                     idempotency_key = f"{idempotency_key}:{uuid4().hex}"
+                elif prior:
+                    idempotency_key = str(prior["idempotency_key"])
                 conn.execute(
                     """
                     INSERT INTO coworking_booking_intents (
@@ -922,13 +938,24 @@ class CoworkingBookingIntentStore:
                             "founder_tools_account_linked"
                         ],
                     }
+                    if backend_result.get("operation_replayed") is True:
+                        booking_result["operation_replayed"] = True
                     child_key = build_coworking_intent_key(slack_user_id, booking_date)
                     existing = conn.execute(
-                        "SELECT status, notification_status, backend_booking_id "
+                        "SELECT idempotency_key, status, notification_status, "
+                        "backend_booking_id "
                         "FROM coworking_booking_intents "
-                        "WHERE idempotency_key = ?",
-                        (child_key,),
+                        "WHERE idempotency_key = ? "
+                        "OR substr(idempotency_key, 1, ?) = ? "
+                        "ORDER BY id DESC LIMIT 1",
+                        (
+                            child_key,
+                            len(f"{child_key}:"),
+                            f"{child_key}:",
+                        ),
                     ).fetchone()
+                    if existing:
+                        child_key = str(existing["idempotency_key"])
                     same_booking = bool(
                         existing
                         and str(existing["backend_booking_id"] or "")

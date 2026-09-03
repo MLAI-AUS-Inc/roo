@@ -17,10 +17,8 @@ sys.path.insert(0, str(ROOT))
 
 
 MENTION_RE = re.compile(r"ROO MENTION:\s+from\s+(?P<user>\S+)\s+in\s+(?P<channel>\S+)")
-TEXT_RE = re.compile(r"Text:\s*(?P<text>.*)")
 PARAMS_RE = re.compile(r"Extracted params:\s*(?P<params>\{.*\})")
 POST_RE = re.compile(r"Message posted to\s+(?P<channel>\S+)(?:\s+\(thread:\s+(?P<thread>[^)]+)\))?")
-BOOKING_ENDPOINT = "/api/v1/points/coworking/book/"
 FAILURE_MARKERS = (
     "MLAIBackendUnavailableError",
     "MLAI backend timed out",
@@ -38,7 +36,6 @@ class ReplayCandidate:
     thread_ts: str
     booking_date: str
     source_line: int
-    text: str
     idempotency_key: str
 
 
@@ -50,7 +47,6 @@ class QuarantinedCandidate:
     channel_id: str = ""
     thread_ts: str = ""
     booking_date: str = ""
-    text: str = ""
 
 
 class _CurrentMention:
@@ -59,7 +55,6 @@ class _CurrentMention:
         self.slack_user_id = slack_user_id
         self.channel_id = channel_id
         self.thread_ts = ""
-        self.text = ""
         self.params: dict[str, Any] = {}
         self.saw_booking_failure = False
 
@@ -88,7 +83,6 @@ def _quarantine_current(current: _CurrentMention, reason: str) -> QuarantinedCan
         channel_id=current.channel_id,
         thread_ts=current.thread_ts,
         booking_date=booking_date,
-        text=current.text,
     )
 
 
@@ -128,7 +122,6 @@ def _candidate_from_current(
             thread_ts=current.thread_ts,
             booking_date=booking_date,
             source_line=current.line_number,
-            text=current.text,
             idempotency_key=idempotency_key,
         ),
         None,
@@ -174,11 +167,6 @@ def parse_failed_coworking_log(
         if current is None:
             continue
 
-        text_match = TEXT_RE.search(line)
-        if text_match:
-            current.text = text_match.group("text").strip()
-            continue
-
         params_match = PARAMS_RE.search(line)
         if params_match:
             try:
@@ -192,7 +180,7 @@ def parse_failed_coworking_log(
         if post_match and post_match.group("thread"):
             current.thread_ts = post_match.group("thread").strip()
 
-        if BOOKING_ENDPOINT in line or any(marker in line for marker in FAILURE_MARKERS):
+        if any(marker in line for marker in FAILURE_MARKERS):
             current.saw_booking_failure = True
 
     flush_current()

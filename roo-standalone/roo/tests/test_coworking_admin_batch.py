@@ -208,6 +208,18 @@ async def test_admin_checkin_coworking_batches_deduped_targets(batch_runtime):
     # A different backend booking ID is a new delivery obligation.
     assert len(batch_runtime["direct_messages"]) == 4
 
+    repeated_rebook_result = await _run_points_action(
+        client,
+        action="admin_checkin_coworking",
+        text="check <@U2> <@U1> in today again",
+    )
+
+    assert "Processed **2** coworking check-ins" in repeated_rebook_result
+    assert len(client.batch_calls) == 4
+    # The latest lifecycle, not only the original canonical row, owns B2's
+    # delivered notification state.
+    assert len(batch_runtime["direct_messages"]) == 4
+
 
 @pytest.mark.asyncio
 async def test_non_admin_tagged_booking_is_denied_before_booking_call():
