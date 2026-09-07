@@ -71,6 +71,11 @@ from .slack_client import (
     post_message,
     send_dm,
 )
+from .office_manager_policy import (
+    OFFICE_MANAGER_TEST_CHANNEL_ID,
+    OfficeManagerChannelRestrictedError,
+    is_office_manager_channel_allowed,
+)
 from .coworking_messages import OFFICE_MANAGER_VOLUNTEER_ACTION_ID
 from .coworking_booking_intents import coworking_booking_retry_loop
 from .office_manager_actions import (
@@ -2551,6 +2556,8 @@ def _validate_office_manager_backend_contract(
         "timezone": timezone_name,
         "claim_generation_supported": True,
         "claim_generation_required": True,
+        "claim_channel_required": True,
+        "allowed_channel_id": OFFICE_MANAGER_TEST_CHANNEL_ID,
     }
     if (
         not isinstance(payload, dict)
@@ -5580,6 +5587,8 @@ async def _send_office_manager_private_feedback(
     outcome: str = "terminal",
     replace_staged: bool = False,
 ) -> None:
+    if not is_office_manager_channel_allowed(channel_id):
+        raise OfficeManagerChannelRestrictedError("office_manager_channel_not_allowed")
     if action is not None and store is not None:
         action_id = int(action["id"])
         owner = str(action["locked_by"])
@@ -5739,6 +5748,9 @@ async def _claim_office_manager_from_action(
 ) -> None:
     from .clients.mlai_backend import MLAIBackendClient
 
+    if not is_office_manager_channel_allowed(channel_id):
+        raise OfficeManagerChannelRestrictedError("office_manager_channel_not_allowed")
+
     message = ""
     outcome = ""
     replace_staged = False
@@ -5785,6 +5797,7 @@ async def _claim_office_manager_from_action(
                     booking_date,
                     str(action["attempt_id"]),
                     generation,
+                    slack_channel_id=channel_id,
                 )
             else:
                 # This branch exists for isolated callers and tests. The routed
@@ -5792,6 +5805,7 @@ async def _claim_office_manager_from_action(
                 result = await backend_client.claim_office_manager_day(
                     user_id,
                     booking_date,
+                    slack_channel_id=channel_id,
                 )
         except httpx.HTTPStatusError as exc:
             payload = _office_manager_error_payload(exc)
@@ -5801,6 +5815,10 @@ async def _claim_office_manager_from_action(
                 str(action["attempt_id"]) if action is not None else ""
             )
             echoed_attempt_id = str(payload.get("attempt_id") or "").strip()
+            if int(exc.response.status_code) == 403 and code == "channel_not_allowed":
+                raise OfficeManagerChannelRestrictedError(
+                    "office_manager_channel_not_allowed"
+                ) from exc
             if int(exc.response.status_code) in {401, 403} and not (
                 int(exc.response.status_code) == 403
                 and code == "member_not_eligible"
@@ -6875,6 +6893,9 @@ async def _process_office_manager_action_record(
     action: dict[str, Any],
     store: OfficeManagerActionStore,
 ) -> None:
+    # Keep historical work pending, without claims or feedback in another channel.
+    if not is_office_manager_channel_allowed(action.get("channel_id")):
+        raise OfficeManagerChannelRestrictedError("office_manager_channel_not_allowed")
     try:
         booking_date = date.fromisoformat(str(action["booking_date"]))
     except (KeyError, TypeError, ValueError):
@@ -7088,6 +7109,9 @@ async def slack_actions(
         return JSONResponse(status_code=200, content={})
 
     if office_manager_action is not None:
+        if not is_office_manager_channel_allowed(channel_id):
+            print("Ignoring Office Manager action outside roo-testing")
+            return JSONResponse(status_code=200, content={})
         if settings.ROO_SURFACE != "public":
             print("Ignoring Office Manager action outside Public Roo")
             return JSONResponse(status_code=200, content={})

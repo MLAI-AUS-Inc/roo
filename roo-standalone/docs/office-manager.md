@@ -1,5 +1,35 @@
 # Office Manager volunteer actions
 
+## Channel-restricted pilot
+
+This release is locked in code to **#roo-testing (`C0BRM181EDV`)**. Keep
+`OFFICE_MANAGER_ENABLED=false` on the backend and
+`OFFICE_MANAGER_ACTIONS_ENABLED=false` on Roo until both services are deployed,
+configured for that channel, and their preflight checks pass. Deploy the backend
+first. Use the same existing Public Roo Slack app on both sides and invite it to
+#roo-testing; Roo's other features keep their existing channel behavior.
+
+Roo derives `slack_channel_id` from the signed Slack envelope, persists it in its
+existing outbox, and sends it with every claim and retry. The backend requires
+that field and independently checks the stored Office Manager day's channel
+before new claims or replay. Preflight advertises `claim_channel_required: true`
+and `allowed_channel_id: C0BRM181EDV`; Roo refuses an older backend contract.
+
+Every Office Manager channel delivery, update, reminder, cancellation correction,
+and recovery path checks the original stored day channel. Private confirmations
+and responsibility DMs remain permitted for a test-channel workflow. Historical
+work bound to any other channel stays blocked in place and visible as pending
+or failed delivery; it is never moved into #roo-testing or silently completed.
+Inspect queued work before activation. This intentionally suspends off-channel
+repair during the pilot; any cleanup elsewhere requires a separately reviewed
+rollout. Disabling the feature flags stops new work while allowed test-channel
+retries can still finish. Expanding to Cowork and Chill requires a reviewed code
+change in both services, not merely a new channel environment value.
+
+No new database migrations are introduced by the pilot restriction. A live
+backend still creates real bookings and points effects: use designated testers.
+
+
 Public Roo handles the Slack button for the backend-owned Office Manager of
 the Day workflow. Roo does not choose the winner or mutate points locally: it
 durably records each click, sends a stable `attempt_id` to `mlai-backend`, and
@@ -60,7 +90,7 @@ reconciliation.
    instances cannot claim through this strict contract during the rollout.
    Complete the backend's historical migration audit before changing persistent
    databases.
-2. Configure the backend's Public Roo Slack token and coworking channel, and
+2. Configure the backend's Public Roo Slack token and #roo-testing channel, and
    configure Roo with its dedicated `ROO_API_KEY` and the intended
    `MLAI_BACKEND_URL`.
 3. Deploy this Roo release with `OFFICE_MANAGER_ACTIONS_ENABLED=false` and

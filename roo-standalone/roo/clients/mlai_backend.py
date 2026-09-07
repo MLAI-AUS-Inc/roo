@@ -2428,8 +2428,14 @@ class MLAIBackendClient:
         booking_date: str,
         attempt_id: str = "",
         generation: int = 1,
+        *,
+        slack_channel_id: str,
     ) -> dict:
-        """Claim today's Office Manager role using the verified Slack actor."""
+        """Claim today's Office Manager role using verified Slack actor/channel."""
+        from ..office_manager_policy import is_office_manager_channel_allowed
+
+        if not is_office_manager_channel_allowed(slack_channel_id):
+            raise ValueError("office_manager_channel_not_allowed")
         if not self.roo_api_key:
             raise BackendIdentityError(
                 "ROO_API_KEY is required for Office Manager claims"
@@ -2447,6 +2453,7 @@ class MLAIBackendClient:
             f"{self._points_base}/coworking/office-manager/claim/",
             json={
                 "slack_user_id": self._clean_slack_id(slack_user_id),
+                "slack_channel_id": slack_channel_id,
                 "date": str(booking_date or "").strip(),
                 "attempt_id": attempt_id,
                 "generation": generation,

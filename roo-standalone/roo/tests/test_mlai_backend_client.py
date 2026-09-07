@@ -267,6 +267,7 @@ async def test_claim_office_manager_day_uses_verified_actor_payload(monkeypatch)
         "<@UVERIFIED>",
         "2026-08-03",
         "11111111-1111-4111-8111-111111111111",
+        slack_channel_id="C0BRM181EDV",
     )
 
     assert result == {"status": "claimed", "points_charged": 0}
@@ -275,6 +276,7 @@ async def test_claim_office_manager_day_uses_verified_actor_payload(monkeypatch)
         "endpoint": "/api/v1/points/coworking/office-manager/claim/",
         "json": {
             "slack_user_id": "UVERIFIED",
+            "slack_channel_id": "C0BRM181EDV",
             "date": "2026-08-03",
             "attempt_id": "11111111-1111-4111-8111-111111111111",
             "generation": 1,
@@ -301,7 +303,7 @@ async def test_claim_office_manager_day_rejects_legacy_api_key_fallback(monkeypa
     client = MLAIBackendClient()
 
     with pytest.raises(BackendIdentityError, match="ROO_API_KEY"):
-        await client.claim_office_manager_day("UVERIFIED", "2026-08-03")
+        await client.claim_office_manager_day("UVERIFIED", "2026-08-03", slack_channel_id="C0BRM181EDV")
 
 
 @pytest.mark.asyncio
@@ -322,6 +324,7 @@ async def test_claim_office_manager_day_rejects_noncanonical_attempt_id(monkeypa
             "UVERIFIED",
             "2026-08-03",
             "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA",
+            slack_channel_id="C0BRM181EDV",
         )
 
 
@@ -348,6 +351,7 @@ async def test_claim_office_manager_day_rejects_noncanonical_generation(
             "2026-08-03",
             "11111111-1111-4111-8111-111111111111",
             generation,
+            slack_channel_id="C0BRM181EDV",
         )
 
 
@@ -443,6 +447,7 @@ async def test_office_manager_backend_transport_redacts_exception_taint(
             user_sentinel,
             "2026-08-03",
             "11111111-1111-4111-8111-111111111111",
+            slack_channel_id="C0BRM181EDV",
         )
 
     output = capsys.readouterr().out
@@ -1078,3 +1083,18 @@ async def test_event_finance_audit_uses_read_only_bounded_endpoint(monkeypatch):
         "until": "2026-08-02",
     }
     assert result["xero_writes"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("channel", ["CCOWORK", "COTHER", "DTESTER", "", None])
+async def test_office_manager_transport_rejects_off_channel_before_http(monkeypatch, channel):
+    from unittest.mock import AsyncMock
+    client = MLAIBackendClient(base_url="https://backend.test", api_key="roo-test-key")
+    request = AsyncMock()
+    monkeypatch.setattr(client, "_request", request)
+    with pytest.raises(ValueError, match="office_manager_channel_not_allowed"):
+        await client.claim_office_manager_day(
+            "UTESTER", "2026-09-07", "11111111-1111-4111-8111-111111111111",
+            slack_channel_id=channel,
+        )
+    request.assert_not_awaited()

@@ -66,7 +66,7 @@ def _settings(tmp_path, **overrides):
     return Settings(**values)
 
 
-def _action_body(*, value=_UNSET, channel_id="CCOWORK", action_ts=None):
+def _action_body(*, value=_UNSET, channel_id="C0BRM181EDV", action_ts=None):
     payload = {
         "type": "block_actions",
         "user": {"id": "UVERIFIED"},
@@ -250,7 +250,7 @@ def test_signed_button_uses_payload_actor_and_deduplicates_delivery(
     asyncio.run(scheduled[0])
     assert captured == {
         "user_id": "UVERIFIED",
-        "channel_id": "CCOWORK",
+        "channel_id": "C0BRM181EDV",
         "booking_date": "2026-08-03",
         "action": captured["action"],
         "store": action_store,
@@ -314,7 +314,7 @@ def test_action_occurrence_identity_preserves_legacy_gen1_and_fences_gen2():
     identity = {
         "slack_team_id": "TMLAI",
         "slack_user_id": "UVERIFIED",
-        "channel_id": "CCOWORK",
+        "channel_id": "C0BRM181EDV",
         "action_id": OFFICE_MANAGER_VOLUNTEER_ACTION_ID,
         "action_ts": "1.000001",
         "message_ts": "2.000002",
@@ -347,7 +347,7 @@ def test_generation_mismatch_cannot_reuse_persisted_request_identity(tmp_path):
     store = action_module.OfficeManagerActionStore(tmp_path / "actions.db")
     store.record_action(
         slack_user_id="UVERIFIED",
-        channel_id="CCOWORK",
+        channel_id="C0BRM181EDV",
         booking_date="2026-08-03",
         generation=1,
         request_fingerprint="a" * 64,
@@ -356,7 +356,7 @@ def test_generation_mismatch_cannot_reuse_persisted_request_identity(tmp_path):
     with pytest.raises(ValueError, match="persisted action identity"):
         store.record_action(
             slack_user_id="UVERIFIED",
-            channel_id="CCOWORK",
+            channel_id="C0BRM181EDV",
             booking_date="2026-08-03",
             generation=2,
             request_fingerprint="a" * 64,
@@ -419,7 +419,7 @@ def test_persistence_failure_is_retried_after_generic_receipt_is_committed(
     assert captured == [
         {
             "user_id": "UVERIFIED",
-            "channel_id": "CCOWORK",
+            "channel_id": "C0BRM181EDV",
             "booking_date": "2026-08-03",
             "action": captured[0]["action"],
             "store": action_store,
@@ -831,6 +831,8 @@ def test_public_readiness_exposes_non_secret_office_manager_contract(
         "timezone": "Australia/Melbourne",
         "claim_generation_supported": True,
         "claim_generation_required": True,
+        "claim_channel_required": True,
+        "allowed_channel_id": "C0BRM181EDV",
         "enabled": True,
     }
     main_module.app.state.slack_app_identity = {
@@ -848,6 +850,8 @@ def test_public_readiness_exposes_non_secret_office_manager_contract(
             "timezone": "Australia/Melbourne",
             "claim_generation_supported": True,
             "claim_generation_required": True,
+            "claim_channel_required": True,
+            "allowed_channel_id": "C0BRM181EDV",
             "enabled": True,
         },
     }
@@ -889,6 +893,8 @@ def test_public_readiness_fails_without_verified_slack_identity(
         "timezone": "Australia/Melbourne",
         "claim_generation_supported": True,
         "claim_generation_required": True,
+        "claim_channel_required": True,
+        "allowed_channel_id": "C0BRM181EDV",
         "enabled": True,
     }
     main_module.app.state.slack_app_identity = None
@@ -924,6 +930,8 @@ def test_office_manager_backend_contract_fails_closed_on_mismatch():
                 "timezone": "UTC",
                 "claim_generation_supported": True,
                 "claim_generation_required": True,
+                "claim_channel_required": True,
+                "allowed_channel_id": "C0BRM181EDV",
                 "enabled": False,
             },
             timezone_name="Australia/Melbourne",
@@ -939,6 +947,8 @@ def test_office_manager_backend_contract_accepts_staged_disabled_gate():
             "timezone": "Australia/Melbourne",
             "claim_generation_supported": True,
             "claim_generation_required": True,
+            "claim_channel_required": True,
+            "allowed_channel_id": "C0BRM181EDV",
             "enabled": False,
         },
         timezone_name="Australia/Melbourne",
@@ -958,6 +968,8 @@ def test_office_manager_backend_contract_requires_generation_support(capability)
         "timezone": "Australia/Melbourne",
         "enabled": False,
         "claim_generation_required": True,
+        "claim_channel_required": True,
+        "allowed_channel_id": "C0BRM181EDV",
     }
     if capability is not None:
         payload["claim_generation_supported"] = capability
@@ -983,6 +995,8 @@ def test_public_readiness_fails_when_office_manager_worker_is_stale(
         "timezone": "Australia/Melbourne",
         "claim_generation_supported": True,
         "claim_generation_required": True,
+        "claim_channel_required": True,
+        "allowed_channel_id": "C0BRM181EDV",
         "enabled": True,
     }
     main_module.app.state.slack_app_identity = {
@@ -1022,7 +1036,7 @@ def test_permanent_target_failure_is_warning_not_core_readiness_failure(
     )
     action, _ = store.record_action(
         slack_user_id="UDELETED",
-        channel_id="CCOWORK",
+        channel_id="C0BRM181EDV",
         booking_date="2026-08-03",
     )
     leased = store.reserve(action["id"], owner="terminal-worker")
@@ -1094,7 +1108,7 @@ def test_malformed_button_is_acknowledged_with_private_feedback(
     asyncio.run(scheduled[0])
     assert feedback == [
         {
-            "channel_id": "CCOWORK",
+            "channel_id": "C0BRM181EDV",
             "user_id": "UVERIFIED",
             "text": (
                 "This volunteer button is no longer valid. "
@@ -1205,6 +1219,8 @@ def test_generation_two_is_persisted_and_sent_on_durable_claim(
             booking_date,
             attempt_id,
             generation=1,
+            *,
+            slack_channel_id,
         ):
             backend_calls.append(
                 (slack_user_id, booking_date, attempt_id, generation)
@@ -1385,7 +1401,7 @@ def test_exact_accepted_delivery_crossing_midnight_resumes_durable_attempt(
 @pytest.mark.asyncio
 async def test_claim_success_reports_zero_charge_and_refund_privately(monkeypatch):
     class FakeClient:
-        async def claim_office_manager_day(self, slack_user_id, booking_date):
+        async def claim_office_manager_day(self, slack_user_id, booking_date, *, slack_channel_id):
             assert slack_user_id == "UVERIFIED"
             assert booking_date == "2026-08-03"
             return _successful_claim_payload(points_refunded=8)
@@ -1404,7 +1420,7 @@ async def test_claim_success_reports_zero_charge_and_refund_privately(monkeypatc
 
     await main_module._claim_office_manager_from_action(
         user_id="UVERIFIED",
-        channel_id="CCOWORK",
+        channel_id="C0BRM181EDV",
         booking_date="2026-08-03",
     )
 
@@ -1416,7 +1432,7 @@ async def test_claim_success_reports_zero_charge_and_refund_privately(monkeypatc
 @pytest.mark.asyncio
 async def test_already_claimed_by_member_is_the_only_idempotent_success(monkeypatch):
     class FakeClient:
-        async def claim_office_manager_day(self, slack_user_id, booking_date):
+        async def claim_office_manager_day(self, slack_user_id, booking_date, *, slack_channel_id):
             return _successful_claim_payload(status="already_claimed_by_you")
 
     feedback = []
@@ -1433,7 +1449,7 @@ async def test_already_claimed_by_member_is_the_only_idempotent_success(monkeypa
 
     await main_module._claim_office_manager_from_action(
         user_id="UVERIFIED",
-        channel_id="CCOWORK",
+        channel_id="C0BRM181EDV",
         booking_date="2026-08-03",
     )
 
@@ -1455,7 +1471,7 @@ async def test_unexpected_success_response_is_retried_without_winner_feedback(
     result,
 ):
     class FakeClient:
-        async def claim_office_manager_day(self, slack_user_id, booking_date):
+        async def claim_office_manager_day(self, slack_user_id, booking_date, *, slack_channel_id):
             return result
 
     feedback = []
@@ -1476,7 +1492,7 @@ async def test_unexpected_success_response_is_retried_without_winner_feedback(
     ):
         await main_module._claim_office_manager_from_action(
             user_id="UVERIFIED",
-            channel_id="CCOWORK",
+            channel_id="C0BRM181EDV",
             booking_date="2026-08-03",
         )
 
@@ -1507,7 +1523,7 @@ async def test_mismatched_success_contract_is_retried_without_feedback(
     result,
 ):
     class FakeClient:
-        async def claim_office_manager_day(self, slack_user_id, booking_date):
+        async def claim_office_manager_day(self, slack_user_id, booking_date, *, slack_channel_id):
             return result
 
     feedback = []
@@ -1528,7 +1544,7 @@ async def test_mismatched_success_contract_is_retried_without_feedback(
     ):
         await main_module._claim_office_manager_from_action(
             user_id="UVERIFIED",
-            channel_id="CCOWORK",
+            channel_id="C0BRM181EDV",
             booking_date="2026-08-03",
         )
 
@@ -1598,6 +1614,8 @@ async def test_success_without_matching_attempt_id_stays_pending(
             booking_date,
             attempt_id,
             generation=1,
+            *,
+            slack_channel_id,
         ):
             return _successful_claim_payload()
 
@@ -1614,7 +1632,7 @@ async def test_success_without_matching_attempt_id_stays_pending(
     store = action_module.OfficeManagerActionStore(tmp_path / "actions.db")
     action, _ = store.record_action(
         slack_user_id="UVERIFIED",
-        channel_id="CCOWORK",
+        channel_id="C0BRM181EDV",
         booking_date="2026-08-03",
     )
 
@@ -1631,7 +1649,7 @@ async def test_success_without_matching_attempt_id_stays_pending(
 @pytest.mark.asyncio
 async def test_invalid_refund_value_keeps_claim_pending_for_recovery(monkeypatch):
     class FakeClient:
-        async def claim_office_manager_day(self, slack_user_id, booking_date):
+        async def claim_office_manager_day(self, slack_user_id, booking_date, *, slack_channel_id):
             return _successful_claim_payload(points_refunded="not-a-number")
 
     feedback = []
@@ -1652,7 +1670,7 @@ async def test_invalid_refund_value_keeps_claim_pending_for_recovery(monkeypatch
     ):
         await main_module._claim_office_manager_from_action(
             user_id="UVERIFIED",
-            channel_id="CCOWORK",
+            channel_id="C0BRM181EDV",
             booking_date="2026-08-03",
         )
 
@@ -1693,6 +1711,8 @@ async def test_claim_rejections_are_private_and_specific(
             booking_date,
             attempt_id=None,
             generation=1,
+            *,
+            slack_channel_id,
         ):
             request = httpx.Request("POST", "https://backend.test/claim")
             response = httpx.Response(
@@ -1720,7 +1740,7 @@ async def test_claim_rejections_are_private_and_specific(
 
     await main_module._claim_office_manager_from_action(
         user_id="UVERIFIED",
-        channel_id="CCOWORK",
+        channel_id="C0BRM181EDV",
         booking_date="2026-08-03",
     )
 
@@ -1757,6 +1777,8 @@ async def test_attempt_supersession_errors_are_terminal_and_private(
             booking_date,
             attempt_id,
             generation=1,
+            *,
+            slack_channel_id,
         ):
             request = httpx.Request("POST", "https://backend.test/claim")
             response = httpx.Response(
@@ -1788,7 +1810,7 @@ async def test_attempt_supersession_errors_are_terminal_and_private(
     store = action_module.OfficeManagerActionStore(tmp_path / "actions.db")
     action, _ = store.record_action(
         slack_user_id="UVERIFIED",
-        channel_id="CCOWORK",
+        channel_id="C0BRM181EDV",
         booking_date="2026-08-03",
     )
 
@@ -1816,6 +1838,8 @@ async def test_terminal_error_missing_attempt_binding_stays_pending(
             booking_date,
             attempt_id,
             generation=1,
+            *,
+            slack_channel_id,
         ):
             payload = {
                 "code": "already_claimed",
@@ -1841,7 +1865,7 @@ async def test_terminal_error_missing_attempt_binding_stays_pending(
     store = action_module.OfficeManagerActionStore(tmp_path / "actions.db")
     action, _ = store.record_action(
         slack_user_id="UVERIFIED",
-        channel_id="CCOWORK",
+        channel_id="C0BRM181EDV",
         booking_date="2026-08-03",
         generation=2,
     )
@@ -1879,6 +1903,8 @@ async def test_unbound_unknown_4xx_remains_retryable_for_authoritative_recovery(
             booking_date,
             attempt_id,
             generation=1,
+            *,
+            slack_channel_id,
         ):
             request = httpx.Request("POST", "https://backend.test/claim")
             response = httpx.Response(
@@ -1904,7 +1930,7 @@ async def test_unbound_unknown_4xx_remains_retryable_for_authoritative_recovery(
     store = action_module.OfficeManagerActionStore(tmp_path / "actions.db")
     action, _ = store.record_action(
         slack_user_id="UVERIFIED",
-        channel_id="CCOWORK",
+        channel_id="C0BRM181EDV",
         booking_date="2026-08-03",
         generation=2,
     )
@@ -1918,7 +1944,7 @@ async def test_unbound_unknown_4xx_remains_retryable_for_authoritative_recovery(
     persisted = store.get(action["id"])
     assert persisted["status"] == "pending"
     assert persisted["slack_user_id"] == "UVERIFIED"
-    assert persisted["channel_id"] == "CCOWORK"
+    assert persisted["channel_id"] == "C0BRM181EDV"
     assert persisted["booking_date"] == "2026-08-03"
     assert delivered and "still confirming" in delivered[0][1]
 
@@ -1935,6 +1961,8 @@ async def test_mismatched_error_attempt_id_stays_pending_for_reconciliation(
             booking_date,
             attempt_id,
             generation=1,
+            *,
+            slack_channel_id,
         ):
             request = httpx.Request("POST", "https://backend.test/claim")
             response = httpx.Response(
@@ -1965,7 +1993,7 @@ async def test_mismatched_error_attempt_id_stays_pending_for_reconciliation(
     store = action_module.OfficeManagerActionStore(tmp_path / "actions.db")
     action, _ = store.record_action(
         slack_user_id="UVERIFIED",
-        channel_id="CCOWORK",
+        channel_id="C0BRM181EDV",
         booking_date="2026-08-03",
     )
 
@@ -1991,6 +2019,8 @@ async def test_mismatched_terminal_error_generation_stays_pending(
             booking_date,
             attempt_id,
             generation=1,
+            *,
+            slack_channel_id,
         ):
             assert generation == 2
             request = httpx.Request("POST", "https://backend.test/claim")
@@ -2023,7 +2053,7 @@ async def test_mismatched_terminal_error_generation_stays_pending(
     store = action_module.OfficeManagerActionStore(tmp_path / "actions.db")
     action, _ = store.record_action(
         slack_user_id="UVERIFIED",
-        channel_id="CCOWORK",
+        channel_id="C0BRM181EDV",
         booking_date="2026-08-03",
         generation=2,
     )
@@ -2043,7 +2073,7 @@ async def test_unknown_backend_failure_is_reported_and_raised_for_durable_retry(
     monkeypatch,
 ):
     class FakeClient:
-        async def claim_office_manager_day(self, slack_user_id, booking_date):
+        async def claim_office_manager_day(self, slack_user_id, booking_date, *, slack_channel_id):
             request = httpx.Request("POST", "https://backend.test/claim")
             response = httpx.Response(
                 502,
@@ -2064,7 +2094,7 @@ async def test_unknown_backend_failure_is_reported_and_raised_for_durable_retry(
     ):
         await main_module._claim_office_manager_from_action(
             user_id="UVERIFIED",
-            channel_id="CCOWORK",
+            channel_id="C0BRM181EDV",
             booking_date="2026-08-03",
         )
 
@@ -2089,6 +2119,8 @@ async def test_backend_auth_drift_stays_pending_and_marks_readiness_until_recove
             booking_date,
             attempt_id,
             generation=1,
+            *,
+            slack_channel_id,
         ):
             backend_calls.append(attempt_id)
             if len(backend_calls) == 1:
@@ -2121,7 +2153,7 @@ async def test_backend_auth_drift_stays_pending_and_marks_readiness_until_recove
     )
     action, _ = store.record_action(
         slack_user_id="UVERIFIED",
-        channel_id="CCOWORK",
+        channel_id="C0BRM181EDV",
         booking_date="2026-08-03",
     )
 
@@ -2183,7 +2215,7 @@ async def test_slack_app_auth_failure_stays_pending_and_fails_readiness(
     )
     action, _ = store.record_action(
         slack_user_id="UVERIFIED",
-        channel_id="CCOWORK",
+        channel_id="C0BRM181EDV",
         booking_date="2026-08-03",
     )
 
@@ -2246,6 +2278,8 @@ async def test_cancellation_while_reporting_uncertain_claim_is_not_masked(
             booking_date,
             attempt_id=None,
             generation=1,
+            *,
+            slack_channel_id,
         ):
             request = httpx.Request("POST", "https://backend.test/claim")
             response = httpx.Response(502, request=request)
@@ -2267,7 +2301,7 @@ async def test_cancellation_while_reporting_uncertain_claim_is_not_masked(
     store = action_module.OfficeManagerActionStore(tmp_path / "actions.db")
     action, _ = store.record_action(
         slack_user_id="UVERIFIED",
-        channel_id="CCOWORK",
+        channel_id="C0BRM181EDV",
         booking_date="2026-08-03",
     )
     leased = store.reserve(action["id"], owner="cancelling-worker")
@@ -2297,6 +2331,8 @@ async def test_transient_claim_failure_retries_then_recovers_idempotent_result(
             booking_date,
             attempt_id=None,
             generation=1,
+            *,
+            slack_channel_id,
         ):
             calls.append((slack_user_id, booking_date))
             if len(calls) == 1:
@@ -2326,7 +2362,7 @@ async def test_transient_claim_failure_retries_then_recovers_idempotent_result(
     store = action_module.OfficeManagerActionStore(tmp_path / "actions.db")
     action, _ = store.record_action(
         slack_user_id="UVERIFIED",
-        channel_id="CCOWORK",
+        channel_id="C0BRM181EDV",
         booking_date="2026-08-03",
     )
 
@@ -2369,6 +2405,8 @@ async def test_commit_response_loss_restart_and_rollover_reuse_attempt(
             booking_date,
             attempt_id,
             generation=1,
+            *,
+            slack_channel_id,
         ):
             backend_attempts.append(attempt_id)
             if len(backend_attempts) == 1:
@@ -2394,7 +2432,7 @@ async def test_commit_response_loss_restart_and_rollover_reuse_attempt(
     initial_store = action_module.OfficeManagerActionStore(database_path)
     action, _ = initial_store.record_action(
         slack_user_id="UVERIFIED",
-        channel_id="CCOWORK",
+        channel_id="C0BRM181EDV",
         booking_date="2026-08-03",
         request_fingerprint="c" * 64,
     )
@@ -2441,6 +2479,8 @@ async def test_repeated_transient_failures_send_one_uncertainty_notice(
             booking_date,
             attempt_id=None,
             generation=1,
+            *,
+            slack_channel_id,
         ):
             backend_calls.append((slack_user_id, booking_date, current_time[0]))
             request = httpx.Request("POST", "https://backend.test/claim")
@@ -2464,7 +2504,7 @@ async def test_repeated_transient_failures_send_one_uncertainty_notice(
     store = action_module.OfficeManagerActionStore(database_path)
     action, _ = store.record_action(
         slack_user_id="UVERIFIED",
-        channel_id="CCOWORK",
+        channel_id="C0BRM181EDV",
         booking_date="2026-08-03",
     )
 
@@ -2522,13 +2562,13 @@ async def test_uncertainty_notice_response_loss_replay_accepts_slack_duplicate(
         match="office_manager_private_feedback_failed",
     ):
         await main_module._send_office_manager_private_feedback(
-            channel_id="CCOWORK",
+            channel_id="C0BRM181EDV",
             user_id="UVERIFIED",
             text="Roo is still confirming your request.",
             client_msg_id=client_msg_id,
         )
     await main_module._send_office_manager_private_feedback(
-        channel_id="CCOWORK",
+        channel_id="C0BRM181EDV",
         user_id="UVERIFIED",
         text="Roo is still confirming your request.",
         client_msg_id=client_msg_id,
@@ -2554,6 +2594,8 @@ async def test_failed_uncertainty_notice_is_not_repeated(
             booking_date,
             attempt_id=None,
             generation=1,
+            *,
+            slack_channel_id,
         ):
             backend_calls.append(current_time[0])
             request = httpx.Request("POST", "https://backend.test/claim")
@@ -2577,7 +2619,7 @@ async def test_failed_uncertainty_notice_is_not_repeated(
     store = action_module.OfficeManagerActionStore(tmp_path / "actions.db")
     action, _ = store.record_action(
         slack_user_id="UVERIFIED",
-        channel_id="CCOWORK",
+        channel_id="C0BRM181EDV",
         booking_date="2026-08-03",
     )
 
@@ -2624,7 +2666,7 @@ def test_existing_outbox_schema_adds_uncertainty_notice_column(tmp_path):
     store = action_module.OfficeManagerActionStore(database_path)
     action, should_process = store.record_action(
         slack_user_id="UVERIFIED",
-        channel_id="CCOWORK",
+        channel_id="C0BRM181EDV",
         booking_date="2026-08-03",
     )
 
@@ -2669,7 +2711,7 @@ def test_concurrent_processes_serialize_legacy_schema_upgrade(tmp_path):
     def upgrade(index):
         return stores[index].record_action(
             slack_user_id=f"UCONCURRENT{index}",
-            channel_id="CCOWORK",
+            channel_id="C0BRM181EDV",
             booking_date="2026-08-03",
         )[0]
 
@@ -2700,6 +2742,8 @@ async def test_staged_success_crossing_midnight_uses_correction_message_id(
             booking_date,
             attempt_id=None,
             generation=1,
+            *,
+            slack_channel_id,
         ):
             backend_calls.append((slack_user_id, booking_date))
             return _successful_claim_payload(attempt_id=attempt_id)
@@ -2720,7 +2764,7 @@ async def test_staged_success_crossing_midnight_uses_correction_message_id(
     store = action_module.OfficeManagerActionStore(database_path)
     action, _ = store.record_action(
         slack_user_id="UVERIFIED",
-        channel_id="CCOWORK",
+        channel_id="C0BRM181EDV",
         booking_date="2026-08-03",
     )
 
@@ -2778,6 +2822,8 @@ async def test_terminal_feedback_response_loss_replay_accepts_slack_duplicate(
             booking_date,
             attempt_id,
             generation=1,
+            *,
+            slack_channel_id,
         ):
             backend_calls.append(attempt_id)
             return _successful_claim_payload(attempt_id=attempt_id)
@@ -2797,7 +2843,7 @@ async def test_terminal_feedback_response_loss_replay_accepts_slack_duplicate(
     store = action_module.OfficeManagerActionStore(tmp_path / "actions.db")
     action, _ = store.record_action(
         slack_user_id="UVERIFIED",
-        channel_id="CCOWORK",
+        channel_id="C0BRM181EDV",
         booking_date="2026-08-03",
     )
 
@@ -2840,6 +2886,8 @@ async def test_legacy_null_staged_outcome_is_reconciled_before_delivery(
             booking_date,
             attempt_id,
             generation=1,
+            *,
+            slack_channel_id,
         ):
             backend_calls.append(attempt_id)
             if len(backend_calls) == 1:
@@ -2875,7 +2923,7 @@ async def test_legacy_null_staged_outcome_is_reconciled_before_delivery(
     store = action_module.OfficeManagerActionStore(database_path)
     action, _ = store.record_action(
         slack_user_id="UVERIFIED",
-        channel_id="CCOWORK",
+        channel_id="C0BRM181EDV",
         booking_date="2026-08-03",
     )
 
@@ -2913,7 +2961,7 @@ async def test_expired_worker_cannot_emit_terminal_private_feedback(
     store = action_module.OfficeManagerActionStore(tmp_path / "actions.db")
     action, _ = store.record_action(
         slack_user_id="UVERIFIED",
-        channel_id="CCOWORK",
+        channel_id="C0BRM181EDV",
         booking_date="2026-08-03",
     )
     stale = store.reserve(action["id"], owner="stale", lease_seconds=1)
@@ -2929,7 +2977,7 @@ async def test_expired_worker_cannot_emit_terminal_private_feedback(
 
     with pytest.raises(action_module.OfficeManagerActionLeaseLostError):
         await main_module._send_office_manager_private_feedback(
-            channel_id="CCOWORK",
+            channel_id="C0BRM181EDV",
             user_id="UVERIFIED",
             text="stale result",
             action=stale,
@@ -2950,7 +2998,7 @@ async def test_lease_renew_exception_revokes_worker_and_preserves_live_lease(
     store = action_module.OfficeManagerActionStore(tmp_path / "actions.db")
     action, _ = store.record_action(
         slack_user_id="UVERIFIED",
-        channel_id="CCOWORK",
+        channel_id="C0BRM181EDV",
         booking_date="2026-08-03",
     )
     renew_failures = []
@@ -2995,7 +3043,7 @@ async def test_inflight_slack_send_holds_delivery_fence_after_heartbeat_failure(
     store = action_module.OfficeManagerActionStore(tmp_path / "actions.db")
     action, _ = store.record_action(
         slack_user_id="UVERIFIED",
-        channel_id="CCOWORK",
+        channel_id="C0BRM181EDV",
         booking_date="2026-08-03",
     )
     send_started = threading.Event()
@@ -3055,7 +3103,7 @@ def test_heartbeat_renewal_never_shortens_slack_delivery_fence(tmp_path):
     store = action_module.OfficeManagerActionStore(tmp_path / "actions.db")
     action, _ = store.record_action(
         slack_user_id="UVERIFIED",
-        channel_id="CCOWORK",
+        channel_id="C0BRM181EDV",
         booking_date="2026-08-03",
     )
     leased = store.reserve(action["id"], owner="delivery-worker")
@@ -3077,7 +3125,7 @@ async def test_shutdown_after_heartbeat_preserves_full_slack_delivery_fence(
     store = action_module.OfficeManagerActionStore(tmp_path / "actions.db")
     action, _ = store.record_action(
         slack_user_id="UVERIFIED",
-        channel_id="CCOWORK",
+        channel_id="C0BRM181EDV",
         booking_date="2026-08-03",
     )
     send_started = threading.Event()
@@ -3125,7 +3173,7 @@ async def test_retry_worker_heartbeat_advances_during_slow_batch(tmp_path):
     store = action_module.OfficeManagerActionStore(tmp_path / "actions.db")
     store.record_action(
         slack_user_id="UVERIFIED",
-        channel_id="CCOWORK",
+        channel_id="C0BRM181EDV",
         booking_date="2026-08-03",
     )
     processor_started = asyncio.Event()
@@ -3164,7 +3212,7 @@ async def test_shutdown_cancel_is_not_swallowed_while_heartbeat_stops(
     store = action_module.OfficeManagerActionStore(tmp_path / "actions.db")
     store.record_action(
         slack_user_id="UVERIFIED",
-        channel_id="CCOWORK",
+        channel_id="C0BRM181EDV",
         booking_date="2026-08-03",
     )
     processor_finished = asyncio.Event()
@@ -3222,6 +3270,8 @@ async def test_private_feedback_failure_keeps_action_pending_until_delivered(
             booking_date,
             attempt_id=None,
             generation=1,
+            *,
+            slack_channel_id,
         ):
             backend_calls.append((slack_user_id, booking_date))
             status = "claimed" if len(backend_calls) == 1 else "already_claimed_by_you"
@@ -3242,7 +3292,7 @@ async def test_private_feedback_failure_keeps_action_pending_until_delivered(
     store = action_module.OfficeManagerActionStore(tmp_path / "actions.db")
     action, _ = store.record_action(
         slack_user_id="UVERIFIED",
-        channel_id="CCOWORK",
+        channel_id="C0BRM181EDV",
         booking_date="2026-08-03",
     )
 
@@ -3279,6 +3329,8 @@ async def test_cancelled_attempt_supersedes_staged_success_before_retry(
             booking_date,
             attempt_id,
             generation=1,
+            *,
+            slack_channel_id,
         ):
             backend_calls.append(attempt_id)
             if len(backend_calls) == 1:
@@ -3325,7 +3377,7 @@ async def test_cancelled_attempt_supersedes_staged_success_before_retry(
     store = action_module.OfficeManagerActionStore(tmp_path / "actions.db")
     action, _ = store.record_action(
         slack_user_id="UVERIFIED",
-        channel_id="CCOWORK",
+        channel_id="C0BRM181EDV",
         booking_date="2026-08-03",
     )
 
@@ -3381,6 +3433,8 @@ async def test_cancellation_supersedes_staged_already_claimed_before_retry(
             booking_date,
             attempt_id,
             generation=1,
+            *,
+            slack_channel_id,
         ):
             backend_calls.append(attempt_id)
             request = httpx.Request("POST", "https://backend.test/claim")
@@ -3415,7 +3469,7 @@ async def test_cancellation_supersedes_staged_already_claimed_before_retry(
     store = action_module.OfficeManagerActionStore(tmp_path / "actions.db")
     action, _ = store.record_action(
         slack_user_id="UVERIFIED",
-        channel_id="CCOWORK",
+        channel_id="C0BRM181EDV",
         booking_date="2026-08-03",
         generation=2,
     )
@@ -3450,6 +3504,8 @@ async def test_permanent_slack_target_failure_is_terminal_and_redacted(
             booking_date,
             attempt_id,
             generation=1,
+            *,
+            slack_channel_id,
         ):
             return _successful_claim_payload(
                 attempt_id=attempt_id,
@@ -3465,7 +3521,7 @@ async def test_permanent_slack_target_failure_is_terminal_and_redacted(
     store = action_module.OfficeManagerActionStore(tmp_path / "actions.db")
     action, _ = store.record_action(
         slack_user_id="UDELETED",
-        channel_id="CCOWORK",
+        channel_id="C0BRM181EDV",
         booking_date="2026-08-03",
     )
 
@@ -3511,6 +3567,8 @@ async def test_backend_disable_then_reenable_keeps_attempt_recoverable(
             booking_date,
             attempt_id,
             generation=1,
+            *,
+            slack_channel_id,
         ):
             backend_calls.append(attempt_id)
             if len(backend_calls) == 1:
@@ -3542,7 +3600,7 @@ async def test_backend_disable_then_reenable_keeps_attempt_recoverable(
     enabled_store = action_module.OfficeManagerActionStore(database_path)
     action, _ = enabled_store.record_action(
         slack_user_id="UVERIFIED",
-        channel_id="CCOWORK",
+        channel_id="C0BRM181EDV",
         booking_date="2026-08-03",
     )
 
@@ -3586,7 +3644,7 @@ async def test_private_feedback_falls_back_to_dm(monkeypatch):
     )
 
     await main_module._send_office_manager_private_feedback(
-        channel_id="CCOWORK",
+        channel_id="C0BRM181EDV",
         user_id="UVERIFIED",
         text="Private result",
     )
@@ -3612,7 +3670,7 @@ async def test_private_feedback_falls_back_when_ephemeral_returns_failure(monkey
     )
 
     await main_module._send_office_manager_private_feedback(
-        channel_id="CCOWORK",
+        channel_id="C0BRM181EDV",
         user_id="UVERIFIED",
         text="Private result",
     )
@@ -3639,7 +3697,7 @@ async def test_private_feedback_offloads_slack_calls_from_event_loop(monkeypatch
     monkeypatch.setattr(main_module.asyncio, "to_thread", capture_to_thread)
 
     await main_module._send_office_manager_private_feedback(
-        channel_id="CCOWORK",
+        channel_id="C0BRM181EDV",
         user_id="UVERIFIED",
         text="Private result",
     )
@@ -3653,7 +3711,7 @@ async def test_office_manager_delivery_redacts_identifiers_and_exception_text(
     capsys,
 ):
     user_sentinel = "U-SECRET-RAW-ID"
-    channel_sentinel = "C-SECRET-RAW-ID"
+    channel_sentinel = "C0BRM181EDV"
     exception_sentinel = "TOKEN-LIKE\nFORGED_LOG_SUFFIX=true"
 
     class TaintedSlackClient:
@@ -3709,7 +3767,7 @@ async def test_pending_action_is_recovered_after_restart(tmp_path):
     original_store = action_module.OfficeManagerActionStore(database_path)
     action, should_process = original_store.record_action(
         slack_user_id="UVERIFIED",
-        channel_id="CCOWORK",
+        channel_id="C0BRM181EDV",
         booking_date="2026-08-03",
         generation=2,
     )
@@ -3738,7 +3796,7 @@ async def test_prior_date_action_survives_disabled_interval_and_recovers(tmp_pat
     disabled_store = action_module.OfficeManagerActionStore(database_path)
     action, should_process = disabled_store.record_action(
         slack_user_id="UVERIFIED",
-        channel_id="CCOWORK",
+        channel_id="C0BRM181EDV",
         booking_date="2026-08-03",
     )
     assert should_process is True
@@ -3796,7 +3854,7 @@ async def test_prior_date_accepted_action_recovers_backend_result_privately(
     store = action_module.OfficeManagerActionStore(tmp_path / "actions.db")
     action, _ = store.record_action(
         slack_user_id="UVERIFIED",
-        channel_id="CCOWORK",
+        channel_id="C0BRM181EDV",
         booking_date="2026-08-03",
     )
     monkeypatch.setattr(
@@ -3814,6 +3872,8 @@ async def test_prior_date_accepted_action_recovers_backend_result_privately(
             booking_date,
             attempt_id,
             generation=1,
+            *,
+            slack_channel_id,
         ):
             backend_calls.append((slack_user_id, booking_date, attempt_id))
             return _successful_claim_payload(
@@ -3852,19 +3912,19 @@ def test_exact_delivery_reuses_attempt_but_new_click_gets_new_lifecycle(tmp_path
     store = action_module.OfficeManagerActionStore(tmp_path / "actions.db")
     first, first_created = store.record_action(
         slack_user_id="UVERIFIED",
-        channel_id="CCOWORK",
+        channel_id="C0BRM181EDV",
         booking_date="2026-08-03",
         request_fingerprint="a" * 64,
     )
     replay, replay_created = store.record_action(
         slack_user_id="UVERIFIED",
-        channel_id="CCOWORK",
+        channel_id="C0BRM181EDV",
         booking_date="2026-08-03",
         request_fingerprint="a" * 64,
     )
     later_click, later_created = store.record_action(
         slack_user_id="UVERIFIED",
-        channel_id="CCOWORK",
+        channel_id="C0BRM181EDV",
         booking_date="2026-08-03",
         request_fingerprint="b" * 64,
     )
@@ -3903,12 +3963,12 @@ async def test_due_actions_are_leased_only_immediately_before_processing(tmp_pat
     store = action_module.OfficeManagerActionStore(tmp_path / "actions.db")
     first, _ = store.record_action(
         slack_user_id="UFIRST",
-        channel_id="CCOWORK",
+        channel_id="C0BRM181EDV",
         booking_date="2026-08-03",
     )
     second, _ = store.record_action(
         slack_user_id="USECOND",
-        channel_id="CCOWORK",
+        channel_id="C0BRM181EDV",
         booking_date="2026-08-03",
     )
     observed_second_status = []
@@ -3938,7 +3998,7 @@ def test_old_completed_actions_are_pruned_by_worker_without_new_writes(
     store = action_module.OfficeManagerActionStore(tmp_path / "actions.db")
     old, _ = store.record_action(
         slack_user_id="UOLD",
-        channel_id="CCOWORK",
+        channel_id="C0BRM181EDV",
         booking_date="2026-08-03",
     )
     leased = store.reserve(old["id"], owner="test")
@@ -3958,7 +4018,7 @@ async def test_expired_processing_lease_is_recovered(tmp_path, monkeypatch):
     store = action_module.OfficeManagerActionStore(tmp_path / "actions.db")
     action, should_process = store.record_action(
         slack_user_id="UVERIFIED",
-        channel_id="CCOWORK",
+        channel_id="C0BRM181EDV",
         booking_date="2026-08-03",
     )
     assert should_process is True
@@ -3987,7 +4047,7 @@ async def test_only_one_worker_can_reserve_an_action(tmp_path):
     second_store = action_module.OfficeManagerActionStore(database_path)
     action, should_process = first_store.record_action(
         slack_user_id="UVERIFIED",
-        channel_id="CCOWORK",
+        channel_id="C0BRM181EDV",
         booking_date="2026-08-03",
     )
     assert should_process is True
@@ -4009,7 +4069,7 @@ def test_expired_worker_cannot_overwrite_replacement_worker_state(
     store = action_module.OfficeManagerActionStore(tmp_path / "actions.db")
     action, should_process = store.record_action(
         slack_user_id="UVERIFIED",
-        channel_id="CCOWORK",
+        channel_id="C0BRM181EDV",
         booking_date="2026-08-03",
     )
     assert should_process is True
@@ -4037,7 +4097,7 @@ async def test_cancelled_action_preserves_lease_until_recovery(tmp_path, monkeyp
     store = action_module.OfficeManagerActionStore(tmp_path / "actions.db")
     action, should_process = store.record_action(
         slack_user_id="UVERIFIED",
-        channel_id="CCOWORK",
+        channel_id="C0BRM181EDV",
         booking_date="2026-08-03",
     )
     assert should_process is True
@@ -4077,7 +4137,7 @@ async def test_shutdown_during_slack_send_keeps_replacement_fenced(
     store = action_module.OfficeManagerActionStore(tmp_path / "actions.db")
     action, _ = store.record_action(
         slack_user_id="UVERIFIED",
-        channel_id="CCOWORK",
+        channel_id="C0BRM181EDV",
         booking_date="2026-08-03",
     )
     send_started = threading.Event()
@@ -4185,3 +4245,112 @@ def test_admin_batch_coworking_confirmation_includes_no_food_reminder():
     )
 
     assert f"\n\n{NO_FOOD_REMINDER}" in message
+
+
+@pytest.mark.parametrize("channel", ["CCOWORK", "COTHER", "DTESTER", "", "C0BRM181EDV "])
+@pytest.mark.parametrize("enabled", [True, False])
+def test_pilot_rejects_signed_off_channel_click_before_outbox(tmp_path, monkeypatch, channel, enabled):
+    configured = _settings(tmp_path, OFFICE_MANAGER_ACTIONS_ENABLED=enabled)
+    main_module.app.dependency_overrides[get_settings] = lambda: configured
+    scheduled = []
+    monkeypatch.setattr(main_module, "start_slack_action", scheduled.append)
+    body = _action_body(channel_id=channel, value={
+        "date": "2026-08-03", "channel_id": "C0BRM181EDV", "slack_channel_id": "C0BRM181EDV",
+    })
+    client = TestClient(main_module.app)
+    for _ in range(2):
+        response = client.post("/slack/actions", content=body, headers=_signed_headers(configured, body))
+        assert response.status_code == 200
+    assert scheduled == []
+    store = action_module.get_office_manager_action_store(configured.SLACK_RECEIPTS_DB_PATH)
+    assert store.get(1) is None
+
+
+@pytest.mark.asyncio
+async def test_pilot_keeps_legacy_off_channel_outbox_pending_after_restart(tmp_path, monkeypatch):
+    from unittest.mock import AsyncMock
+    path = tmp_path / "legacy-actions.db"
+    original = action_module.OfficeManagerActionStore(path)
+    action, _ = original.record_action(
+        slack_user_id="UTESTER", channel_id="CCOWORK", booking_date="2026-08-03",
+        request_fingerprint="e" * 64,
+    )
+    # A new store/worker must not trust a record admitted by an older release.
+    restored = action_module.OfficeManagerActionStore(path)
+    claim = AsyncMock()
+    feedback = AsyncMock()
+    monkeypatch.setattr(main_module, "_claim_office_manager_from_action", claim)
+    monkeypatch.setattr(main_module, "_send_office_manager_private_feedback", feedback)
+    await action_module.process_office_manager_action(
+        action["id"], store=restored, processor=main_module._process_office_manager_action_record,
+    )
+    current = restored.get(action["id"])
+    assert current["status"] == "pending"
+    assert current["channel_id"] == "CCOWORK"
+    assert current["attempt_id"] == action["attempt_id"]
+    claim.assert_not_awaited()
+    feedback.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_pilot_blocks_direct_claim_and_private_feedback_outside_test_channel(monkeypatch):
+    from unittest.mock import Mock
+    backend = Mock()
+    dm = Mock()
+    monkeypatch.setattr(backend_module, "MLAIBackendClient", backend)
+    monkeypatch.setattr(main_module, "send_dm", dm)
+    with pytest.raises(RuntimeError, match="office_manager_channel_not_allowed"):
+        await main_module._claim_office_manager_from_action(
+            user_id="UTESTER", channel_id="CCOWORK", booking_date="2026-08-03",
+        )
+    with pytest.raises(RuntimeError, match="office_manager_channel_not_allowed"):
+        await main_module._send_office_manager_private_feedback(
+            user_id="UTESTER", channel_id="CCOWORK", text="Must never be sent",
+        )
+    backend.assert_not_called()
+    dm.assert_not_called()
+
+
+@pytest.mark.parametrize("field,value", [("claim_channel_required", False), ("allowed_channel_id", "CCOWORK")])
+def test_pilot_rejects_backend_without_matching_channel_contract(field, value):
+    contract = {
+        "status": "ok", "contract": "office-manager-v1", "credential_scope": "strict_roo",
+        "timezone": "Australia/Melbourne", "claim_generation_supported": True,
+        "claim_generation_required": True, "claim_channel_required": True,
+        "allowed_channel_id": "C0BRM181EDV", "enabled": False,
+    }
+    contract[field] = value
+    with pytest.raises(RuntimeError, match="backend contract mismatch"):
+        main_module._validate_office_manager_backend_contract(contract, timezone_name="Australia/Melbourne")
+
+
+@pytest.mark.asyncio
+async def test_backend_channel_rejection_stays_pending_without_false_auth_or_member_feedback(
+    tmp_path, monkeypatch,
+):
+    from unittest.mock import AsyncMock
+    from roo.office_manager_policy import OfficeManagerChannelRestrictedError
+
+    class RestrictedBackend:
+        async def claim_office_manager_day(self, *args, **kwargs):
+            request = httpx.Request("POST", "https://backend.test/claim")
+            response = httpx.Response(
+                403, request=request, json={"code": "channel_not_allowed"},
+            )
+            raise httpx.HTTPStatusError("pilot restriction", request=request, response=response)
+
+    monkeypatch.setattr(backend_module, "MLAIBackendClient", RestrictedBackend)
+    feedback = AsyncMock()
+    monkeypatch.setattr(main_module, "_send_office_manager_private_feedback", feedback)
+    store = action_module.OfficeManagerActionStore(tmp_path / "restricted.db")
+    action, _ = store.record_action(
+        slack_user_id="UTESTER", channel_id="C0BRM181EDV", booking_date="2026-08-03",
+        request_fingerprint="f" * 64,
+    )
+    await action_module.process_office_manager_action(
+        action["id"], store=store, processor=main_module._process_office_manager_action_record,
+    )
+    current = store.get(action["id"])
+    assert current["status"] == "pending"
+    assert current["last_error"] == OfficeManagerChannelRestrictedError.__name__
+    feedback.assert_not_awaited()
