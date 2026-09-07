@@ -5,9 +5,10 @@
 This release is locked in code to **#roo-testing (`C0BRM181EDV`)**. Keep
 `OFFICE_MANAGER_ENABLED=false` on the backend and
 `OFFICE_MANAGER_ACTIONS_ENABLED=false` on Roo until both services are deployed,
-configured for that channel, and their preflight checks pass. Deploy the backend
-first. Use the same existing Public Roo Slack app on both sides and invite it to
-#roo-testing; Roo's other features keep their existing channel behavior.
+configured for that channel, and their preflight checks pass. Set the deployment
+channel to `C0BRM181EDV` and both feature flags to false before deploying the
+backend, then deploy Roo. Use the same existing Public Roo Slack app on both
+sides and invite it to #roo-testing; Roo's other features keep their existing channel behavior.
 
 Roo derives `slack_channel_id` from the signed Slack envelope, persists it in its
 existing outbox, and sends it with every claim and retry. The backend requires
