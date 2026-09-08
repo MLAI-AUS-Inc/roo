@@ -17,7 +17,7 @@ before new claims or replay. Preflight advertises `claim_channel_required: true`
 and `allowed_channel_id: C0BRM181EDV`; Roo refuses an older backend contract.
 
 Every Office Manager channel delivery, update, reminder, cancellation correction,
-and recovery path checks the original stored day channel. Private confirmations
+and recovery path checks the original stored day channel. Private error feedback
 and responsibility DMs remain permitted for a test-channel workflow. Historical
 work bound to any other channel stays blocked in place and visible as pending
 or failed delivery; it is never moved into #roo-testing or silently completed.
@@ -34,7 +34,10 @@ backend still creates real bookings and points effects: use designated testers.
 Public Roo handles the Slack button for the backend-owned Office Manager of
 the Day workflow. Roo does not choose the winner or mutate points locally: it
 durably records each click, sends a stable `attempt_id` to `mlai-backend`, and
-delivers the backend's authoritative result privately.
+validates the backend's authoritative result. The backend sends the winner
+announcement and responsibilities DM. Roo completes successful claims silently,
+including idempotent retries and old staged success messages recovered after an
+upgrade. Failed or uncertain requests still receive private feedback.
 
 Each current announcement encodes a positive integer claim epoch in its button
 value, for example `{"date":"2026-08-03","generation":2}`. Dates must use

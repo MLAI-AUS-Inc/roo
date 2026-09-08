@@ -5445,7 +5445,7 @@ def _office_manager_claim_generation_echo_required() -> bool:
     )
 
 
-def _office_manager_claim_success_message(
+def _validate_office_manager_claim_success(
     result: Any,
     *,
     expected_user_id: str,
@@ -5453,7 +5453,8 @@ def _office_manager_claim_success_message(
     expected_attempt_id: Optional[str] = None,
     expected_generation: int = 1,
     generation_echo_required: bool = False,
-) -> str:
+) -> None:
+    """Validate the committed booking before completing the durable action."""
     def invalid(reason: str) -> None:
         print(f"OFFICE_MANAGER_CLAIM_RESPONSE_INVALID reason={reason}")
         raise OfficeManagerClaimUncertainError(
@@ -5534,46 +5535,6 @@ def _office_manager_claim_success_message(
         or points_refunded < 0
     ):
         invalid("invalid_points_refunded")
-
-    if expected_booking_date != get_current_date().isoformat():
-        message = (
-            f"Roo confirmed your Office Manager request for {expected_booking_date}. "
-            "That date has passed, so this is a historical confirmation only "
-            "and no action is needed now."
-        )
-        if points_refunded:
-            message += (
-                f" At processing time, Roo returned the {points_refunded} "
-                "points charged for that date."
-            )
-        return message
-
-    if claim_status == "already_claimed_by_you":
-        message = (
-            f"Roo had already accepted your Office Manager request for "
-            f"{expected_booking_date} and found the zero-point booking in place. "
-            "Check the latest daily announcement: a later cancellation or "
-            "replacement takes precedence over this processing result."
-        )
-        if points_refunded:
-            message += (
-                f" At processing time, the {points_refunded} Roo points "
-                "previously charged had been returned."
-            )
-        return message
-
-    message = (
-        f"Roo accepted your Office Manager request for {expected_booking_date} "
-        "and created a zero-point booking. Check the latest daily announcement: "
-        "a later cancellation or replacement takes precedence over this "
-        "processing result."
-    )
-    if points_refunded:
-        message += (
-            f" At processing time, Roo also returned the {points_refunded} "
-            "points previously charged."
-        )
-    return message
 
 
 async def _send_office_manager_private_feedback(
@@ -5949,7 +5910,7 @@ async def _claim_office_manager_from_action(
                 "office_manager_claim_result_uncertain"
             ) from exc
         else:
-            message = _office_manager_claim_success_message(
+            _validate_office_manager_claim_success(
                 result,
                 expected_user_id=user_id,
                 expected_booking_date=booking_date,
@@ -5961,7 +5922,10 @@ async def _claim_office_manager_from_action(
                     _office_manager_claim_generation_echo_required()
                 ),
             )
-            outcome = str(result.get("status") or "")
+            # The backend owns the winner announcement and responsibilities DM.
+            # Complete verified successes without an extra processing-result DM,
+            # including retries of success feedback staged by an older release.
+            return
 
     if staged_message and message != staged_message and not replace_staged:
         replace_staged = True
@@ -6948,7 +6912,7 @@ async def _process_office_manager_action_record(
                 raise
             except Exception:
                 # This is a one-time informational notice. The durable claim retry
-                # and its required terminal private result remain authoritative.
+                # and backend-owned winner notifications remain authoritative.
                 pass
         raise
 

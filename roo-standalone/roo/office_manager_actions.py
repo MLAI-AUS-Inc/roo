@@ -770,7 +770,7 @@ class OfficeManagerActionStore:
         return claimed
 
     def mark_completed(self, action_id: int, *, owner: str) -> bool:
-        """Record that the backend result and private feedback were handled."""
+        """Record that the backend result and any required feedback were handled."""
         self._ensure_schema()
         current_time = time.time()
         with self._lock:
