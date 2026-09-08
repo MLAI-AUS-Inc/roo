@@ -11,6 +11,38 @@ from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+PRODUCTION_MUTATION_BACKEND_AUTHORITIES = frozenset(
+    {
+        ("https", "api.mlai.au", 443),
+        ("http", "10.126.0.2", 80),
+        ("http", "10.126.0.2", 8000),
+    }
+)
+
+
+def backend_authority(url: str) -> tuple[str, str, int] | None:
+    """Return a canonical root authority, or None for an unsafe backend URL."""
+    parsed = urlparse(url)
+    try:
+        port = parsed.port
+    except ValueError:
+        return None
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in {"", "/"}
+        or parsed.params
+        or parsed.query
+        or parsed.fragment
+    ):
+        return None
+    if port is None:
+        port = 443 if parsed.scheme == "https" else 80
+    return parsed.scheme, parsed.hostname.lower(), port
+
+
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
 
@@ -159,6 +191,7 @@ class Settings(BaseSettings):
     LINEAR_CONTEXTUAL_AUTO_CREATE_ENABLED: bool = True
     COWORKING_INTENTS_DB_PATH: str = "data/coworking_booking_intents.db"
     COWORKING_RETRY_POLL_SECONDS: float = 30.0
+    OFFICE_MANAGER_ACTIONS_ENABLED: bool = False
     ROO_POINTS_TOPUP_ENABLED: bool = False
     ROO_POINTS_TOPUP_BUTTONS_ENABLED: bool = False
     ROO_POINTS_STRIPE_CHECKOUT_HOSTS: str = "checkout.stripe.com"
@@ -293,6 +326,18 @@ class Settings(BaseSettings):
         if channel_type == "im":
             return bool(user_id and user_id in self.allowed_dm_user_ids)
         return bool(channel_id and channel_id in self.allowed_channel_ids)
+
+    @property
+    def authenticated_backend_preflight_required(self) -> bool:
+        """Whether this runtime must verify Roo's strict backend contract."""
+        return bool(
+            self.ROO_SURFACE == "public"
+            and (
+                self.is_production
+                or self.MEETING_ROOM_BOOKING_ENABLED
+                or self.OFFICE_MANAGER_ACTIONS_ENABLED
+            )
+        )
 
     @model_validator(mode="after")
     def validate_contextual_responses(self):
@@ -471,6 +516,56 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "ROO_API_KEY is required when "
                     "MEETING_ROOM_BOOKING_ENABLED is true"
+                )
+        if (
+            self.authenticated_backend_preflight_required
+        ):
+            if not str(self.MLAI_BACKEND_URL or "").strip():
+                raise ValueError(
+                    "MLAI_BACKEND_URL is required for Public Roo's authenticated "
+                    "backend preflight"
+                )
+            if not str(self.ROO_API_KEY or "").strip():
+                raise ValueError(
+                    "ROO_API_KEY is required for Public Roo's authenticated "
+                    "backend preflight"
+                )
+            mutation_backend_authority = backend_authority(
+                str(self.MLAI_BACKEND_URL or "")
+            )
+            if mutation_backend_authority is None:
+                raise ValueError(
+                    "MLAI_BACKEND_URL must be a non-secret HTTP(S) root origin "
+                    "without a path when Public Roo authenticates to the backend"
+                )
+            if (
+                self.is_production
+                and mutation_backend_authority
+                not in PRODUCTION_MUTATION_BACKEND_AUTHORITIES
+            ):
+                raise ValueError(
+                    "MLAI_BACKEND_URL must target the reviewed MLAI production "
+                    "backend authority when Public Roo authenticates to the backend"
+                )
+        if self.OFFICE_MANAGER_ACTIONS_ENABLED:
+            if self.ROO_SURFACE != "public":
+                raise ValueError(
+                    "Office Manager actions are available only on Public Roo"
+                )
+            if not str(self.MLAI_BACKEND_URL or "").strip():
+                raise ValueError(
+                    "MLAI_BACKEND_URL is required when "
+                    "OFFICE_MANAGER_ACTIONS_ENABLED is true"
+                )
+            if not str(self.ROO_API_KEY or "").strip():
+                raise ValueError(
+                    "ROO_API_KEY is required when "
+                    "OFFICE_MANAGER_ACTIONS_ENABLED is true"
+                )
+            if self.TIMEZONE != "Australia/Melbourne":
+                raise ValueError(
+                    "TIMEZONE must be Australia/Melbourne when "
+                    "OFFICE_MANAGER_ACTIONS_ENABLED is true"
                 )
 
         if self.ROO_SURFACE == "public":

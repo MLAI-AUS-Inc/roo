@@ -325,6 +325,8 @@ For coworking report actions:
 Call the appropriate MLAIBackendClient method with extracted parameters.
 - All API calls pass the requester's `slack_user_id` from the Slack event
 - Never trust user-provided identity in message text
+- Before cancelling by a user-supplied date, resolve it to exactly one active
+  booking and send that immutable `booking_id`; never mutate by date alone
 
 ### Step 4: Format Response
 Generate friendly response with relevant information:
@@ -439,6 +441,8 @@ Booked you in for **20 Dec 2025** at the coworking space.
 Cost: 1 point (Balance remaining: 14 points)
 
 See you there, legend!
+
+Reminder: no food is permitted in the coworking space.
 ```
 
 ### Insufficient Balance

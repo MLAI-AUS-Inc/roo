@@ -474,14 +474,17 @@ def _coworking_retry_confirmed_message(
     requested_by_slack_id: str,
     booking_date: str,
 ) -> str:
+    from .coworking_messages import NO_FOOD_REMINDER
+
     if requested_by_slack_id and requested_by_slack_id != slack_user_id:
         return (
             "I retried the queued coworking check-in for "
-            f"<@{slack_user_id}> and confirmed {booking_date}. They're booked."
+            f"<@{slack_user_id}> and confirmed {booking_date}. They're booked.\n\n"
+            f"{NO_FOOD_REMINDER}"
         )
     return (
         "I retried your queued coworking booking and confirmed "
-        f"{booking_date}. You're booked."
+        f"{booking_date}. You're booked.\n\n{NO_FOOD_REMINDER}"
     )
 
 

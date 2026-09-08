@@ -1006,7 +1006,9 @@ class RooAgent:
             today = self._get_today().isoformat()
             return await self._execute_fast_points(
                 user_id, "cancel_coworking",
-                date=today
+                date=today,
+                channel_id=channel_id,
+                thread_ts=thread_ts,
             )
 
         return None
@@ -1106,9 +1108,16 @@ class RooAgent:
                 
             elif action == "cancel_coworking":
                 booking_date = kwargs.get("date")
-                res = await client.cancel_coworking(user_id, booking_date=booking_date)
-                ref = res.get("refund_amount", 0)
-                msg = f"No worries, cancelled your booking for {booking_date}. Refunded {ref} points."
+                msg = await self.skill_executor._handle_points_action(
+                    client=client,
+                    action="cancel_coworking",
+                    params={"date": booking_date},
+                    text=f"cancel coworking {booking_date}",
+                    user_id=user_id,
+                    channel_id=kwargs.get("channel_id"),
+                    thread_ts=kwargs.get("thread_ts"),
+                    skill=skill,
+                )
                 
             else:
                 msg = "Unknown fast action."

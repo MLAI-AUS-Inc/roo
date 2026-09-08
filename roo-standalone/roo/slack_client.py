@@ -27,7 +27,9 @@ def get_slack_client():
         from slack_sdk import WebClient
         
         settings = get_settings()
-        _slack_client = WebClient(token=settings.SLACK_BOT_TOKEN)
+        # Bound synchronous calls so durable outbox leases can fence every
+        # in-flight Slack mutation until its worker thread has drained.
+        _slack_client = WebClient(token=settings.SLACK_BOT_TOKEN, timeout=30)
         print("🔌 Slack client initialized")
     
     return _slack_client
@@ -37,6 +39,24 @@ def get_slack_client():
 _bot_user_id = None
 
 
+@lru_cache(maxsize=1)
+def get_slack_app_identity() -> Dict[str, str]:
+    """Return the non-secret identity bound to Roo's configured Slack token."""
+    response = get_slack_client().auth_test()
+    if response.get("ok") is not True:
+        raise SlackIdentityLookupError("Slack auth.test did not succeed")
+    identity = {
+        "team_id": str(response.get("team_id") or "").strip(),
+        "bot_id": str(response.get("bot_id") or "").strip(),
+        "user_id": str(response.get("user_id") or "").strip(),
+    }
+    if any(not value for value in identity.values()):
+        raise SlackIdentityLookupError(
+            "Slack auth.test did not return team_id, bot_id, and user_id"
+        )
+    return identity
+
+
 def get_bot_user_id() -> str:
     """Get Roo's own Slack user ID via auth.test.
     
@@ -44,9 +64,7 @@ def get_bot_user_id() -> str:
     """
     global _bot_user_id
     if _bot_user_id is None:
-        client = get_slack_client()
-        response = client.auth_test()
-        _bot_user_id = response["user_id"]
+        _bot_user_id = get_slack_app_identity()["user_id"]
         print(f"🤖 Bot user ID: {_bot_user_id}")
     return _bot_user_id
 
@@ -55,6 +73,7 @@ def post_message(
     channel: str,
     text: str,
     thread_ts: Optional[str] = None,
+    redact_logs: bool = False,
     **kwargs
 ) -> Dict[str, Any]:
     """
@@ -82,15 +101,24 @@ def post_message(
         )
         
         if response.get("ok"):
-            suffix = f" (thread: {thread_ts})" if thread_ts else ""
-            print(f"✅ Message posted to {channel}{suffix}")
+            if redact_logs:
+                print("✅ Slack message posted to private destination")
+            else:
+                suffix = f" (thread: {thread_ts})" if thread_ts else ""
+                print(f"✅ Message posted to {channel}{suffix}")
         else:
-            print(f"❌ Failed to post message: {response}")
+            if redact_logs:
+                print("❌ Slack private message failed")
+            else:
+                print(f"❌ Failed to post message: {response}")
         
         return response
         
     except Exception as e:
-        print(f"❌ Slack post error: {e}")
+        if redact_logs:
+            print(f"❌ Slack private post error: error_type={e.__class__.__name__}")
+        else:
+            print(f"❌ Slack post error: {e}")
         raise
 
 
@@ -99,6 +127,7 @@ def post_ephemeral(
     user: str,
     text: str,
     thread_ts: Optional[str] = None,
+    redact_logs: bool = False,
     **kwargs,
 ) -> Dict[str, Any]:
     """Post a private message visible only to one member in a Slack channel."""
@@ -113,12 +142,18 @@ def post_ephemeral(
             **kwargs,
         )
         if response.get("ok"):
-            print(f"✅ Private message posted in {channel} for {user}")
+            if redact_logs:
+                print("✅ Private Slack feedback posted")
+            else:
+                print(f"✅ Private message posted in {channel} for {user}")
         else:
-            print(
-                "❌ Failed to post private message: "
-                f"error={response.get('error', 'unknown')}"
-            )
+            if redact_logs:
+                print("❌ Private Slack feedback failed")
+            else:
+                print(
+                    "❌ Failed to post private message: "
+                    f"error={response.get('error', 'unknown')}"
+                )
         return response
     except Exception as exc:
         print(f"❌ Slack private post error: error_type={exc.__class__.__name__}")
@@ -542,7 +577,12 @@ def get_display_name(user_id: str) -> str:
     )
 
 
-def open_dm(user_id: str, *, raise_on_error: bool = False) -> Optional[str]:
+def open_dm(
+    user_id: str,
+    *,
+    raise_on_error: bool = False,
+    redact_logs: bool = False,
+) -> Optional[str]:
     """Open a DM channel with a user."""
     client = get_slack_client()
     
@@ -552,7 +592,10 @@ def open_dm(user_id: str, *, raise_on_error: bool = False) -> Optional[str]:
             return response["channel"]["id"]
         return None
     except Exception as e:
-        print(f"❌ Failed to open DM with {user_id}: {e}")
+        if redact_logs:
+            print(f"❌ Failed to open private Slack DM: error_type={e.__class__.__name__}")
+        else:
+            print(f"❌ Failed to open DM with {user_id}: {e}")
         if raise_on_error:
             raise
         return None
@@ -563,12 +606,22 @@ def send_dm(
     text: str,
     *,
     raise_on_error: bool = False,
+    redact_logs: bool = False,
     **kwargs,
 ) -> Optional[Dict[str, Any]]:
     """Send a direct message to a user."""
-    dm_channel = open_dm(user_id, raise_on_error=raise_on_error)
+    dm_channel = open_dm(
+        user_id,
+        raise_on_error=raise_on_error,
+        redact_logs=redact_logs,
+    )
     if dm_channel:
-        return post_message(dm_channel, text, **kwargs)
+        return post_message(
+            dm_channel,
+            text,
+            redact_logs=redact_logs,
+            **kwargs,
+        )
     if raise_on_error:
         raise RuntimeError("Slack did not return a direct-message channel")
     return None

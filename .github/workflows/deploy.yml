@@ -45,6 +45,9 @@ jobs:
           python -m pytest \
             roo/tests/test_surface_security.py \
             roo/tests/test_slack_security.py \
+            roo/tests/test_office_manager_actions.py \
+            roo/tests/test_coworking_booking_intents.py \
+            roo/tests/test_start_here_introductions.py \
             roo/tests/test_backend_identity.py \
             roo/tests/test_mlai_backend_client.py \
             roo/tests/test_jobs_scheduler.py \
@@ -141,14 +144,16 @@ jobs:
           SIM_PATIENT_SAFETY_SALT: ${{ secrets.SIM_PATIENT_SAFETY_SALT }}
           ROO_API_KEY: ${{ secrets.ROO_API_KEY }}
           VICTOR_AI_ROO_SIGNING_SECRET: ${{ secrets.VICTOR_AI_ROO_SIGNING_SECRET }}
+          ROO_PUBLIC_HOST: ${{ secrets.DO_HOST }}
           ROO_PRIVATE_BASE_URL: ${{ vars.ROO_PRIVATE_BASE_URL }}
           MEETING_ROOM_BOOKING_ENABLED: ${{ vars.MEETING_ROOM_BOOKING_ENABLED || 'false' }}
+          OFFICE_MANAGER_ACTIONS_ENABLED: ${{ vars.OFFICE_MANAGER_ACTIONS_ENABLED || 'false' }}
           LINEAR_CHANNEL_ISSUE_WRITES_ENABLED: ${{ vars.LINEAR_CHANNEL_ISSUE_WRITES_ENABLED || 'false' }}
         with:
           host: ${{ secrets.DO_HOST }}
           username: ${{ secrets.DO_USERNAME }}
           key: ${{ secrets.DO_SSH_KEY }}
-          envs: SIM_PATIENT_API_KEY,SIM_PATIENT_SAFETY_SALT,ROO_API_KEY,VICTOR_AI_ROO_SIGNING_SECRET,ROO_PRIVATE_BASE_URL,MEETING_ROOM_BOOKING_ENABLED,LINEAR_CHANNEL_ISSUE_WRITES_ENABLED,RELEASE_SHA
+          envs: SIM_PATIENT_API_KEY,SIM_PATIENT_SAFETY_SALT,ROO_API_KEY,VICTOR_AI_ROO_SIGNING_SECRET,ROO_PUBLIC_HOST,ROO_PRIVATE_BASE_URL,MEETING_ROOM_BOOKING_ENABLED,OFFICE_MANAGER_ACTIONS_ENABLED,LINEAR_CHANNEL_ISSUE_WRITES_ENABLED,RELEASE_SHA
           script: |
             # Stop if any command fails
             set -eu
@@ -175,6 +180,14 @@ jobs:
                 exit 1
                 ;;
             esac
+            case "$OFFICE_MANAGER_ACTIONS_ENABLED" in
+              true|TRUE|True|1|yes|YES|Yes|on|ON|On) OFFICE_MANAGER_ACTIONS_ENABLED=true ;;
+              false|FALSE|False|0|no|NO|No|off|OFF|Off|"") OFFICE_MANAGER_ACTIONS_ENABLED=false ;;
+              *)
+                echo "OFFICE_MANAGER_ACTIONS_ENABLED must be true or false" >&2
+                exit 1
+                ;;
+            esac
             case "$LINEAR_CHANNEL_ISSUE_WRITES_ENABLED" in
               true|TRUE|True|1|yes|YES|Yes|on|ON|On) LINEAR_CHANNEL_ISSUE_WRITES_ENABLED=true ;;
               false|FALSE|False|0|no|NO|No|off|OFF|Off|'') LINEAR_CHANNEL_ISSUE_WRITES_ENABLED=false ;;
@@ -189,6 +202,93 @@ jobs:
               echo "Cloning repository..."
               git clone https://github.com/MLAI-AUS-Inc/roo.git "$DEPLOY_DIR"
             fi
+            cd "$DEPLOY_DIR"
+            previous_release_sha="$(git rev-parse HEAD)"
+            cd "$DEPLOY_DIR/roo-standalone"
+            previous_env_backup="$(mktemp /root/roo-public-env.XXXXXX)"
+            previous_env_present=0
+            if [ -f .env ]; then
+              cp .env "$previous_env_backup"
+              chmod 600 "$previous_env_backup"
+              previous_env_present=1
+            fi
+            previous_container_id="$(docker compose ps -q roo 2>/dev/null || true)"
+            previous_image_id=""
+            previous_image_ref=""
+            if [ -n "$previous_container_id" ]; then
+              previous_image_id="$(docker inspect --format '{{.Image}}' "$previous_container_id")"
+              previous_image_ref="$(docker inspect --format '{{.Config.Image}}' "$previous_container_id")"
+            fi
+            previous_bridge_mode="none"
+            if command -v systemctl >/dev/null 2>&1 \
+              && systemctl is-active --quiet slack-bridge.service; then
+              previous_bridge_mode="systemd"
+            elif docker compose -f docker-compose.bridge.yml ps \
+              --services --status running | grep -qx slack-bridge; then
+              previous_bridge_mode="compose"
+            fi
+
+            restart_bridge_for_checkout() {
+              case "$previous_bridge_mode" in
+                systemd)
+                  systemctl restart slack-bridge.service
+                  ;;
+                compose)
+                  docker compose -f docker-compose.bridge.yml up -d --build \
+                    --force-recreate
+                  ;;
+                none)
+                  return 0
+                  ;;
+              esac
+              bridge_attempt=0
+              until bridge_container_id="$(docker compose \
+                -f docker-compose.bridge.yml ps -q slack-bridge)" \
+                && [ -n "$bridge_container_id" ] \
+                && [ "$(docker inspect --format \
+                  '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' \
+                  "$bridge_container_id")" = "healthy" ]; do
+                bridge_attempt=$((bridge_attempt + 1))
+                if [ "$bridge_attempt" -ge 18 ]; then
+                  echo "Slack bridge readiness check timed out" >&2
+                  return 1
+                fi
+                sleep 5
+              done
+            }
+
+            rollback_release() {
+              status="$?"
+              trap - EXIT
+              if [ "$status" -ne 0 ]; then
+                echo "Roo rollout failed; restoring the previous release" >&2
+                if [ "$previous_env_present" -eq 1 ]; then
+                  cp "$previous_env_backup" "$DEPLOY_DIR/roo-standalone/.env"
+                  chmod 600 "$DEPLOY_DIR/roo-standalone/.env"
+                else
+                  rm -f "$DEPLOY_DIR/roo-standalone/.env"
+                fi
+                cd "$DEPLOY_DIR"
+                git checkout --detach "$previous_release_sha" || true
+                cd "$DEPLOY_DIR/roo-standalone"
+                if [ -n "$previous_image_id" ] && [ -n "$previous_image_ref" ]; then
+                  docker image tag "$previous_image_id" "$previous_image_ref" || true
+                  docker compose --ansi never up -d --no-build --force-recreate --remove-orphans || true
+                fi
+                # The bridge is built from the same checkout but supervised
+                # separately. Restore and verify it after returning to the
+                # previous source revision so a rejected candidate cannot stay
+                # live beside a rolled-back Roo service.
+                if ! restart_bridge_for_checkout; then
+                  echo "Slack bridge rollback failed" >&2
+                  status=1
+                fi
+              fi
+              rm -f "$previous_env_backup"
+              exit "$status"
+            }
+            trap rollback_release EXIT
+
             cd "$DEPLOY_DIR"
             git fetch origin main
             git cat-file -e "${RELEASE_SHA}^{commit}"
@@ -227,10 +327,18 @@ jobs:
             upsert_env "ROO_POINTS_TOPUP_BUTTONS_ENABLED" "true"
             upsert_env "ROO_POINTS_STRIPE_CHECKOUT_HOSTS" "checkout.stripe.com"
             upsert_env "MEETING_ROOM_BOOKING_ENABLED" "$MEETING_ROOM_BOOKING_ENABLED"
+            upsert_env "OFFICE_MANAGER_ACTIONS_ENABLED" "$OFFICE_MANAGER_ACTIONS_ENABLED"
             upsert_env "LINEAR_CHANNEL_ISSUE_WRITES_ENABLED" "$LINEAR_CHANNEL_ISSUE_WRITES_ENABLED"
             
-            # Restart the app
-            docker compose up -d --build --remove-orphans
+            # Build without replacing the running release. Every candidate must
+            # authenticate to the exact Office Manager backend contract even
+            # while action processing is staged off.
+            docker compose build roo
+            echo "Preflighting the Office Manager backend contract before cutover..."
+            docker compose run --rm --no-deps roo python -c 'import asyncio; from roo.clients.mlai_backend import MLAIBackendClient; from roo.config import get_settings; from roo.main import _validate_office_manager_backend_contract; settings = get_settings(); payload = asyncio.run(MLAIBackendClient().get_office_manager_preflight()); _validate_office_manager_backend_contract(payload, timezone_name=settings.TIMEZONE)'
+
+            # Replace the app only after all enabled-feature preflights pass.
+            docker compose up -d --remove-orphans
 
             # Bounded readiness check. Never wait forever on a broken release.
             ready_attempt=0
@@ -249,34 +357,16 @@ jobs:
               docker compose exec -T roo python -c 'from roo.config import get_settings; settings = get_settings(); assert settings.ROO_SURFACE == "public"; assert settings.MEETING_ROOM_BOOKING_ENABLED is True; assert "meeting-room-booking" in settings.enabled_skill_names'
             fi
 
+            if [ "$OFFICE_MANAGER_ACTIONS_ENABLED" = "true" ]; then
+              echo "Verifying Office Manager actions are enabled on Public Roo..."
+              docker compose exec -T roo python -c 'from roo.config import PRODUCTION_MUTATION_BACKEND_AUTHORITIES, backend_authority, get_settings; settings = get_settings(); assert settings.ROO_SURFACE == "public"; assert settings.OFFICE_MANAGER_ACTIONS_ENABLED is True; assert backend_authority(str(settings.MLAI_BACKEND_URL or "")) in PRODUCTION_MUTATION_BACKEND_AUTHORITIES; assert settings.ROO_API_KEY'
+            fi
+
             # The cross-workspace Slack bridge is a separate Compose project.
             # Rebuild it when it is already deployed, preserving its current
             # supervisor instead of silently leaving old mention logic live.
-            bridge_restarted=0
-            if command -v systemctl >/dev/null 2>&1 \
-              && systemctl is-active --quiet slack-bridge.service; then
-              systemctl restart slack-bridge.service
-              bridge_restarted=1
-            elif docker compose -f docker-compose.bridge.yml ps \
-              --services --status running | grep -qx slack-bridge; then
-              docker compose -f docker-compose.bridge.yml up -d --build
-              bridge_restarted=1
-            fi
-            if [ "$bridge_restarted" -eq 1 ]; then
-              bridge_attempt=0
-              until bridge_container_id="$(docker compose \
-                -f docker-compose.bridge.yml ps -q slack-bridge)" \
-                && [ -n "$bridge_container_id" ] \
-                && [ "$(docker inspect --format \
-                  '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' \
-                  "$bridge_container_id")" = "healthy" ]; do
-                bridge_attempt=$((bridge_attempt + 1))
-                if [ "$bridge_attempt" -ge 18 ]; then
-                  echo "Slack bridge readiness check timed out" >&2
-                  exit 1
-                fi
-                sleep 5
-              done
+            if [ "$previous_bridge_mode" != "none" ]; then
+              restart_bridge_for_checkout
             else
               echo "Slack bridge is not deployed on this host; skipping restart"
             fi
@@ -297,33 +387,31 @@ jobs:
                 exit 1
               fi
             fi
-            
-            # Clean up space
-            docker image prune -f
 
-      - name: Verify public Roo containment
-        env:
-          ROO_PUBLIC_HOST: ${{ secrets.DO_HOST }}
-        run: |
-          set -eu
-          base_url="http://${ROO_PUBLIC_HOST}"
-          expect_status() {
-            expected="$1"
-            method="$2"
-            path="$3"
-            actual="$(curl --silent --show-error --max-time 8 \
-              --output /dev/null --write-out '%{http_code}' \
-              --request "$method" "${base_url}${path}")"
-            if [ "$actual" != "$expected" ]; then
-              echo "Public containment failed for $path (status $actual)" >&2
-              exit 1
-            fi
-          }
-          expect_status 200 GET /healthz/ready
-          expect_status 404 GET /docs
-          expect_status 404 POST /api/mention
-          expect_status 403 POST /api/sim-patient
-          expect_status 403 POST /api/diagnosis-check
+            # Verify public Roo containment through the deployed public route
+            # while rollback state and the previous image are still retained.
+            # Any failure exits through rollback_release.
+            public_base_url="http://${ROO_PUBLIC_HOST}"
+            expect_public_status() {
+              expected="$1"
+              method="$2"
+              path="$3"
+              actual="$(curl --silent --show-error --max-time 8 \
+                --output /dev/null --write-out '%{http_code}' \
+                --request "$method" "${public_base_url}${path}")"
+              if [ "$actual" != "$expected" ]; then
+                echo "Public containment failed for $path (status $actual)" >&2
+                exit 1
+              fi
+            }
+            expect_public_status 200 GET /healthz/ready
+            expect_public_status 404 GET /docs
+            expect_public_status 404 POST /api/mention
+            expect_public_status 403 POST /api/sim-patient
+            expect_public_status 403 POST /api/diagnosis-check
+            
+            # Clean up only after every rollback-capable gate has passed.
+            docker image prune -f
 
   rollout-diagnostics:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.diagnostics_only == true }}

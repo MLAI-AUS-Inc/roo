@@ -84,9 +84,62 @@ async def _run_points_action(client, *, action, text, params=None, user_id="UADM
     )
 
 
+class FakeCancellationClient:
+    def __init__(self, bookings):
+        self.bookings = bookings
+        self.list_calls = []
+        self.cancel_calls = []
+
+    async def get_my_bookings(self, slack_user_id):
+        self.list_calls.append(slack_user_id)
+        return list(self.bookings)
+
+    async def cancel_coworking(self, slack_user_id, **kwargs):
+        self.cancel_calls.append((slack_user_id, kwargs))
+        return {"refunded": True, "refund_amount": 8}
+
+
 @pytest.fixture(autouse=True)
 def bot_user(monkeypatch):
     monkeypatch.setattr(slack_client_module, "get_bot_user_id", lambda: "UROO")
+
+
+@pytest.mark.asyncio
+async def test_date_cancellation_resolves_immutable_booking_id_before_mutation():
+    client = FakeCancellationClient(
+        [{"id": "booking-current", "date": "2026-07-04", "status": "booked"}]
+    )
+
+    result = await _run_points_action(
+        client,
+        action="cancel_coworking",
+        text="cancel coworking 2026-07-04",
+    )
+
+    assert client.list_calls == ["UADMIN"]
+    assert client.cancel_calls == [
+        ("UADMIN", {"booking_id": "booking-current"})
+    ]
+    assert "8 point refunded" in result
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_date_cancellation_fails_closed():
+    client = FakeCancellationClient(
+        [
+            {"id": "booking-1", "date": "2026-07-04", "status": "booked"},
+            {"id": "booking-2", "date": "2026-07-04", "status": "booked"},
+        ]
+    )
+
+    result = await _run_points_action(
+        client,
+        action="cancel_coworking",
+        text="cancel coworking 2026-07-04",
+    )
+
+    assert client.cancel_calls == []
+    assert "more than one active booking" in result
 
 
 @pytest.mark.asyncio
