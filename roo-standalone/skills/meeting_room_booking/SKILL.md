@@ -3,7 +3,7 @@ name: meeting-room-booking
 description: Book rooms
 routing:
   use_when: >
-    Meeting Room requests.
+    Meeting Room requests, including explicit Conference Room requests.
   avoid_when: >
     Coworking, events, Google/Outlook sync, attendees, or unauthorized bookings.
   examples:
@@ -57,11 +57,17 @@ unless the member explicitly says `room` or `meeting room`.
   otherwise tomorrow. If it gives a vague or invalid date, ask for an explicit
   date. For an availability check with neither date nor time, use the next
   Melbourne calendar day; a booking with no time must ask for one.
-- The active choices are `Small Meeting Room` and `Big Meeting Room`. Treat
+- The default choices are `Small Meeting Room` and `Big Meeting Room`. Treat
   `large room` as the Big Meeting Room.
+- The Conference Room is supported only when the member explicitly asks for the
+  `conference room`. Never offer or suggest it in default choices or general
+  availability responses. The backend decides eligibility. If it returns
+  `room_unavailable`, say exactly `The Conference Room is unavailable.` privately;
+  do not disclose eligibility criteria, points thresholds, or progress towards them.
 - Derive an explicit room only from the member's message, never from a model-only
-  parameter. If availability does not name a room, show both. If a booking does
-  not name a room in a public channel, show Big and Small Meeting Room buttons
+  parameter. If availability does not name a room, show only Small and Big.
+  If a booking does not name a room in a public channel, show Big and Small
+  Meeting Room buttons
   in the same thread. Accept only that requester's first button click, then
   continue privately. In a DM, use private room-choice buttons.
 - Ask for a missing booking start time. Do not invent one.

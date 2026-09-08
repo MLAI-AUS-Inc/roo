@@ -34,6 +34,9 @@ ROOM_CHOICES = (
     ("big-meeting-room", "Big Meeting Room"),
 )
 ROOM_NAMES = dict(ROOM_CHOICES)
+CONFERENCE_ROOM_SLUG = "conference-room"
+CONFERENCE_ROOM_UNAVAILABLE = "The Conference Room is unavailable."
+ROOM_NAMES[CONFERENCE_ROOM_SLUG] = "Conference Room"
 WEEKDAYS = {
     "monday": 0,
     "tuesday": 1,
@@ -71,6 +74,9 @@ class MeetingRoomInputError(ValueError):
 
 def room_slug_from_text(text: str) -> Optional[str]:
     normalized = str(text or "").lower()
+    # An explicit conference request must never fall back to default room choices.
+    if re.search(r"\bconference\s+room\b", normalized):
+        return CONFERENCE_ROOM_SLUG
     small = bool(re.search(r"\bsmall(?:\s+meeting)?\s+room\b", normalized))
     big = bool(
         re.search(r"\b(?:big|large)(?:\s+meeting)?\s+room\b", normalized)
@@ -742,7 +748,7 @@ def parse_action_value(raw_value: Any, *, expected_action: str) -> dict:
                 "invalid_action",
                 "This room choice is not valid. Ask Roo to start again.",
             )
-        if payload["room_slug"] not in ROOM_NAMES:
+        if payload["room_slug"] not in CHOOSE_ROOM_ACTION_IDS_BY_ROOM:
             raise MeetingRoomInputError(
                 "invalid_action",
                 "This room choice is not supported. Ask Roo to start again.",
@@ -1149,6 +1155,7 @@ def backend_error_message(
     targeted = bool(str(target_slack_user_id or "").strip())
     room_name = ROOM_NAMES.get(str(room_slug or ""), "meeting room")
     messages = {
+        "room_unavailable": CONFERENCE_ROOM_UNAVAILABLE,
         "booking_conflict": f"The {room_name} was booked by someone else before you confirmed. No points were deducted.",
         "user_booking_conflict": (
             f"The tagged member already has another meeting-room booking that overlaps the {room_name} time. No points were deducted."
