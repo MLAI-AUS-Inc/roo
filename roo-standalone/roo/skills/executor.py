@@ -98,6 +98,8 @@ from ..coworking_booking_intents import (
     is_retryable_coworking_exception,
 )
 from ..meeting_room_booking import (
+    CONFERENCE_ROOM_SLUG,
+    MELBOURNE_TZ,
     MeetingRoomInputError,
     backend_error_message as meeting_room_backend_error_message,
     booking_preview,
@@ -702,8 +704,29 @@ class SkillExecutor:
         )
         try:
             requested_room_slug = room_slug_from_text(text)
+            conference_room = None
+            if requested_room_slug == CONFERENCE_ROOM_SLUG and action in (
+                "check_room_availability", "book_meeting_room",
+            ):
+                # Check eligibility before asking for missing booking details.
+                # The backend owns the rule and returns only 'unavailable' on denial.
+                access = await client.check_meeting_room_availability(
+                    user_id,
+                    room_slug=CONFERENCE_ROOM_SLUG,
+                    date=datetime.now(MELBOURNE_TZ).date().isoformat(),
+                    target_slack_user_id=target_slack_user_id,
+                )
+                conference_room = access.get("room") or {}
+                if conference_room.get("slug") != CONFERENCE_ROOM_SLUG:
+                    raise MeetingRoomInputError(
+                        "invalid_response",
+                        "I could not verify that meeting room. Ask Roo to start again.",
+                    )
             if action == "check_room_availability":
-                rooms = supported_active_rooms(await client.list_meeting_rooms())
+                rooms = (
+                    [conference_room] if conference_room else
+                    supported_active_rooms(await client.list_meeting_rooms())
+                )
                 selected_rooms = (
                     [room for room in rooms if room["slug"] == requested_room_slug]
                     if requested_room_slug
@@ -758,7 +781,10 @@ class SkillExecutor:
 
             if action == "book_meeting_room":
                 starts_at, ends_at = resolve_meeting_room_interval(text, params)
-                rooms = supported_active_rooms(await client.list_meeting_rooms())
+                rooms = (
+                    [conference_room] if conference_room else
+                    supported_active_rooms(await client.list_meeting_rooms())
+                )
                 if not rooms:
                     raise MeetingRoomInputError(
                         "inactive_room",
