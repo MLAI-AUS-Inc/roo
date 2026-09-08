@@ -3546,14 +3546,12 @@ async def api_mention(
             detail="Invalid internal mention credentials",
         )
 
+    from .internal_mentions import handle_internal_mention
+
     payload = await request.json()
-    agent = get_agent()
-    return await agent.handle_mention(
-        text=payload.get("text", ""),
-        user_id=payload.get("user_id", ""),
-        channel_id=payload.get("channel_id"),
-        thread_ts=payload.get("thread_ts"),
-    )
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Invalid mention request")
+    return await handle_internal_mention(payload, get_agent())
 
 
 @app.post("/api/sim-patient")

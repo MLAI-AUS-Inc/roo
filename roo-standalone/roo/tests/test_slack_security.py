@@ -264,3 +264,31 @@ def test_internal_mention_endpoint_is_disabled_or_bearer_authenticated(tmp_path,
         headers={"Authorization": "Bearer internal-mention-key"},
     )
     assert admin_response.status_code == 404
+
+
+def test_threaded_internal_reply_requires_public_service_credential(tmp_path, monkeypatch):
+    from unittest.mock import AsyncMock, Mock
+    from roo import internal_mentions
+
+    configured = _settings(tmp_path, INTERNAL_MENTION_API_KEY="synthetic-mention-key")
+    main_module.app.dependency_overrides[get_settings] = lambda: configured
+    agent = Mock()
+    agent.handle_mention = AsyncMock(return_value={"message": "Booking request received"})
+    post = Mock(return_value={"ok": True})
+    monkeypatch.setattr(main_module, "get_agent", lambda: agent)
+    monkeypatch.setattr(internal_mentions, "post_message", post)
+    client = TestClient(main_module.app)
+    payload = {
+        "text": "Please book me in on 2026-09-08.",
+        "user_id": "UMEMBER", "channel_id": "CCOWORK", "thread_ts": "123.456",
+        "post_reply": True, "request_id": "49ef0a0b-bdf4-4aa4-a184-20644cd4e758",
+    }
+    denied = client.post("/api/mention", json=payload)
+    assert denied.status_code == 401
+    agent.handle_mention.assert_not_called()
+    post.assert_not_called()
+    allowed = client.post("/api/mention", json=payload,
+                          headers={"Authorization": "Bearer synthetic-mention-key"})
+    assert allowed.status_code == 200
+    assert allowed.json()["reply_delivered"] is True
+    post.assert_called_once()
