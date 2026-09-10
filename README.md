@@ -276,6 +276,11 @@ For the local, channel-bound Linear issue reader workflow, see
 
 ## Scheduled jobs
 
+Builder payment reminders have a separate, opt-in worker. It DMs each configured
+builder their full list of open Linear tasks on the Thursday before a fortnightly
+payment Friday. See the [payment reminder guide](roo-standalone/docs/payment-reminders.md)
+for configuration, preview, activation, and delivery recovery.
+
 The recommended production arrangement keeps `JOBS_SCHEDULER_ENABLED=false` in
 Roo. `mlai-backend` owns the 7 a.m. Melbourne schedule and Slack posting. Roo
 only needs job trigger configuration when explicitly used as a manual caller.

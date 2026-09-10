@@ -1,0 +1,31 @@
+name: Payment reminder tests
+
+on:
+  pull_request:
+    paths:
+      - "roo-standalone/roo/payment_reminders.py"
+      - "roo-standalone/roo/payment_reminder_worker.py"
+      - "roo-standalone/roo/tests/test_payment_reminders.py"
+      - ".github/workflows/payment-reminder-tests.yml"
+  push:
+    branches: [main]
+    paths:
+      - "roo-standalone/roo/payment_reminders.py"
+      - "roo-standalone/roo/payment_reminder_worker.py"
+      - "roo-standalone/roo/tests/test_payment_reminders.py"
+      - ".github/workflows/payment-reminder-tests.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install 'pytest>=7.4,<10' 'httpx>=0.25,<1'
+      - run: python -m pytest roo/tests/test_payment_reminders.py -q
+        working-directory: roo-standalone
