@@ -328,7 +328,7 @@ def test_disabled_cli_does_not_need_credentials(monkeypatch, capsys):
 def test_integrated_tick_uses_private_dm_and_all_pages(config):
     posts = []
     def handler(request):
-        payload = json.loads(request.content)
+        payload = dict(request.url.params) if request.method == "GET" else json.loads(request.content)
         if request.url.host == "api.linear.app":
             assert request.headers["Authorization"] == "test-read-key"
             query = payload["query"]
@@ -342,6 +342,8 @@ def test_integrated_tick_uses_private_dm_and_all_pages(config):
         if method == "auth.test":
             body = {"team_id": "T123"}
         elif method == "users.info":
+            assert request.method == "GET"
+            assert payload == {"user": "U123"}
             body = {"user": {"id": "U123", "team_id": "T123", "deleted": False}}
         elif method == "conversations.open":
             assert payload == {"users": "U123"}

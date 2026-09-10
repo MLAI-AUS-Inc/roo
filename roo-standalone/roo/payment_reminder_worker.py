@@ -53,11 +53,16 @@ class ReminderAPI:
         return body["data"]
 
     def slack(self, method, payload=None):
-        response = self.client.post(
-            f"https://slack.com/api/{method}",
-            headers={"Authorization": f"Bearer {self.slack_token}"},
-            json=payload or {},
-        )
+        headers = {"Authorization": f"Bearer {self.slack_token}"}
+        if method == "users.info":
+            # Slack's user lookup reads query parameters, not a JSON POST body.
+            response = self.client.get(
+                f"https://slack.com/api/{method}", headers=headers, params=payload or {},
+            )
+        else:
+            response = self.client.post(
+                f"https://slack.com/api/{method}", headers=headers, json=payload or {},
+            )
         if response.status_code == 429:
             raise DeliveryRejected("ratelimited", max(1, int(response.headers.get("Retry-After", "60"))))
         response.raise_for_status()
