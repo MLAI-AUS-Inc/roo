@@ -176,12 +176,19 @@ class ReceiptStore:
 
 
 class DeliveryRejected(Exception):
-    """Slack explicitly rejected the message; only rate limits retry unaided."""
+    """Definite non-delivery; only outcomes with retry_after retry unaided."""
 
     def __init__(self, code: str, retry_after: int | None = None):
         self.code = code
         self.retry_after = retry_after
         super().__init__(code)
+
+
+class DeliveryNotSent(DeliveryRejected):
+    """The transport could not acquire/connect a socket; Slack received no request."""
+
+    def __init__(self):
+        super().__init__("not_sent", retry_after=60)
 
 
 def run_reminders(config, api, store, now, *, dry_run=False, clock=None):

@@ -59,7 +59,7 @@ existing Public Roo or Admin Roo deployment.
 For a development preview, use **development credentials and users only**:
 
 ```bash
-docker compose -f docker-compose.payment-reminders.yml run --rm payment-reminders \
+docker compose -p roo-payment-reminders -f docker-compose.payment-reminders.yml run --rm payment-reminders \
   python -m roo.payment_reminder_worker --dry-run
 ```
 
@@ -75,8 +75,8 @@ After configuring the approved production roster and credentials, start the
 separate worker from the deployed checkout:
 
 ```bash
-docker compose -f docker-compose.payment-reminders.yml up -d --build
-docker compose -f docker-compose.payment-reminders.yml logs -f payment-reminders
+docker compose -p roo-payment-reminders -f docker-compose.payment-reminders.yml up -d --build
+docker compose -p roo-payment-reminders -f docker-compose.payment-reminders.yml logs -f payment-reminders
 ```
 
 The worker polls the local delivery window every minute. If it starts late on
@@ -88,6 +88,16 @@ the end of Thursday can still complete. Changing `PAYMENT_REMINDER_HOUR` changes
 only Thursday's send time. `PAYMENT_FIRST_FRIDAY` defines the actual payment
 calendar; do not move it forward merely to make an old first-payment message run.
 
+The dedicated `roo-payment-reminders` Compose project isolates this worker from
+Public Roo deployments, which use `--remove-orphans`. Keep the explicit
+`-p roo-payment-reminders` in every operational command: it overrides any
+`COMPOSE_PROJECT_NAME` inherited from the Public Roo environment.
+
+If upgrading an already-started worker from the version without project
+isolation, stop the old worker and transfer its receipt files to the new
+project's volume before enabling delivery. Starting with an empty volume would
+lose duplicate protection for the current cycle. Do not run both copies.
+
 The named `payment-reminder-data` volume must persist across restarts and
 deployments. Do not use `down -v`, delete receipts, or run replicas backed by
 separate volumes: that removes duplicate protection. The local filesystem lock
@@ -96,7 +106,10 @@ hosts with independent volumes are unsupported.
 
 One receipt per workspace, payment Friday, and builder stores the prepared message
 parts and each delivery result. Successful parts are never resent. Rate-limited
-parts retry after Slack's delay, at least 60 seconds later. A partial delivery
+parts retry after Slack's delay, at least 60 seconds later. Connection failures,
+connection timeouts, and connection-pool timeouts also retry after 60 seconds:
+these happen before a request reaches Slack. The retry deadline survives
+restarts and the Thursday delivery window still applies. A partial delivery
 resumes the original prepared list, so it is a snapshot of the initial check.
 Builders with no open work are recorded as checked for that cycle.
 
@@ -112,11 +125,16 @@ no partial list. Workspace verification failures stop that tick. A failure for
 one builder does not stop others. A changed account mapping after a message was
 prepared requires operator review rather than delivering the old user's tasks.
 
-If Slack delivery times out or the process crashes after posting, the part stays
-`sending`. Later runs report `needs_review` and do not guess whether it arrived.
-Explicit non-rate-limit Slack rejections leave the part `failed`. To recover:
+If a write/read times out, another error leaves delivery uncertain, or the
+process crashes after posting, the part stays `sending`. Later runs report
+`needs_review` and do not guess whether it arrived. This also applies if the
+worker cannot persist its retry decision after a definite connection failure:
+the old durable `sending` state cannot prove that failure after restart.
+Existing `sending` receipts from earlier versions still require review; this
+change does not automatically release them. Explicit non-rate-limit Slack
+rejections leave the part `failed`. To recover:
 
-1. Stop the worker with `docker compose -f docker-compose.payment-reminders.yml stop`.
+1. Stop the worker with `docker compose -p roo-payment-reminders -f docker-compose.payment-reminders.yml stop`.
 2. Inspect the affected builder's DM and the receipt JSON in the persistent volume.
 3. If the part arrived, set that part's status to `sent` and record its Slack `ts`.
    Only when confirmed absent, set it to `pending` after fixing the failure.
@@ -124,7 +142,7 @@ Explicit non-rate-limit Slack rejections leave the part `failed`. To recover:
 4. Restart the worker on Thursday to resume. After that delivery window, record
    the missed reminder for manual follow-up; automated delivery will not backfill.
 
-Disable the worker with `docker compose -f docker-compose.payment-reminders.yml stop`.
+Disable the worker with `docker compose -p roo-payment-reminders -f docker-compose.payment-reminders.yml stop`.
 This does not affect the Public Roo web service or Admin Roo and preserves receipts.
 
 ## Offline verification

@@ -6,6 +6,9 @@ on:
       - "roo-standalone/roo/payment_reminders.py"
       - "roo-standalone/roo/payment_reminder_worker.py"
       - "roo-standalone/roo/tests/test_payment_reminders.py"
+      - "roo-standalone/docker-compose*.yml"
+      - "roo-standalone/.env*.example"
+      - "roo-standalone/docs/payment-reminders.md"
       - ".github/workflows/payment-reminder-tests.yml"
   push:
     branches: [main]
@@ -13,6 +16,9 @@ on:
       - "roo-standalone/roo/payment_reminders.py"
       - "roo-standalone/roo/payment_reminder_worker.py"
       - "roo-standalone/roo/tests/test_payment_reminders.py"
+      - "roo-standalone/docker-compose*.yml"
+      - "roo-standalone/.env*.example"
+      - "roo-standalone/docs/payment-reminders.md"
       - ".github/workflows/payment-reminder-tests.yml"
 
 permissions:
@@ -29,3 +35,31 @@ jobs:
       - run: python -m pip install 'pytest>=7.4,<10' 'httpx>=0.25,<1'
       - run: python -m pytest roo/tests/test_payment_reminders.py -q
         working-directory: roo-standalone
+      - name: Verify worker project isolation from public orphan cleanup
+        working-directory: roo-standalone
+        run: |
+          set -eu
+          cp .env.example .env
+          cp .env.payment-reminders.example .env.payment-reminders
+          trap 'rm -f .env .env.payment-reminders' EXIT
+          COMPOSE_PROJECT_NAME=roo-standalone docker compose config --format json > "$RUNNER_TEMP/roo-public.json"
+          docker compose -f docker-compose.payment-reminders.yml config --format json > "$RUNNER_TEMP/payment-default.json"
+          COMPOSE_PROJECT_NAME=roo-standalone docker compose -p roo-payment-reminders -f docker-compose.payment-reminders.yml config --format json > "$RUNNER_TEMP/payment-explicit.json"
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          root = Path(os.environ["RUNNER_TEMP"])
+          public = json.loads((root / "roo-public.json").read_text())
+          default = json.loads((root / "payment-default.json").read_text())
+          explicit = json.loads((root / "payment-explicit.json").read_text())
+          assert public["name"] == "roo-standalone"
+          for worker in (default, explicit):
+              assert worker["name"] == "roo-payment-reminders"
+              assert worker["name"] != public["name"]
+              assert set(worker["services"]) == {"payment-reminders"}
+          assert default["volumes"] == explicit["volumes"]
+          guide = Path("docs/payment-reminders.md").read_text()
+          commands = [line for line in guide.splitlines() if "docker compose " in line]
+          assert commands
+          assert all("docker compose -p roo-payment-reminders -f " in line for line in commands)
+          PY

@@ -11,7 +11,7 @@ import threading
 
 import httpx
 
-from .payment_reminders import DeliveryRejected, ReceiptStore, ReminderConfig, run_reminders
+from .payment_reminders import DeliveryNotSent, DeliveryRejected, ReceiptStore, ReminderConfig, run_reminders
 
 
 ISSUES_QUERY = """
@@ -130,10 +130,16 @@ class ReminderAPI:
         return channel
 
     def post_message(self, channel, text):
-        result = self.slack("chat.postMessage", {
-            "channel": channel, "text": text, "parse": "none",
-            "unfurl_links": False, "unfurl_media": False,
-        })
+        try:
+            result = self.slack("chat.postMessage", {
+                "channel": channel, "text": text, "parse": "none",
+                "unfurl_links": False, "unfurl_media": False,
+            })
+        except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout) as exc:
+            # No request reached Slack. Persist a delayed retry instead of
+            # stranding the part in sending. Write/read/protocol errors remain
+            # uncertain: the request could already have committed at Slack.
+            raise DeliveryNotSent() from exc
         if result.get("channel") != channel or not result.get("ts"):
             raise ValueError("Slack did not confirm the message")
         return result["ts"]

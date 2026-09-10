@@ -381,3 +381,119 @@ def test_account_check_rate_limit_stops_tick_with_retry_delay(config, api):
     result = run_reminders(config, api, ReceiptStore(config.receipts_dir), NOW)
     assert result["builders"][0]["retry_after"] == 180
     api.post_message.assert_not_called()
+
+
+@pytest.mark.parametrize("error_type", [httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout])
+def test_unsent_transport_failure_retries_after_restart(config, api, error_type):
+    attempts = []
+    accepted = []
+    def handler(request):
+        attempts.append(json.loads(request.content))
+        if len(attempts) == 1:
+            raise error_type("failure before sending", request=request)
+        accepted.append(attempts[-1])
+        return httpx.Response(200, json={"ok": True, "channel": "D123", "ts": "1.2"})
+    api.post_message = make_api(handler).post_message
+    result = run_reminders(config, api, ReceiptStore(config.receipts_dir), NOW)
+    assert result["builders"][0]["status"] == "pending"
+    receipt = ReceiptStore(config.receipts_dir).read("T123_2026-09-11_U123")
+    assert receipt["parts"][0]["status"] == "pending"
+    assert receipt["parts"][0]["retry_at"] == (NOW + timedelta(seconds=60)).timestamp()
+    run_reminders(config, api, ReceiptStore(config.receipts_dir), NOW + timedelta(seconds=59))
+    assert len(attempts) == 1
+    result = run_reminders(config, api, ReceiptStore(config.receipts_dir), NOW + timedelta(seconds=60))
+    assert result["builders"][0]["status"] == "sent"
+    run_reminders(config, api, ReceiptStore(config.receipts_dir), NOW + timedelta(seconds=120))
+    assert len(attempts) == 2
+    assert len(accepted) == 1
+    assert attempts[0] == attempts[1]
+
+
+@pytest.mark.parametrize("error_type", [
+    httpx.ReadTimeout, httpx.WriteTimeout, httpx.ReadError,
+    httpx.WriteError, httpx.RemoteProtocolError,
+])
+def test_uncertain_transport_failure_still_requires_review(config, api, error_type):
+    attempts = []
+    def handler(request):
+        attempts.append(request)
+        raise error_type("may have reached Slack", request=request)
+    api.post_message = make_api(handler).post_message
+    first = run_reminders(config, api, ReceiptStore(config.receipts_dir), NOW)
+    assert first["builders"][0]["status"] == "error"
+    second = run_reminders(config, api, ReceiptStore(config.receipts_dir), NOW + timedelta(minutes=5))
+    assert second["builders"][0]["status"] == "needs_review"
+    assert len(attempts) == 1
+
+
+def test_partial_send_connect_failure_then_uncertain_retry(config, api):
+    api.open_issues.return_value = [issue(i) for i in range(100)]
+    messages = render_messages(api.open_issues.return_value, first_payment=True)
+    attempts = []
+    def handler(request):
+        attempts.append(json.loads(request.content)["text"])
+        if len(attempts) == 2:
+            raise httpx.ConnectError("connection unavailable", request=request)
+        if len(attempts) == 3:
+            raise httpx.ReadTimeout("response lost", request=request)
+        return httpx.Response(200, json={"ok": True, "channel": "D123", "ts": "1.2"})
+    api.post_message = make_api(handler).post_message
+    assert run_reminders(config, api, ReceiptStore(config.receipts_dir), NOW)["builders"][0]["status"] == "pending"
+    result = run_reminders(config, api, ReceiptStore(config.receipts_dir), NOW + timedelta(minutes=1))
+    assert result["builders"][0]["status"] == "error"
+    result = run_reminders(config, api, ReceiptStore(config.receipts_dir), NOW + timedelta(minutes=2))
+    assert result["builders"][0]["status"] == "needs_review"
+    assert attempts == [messages[0], messages[1], messages[1]]
+    receipt = ReceiptStore(config.receipts_dir).read("T123_2026-09-11_U123")
+    assert receipt["parts"][0]["status"] == "sent"
+    assert receipt["parts"][1]["status"] == "sending"
+
+
+def test_unsent_retry_does_not_send_after_thursday(config, api):
+    attempts = []
+    def handler(request):
+        attempts.append(request)
+        raise httpx.ConnectError("connection unavailable", request=request)
+    api.post_message = make_api(handler).post_message
+    late = NOW.replace(hour=23, minute=59, second=30)
+    assert run_reminders(config, api, ReceiptStore(config.receipts_dir), late)["builders"][0]["status"] == "pending"
+    result = run_reminders(config, api, ReceiptStore(config.receipts_dir), late + timedelta(seconds=60))
+    assert result["status"] == "not_due"
+    assert len(attempts) == 1
+
+
+def test_unsent_retry_rechecks_account_before_delivery(config, api):
+    attempts = []
+    def handler(request):
+        attempts.append(request)
+        if len(attempts) == 1:
+            raise httpx.ConnectError("connection unavailable", request=request)
+        return httpx.Response(200, json={"ok": True, "channel": "D123", "ts": "1.2"})
+    api.post_message = make_api(handler).post_message
+    run_reminders(config, api, ReceiptStore(config.receipts_dir), NOW)
+    api.verify_builder.side_effect = ValueError("builder account deactivated")
+    result = run_reminders(config, api, ReceiptStore(config.receipts_dir), NOW + timedelta(minutes=1))
+    assert result["builders"][0]["status"] == "error"
+    assert len(attempts) == 1
+    api.verify_builder.side_effect = None
+    result = run_reminders(config, api, ReceiptStore(config.receipts_dir), NOW + timedelta(minutes=2))
+    assert result["builders"][0]["status"] == "sent"
+    assert len(attempts) == 2
+
+
+def test_failed_retry_persistence_does_not_guess_sending_outcome(config, api):
+    attempts = []
+    def handler(request):
+        attempts.append(request)
+        raise httpx.ConnectError("connection unavailable", request=request)
+    api.post_message = make_api(handler).post_message
+    class FailedRetryWrite(ReceiptStore):
+        def write(self, key, receipt):
+            if any("retry_at" in part for part in receipt["parts"]):
+                raise OSError("disk failed before retry state persisted")
+            super().write(key, receipt)
+    result = run_reminders(config, api, FailedRetryWrite(config.receipts_dir), NOW)
+    assert result["builders"][0]["status"] == "error"
+    result = run_reminders(config, api, ReceiptStore(config.receipts_dir), NOW + timedelta(minutes=1))
+    assert result["builders"][0]["status"] == "needs_review"
+    assert len(attempts) == 1

@@ -1,4 +1,6 @@
 # Opt-in worker; uses Roo's bot identity but no public/admin agent runtime.
+name: roo-payment-reminders
+
 services:
   payment-reminders:
     build: .
