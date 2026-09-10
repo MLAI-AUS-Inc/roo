@@ -72,7 +72,7 @@ class ReminderConfig:
         )
 
     def due_friday(self, now: datetime) -> date | None:
-        """Thursday delivery window; never guess Friday's payment cutoff hour."""
+        """Thursday reminder delivery window for Friday payments."""
         if not self.enabled or now.tzinfo is None:
             return None
         local = now.astimezone(self.timezone)
@@ -94,7 +94,7 @@ def render_messages(issues: list[dict], *, first_payment: bool) -> list[str]:
     opening = "First payments are this Friday!" if first_payment else "Payments are this Friday!"
     intro = (
         f"*Payment reminder:* {opening} Please get all your hours in and mark your "
-        "completed Linear tasks as done by Friday so your completed work is included "
+        "completed Linear tasks as done Friday by 12pm (noon) so your completed work is included "
         "in this payment run.\n\n"
         f"*Your tasks still open in Linear ({len(issues)}):*\n"
     )

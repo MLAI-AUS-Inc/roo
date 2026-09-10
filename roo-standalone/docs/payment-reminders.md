@@ -3,16 +3,15 @@
 An opt-in Roo worker sends each configured builder a private Slack reminder on
 the Thursday before a fortnightly payment Friday. The first payment date defaults
 to **11 September 2026**, followed by 25 September, 9 October, and so on.
-Thursday's reminder time defaults to **09:00 Australia/Melbourne**. This is a
-delivery time, not an assumed payment cutoff: all user-facing copy says **Friday**.
-Until the cutoff time is known, reminders run on the preceding day rather than
-claiming to run exactly 24 hours before the cutoff.
+Thursday's reminder time defaults to **09:00 Australia/Melbourne**. The reminder
+asks builders to submit their hours and update completed tasks **Friday by 12pm
+(noon)**. The delivery schedule remains on the preceding Thursday.
 
 For the first cycle the message starts:
 
 > **Payment reminder:** First payments are this Friday! Please get all your hours
-> in and mark your completed Linear tasks as done by Friday so your completed work
-> is included in this payment run.
+> in and mark your completed Linear tasks as done Friday by 12pm (noon) so your
+> completed work is included in this payment run.
 
 Later cycles say “Payments are this Friday!” Each reminder contains the **full
 list** of that builder's assigned, open Linear tickets: identifier, clickable

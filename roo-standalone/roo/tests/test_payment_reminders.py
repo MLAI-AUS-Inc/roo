@@ -98,6 +98,7 @@ def test_full_list_and_copy():
     text = "\n".join(messages)
     assert "First payments are this Friday!" in text
     assert "Please get all your hours in" in text
+    assert "Friday by 12pm (noon)" in text
     assert "500" in messages[0]
     assert len(messages) > 1
     assert all(len(message) <= 3800 for message in messages)
@@ -105,6 +106,7 @@ def test_full_list_and_copy():
         assert text.count(f"|{item['identifier']}>") == 1
         assert item["title"] in text
     assert "First payments" not in render_messages([issue()], first_payment=False)[0]
+    assert "Friday by 12pm (noon)" in render_messages([issue()], first_payment=False)[0]
     assert render_messages([], first_payment=True) == []
 
 
