@@ -6,6 +6,7 @@ import argparse
 from datetime import datetime, timezone
 import json
 import os
+import re
 import signal
 import threading
 
@@ -54,7 +55,7 @@ class ReminderAPI:
 
     def slack(self, method, payload=None):
         headers = {"Authorization": f"Bearer {self.slack_token}"}
-        if method == "users.info":
+        if method in {"users.info", "conversations.info", "conversations.members"}:
             # Slack's user lookup reads query parameters, not a JSON POST body.
             response = self.client.get(
                 f"https://slack.com/api/{method}", headers=headers, params=payload or {},
@@ -78,6 +79,54 @@ class ReminderAPI:
         data = self.linear("query PaymentReminderOrganization { organization { id } }")
         if data["organization"]["id"] != config.linear_organization_id:
             raise ValueError("Linear organization mismatch")
+
+    def channel_builders(self, config):
+        """Read the entire approved channel; never infer identity from names.
+
+        Explicit mappings are identity bindings, not an independent audience.
+        Unmapped humans are surfaced so onboarding cannot silently omit them.
+        """
+        channel = self.slack("conversations.info", {"channel": config.slack_channel_id})["channel"]
+        if (channel.get("id") != config.slack_channel_id
+                or channel.get("name") != "mlai-studio-builders"
+                or channel.get("is_archived") is not False
+                or channel.get("is_member") is not True):
+            raise ValueError("Roo must belong to the active mlai-studio-builders channel")
+        members = set()
+        cursor = ""
+        cursors = set()
+        while True:
+            page = self.slack("conversations.members", {
+                "channel": config.slack_channel_id, "limit": 200, "cursor": cursor,
+            })
+            ids = page.get("members")
+            if not isinstance(ids, list) or any(
+                not isinstance(user_id, str) or not re.fullmatch(r"[UW][A-Z0-9]+", user_id)
+                for user_id in ids
+            ):
+                raise ValueError("Incomplete Slack channel membership")
+            members.update(ids)
+            cursor = page.get("response_metadata", {}).get("next_cursor")
+            if not isinstance(cursor, str) or cursor in cursors:
+                raise ValueError("Incomplete or repeated Slack membership cursor")
+            if not cursor:
+                break
+            cursors.add(cursor)
+        mappings = {builder.slack_user_id: builder for builder in config.builders}
+        builders, missing = [], []
+        for user_id in sorted(members):
+            user = self.slack("users.info", {"user": user_id})["user"]
+            if user.get("id") != user_id:
+                raise ValueError("Slack returned a different channel member")
+            if user.get("deleted") or user.get("is_bot") or user.get("is_app_user"):
+                continue
+            if user.get("team_id") != config.slack_team_id:
+                raise ValueError("Channel member belongs to a different workspace")
+            if user_id in mappings:
+                builders.append(mappings[user_id])
+            else:
+                missing.append(user_id)
+        return tuple(builders), missing
 
     def verify_builder(self, builder, slack_team_id):
         user = self.slack("users.info", {"user": builder.slack_user_id})["user"]
@@ -149,6 +198,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--once", action="store_true", help="Check the current delivery window once")
     parser.add_argument("--dry-run", action="store_true", help="Read and print previews once; never open DMs or write receipts")
+    parser.add_argument("--check-roster", action="store_true", help="Audit channel membership and mapped accounts at any time; never send messages")
     args = parser.parse_args(argv)
     config = ReminderConfig.from_env(os.environ)
     if not config.enabled:
@@ -163,19 +213,32 @@ def main(argv=None):
                           slack_token=os.environ.get("PAYMENT_SLACK_BOT_TOKEN"))
         while not stop.is_set():
             try:
-                result = run_reminders(config, api, store, datetime.now(timezone.utc),
-                                       dry_run=args.dry_run, clock=lambda: datetime.now(timezone.utc))
+                if args.check_roster:
+                    api.verify_workspace(config)
+                    builders, missing = api.channel_builders(config)
+                    outcomes = [{"builder": user_id, "status": "needs_mapping"} for user_id in missing]
+                    for builder in builders:
+                        try:
+                            api.verify_builder(builder, config.slack_team_id)
+                            outcomes.append({"builder": builder.slack_user_id, "status": "mapped"})
+                        except Exception as exc:
+                            outcomes.append({"builder": builder.slack_user_id, "status": "error",
+                                             "error_type": type(exc).__name__})
+                    result = {"status": "roster_checked", "builders": outcomes}
+                else:
+                    result = run_reminders(config, api, store, datetime.now(timezone.utc),
+                                           dry_run=args.dry_run, clock=lambda: datetime.now(timezone.utc))
             except DeliveryRejected as exc:
                 result = {"status": "error", "error_type": type(exc).__name__,
                           "retry_after": exc.retry_after or 60}
             except Exception as exc:
                 result = {"status": "error", "error_type": type(exc).__name__}
             # Task titles are printed only during an explicitly requested preview.
-            if args.once or args.dry_run or result["status"] != "not_due":
+            if args.once or args.dry_run or args.check_roster or result["status"] != "not_due":
                 print(json.dumps(result), flush=True)
-            if args.once or args.dry_run:
+            if args.once or args.dry_run or args.check_roster:
                 failed = result["status"] == "error" or any(
-                    item["status"] in {"error", "needs_review", "pending"}
+                    item["status"] in {"error", "needs_review", "needs_mapping", "pending"}
                     for item in result.get("builders", [])
                 )
                 return 1 if failed else 0

@@ -68,6 +68,7 @@ def test_disabled_and_outside_window_make_no_calls(config, api):
 
 def valid_env():
     return {"PAYMENT_REMINDERS_ENABLED": "true", "PAYMENT_SLACK_TEAM_ID": "T123",
+            "PAYMENT_SLACK_CHANNEL_ID": "C123",
             "PAYMENT_LINEAR_ORGANIZATION_ID": ORG_ID,
             "PAYMENT_BUILDERS_JSON": json.dumps([BUILDER.__dict__])}
 
@@ -75,7 +76,8 @@ def valid_env():
 @pytest.mark.parametrize("updates", [
     {"PAYMENT_REMINDERS_ENABLED": "yes"}, {"PAYMENT_FIRST_FRIDAY": "2026-09-12"},
     {"PAYMENT_REMINDER_HOUR": "24"}, {"PAYMENT_BUILDERS_JSON": "{}"},
-    {"PAYMENT_BUILDERS_JSON": "[]"}, {"PAYMENT_SLACK_TEAM_ID": "C123"},
+    {"PAYMENT_SLACK_CHANNEL_ID": ""}, {"PAYMENT_SLACK_CHANNEL_ID": "D123"},
+    {"PAYMENT_SLACK_TEAM_ID": "C123"},
     {"PAYMENT_LINEAR_ORGANIZATION_ID": "unknown"},
     {"PAYMENT_BUILDERS_JSON": json.dumps([BUILDER.__dict__, BUILDER.__dict__])},
     {"PAYMENT_BUILDERS_JSON": '[{"slack_user_id":"../oops","linear_user_id":"bad"}]'},
@@ -90,6 +92,180 @@ def test_defaults_and_valid_config():
     config = ReminderConfig.from_env(valid_env())
     assert config.builders == (BUILDER,)
     assert config.first_payment_date == date(2026, 9, 11)
+
+
+def channel_api(*, members=None, next_cursor="", channel_updates=None, user_updates=None):
+    def handler(request):
+        assert request.method == "GET"
+        payload = dict(request.url.params)
+        if request.url.path.endswith("conversations.info"):
+            assert payload["channel"] == "C123"
+            return httpx.Response(200, json={"ok": True, "channel": {
+                "id": "C123", "name": "mlai-studio-builders", "is_member": True,
+                "is_archived": False, **(channel_updates or {}),
+            }})
+        if request.url.path.endswith("conversations.members"):
+            ids = members if members is not None else (
+                ["U123", "U456", "UBOT", "UDELETED"] if not payload["cursor"] else ["U789", "U123"])
+            cursor = next_cursor if members is not None else ("page-2" if not payload["cursor"] else "")
+            return httpx.Response(200, json={"ok": True, "members": ids,
+                                            "response_metadata": {"next_cursor": cursor}})
+        user_id = payload["user"]
+        return httpx.Response(200, json={"ok": True, "user": {
+            "id": user_id, "team_id": "T123", "is_bot": user_id == "UBOT",
+            "deleted": user_id == "UDELETED", **(user_updates or {}),
+        }})
+    return make_api(handler)
+
+
+def test_channel_roster_follows_all_pages_and_ignores_outsider_mappings(config):
+    outsider = Builder("UOUTSIDE", ORG_ID)
+    conf = replace(config, slack_channel_id="C123", builders=(BUILDER, outsider))
+    builders, missing = channel_api().channel_builders(conf)
+    assert builders == (BUILDER,)
+    assert missing == ["U456", "U789"]
+
+
+@pytest.mark.parametrize("updates", [
+    {"id": "COTHER"}, {"name": "other-channel"}, {"is_archived": True},
+    {"is_member": False}, {"is_member": None},
+])
+def test_wrong_or_inaccessible_channel_rejected(config, updates):
+    with pytest.raises(ValueError):
+        channel_api(channel_updates=updates).channel_builders(replace(config, slack_channel_id="C123"))
+
+
+@pytest.mark.parametrize("members,cursor", [({}, ""), (["U123"], None), (["U123"], "loop"), (["bad"], "")])
+def test_incomplete_channel_membership_rejected(config, members, cursor):
+    with pytest.raises(ValueError):
+        channel_api(members=members, next_cursor=cursor).channel_builders(replace(config, slack_channel_id="C123"))
+
+
+@pytest.mark.parametrize("updates", [{"id": "UOTHER"}, {"team_id": "TOTHER"}])
+def test_channel_user_identity_rejected(config, updates):
+    with pytest.raises(ValueError):
+        channel_api(members=["U123"], user_updates=updates).channel_builders(replace(config, slack_channel_id="C123"))
+
+
+def test_channel_members_without_open_tasks_receive_hours_reminder(config, api):
+    conf = replace(config, slack_channel_id="C123")
+    api.channel_builders.return_value = ((BUILDER,), ["UUNMAPPED"])
+    api.open_issues.return_value = []
+    store = ReceiptStore(config.receipts_dir)
+    result = run_reminders(conf, api, store, NOW)
+    assert result["builders"][0] == {"builder": "UUNMAPPED", "status": "needs_mapping"}
+    assert result["builders"][1]["status"] == "sent"
+    assert "no open assigned Linear tasks" in api.post_message.call_args.args[1]
+    assert "Friday by 12pm (noon)" in api.post_message.call_args.args[1]
+    run_reminders(conf, api, store, NOW)
+    api.post_message.assert_called_once()
+    api.open_dm.assert_called_once_with("U123")
+
+
+def test_removed_channel_member_cannot_resume_pending_delivery(config, api):
+    conf = replace(config, slack_channel_id="C123")
+    api.channel_builders.return_value = ((BUILDER,), [])
+    api.post_message.side_effect = DeliveryRejected("ratelimited", 60)
+    store = ReceiptStore(config.receipts_dir)
+    run_reminders(conf, api, store, NOW)
+    api.channel_builders.return_value = ((), [])
+    result = run_reminders(conf, api, store, NOW + timedelta(seconds=120))
+    assert result["builders"] == []
+    api.post_message.assert_called_once()
+
+
+def test_new_member_checked_on_next_tick_and_old_empty_receipt_upgraded(config, api):
+    conf = replace(config, slack_channel_id="C123")
+    store = ReceiptStore(config.receipts_dir)
+    api.channel_builders.return_value = ((), [])
+    run_reminders(conf, api, store, NOW)
+    api.channel_builders.return_value = ((BUILDER,), [])
+    with store.locked("T123_2026-09-11_U123"):
+        store.write("T123_2026-09-11_U123", {"linear_user_id": LINEAR_ID, "status": "empty", "parts": []})
+    api.open_issues.return_value = []
+    assert run_reminders(conf, api, store, NOW)["builders"][0]["status"] == "sent"
+    api.post_message.assert_called_once()
+
+
+def test_channel_read_failure_cannot_fall_back_to_static_roster(config, api):
+    api.channel_builders.side_effect = ValueError("missing scope")
+    with pytest.raises(ValueError):
+        run_reminders(replace(config, slack_channel_id="C123"), api, ReceiptStore(config.receipts_dir), NOW)
+    api.open_dm.assert_not_called()
+    api.post_message.assert_not_called()
+
+
+def test_roster_check_reports_missing_identities_outside_window_without_delivery(monkeypatch, capsys):
+    import roo.payment_reminder_worker as worker
+    for key, value in valid_env().items():
+        monkeypatch.setenv(key, value)
+    api = Mock()
+    api.channel_builders.return_value = ((BUILDER,), ["U456"])
+    monkeypatch.setattr(worker, "ReminderAPI", Mock(return_value=api))
+    assert main(["--check-roster"]) == 1
+    result = json.loads(capsys.readouterr().out)
+    assert result == {"status": "roster_checked", "builders": [
+        {"builder": "U456", "status": "needs_mapping"}, {"builder": "U123", "status": "mapped"},
+    ]}
+    api.open_dm.assert_not_called()
+    api.post_message.assert_not_called()
+    api.open_issues.assert_not_called()
+    api.verify_builder.assert_called_once_with(BUILDER, "T123")
+
+
+def test_channel_tick_from_environment_through_real_adapters(tmp_path):
+    second_id = "00000000-0000-0000-0000-000000000003"
+    env = valid_env() | {
+        "PAYMENT_RECEIPTS_DIR": str(tmp_path / "receipts"),
+        "PAYMENT_BUILDERS_JSON": json.dumps([
+            BUILDER.__dict__, Builder("U789", second_id).__dict__,
+            Builder("UOUTSIDE", ORG_ID).__dict__,
+        ]),
+    }
+    config = ReminderConfig.from_env(env)
+    roster = channel_api()
+    delivered = []
+
+    def handler(request):
+        payload = dict(request.url.params) if request.method == "GET" else json.loads(request.content)
+        if request.url.host == "api.linear.app":
+            assert request.headers["Authorization"] == "test-read-key"
+            query = payload["query"]
+            if "PaymentReminderOrganization" in query:
+                body = {"organization": {"id": ORG_ID}}
+            elif "PaymentReminderUser" in query:
+                assert payload["variables"]["id"] in {LINEAR_ID, second_id}
+                body = {"user": {"id": payload["variables"]["id"], "active": True}}
+            else:
+                assert payload["variables"]["assignee"] in {LINEAR_ID, second_id}
+                tasks = [issue(title="Private task <@UOTHER>")] if payload["variables"]["assignee"] == LINEAR_ID else []
+                return httpx.Response(200, json=page(tasks))
+            return httpx.Response(200, json={"data": body})
+        assert request.url.host == "slack.com"
+        assert request.headers["Authorization"] == "Bearer test-bot-token"
+        if request.method == "GET":
+            return roster.client.send(request)
+        if request.url.path.endswith("auth.test"):
+            return httpx.Response(200, json={"ok": True, "team_id": "T123"})
+        if request.url.path.endswith("conversations.open"):
+            assert payload["users"] in {"U123", "U789"}
+            return httpx.Response(200, json={"ok": True, "channel": {"id": "D" + payload["users"]}})
+        assert request.url.path.endswith("chat.postMessage")
+        delivered.append(payload)
+        return httpx.Response(200, json={"ok": True, "channel": payload["channel"], "ts": "1.2"})
+
+    api = make_api(handler)
+    for _ in range(2):
+        result = run_reminders(config, api, ReceiptStore(config.receipts_dir), NOW)
+        assert {item["builder"]: item["status"] for item in result["builders"]} == {
+            "U456": "needs_mapping", "U123": "sent", "U789": "sent",
+        }
+    assert len(delivered) == 2
+    assert delivered[0]["channel"] == "DU123"
+    assert "Private task &lt;@UOTHER&gt;" in delivered[0]["text"]
+    assert delivered[1]["channel"] == "DU789"
+    assert "no open assigned Linear tasks" in delivered[1]["text"]
+    assert "Private task" not in delivered[1]["text"]
 
 
 def test_full_list_and_copy():

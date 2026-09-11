@@ -277,7 +277,8 @@ For the local, channel-bound Linear issue reader workflow, see
 ## Scheduled jobs
 
 Builder payment reminders have a separate, opt-in worker. It DMs each configured
-builder their full list of open Linear tasks on the Thursday before a fortnightly
+human member of #mlai-studio-builders their full list of open Linear tasks (or an
+hours reminder when none are open) on the Thursday before a fortnightly
 payment Friday. See the [payment reminder guide](roo-standalone/docs/payment-reminders.md)
 for configuration, preview, activation, and delivery recovery.
 

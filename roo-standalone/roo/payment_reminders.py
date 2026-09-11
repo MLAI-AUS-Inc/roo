@@ -32,6 +32,7 @@ class ReminderConfig:
     linear_organization_id: str
     builders: tuple[Builder, ...]
     receipts_dir: Path
+    slack_channel_id: str = ""
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> ReminderConfig:
@@ -60,15 +61,19 @@ class ReminderConfig:
             raise ValueError("Builder mappings must be one-to-one")
         team = env.get("PAYMENT_SLACK_TEAM_ID", "")
         organization = env.get("PAYMENT_LINEAR_ORGANIZATION_ID", "")
+        channel = env.get("PAYMENT_SLACK_CHANNEL_ID", "")
+        if channel and not re.fullmatch(r"[CG][A-Z0-9]+", channel):
+            raise ValueError("Invalid PAYMENT_SLACK_CHANNEL_ID")
         if enabled == "true":
-            if not builders or not re.fullmatch(r"T[A-Z0-9]+", team):
-                raise ValueError("Enabled reminders require builders and PAYMENT_SLACK_TEAM_ID")
+            if not re.fullmatch(r"T[A-Z0-9]+", team) or not channel:
+                raise ValueError("Enabled reminders require PAYMENT_SLACK_TEAM_ID and PAYMENT_SLACK_CHANNEL_ID")
             organization = str(UUID(organization))
         return cls(
             enabled == "true", first,
             ZoneInfo(env.get("PAYMENT_TIMEZONE", "Australia/Melbourne")),
             hour, team, organization, tuple(builders),
             Path(env.get("PAYMENT_RECEIPTS_DIR", "/app/data/payment-reminders")),
+            channel,
         )
 
     def due_friday(self, now: datetime) -> date | None:
@@ -87,9 +92,9 @@ def _escape(value: str) -> str:
     return " ".join(value.split()).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
-def render_messages(issues: list[dict], *, first_payment: bool) -> list[str]:
+def render_messages(issues: list[dict], *, first_payment: bool, include_empty: bool = False) -> list[str]:
     """Keep every issue, including older/backlog work, without Slack truncation."""
-    if not issues:
+    if not issues and not include_empty:
         return []
     opening = "First payments are this Friday!" if first_payment else "Payments are this Friday!"
     intro = (
@@ -99,6 +104,8 @@ def render_messages(issues: list[dict], *, first_payment: bool) -> list[str]:
         f"*Your tasks still open in Linear ({len(issues)}):*\n"
     )
     messages = [intro]
+    if not issues:
+        return [intro + "You have no open assigned Linear tasks. Please still make sure all your hours are recorded."]
     continuation = "*Your open Linear tasks (continued):*\n"
     for issue in sorted(issues, key=lambda item: item["identifier"]):
         url = issue["url"]
@@ -197,15 +204,17 @@ def run_reminders(config, api, store, now, *, dry_run=False, clock=None):
     if friday is None:
         return {"status": "not_due", "builders": []}
     api.verify_workspace(config)
-    results = []
-    for builder in config.builders:
+    builders, missing = api.channel_builders(config) if config.slack_channel_id else (config.builders, [])
+    results = [{"builder": user_id, "status": "needs_mapping"} for user_id in missing]
+    for builder in builders:
         key = f"{config.slack_team_id}_{friday.isoformat()}_{builder.slack_user_id}"
         try:
             if dry_run:
                 api.verify_builder(builder, config.slack_team_id)
                 issues = api.open_issues(builder.linear_user_id)
                 results.append({"builder": builder.slack_user_id, "status": "preview",
-                                "messages": render_messages(issues, first_payment=friday == config.first_payment_date)})
+                                "messages": render_messages(issues, first_payment=friday == config.first_payment_date,
+                                                            include_empty=bool(config.slack_channel_id))})
                 continue
             with store.locked(key) as acquired:
                 if not acquired:
@@ -214,6 +223,10 @@ def run_reminders(config, api, store, now, *, dry_run=False, clock=None):
                 receipt = store.read(key)
                 if receipt and receipt["linear_user_id"] != builder.linear_user_id:
                     raise ValueError("Builder mapping changed after preparation")
+                # Old versions skipped empty lists. Channel members now receive
+                # an hours reminder even when their Linear work is all done.
+                if receipt and receipt["status"] == "empty" and config.slack_channel_id:
+                    receipt = None
                 if receipt and receipt["status"] in {"sent", "empty"}:
                     results.append({"builder": builder.slack_user_id, "status": receipt["status"]})
                     continue
@@ -223,7 +236,8 @@ def run_reminders(config, api, store, now, *, dry_run=False, clock=None):
                 api.verify_builder(builder, config.slack_team_id)
                 if receipt is None:
                     issues = api.open_issues(builder.linear_user_id)
-                    messages = render_messages(issues, first_payment=friday == config.first_payment_date)
+                    messages = render_messages(issues, first_payment=friday == config.first_payment_date,
+                                               include_empty=bool(config.slack_channel_id))
                     receipt = {"linear_user_id": builder.linear_user_id,
                                "status": "pending" if messages else "empty",
                                "parts": [{"text": text, "status": "pending"} for text in messages]}

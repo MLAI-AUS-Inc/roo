@@ -1,6 +1,7 @@
 # Builder payment reminders
 
-An opt-in Roo worker sends each configured builder a private Slack reminder on
+An opt-in Roo worker sends active human members of **#mlai-studio-builders**
+(`C0C02S608LU`) a private Slack reminder on
 the Thursday before a fortnightly payment Friday. The first payment date defaults
 to **11 September 2026**, followed by 25 September, 9 October, and so on.
 Thursday's reminder time defaults to **09:00 Australia/Melbourne**. The reminder
@@ -19,7 +20,8 @@ link, full title, and current status. Backlog and older tickets are included;
 there is no project, team, cycle, updated-at, or “likely finished” filter.
 Completed and cancelled status categories and archived tickets are excluded.
 The worker follows every API page and divides long lists into additional DMs.
-Builders without open tickets receive no reminder. It never updates a ticket,
+Members without open tickets still receive the hours reminder and an explicit
+“no open assigned Linear tasks” message. It never updates a ticket,
 logs hours, calculates a payment, or infers that work is complete.
 
 ## Runtime and identity boundaries
@@ -31,11 +33,25 @@ both Public Roo's interactive agent and Admin Roo. It has no inbound endpoint,
 LLM calls, skill routing, backend credentials, or administrative capability.
 
 Use the Public Roo bot's token to preserve Roo's DM identity. Required bot scopes
-are `chat:write`, `im:write`, and `users:read`. No history permission is needed.
+are `chat:write`, `im:write`, `users:read`, and `channels:read` for public channels
+or `groups:read` for private channels. Invite the bot into #mlai-studio-builders.
+No history permission is needed.
 The worker verifies the Slack workspace and Linear organization before checking
-builders, and checks each mapped account is active. Provide a manually verified,
-one-to-one roster of Slack user IDs and Linear user UUIDs. It does not infer paid
-builder eligibility from all Slack members or guess identities from names.
+builders, and checks each mapped account is active. The configured channel ID
+must resolve to the active `mlai-studio-builders` channel with the bot as a member.
+Every membership page is read on each scheduled check. Bots and deactivated
+accounts are excluded; mappings for people outside the channel never receive
+messages. A member removed before a retry tick cannot resume pending delivery.
+
+Provide manually verified, one-to-one mappings from Slack user IDs to Linear user
+UUIDs for every human member. The channel defines the audience; the mapping only
+identifies whose tasks to read. Unmapped members are explicitly reported as
+`needs_mapping`, and receive no task list until their identity is verified.
+Other mapped members can proceed. Roo never guesses identities from names or
+treats a missing mapping as an empty Linear task list. Channel read failures stop
+the tick rather than falling back to the static mappings. Complete the roster
+audit below before activation; channel membership alone cannot establish a
+person's Linear identity.
 
 Provision the Linear key with read access to **every team containing these
 builders' work**. The API cannot report tickets hidden from its credential; an
@@ -50,10 +66,25 @@ API references: [Linear queries and archived resources](https://linear.app/devel
 
 From `roo-standalone`, copy `.env.payment-reminders.example` to the ignored
 `.env.payment-reminders`. Fill in the dedicated credentials, Slack workspace ID,
-Linear organization UUID, and verified `PAYMENT_BUILDERS_JSON` roster. No live
-IDs or credentials are committed. Set `PAYMENT_REMINDERS_ENABLED=true` when ready
+Linear organization UUID, `PAYMENT_SLACK_CHANNEL_ID=C0C02S608LU`, and verified
+`PAYMENT_BUILDERS_JSON` mappings. No credentials or member identities are committed.
+Set `PAYMENT_REMINDERS_ENABLED=true` when ready
 to preview. The feature is disabled by default and is not started by either
 existing Public Roo or Admin Roo deployment.
+
+Check coverage at any time, including outside the Thursday delivery window:
+
+```bash
+docker compose -p roo-payment-reminders -f docker-compose.payment-reminders.yml run --rm payment-reminders \
+  python -m roo.payment_reminder_worker --check-roster
+```
+
+This reads channel membership and verifies each mapped account, prints member IDs
+and `mapped`, `needs_mapping`, or `error`, and exits nonzero for unresolved members.
+It never fetches task text, opens DMs, sends messages, or writes receipts. Add
+verified mappings for every `needs_mapping` member and rerun before activation.
+Recheck when people join the channel. Missing members remain visible in worker
+results during the delivery window.
 
 For a development preview, use **development credentials and users only**:
 
@@ -110,12 +141,14 @@ connection timeouts, and connection-pool timeouts also retry after 60 seconds:
 these happen before a request reaches Slack. The retry deadline survives
 restarts and the Thursday delivery window still applies. A partial delivery
 resumes the original prepared list, so it is a snapshot of the initial check.
-Builders with no open work are recorded as checked for that cycle.
+Members with no open work receive an hours reminder once per cycle. When upgrading
+from the previous behavior, an existing `empty` receipt is rechecked and prepared
+for this reminder; already-sent reminders are not repeated.
 
 ## Failures and recovery
 
 Normal logs contain builder IDs and outcomes, not task text or API responses.
-Monitor for `error`, `needs_review`, and `pending` that remains unresolved as
+Monitor for `needs_mapping`, `error`, `needs_review`, and `pending` that remains unresolved as
 Thursday ends. `--once` performs one scheduled check, returns a nonzero status
 for failures/pending deliveries, and is useful for operational checks.
 
@@ -154,3 +187,6 @@ Tests exercise every-page retrieval, status categories, all-task rendering,
 long-list splitting, escaping, identity checks, first/subsequent payment copy,
 fortnightly/DST scheduling, dry runs, restarts, concurrent workers, rate limits,
 partial sends, and uncertain delivery. No database migration is required.
+Channel tests cover complete membership pagination, outsiders, bots, missing
+mappings, removed members on retry, new members, empty-work reminders, and a
+read-only roster audit outside the delivery window.
