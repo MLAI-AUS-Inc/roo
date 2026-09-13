@@ -15,6 +15,8 @@ routing:
     - {text: "what's my balance", action: balance}
     - {text: "flex my points", action: flex_points}
     - {text: "book me in for coworking tomorrow", action: book_coworking}
+    - {text: "pls book me in sept 18th", action: book_coworking}
+    - {text: "is coworking available next Friday?", action: check_coworking}
     - {text: "book me in for 1pm today", action: book_coworking}
     - {text: "claim task ROO-12", action: claim_task}
     - {text: "how busy was the coworking space in may?", action: coworking_report}
@@ -80,7 +82,7 @@ actions:
   - name: book_coworking
     description: Book the user a coworking day.
     params:
-      date: {type: string, description: "ISO date or natural phrase like 'tomorrow'."}
+      date: {type: string, description: "Preserve the user's date phrase, e.g. sept 18th, 18 September, next Friday, in two days, tomorrow, or an explicit ISO date. Do not invent a year or reduce multiple dates to one; the handler resolves or clarifies them."}
   - name: cancel_coworking
     description: Cancel the user's coworking booking.
     params:
@@ -88,11 +90,11 @@ actions:
   - name: check_coworking
     description: Check coworking availability.
     params:
-      date: {type: string}
+      date: {type: string, description: "Preserve the user's date phrase, including any year; the handler resolves natural dates or asks for clarification."}
   - name: admin_checkin_coworking
     description: Admin — check one or more OTHER members in for coworking (message mentions someone else).
     params:
-      date: {type: string}
+      date: {type: string, description: "Preserve the user's date phrase, including any year; the handler resolves natural dates or asks for clarification."}
       target_users: {type: array}
   - name: coworking_report
     description: Usage report/trends/comparisons for the coworking space.
@@ -200,7 +202,7 @@ Example responses:
 - **action**: The action to perform (required) - e.g., "balance", "request_points", "topup_points", "book_coworking", "admin_checkin_coworking", "coworking_report", "claim_task", "submit_task", "award_points", "create_task"
 - **pack_id**: Top-up pack ID for `topup_points`; one of `topup_5`, `topup_10`, or `topup_25`
 - **task_id**: Task ID number or task code (for example `42` or `ROO-0042`) for task-related actions
-- **date**: Date for coworking bookings (YYYY-MM-DD format)
+- **date**: Preserve the date phrase for coworking booking, check-in, and availability actions. The handler converts named dates (including `sept 18th` and `18 September`), weekdays, `today`, `tomorrow`, `day after tomorrow`, and `in two days` to YYYY-MM-DD using Roo's configured timezone. Without a year, a named date means its next occurrence. `next Friday` means the next Friday strictly after today; `this Friday` means Friday of this calendar week. Numeric dates such as `09/10`, invalid dates, and multiple dates require clarification. Backend booking limits still apply.
 - **start_date**: Start date for coworking reports (YYYY-MM-DD format)
 - **end_date**: End date for coworking reports (YYYY-MM-DD format)
 - **points**: The number of points to award (integer, positive only)

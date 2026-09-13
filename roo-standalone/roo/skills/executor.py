@@ -93,6 +93,7 @@ from ..admin_brain import (
     build_admin_brain_response,
 )
 from ..clients.mlai_backend import MLAIBackendClient, MLAIBackendUnavailableError
+from ..coworking_dates import CoworkingDateError, resolve_coworking_date
 from ..coworking_booking_intents import (
     get_coworking_intent_store,
     is_retryable_coworking_exception,
@@ -13885,31 +13886,15 @@ Chunk {index} source: {label}
         *,
         default_to_today: bool,
     ) -> Optional[str]:
-        """Resolve coworking booking/check-in date from params, text, or today's default."""
-        raw_date = str(params.get("date") or "").strip().strip(".,")
-
-        if not raw_date:
-            match = re.search(r"(\d{4}-\d{2}-\d{2})", str(text or ""))
-            if match:
-                raw_date = match.group(1)
-
-        text_lower = self._normalize_points_routing_text(text)
-        if not raw_date:
-            if re.search(r"\btomorrow\b", text_lower):
-                raw_date = "tomorrow"
-            elif re.search(r"\btoday\b", text_lower):
-                raw_date = "today"
-
-        if raw_date.lower() not in {"today", "tomorrow"} and (raw_date or not default_to_today):
-            return raw_date or None
-
+        """Normalise coworking dates using the configured local calendar."""
         from roo.utils import get_current_date
-        today = get_current_date()
-        if raw_date.lower() == "today":
-            return today.isoformat()
-        if raw_date.lower() == "tomorrow":
-            return (today + timedelta(days=1)).isoformat()
-        return today.isoformat()
+
+        return resolve_coworking_date(
+            params.get("date"),
+            text,
+            today=get_current_date(),
+            default_to_today=default_to_today,
+        )
 
     def _extract_coworking_checkin_targets(
         self,
@@ -14357,6 +14342,26 @@ Chunk {index} source: {label}
         request_id: Optional[str] = None,
     ) -> Any:
         """Handle individual points actions."""
+        if action in {
+            "book_coworking", "admin_checkin_coworking", "check_coworking",
+        }:
+            try:
+                # Validate before creating a durable intent or calling an API.
+                date_text = text
+                if action == "check_coworking":
+                    # Availability has a separate `days` window. Do not
+                    # mistake "for the next 7 days" for a booking date.
+                    date_text = re.sub(
+                        r"\b(?:for\s+)?(?:the\s+)?next\s+\d+\s+days?\b",
+                        "", date_text, flags=re.IGNORECASE,
+                    )
+                resolved_date = self._resolve_coworking_booking_date(
+                    params, date_text,
+                    default_to_today=action in {"book_coworking", "admin_checkin_coworking"},
+                )
+            except CoworkingDateError as exc:
+                return str(exc)
+            params = {**params, "date": resolved_date}
         
         # =====================================================================
         # Member Actions
@@ -15121,11 +15126,7 @@ Chunk {index} source: {label}
             if not self._is_full_points_admin_details(admin_details):
                 return self._full_points_admin_denial(admin_details, "check people in for coworking")
 
-            booking_date = self._resolve_coworking_booking_date(
-                params,
-                text,
-                default_to_today=True,
-            )
+            booking_date = params["date"]
 
             if len(target_slack_ids) > 1:
                 return await self._book_coworking_many_for_admin(
@@ -15193,11 +15194,7 @@ Chunk {index} source: {label}
                 if not self._is_full_points_admin_details(admin_details):
                     return self._full_points_admin_denial(admin_details, "check people in for coworking")
 
-                booking_date = self._resolve_coworking_booking_date(
-                    params,
-                    text,
-                    default_to_today=True,
-                )
+                booking_date = params["date"]
 
                 if len(target_slack_ids) > 1:
                     return await self._book_coworking_many_for_admin(
@@ -15229,11 +15226,7 @@ Chunk {index} source: {label}
                         )
                     raise
 
-            booking_date = self._resolve_coworking_booking_date(
-                params,
-                text,
-                default_to_today=True,
-            )
+            booking_date = params["date"]
             return await self._book_coworking_with_intent(
                 client=client,
                 target_user_id=user_id,
