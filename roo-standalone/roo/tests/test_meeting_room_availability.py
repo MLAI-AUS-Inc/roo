@@ -32,12 +32,7 @@ def local_clock_ranges(rows, day=DAY, duration=2, now=NOW):
     ('what hours are the rooms free tomorrow?', {}, 2),
     ('find a one-hour meeting room slot tomorrow', {}, 2),
     ('find a two-hour meeting room slot tomorrow', {}, 4),
-    ('find a 90-minute room slot tomorrow', {}, 3),
-    ('find a 1.5 hour meeting room slot tomorrow', {}, 3),
-    ('room free tomorrow for an hour and a half?', {}, 3),
-    ('room free tomorrow for one and a half hours?', {}, 3),
     ('room free tomorrow for 2 hours?', {'duration_hours': 1}, 4),
-    ('room free tomorrow?', {'duration_hours': 1.5}, 3),
 ])
 def test_search_duration(text, params, expected):
     assert resolve_search_duration(text, params) == expected
@@ -45,6 +40,11 @@ def test_search_duration(text, params, expected):
 
 @pytest.mark.parametrize('text,params', [
     ('find a 30-minute room slot', {}),
+    ('find a 90-minute room slot tomorrow', {}),
+    ('find a 1.5 hour meeting room slot tomorrow', {}),
+    ('room free tomorrow for an hour and a half?', {}),
+    ('room free tomorrow for one and a half hours?', {}),
+    ('room free tomorrow?', {'duration_hours': 1.5}),
     ('find a 45-minute room slot', {}),
     ('find a three-hour room slot', {}),
     ('room free for three quarters of an hour?', {}),
@@ -57,7 +57,7 @@ def test_invalid_duration_does_not_silently_default(text, params):
         resolve_search_duration(text, params)
 
 
-@pytest.mark.parametrize('duration,last', [(2, '23:00'), (3, '22:30'), (4, '22:00')])
+@pytest.mark.parametrize('duration,last', [(2, '23:00'), (4, '22:00')])
 def test_empty_day_last_start_finishes_at_midnight(duration, last):
     assert local_clock_ranges([], duration=duration) == [('00:00', last)]
 
@@ -73,7 +73,7 @@ def test_off_grid_blocks_round_starts_and_require_whole_duration():
     rows = [busy('2026-09-15T00:00:00+10:00', '2026-09-15T09:10:00+10:00'),
             busy('2026-09-15T10:45:00+10:00', '2026-09-16T00:00:00+10:00')]
     assert local_clock_ranges(rows) == [('09:30', '09:30')]
-    assert local_clock_ranges(rows, duration=3) == []
+    assert local_clock_ranges(rows, duration=4) == []
 
 
 def test_blocks_spanning_day_boundaries_and_different_offsets():
@@ -98,7 +98,7 @@ def test_fully_blocked_day_and_past_day_have_no_slots():
 
 
 @pytest.mark.parametrize('day', [date(2026, 10, 4), date(2027, 4, 4)])
-@pytest.mark.parametrize('duration', [2, 3, 4])
+@pytest.mark.parametrize('duration', [2, 4])
 def test_dst_suggestions_round_trip_through_booking_parser(day, duration):
     now = datetime.combine(day - timedelta(days=1), datetime.min.time(), TZ)
     for first, last in available_start_ranges([], day, duration, now=now):

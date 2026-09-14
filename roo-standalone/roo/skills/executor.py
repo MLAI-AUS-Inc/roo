@@ -587,7 +587,7 @@ class SkillExecutor:
                     return (
                         f"The *{room_name}* is available {format_meeting_room_interval(starts_at, ends_at)} "
                         "(Melbourne time). This is an availability check only; one booking must be "
-                        "between 1 and 2 hours."
+                        "exactly 1 or 2 hours."
                     )
                 cost = int(result.get("points_cost") or 0)
                 return (

@@ -10,7 +10,7 @@ routing:
     - {text: "room calendar tomorrow?", action: check_room_availability}
     - {text: "find a two-hour room slot tomorrow", action: check_room_availability}
     - {text: "book room tomorrow 2pm-4pm", action: book_meeting_room}
-    - {text: "book <@U123> room tomorrow 1.5h", action: book_meeting_room}
+    - {text: "book <@U123> room tomorrow 2h", action: book_meeting_room}
     - {text: "my room bookings", action: list_my_room_bookings}
     - {text: "cancel room tomorrow", action: cancel_meeting_room}
   negative_examples:
@@ -76,7 +76,7 @@ unless the member explicitly says `room` or `meeting room`.
 - For availability without a specific start, leave start_time and end_time unset.
   Do not ask for a start: Roo lists available start times for both default rooms
   on that date. Use duration_hours only when the member specifies a meeting length;
-  otherwise show one-hour slots. Support `one-hour slot`, `90 minutes`, and
+  otherwise show one-hour slots. Support `one-hour slot`, `60 minutes`, and
   `two-hour meeting` requests without turning them into bookings.
 - Availability ranges list inclusive start times every 30 minutes, not meeting
   end times. Each complete meeting fits before midnight on the requested date.
@@ -85,10 +85,10 @@ unless the member explicitly says `room` or `meeting room`.
   allowance. When the member chooses a room, date, start and duration, use the
   normal booking preview and confirmation flow, which rechecks eligibility.
 - If the member gives a start but no duration or end, use one hour.
-- Bookings last 1 to 2 hours and use 30-minute increments. Accept phrases such
-  as `an hour and a half`, `1.5 hours`, and `90 minutes`.
-- Starts and ends must be on the hour or half-hour. Each started hour costs one
-  Roo Point, so a 90-minute booking costs 2 points.
+- Bookings last exactly 1 or 2 hours. Reject `1.5 hours`, `90 minutes`, and
+  `an hour and a half`; ask the member to choose 1 or 2 hours without rounding.
+- Starts and ends must be on the hour or half-hour, including 2:30pm. A one-hour
+  booking costs 1 Roo Point; a two-hour booking costs 2 points.
 - Full Points Admins may book one tagged member. Derive the target only from the
   Slack message, charge the tagged member, and never charge the administrator.
 - Non-admins cannot book for tagged users. Never use a model-provided Slack identity.
@@ -102,10 +102,10 @@ unless the member explicitly says `room` or `meeting room`.
 
 ## Examples
 
-- `book the meeting room tomorrow at 2pm for an hour and a half`
+- `book the meeting room tomorrow at 2pm for an hour`
 - `is either meeting room free tomorrow at 2pm?`
 - `book the small meeting room tomorrow at 2pm for an hour`
-- `book the large room tomorrow at 2:30pm for 90 minutes`
-- `book the meeting room tomorrow from 2:30pm to 4pm`
-- `book <@U123> into the meeting room tomorrow at 2pm for 90 minutes`
+- `book the large room tomorrow at 2:30pm for 2 hours`
+- `book the meeting room tomorrow from 2:30pm to 4:30pm`
+- `book <@U123> into the meeting room tomorrow at 2pm for 2 hours`
 - `cancel my meeting room booking tomorrow`

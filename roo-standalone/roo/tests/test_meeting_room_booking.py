@@ -90,7 +90,7 @@ class FakeMeetingRoomClient:
             starts_at = datetime.fromisoformat(kwargs["starts_at"])
             ends_at = datetime.fromisoformat(kwargs["ends_at"])
             duration_seconds = int((ends_at - starts_at).total_seconds())
-            bookable = 3600 <= duration_seconds <= 7200
+            bookable = duration_seconds in (3600, 7200)
             cost = (duration_seconds + 3599) // 3600 if bookable else None
             requested = {
                 "starts_at": kwargs["starts_at"],
@@ -429,14 +429,9 @@ def test_interval_parser_keeps_leading_zero_time_unambiguous():
         "book tomorrow at 2pm for 90 minutes",
     ),
 )
-def test_interval_parser_accepts_ninety_minute_phrasings(text):
-    starts_at, ends_at = resolve_interval(
-        text,
-        now=datetime(2026, 8, 11, 9, tzinfo=MELBOURNE),
-    )
-
-    assert starts_at == datetime(2026, 8, 12, 14, tzinfo=MELBOURNE)
-    assert ends_at == datetime(2026, 8, 12, 15, 30, tzinfo=MELBOURNE)
+def test_interval_parser_rejects_ninety_minute_phrasings(text):
+    with pytest.raises(MeetingRoomInputError, match="exactly 1 or 2 hours"):
+        resolve_interval(text, now=datetime(2026, 8, 11, 9, tzinfo=MELBOURNE))
 
 
 def test_interval_parser_accepts_word_number_two_hours():
@@ -452,12 +447,12 @@ def test_interval_parser_accepts_word_number_two_hours():
 def test_interval_parser_accepts_half_hour_boundaries_and_bare_start_time():
     starts_at, ends_at = resolve_interval(
         "book tomorrow 2:30pm",
-        {"duration_hours": 1.5},
+        {"duration_hours": 2},
         now=datetime(2026, 8, 11, 9, tzinfo=MELBOURNE),
     )
 
     assert starts_at == datetime(2026, 8, 12, 14, 30, tzinfo=MELBOURNE)
-    assert ends_at == datetime(2026, 8, 12, 16, tzinfo=MELBOURNE)
+    assert ends_at == datetime(2026, 8, 12, 16, 30, tzinfo=MELBOURNE)
 
 
 @pytest.mark.parametrize(
@@ -468,7 +463,7 @@ def test_interval_parser_accepts_half_hour_boundaries_and_bare_start_time():
     ),
 )
 def test_booking_parser_rejects_half_hour_wording_without_defaulting(text):
-    with pytest.raises(MeetingRoomInputError, match="between 1 and 2 hours"):
+    with pytest.raises(MeetingRoomInputError, match="exactly 1 or 2 hours"):
         resolve_interval(
             text,
             now=datetime(2026, 8, 11, 9, tzinfo=MELBOURNE),
@@ -522,7 +517,7 @@ def test_interval_parser_rejects_past_start_before_backend_call():
 
 
 def test_interval_parser_rejects_probable_reversed_range_instead_of_rolling_23_hours():
-    with pytest.raises(MeetingRoomInputError, match="at most two hours"):
+    with pytest.raises(MeetingRoomInputError, match="exactly 1 or 2 hours"):
         resolve_interval(
             "book tomorrow from 2pm to 1pm",
             now=datetime(2026, 8, 11, 9, tzinfo=MELBOURNE),
@@ -1219,7 +1214,7 @@ async def test_public_dm_failure_never_exposes_booking_details(monkeypatch):
 @pytest.mark.parametrize('text,expected_rooms,duration', [
     ('what times are the meeting rooms available tomorrow?', ['small-meeting-room', 'big-meeting-room'], 1),
     ('find me a two-hour meeting room slot tomorrow', ['small-meeting-room', 'big-meeting-room'], 2),
-    ('when is the small meeting room free for 90 minutes tomorrow?', ['small-meeting-room'], 1.5),
+    ('when is the small meeting room free for 2 hours tomorrow?', ['small-meeting-room'], 2),
 ])
 async def test_day_discovery_uses_day_snapshot_and_stays_private(monkeypatch, text, expected_rooms, duration):
     class DiscoveryClient(FakeMeetingRoomClient):
@@ -1253,7 +1248,7 @@ async def test_day_discovery_uses_day_snapshot_and_stays_private(monkeypatch, te
     assert delivered[0][0] == 'UOWNER'
     message = delivered[0][1]
     assert f'Available start times for a {duration:g}-hour meeting' in message
-    last = {1: '11:00 AM', 1.5: '10:30 AM', 2: '10:00 AM'}[duration]
+    last = {1: '11:00 AM', 2: '10:00 AM'}[duration]
     assert f'9:00 AM to {last}' in message
     assert 'Conference' not in message
     assert result['message'] == "I've sent you a private reply about the Meeting Room."
@@ -1400,14 +1395,14 @@ async def test_points_admin_tagged_booking_previews_target_charge(monkeypatch):
     _patch_executor(monkeypatch, configured)
 
     result = await SkillExecutor()._execute_meeting_room_booking(
-        text="book the small meeting room for <@UOTHER|Other Member> tomorrow at 2pm for 1.5 hours",
+        text="book the small meeting room for <@UOTHER|Other Member> tomorrow at 2pm for 2 hours",
         params={"action": "book_meeting_room"},
         user_id="UADMIN",
         channel_id="DADMIN",
     )
 
     assert "for <@UOTHER>" in result["message"]
-    assert "1.5 hours" in result["message"]
+    assert "2 hours" in result["message"]
     assert "Their Roo Points account will be charged" in result["message"]
     availability_call = FakeMeetingRoomClient.instances[0].calls[1]
     assert availability_call[1] == "UADMIN"
@@ -2097,7 +2092,7 @@ async def test_unspecified_availability_checks_only_default_rooms(monkeypatch):
 @pytest.mark.parametrize('target', [None, 'UTARGET'])
 async def test_explicit_conference_request_previews_without_default_room_list(monkeypatch, target):
     _patch_executor(monkeypatch, _settings(), FakeConferenceRoomClient)
-    text = 'book the conference room tomorrow at 2pm for 90 minutes'
+    text = 'book the conference room tomorrow at 2pm for 2 hours'
     if target:
         text += ' for <@UTARGET>'
     result = await SkillExecutor()._execute_meeting_room_booking(
@@ -2201,3 +2196,43 @@ def test_router_catalog_includes_explicit_conference_room_request():
     from roo.router import _tool_description
     skill = load_skill_from_directory(Path(__file__).resolve().parents[2] / 'skills' / 'meeting_room_booking')
     assert 'Conference Room requests' in _tool_description(skill)
+
+
+@pytest.mark.parametrize('text,params', [
+    ('book small room tomorrow at 2pm for 90 minutes', {'duration_hours': 2}),
+    ('book small room tomorrow at 2pm for 90 minutes', {'end_time': '4pm'}),
+    ('book small room tomorrow from 2pm to 3:30pm', {}),
+    ('book small room tomorrow', {'start_time': '2pm', 'end_time': '3:30pm'}),
+    ('book small room', {'starts_at': '2026-09-15T14:00:00+10:00', 'ends_at': '2026-09-15T15:30:00+10:00'}),
+])
+def test_ninety_minutes_cannot_bypass_duration_policy(text, params):
+    with pytest.raises(MeetingRoomInputError, match='exactly 1 or 2 hours'):
+        resolve_interval(text, params, now=datetime(2026, 9, 14, 9, tzinfo=MELBOURNE))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('action,text', [
+    ('book_meeting_room', 'book small meeting room tomorrow at 2pm for 90 minutes'),
+    ('check_room_availability', 'find me a 90-minute meeting room slot tomorrow'),
+])
+async def test_ninety_minute_request_asks_for_allowed_duration_without_preview(monkeypatch, action, text):
+    _patch_executor(monkeypatch, _settings())
+    result = await SkillExecutor()._execute_meeting_room_booking(
+        text=text, params={'action': action}, user_id='UOWNER', channel_id='DOWNER',
+    )
+    assert 'exactly 1 or 2 hours' in result['message']
+    assert not result.get('blocks')
+    assert not any(call[0] == 'availability' for client in FakeMeetingRoomClient.instances for call in client.calls)
+
+
+@pytest.mark.asyncio
+async def test_exact_ninety_minute_check_is_not_offered_as_a_booking(monkeypatch):
+    _patch_executor(monkeypatch, _settings())
+    result = await SkillExecutor()._execute_meeting_room_booking(
+        text='is the small meeting room free tomorrow from 2pm to 3:30pm?',
+        params={'action': 'check_room_availability'}, user_id='UOWNER', channel_id='DOWNER',
+    )
+    assert 'availability check only' in result['message']
+    assert 'exactly 1 or 2 hours' in result['message']
+    assert 'costs' not in result['message']
+    assert not result.get('blocks')
