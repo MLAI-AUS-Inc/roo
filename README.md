@@ -33,6 +33,10 @@ The root planning and audit files are background context. They are not the
 authoritative runtime instructions unless this README or a current service
 document links to them explicitly.
 
+Studio timesheet commands, local testing, cutoff rules and recovery are described
+in [the timesheet guide](roo-standalone/docs/studio-timesheets.md). The feature is
+disabled by default and uses a separate report worker.
+
 ## Requirements
 
 - Python 3.11
