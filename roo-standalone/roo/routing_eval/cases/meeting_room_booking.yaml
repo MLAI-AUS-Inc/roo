@@ -46,3 +46,15 @@
   text: "when is our next committee meeting?"
   expect: {skill: none}
   tags: [meeting-room, misroute-guard]
+- id: conference-room-book-explicit
+  text: "book the conference room tomorrow at 2pm for an hour"
+  expect: {skill: meeting-room-booking, action: book_meeting_room}
+  tags: [meeting-room, conference-room]
+- id: conference-room-availability-explicit
+  text: "is the conference room free tomorrow at 2pm?"
+  expect: {skill: meeting-room-booking, action: check_room_availability}
+  tags: [meeting-room, conference-room]
+- id: conference-room-cancel-explicit
+  text: "cancel my conference room booking tomorrow"
+  expect: {skill: meeting-room-booking, action: cancel_meeting_room}
+  tags: [meeting-room, conference-room]
