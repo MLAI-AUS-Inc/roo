@@ -8,6 +8,7 @@ routing:
     Coworking, events, Google/Outlook sync, attendees, or unauthorized bookings.
   examples:
     - {text: "room calendar tomorrow?", action: check_room_availability}
+    - {text: "find a two-hour room slot tomorrow", action: check_room_availability}
     - {text: "book room tomorrow 2pm-4pm", action: book_meeting_room}
     - {text: "book <@U123> room tomorrow 1.5h", action: book_meeting_room}
     - {text: "my room bookings", action: list_my_room_bookings}
@@ -16,12 +17,13 @@ routing:
     - {text: "book coworking tomorrow", instead: mlai-points}
 actions:
   - name: check_room_availability
-    description: Check times.
+    description: Find free slots, optionally by duration. Omit times unless explicit.
     params:
       room: {type: string}
       date: {type: string}
       start_time: {type: string}
       end_time: {type: string}
+      duration_hours: {type: number}
   - name: book_meeting_room
     description: Book.
     params:
@@ -65,6 +67,17 @@ unless the member explicitly says `room` or `meeting room`.
   in the same thread. Accept only that requester's first button click, then
   continue privately. In a DM, use private room-choice buttons.
 - Ask for a missing booking start time. Do not invent one.
+- For availability without a specific start, leave start_time and end_time unset.
+  Do not ask for a start: Roo lists available start times for both default rooms
+  on that date. Use duration_hours only when the member specifies a meeting length;
+  otherwise show one-hour slots. Support `one-hour slot`, `90 minutes`, and
+  `two-hour meeting` requests without turning them into bookings.
+- Availability ranges list inclusive start times every 30 minutes, not meeting
+  end times. Each complete meeting fits before midnight on the requested date.
+  The snapshot excludes bookings, blocks, past starts and ambiguous DST times;
+  it does not reserve a room or guarantee the member has enough points or daily
+  allowance. When the member chooses a room, date, start and duration, use the
+  normal booking preview and confirmation flow, which rechecks eligibility.
 - If the member gives a start but no duration or end, use one hour.
 - Bookings last 1 to 2 hours and use 30-minute increments. Accept phrases such
   as `an hour and a half`, `1.5 hours`, and `90 minutes`.

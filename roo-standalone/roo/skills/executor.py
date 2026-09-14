@@ -117,6 +117,7 @@ from ..meeting_room_clarifications import (
     get_meeting_room_clarification_store,
     public_room_choice_prompt,
 )
+from ..meeting_room_availability import format_day_availability, resolve_search_duration
 
 
 POINTS_SUPER_ADMIN_SLACK_ID = "U05QPB483K9"
@@ -738,6 +739,7 @@ class SkillExecutor:
                         )
                 else:
                     local_date = resolve_meeting_room_date(text, params)
+                    duration_half_hours = resolve_search_duration(text, params)
                     for room in selected_rooms:
                         availability_results.append(
                             await client.check_meeting_room_availability(
@@ -747,6 +749,15 @@ class SkillExecutor:
                                 target_slack_user_id=target_slack_user_id,
                             )
                         )
+                    message = format_day_availability(
+                        availability_results, local_date, duration_half_hours
+                    )
+                    return self._deliver_meeting_room_response(
+                        user_id=user_id,
+                        channel_id=channel_id,
+                        message=message,
+                        action=action,
+                    )
                 message = self._format_meeting_room_availability_list(
                     availability_results
                 )

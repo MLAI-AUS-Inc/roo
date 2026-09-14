@@ -295,6 +295,10 @@ def _duration_half_hours(
             "invalid_time",
             "The duration must be between 1 and 2 hours in 30-minute increments.",
         )
+    if not duration.is_finite():
+        raise MeetingRoomInputError(
+            "invalid_time", "The duration must be between 1 and 2 hours in 30-minute increments.",
+        )
     half_hours = duration * 2
     if half_hours != half_hours.to_integral_value():
         raise MeetingRoomInputError(

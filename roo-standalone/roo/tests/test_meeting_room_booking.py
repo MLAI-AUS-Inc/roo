@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from roo import main as main_module
 from roo import meeting_room_booking as room_module
+from roo import meeting_room_availability as availability_module
 from roo import meeting_room_actions as action_module
 from roo import meeting_room_clarifications as clarification_module
 from roo import slack_action_tasks
@@ -1145,6 +1146,10 @@ async def test_bare_misspelled_tomorrow_clarification_checks_the_day(monkeypatch
         "get_current_datetime",
         lambda: datetime(2026, 8, 11, 9, tzinfo=MELBOURNE),
     )
+    monkeypatch.setattr(
+        availability_module, "get_current_datetime",
+        lambda: datetime(2026, 8, 11, 9, tzinfo=MELBOURNE),
+    )
 
     result = await SkillExecutor()._execute_meeting_room_booking(
         text="tommorrow",
@@ -1158,9 +1163,10 @@ async def test_bare_misspelled_tomorrow_clarification_checks_the_day(monkeypatch
     assert calls[1][2]["date"] == "2026-08-12"
     assert "starts_at" not in calls[1][2]
     assert "What date should I check?" not in result["message"]
-    assert "no bookings or blocks currently shown" in result["message"]
-    assert "specific future time" in result["message"]
-    assert "available" not in result["message"].lower()
+    assert "Available start times for a 1-hour meeting" in result["message"]
+    assert "12:00 AM to 11:00 PM" in result["message"]
+    assert "Small Meeting Room" in result["message"]
+    assert "Big Meeting Room" in result["message"]
 
 
 @pytest.mark.asyncio
@@ -1207,6 +1213,71 @@ async def test_public_dm_failure_never_exposes_booking_details(monkeypatch):
     assert "DM Roo" in result["message"]
     assert "2:00" not in result["message"]
     assert "available" not in result["message"].lower()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('text,expected_rooms,duration', [
+    ('what times are the meeting rooms available tomorrow?', ['small-meeting-room', 'big-meeting-room'], 1),
+    ('find me a two-hour meeting room slot tomorrow', ['small-meeting-room', 'big-meeting-room'], 2),
+    ('when is the small meeting room free for 90 minutes tomorrow?', ['small-meeting-room'], 1.5),
+])
+async def test_day_discovery_uses_day_snapshot_and_stays_private(monkeypatch, text, expected_rooms, duration):
+    class DiscoveryClient(FakeMeetingRoomClient):
+        async def list_meeting_rooms(self):
+            return [*(await super().list_meeting_rooms()),
+                    {'slug': 'conference-room', 'name': 'Conference Room'}]
+
+        async def check_meeting_room_availability(self, slack_user_id, **kwargs):
+            result = await super().check_meeting_room_availability(slack_user_id, **kwargs)
+            # Include both a booking and an administrative block. Only 9am–noon remains.
+            result['busy_intervals'] = [
+                {'starts_at': '2026-09-15T00:00:00+10:00', 'ends_at': '2026-09-15T09:00:00+10:00'},
+                {'starts_at': '2026-09-15T12:00:00+10:00', 'ends_at': '2026-09-16T00:00:00+10:00'},
+            ]
+            return result
+
+    _patch_executor(monkeypatch, _settings(), DiscoveryClient)
+    for module in (room_module, availability_module):
+        monkeypatch.setattr(module, 'get_current_datetime', lambda: datetime(2026, 9, 14, 12, tzinfo=MELBOURNE))
+    delivered = []
+    monkeypatch.setitem(SkillExecutor._deliver_meeting_room_response.__globals__, 'send_dm',
+                        lambda user_id, message, **kwargs: delivered.append((user_id, message)) or {'ok': True})
+    result = await SkillExecutor()._execute_meeting_room_booking(
+        text=text, params={'action': 'check_room_availability', 'room': 'conference-room'},
+        user_id='UOWNER', channel_id='CPUBLIC',
+    )
+    calls = FakeMeetingRoomClient.instances[0].calls
+    assert [call[0] for call in calls] == ['rooms'] + ['availability'] * len(expected_rooms)
+    assert [call[2]['room_slug'] for call in calls[1:]] == expected_rooms
+    assert all(call[2]['date'] == '2026-09-15' and 'starts_at' not in call[2] for call in calls[1:])
+    assert delivered[0][0] == 'UOWNER'
+    message = delivered[0][1]
+    assert f'Available start times for a {duration:g}-hour meeting' in message
+    last = {1: '11:00 AM', 1.5: '10:30 AM', 2: '10:00 AM'}[duration]
+    assert f'9:00 AM to {last}' in message
+    assert 'Conference' not in message
+    assert result['message'] == "I've sent you a private reply about the Meeting Room."
+    assert 'blocks' not in result  # Discovery never offers a charge/confirmation action.
+
+
+@pytest.mark.asyncio
+async def test_chosen_slot_is_rechecked_before_booking_preview(monkeypatch):
+    class ChangedAvailabilityClient(FakeMeetingRoomClient):
+        async def check_meeting_room_availability(self, slack_user_id, **kwargs):
+            result = await super().check_meeting_room_availability(slack_user_id, **kwargs)
+            result['available'] = False  # Another member booked it after the day snapshot.
+            return result
+
+    _patch_executor(monkeypatch, _settings(), ChangedAvailabilityClient)
+    result = await SkillExecutor()._execute_meeting_room_booking(
+        text='book small meeting room tomorrow at 9am for 2 hours',
+        params={'action': 'book_meeting_room'}, user_id='UOWNER', channel_id='DOWNER',
+    )
+    calls = FakeMeetingRoomClient.instances[0].calls
+    assert [call[0] for call in calls] == ['rooms', 'availability']
+    assert 'starts_at' in calls[1][2]
+    assert 'not available' in result['message']
+    assert not result.get('blocks')
 
 
 def test_date_availability_makes_an_empty_day_explicitly_clear():
