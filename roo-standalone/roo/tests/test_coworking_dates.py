@@ -21,6 +21,18 @@ TODAY = date(2026, 9, 13)
     ("September 18, 2026", "2026-09-18"),
     ("18 Sept 2027", "2027-09-18"),
     ("2026-09-18", "2026-09-18"),
+    ("16/09/2026", "2026-09-16"),
+    ("16-09-2026", "2026-09-16"),
+    ("09/16/2026", "2026-09-16"),
+    ("09-16-2026", "2026-09-16"),
+    ("16/9", "2026-09-16"),
+    ("18/9", "2026-09-18"),
+    ("9/18", "2026-09-18"),
+    ("18-9", "2026-09-18"),
+    ("09/09/2026", "2026-09-09"),
+    ("29/02/2028", "2028-02-29"),
+    ("16/09/2025", "2025-09-16"),
+    ("31/01", "2027-01-31"),
     ("today", "2026-09-13"),
     ("tomorrow", "2026-09-14"),
     ("tomorow", "2026-09-14"),
@@ -45,7 +57,11 @@ def test_natural_dates_work_with_or_without_router_parameter(phrase, expected, r
 
 
 @pytest.mark.parametrize("phrase", [
-    "31 September", "2026-02-30", "29 February", "18/9", "09/10",
+    "31 September", "2026-02-30", "29 February", "09/10", "09/10/2026",
+    "31/09/2026", "29/02/2026", "00/09/2026", "16/13/2026", "16/09/0000",
+    "16/09/26", "16/09/202", "16/09-2026", "16/09/20266",
+    "16/09/2026 or 17/09/2026", "16/09/2026 and tomorrow", "16/09-18/09",
+    "not 16/09/2026", "16/09/2026 or 17", "16/09/2026 except tomorrow",
     "the 18th", "next week", "sometime next month", "Christmas",
     "sept 18 or sept 19", "sept 18 and 19", "sept 18-20",
     "every Friday", "not tomorrow", "tomorrow or Friday", "in 999999999999999999 days",
@@ -108,10 +124,26 @@ async def test_screenshot_phrase_reaches_booking_with_iso_date(executor):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("router_date", [None, "16/09/2026", "2026-09-16"])
+async def test_numeric_screenshot_phrase_reaches_booking_with_iso_date(executor, router_date):
+    result = await run_action(
+        executor, SimpleNamespace(), "book_coworking",
+        "<@UROO> - can you please book me in for 16/09/2026 from 12pm - 5:30pm",
+        {"date": router_date} if router_date else {},
+    )
+    assert result == "Booked"
+    executor._book_coworking_with_intent.assert_awaited_once()
+    call = executor._book_coworking_with_intent.await_args.kwargs
+    assert call["booking_date"] == "2026-09-16"
+    assert call["target_user_id"] == "U123"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("action", ["book_coworking", "admin_checkin_coworking"])
-async def test_admin_batch_uses_same_date_resolution(executor, action):
+@pytest.mark.parametrize("phrase", ["sept 18", "18/09/2026"])
+async def test_admin_batch_uses_same_date_resolution(executor, action, phrase):
     client = SimpleNamespace(get_admin_details=AsyncMock(return_value={"role": "admin"}))
-    await run_action(executor, client, action, "book <@U1> <@U2> in sept 18", {"date": "sept 18"})
+    await run_action(executor, client, action, f"book <@U1> <@U2> in {phrase}", {"date": phrase})
     assert executor._book_coworking_many_for_admin.await_args.kwargs["booking_date"] == "2026-09-18"
     executor._book_coworking_with_intent.assert_not_awaited()
 
@@ -120,18 +152,20 @@ async def test_admin_batch_uses_same_date_resolution(executor, action):
 @pytest.mark.parametrize("action", [
     "book_coworking", "admin_checkin_coworking", "check_coworking",
 ])
-async def test_clarification_precedes_any_client_or_intent_call(executor, action):
+@pytest.mark.parametrize("phrase", ["sept 18 or 19", "09/10/2026", "31/09/2026", "18/09 or 19/09"])
+async def test_clarification_precedes_any_client_or_intent_call(executor, action, phrase):
     # A client with no methods ensures no API or permission lookup happens.
-    result = await run_action(executor, SimpleNamespace(), action, "coworking sept 18 or 19", {"date": "2026-09-18"})
+    result = await run_action(executor, SimpleNamespace(), action, f"coworking {phrase}", {"date": "2026-09-18"})
     assert "Which" in result
     executor._book_coworking_with_intent.assert_not_awaited()
     executor._book_coworking_many_for_admin.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_availability_accepts_natural_dates(executor):
+@pytest.mark.parametrize("phrase", ["next Friday", "18/09/2026"])
+async def test_availability_accepts_natural_dates(executor, phrase):
     client = SimpleNamespace(check_coworking=AsyncMock(return_value=[]))
-    await run_action(executor, client, "check_coworking", "coworking availability next Friday", {"date": "next Friday"})
+    await run_action(executor, client, "check_coworking", f"coworking availability {phrase}", {"date": phrase})
     client.check_coworking.assert_awaited_once_with("2026-09-18", 7, slack_user_id="U123")
 
 

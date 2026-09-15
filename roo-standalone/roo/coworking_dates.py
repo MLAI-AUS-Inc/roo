@@ -40,12 +40,12 @@ RELATIVE = (
     r"day after tomorrow|today|tomorrow|tomorow|tommorow|tommorrow|yesterday"
     r"|in\s+(?:\d+|one|two|three|four|five|six|seven)\s+(?:days?|weeks?)"
 )
+NUMERIC_DATE = re.compile(r"\d{1,2}(?:/\d{1,2}(?:/\d{4})?|-\d{1,2}(?:-\d{4})?)")
 DATE_REFERENCE = re.compile(
-    rf"\b(?:\d{{4}}-\d{{2}}-\d{{2}}|{MONTH_FIRST.pattern}|{DAY_FIRST.pattern}"
+    rf"\b(?:\d{{4}}-\d{{2}}-\d{{2}}|{NUMERIC_DATE.pattern}|{MONTH_FIRST.pattern}|{DAY_FIRST.pattern}"
     rf"|{RELATIVE}|(?:(?:this|next)\s+)?{WEEKDAY})(?!\w)",
     re.IGNORECASE,
 )
-NUMERIC_DATE = re.compile(r"(?<![\d-])\b\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?\b(?![\d-])")
 UNRESOLVED_REFERENCE = re.compile(
     rf"\b(?:{MONTH}|{WEEKDAY}|next|this|last|week|weekend|month|year|"
     r"christmas|easter|sometime|later|soon|after|before|between|until|through|"
@@ -63,8 +63,35 @@ def _without_times_and_mentions(text: str) -> str:
     )
 
 
+def _parse_numeric_date(phrase: str, today: date) -> date:
+    parts = [int(part) for part in re.split(r"[/-]", phrase)]
+    first, second = parts[:2]
+    year = parts[2] if len(parts) == 3 else today.year
+    candidates = set()
+    for day, month in ((first, second), (second, first)):
+        try:
+            candidates.add(date(year, month, day))
+        except ValueError:
+            continue
+    if not candidates:
+        raise CoworkingDateError("That date isn't valid. Which day, month and year did you mean?")
+    if len(candidates) > 1:
+        raise CoworkingDateError(
+            "Which day and month do you mean? Please spell out the month, like `18 September`."
+        )
+    resolved = candidates.pop()
+    if len(parts) == 2 and resolved < today:
+        try:
+            resolved = resolved.replace(year=year + 1)
+        except ValueError:
+            raise CoworkingDateError(DATE_QUESTION) from None
+    return resolved
+
+
 def _parse_phrase(phrase: str, today: date) -> date:
     phrase = phrase.lower().strip().rstrip(".")
+    if NUMERIC_DATE.fullmatch(phrase):
+        return _parse_numeric_date(phrase, today)
     try:
         if re.fullmatch(r"\d{4}-\d{2}-\d{2}", phrase):
             return date.fromisoformat(phrase)
@@ -117,10 +144,6 @@ def _parse_phrase(phrase: str, today: date) -> date:
 
 def _from_text(text: str, today: date, *, strict: bool) -> date | None:
     cleaned = _without_times_and_mentions(text.lower())
-    if NUMERIC_DATE.search(cleaned):
-        raise CoworkingDateError(
-            "Which day and month do you mean? Please spell out the month, like `18 September`."
-        )
     matches = list(DATE_REFERENCE.finditer(cleaned))
     if len(matches) > 1:
         raise CoworkingDateError("Which single date should I use? Please send one date at a time.")
