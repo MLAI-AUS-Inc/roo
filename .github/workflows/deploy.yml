@@ -97,6 +97,7 @@ jobs:
             -q
           # This legacy module installs an executor stub at import time, so run
           # it in a separate process to keep the security suite isolated.
+          python -m pytest roo/tests/test_start_here_introductions.py -q
           python -m pytest roo/tests/test_agent_routing.py -q
           python -m pytest roo/tests/test_routing_eval_gate.py -q
           python -m compileall -q roo bridge
