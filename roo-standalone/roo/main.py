@@ -3216,8 +3216,11 @@ async def slack_events(
         try:
             queued = await asyncio.to_thread(enqueue_timesheet_event, timesheet_settings, payload)
         except Exception:
+            await _release_slack_event_receipt(request)
             raise HTTPException(status_code=503, detail="Timesheet request could not be saved; retry")
         if queued.get("handled"):
+            # The queue is the durable owner now; finish the generic event lease.
+            await _complete_slack_event_receipt(request)
             if queued.get("new") and queued.get("text"):
                 asyncio.create_task(_timesheet_ack(timesheet_event, queued["text"]))
             return JSONResponse(status_code=200, content={})
