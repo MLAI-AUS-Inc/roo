@@ -97,6 +97,7 @@ from ..clients.mlai_backend import (
     MLAIBackendUnavailableError,
     validate_coworking_booking_result,
 )
+from ..coworking_dates import CoworkingDateError, resolve_coworking_date
 from ..coworking_booking_intents import (
     build_coworking_operation_id,
     coworking_failure_code,
@@ -105,6 +106,8 @@ from ..coworking_booking_intents import (
     is_retryable_coworking_exception,
 )
 from ..meeting_room_booking import (
+    CONFERENCE_ROOM_SLUG,
+    MELBOURNE_TZ,
     MeetingRoomInputError,
     backend_error_message as meeting_room_backend_error_message,
     booking_preview,
@@ -123,6 +126,7 @@ from ..meeting_room_clarifications import (
     get_meeting_room_clarification_store,
     public_room_choice_prompt,
 )
+from ..meeting_room_availability import format_day_availability, resolve_search_duration
 
 
 POINTS_SUPER_ADMIN_SLACK_ID = "U05QPB483K9"
@@ -710,8 +714,29 @@ class SkillExecutor:
         )
         try:
             requested_room_slug = room_slug_from_text(text)
+            conference_room = None
+            if requested_room_slug == CONFERENCE_ROOM_SLUG and action in (
+                "check_room_availability", "book_meeting_room",
+            ):
+                # Check eligibility before asking for missing booking details.
+                # The backend owns the rule and returns only 'unavailable' on denial.
+                access = await client.check_meeting_room_availability(
+                    user_id,
+                    room_slug=CONFERENCE_ROOM_SLUG,
+                    date=datetime.now(MELBOURNE_TZ).date().isoformat(),
+                    target_slack_user_id=target_slack_user_id,
+                )
+                conference_room = access.get("room") or {}
+                if conference_room.get("slug") != CONFERENCE_ROOM_SLUG:
+                    raise MeetingRoomInputError(
+                        "invalid_response",
+                        "I could not verify that meeting room. Ask Roo to start again.",
+                    )
             if action == "check_room_availability":
-                rooms = supported_active_rooms(await client.list_meeting_rooms())
+                rooms = (
+                    [conference_room] if conference_room else
+                    supported_active_rooms(await client.list_meeting_rooms())
+                )
                 selected_rooms = (
                     [room for room in rooms if room["slug"] == requested_room_slug]
                     if requested_room_slug
@@ -745,6 +770,7 @@ class SkillExecutor:
                         )
                 else:
                     local_date = resolve_meeting_room_date(text, params)
+                    duration_half_hours = resolve_search_duration(text, params)
                     for room in selected_rooms:
                         availability_results.append(
                             await client.check_meeting_room_availability(
@@ -754,6 +780,15 @@ class SkillExecutor:
                                 target_slack_user_id=target_slack_user_id,
                             )
                         )
+                    message = format_day_availability(
+                        availability_results, local_date, duration_half_hours
+                    )
+                    return self._deliver_meeting_room_response(
+                        user_id=user_id,
+                        channel_id=channel_id,
+                        message=message,
+                        action=action,
+                    )
                 message = self._format_meeting_room_availability_list(
                     availability_results
                 )
@@ -766,7 +801,10 @@ class SkillExecutor:
 
             if action == "book_meeting_room":
                 starts_at, ends_at = resolve_meeting_room_interval(text, params)
-                rooms = supported_active_rooms(await client.list_meeting_rooms())
+                rooms = (
+                    [conference_room] if conference_room else
+                    supported_active_rooms(await client.list_meeting_rooms())
+                )
                 if not rooms:
                     raise MeetingRoomInputError(
                         "inactive_room",
@@ -5866,6 +5904,7 @@ Chunk {index} source: {label}
                 "project": None,
                 "confidence": 0.0,
                 "reason": exc.__class__.__name__,
+                "lookupDetail": str(exc).strip(),
             }
             self._log_linear_project_resolution(
                 hint=hint,
@@ -5934,6 +5973,7 @@ Chunk {index} source: {label}
                     "is_inactive": payload.get("isInactive"),
                     "candidate_count": payload.get("candidateCount"),
                     "lookup_error": payload.get("lookupError"),
+                    "lookup_detail": payload.get("lookupDetail"),
                 },
                 ensure_ascii=True,
                 separators=(",", ":"),
@@ -5962,6 +6002,15 @@ Chunk {index} source: {label}
             return (
                 f"I couldn't find a Linear project matching {hint!r} in the full "
                 "workspace. Check the exact title or Roo's access. Nothing was changed."
+            )
+        lookup_detail = str(payload.get("lookupDetail") or "").strip()
+        if "linear_team_access_incomplete" in lookup_detail or (
+            "incomplete workspace access" in lookup_detail.lower()
+        ):
+            return (
+                "Roo's Linear connection cannot access every required workspace team. "
+                "A Linear admin needs to replace or re-authorize its read/write API key "
+                "for all teams. Nothing was changed."
             )
         return (
             f"I couldn't verify the Linear project {hint!r} because the full project "
@@ -14156,31 +14205,15 @@ Chunk {index} source: {label}
         *,
         default_to_today: bool,
     ) -> Optional[str]:
-        """Resolve coworking booking/check-in date from params, text, or today's default."""
-        raw_date = str(params.get("date") or "").strip().strip(".,")
-
-        if not raw_date:
-            match = re.search(r"(\d{4}-\d{2}-\d{2})", str(text or ""))
-            if match:
-                raw_date = match.group(1)
-
-        text_lower = self._normalize_points_routing_text(text)
-        if not raw_date:
-            if re.search(r"\btomorrow\b", text_lower):
-                raw_date = "tomorrow"
-            elif re.search(r"\btoday\b", text_lower):
-                raw_date = "today"
-
-        if raw_date.lower() not in {"today", "tomorrow"} and (raw_date or not default_to_today):
-            return raw_date or None
-
+        """Normalise coworking dates using the configured local calendar."""
         from roo.utils import get_current_date
-        today = get_current_date()
-        if raw_date.lower() == "today":
-            return today.isoformat()
-        if raw_date.lower() == "tomorrow":
-            return (today + timedelta(days=1)).isoformat()
-        return today.isoformat()
+
+        return resolve_coworking_date(
+            params.get("date"),
+            text,
+            today=get_current_date(),
+            default_to_today=default_to_today,
+        )
 
     def _extract_coworking_checkin_targets(
         self,
@@ -14910,6 +14943,26 @@ Chunk {index} source: {label}
         request_id: Optional[str] = None,
     ) -> Any:
         """Handle individual points actions."""
+        if action in {
+            "book_coworking", "admin_checkin_coworking", "check_coworking",
+        }:
+            try:
+                # Validate before creating a durable intent or calling an API.
+                date_text = text
+                if action == "check_coworking":
+                    # Availability has a separate `days` window. Do not
+                    # mistake "for the next 7 days" for a booking date.
+                    date_text = re.sub(
+                        r"\b(?:for\s+)?(?:the\s+)?next\s+\d+\s+days?\b",
+                        "", date_text, flags=re.IGNORECASE,
+                    )
+                resolved_date = self._resolve_coworking_booking_date(
+                    params, date_text,
+                    default_to_today=action in {"book_coworking", "admin_checkin_coworking"},
+                )
+            except CoworkingDateError as exc:
+                return str(exc)
+            params = {**params, "date": resolved_date}
         
         # =====================================================================
         # Member Actions
@@ -15703,11 +15756,7 @@ Chunk {index} source: {label}
             if not self._is_full_points_admin_details(admin_details):
                 return self._full_points_admin_denial(admin_details, "check people in for coworking")
 
-            booking_date = self._resolve_coworking_booking_date(
-                params,
-                text,
-                default_to_today=True,
-            )
+            booking_date = params["date"]
 
             if len(target_slack_ids) > 1:
                 return await self._book_coworking_many_for_admin(
@@ -15775,11 +15824,7 @@ Chunk {index} source: {label}
                 if not self._is_full_points_admin_details(admin_details):
                     return self._full_points_admin_denial(admin_details, "check people in for coworking")
 
-                booking_date = self._resolve_coworking_booking_date(
-                    params,
-                    text,
-                    default_to_today=True,
-                )
+                booking_date = params["date"]
 
                 if len(target_slack_ids) > 1:
                     return await self._book_coworking_many_for_admin(
@@ -15811,11 +15856,7 @@ Chunk {index} source: {label}
                         )
                     raise
 
-            booking_date = self._resolve_coworking_booking_date(
-                params,
-                text,
-                default_to_today=True,
-            )
+            booking_date = params["date"]
             return await self._book_coworking_with_intent(
                 client=client,
                 target_user_id=user_id,

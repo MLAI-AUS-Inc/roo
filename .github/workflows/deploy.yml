@@ -55,6 +55,8 @@ jobs:
             -q
           python -m pytest \
             roo/tests/test_slack_security.py \
+            roo/tests/test_internal_mentions.py \
+            roo/tests/test_coworking_dates.py \
             roo/tests/test_backend_identity.py \
             roo/tests/test_mlai_backend_client.py \
             roo/tests/test_founder_account_link.py \

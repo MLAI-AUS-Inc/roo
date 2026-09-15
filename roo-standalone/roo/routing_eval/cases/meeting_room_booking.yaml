@@ -2,6 +2,18 @@
   text: "is the meeting room free tomorrow at 2pm?"
   expect: {skill: meeting-room-booking, action: check_room_availability}
   tags: [meeting-room]
+- id: meeting-room-find-free-times
+  text: "what times are the meeting rooms available tomorrow?"
+  expect: {skill: meeting-room-booking, action: check_room_availability}
+  tags: [meeting-room, availability]
+- id: meeting-room-find-duration-slot
+  text: "find me a two-hour meeting room slot tomorrow"
+  expect: {skill: meeting-room-booking, action: check_room_availability}
+  tags: [meeting-room, availability]
+- id: meeting-room-find-ninety-minutes
+  text: "when is the small meeting room free for 90 minutes tomorrow?"
+  expect: {skill: meeting-room-booking, action: check_room_availability}
+  tags: [meeting-room, availability]
 - id: meeting-room-check-tomorrow-typo
   text: "is the meeting room free tommorrow at 1pm?"
   expect: {skill: meeting-room-booking, action: check_room_availability}
@@ -46,3 +58,15 @@
   text: "when is our next committee meeting?"
   expect: {skill: none}
   tags: [meeting-room, misroute-guard]
+- id: conference-room-book-explicit
+  text: "book the conference room tomorrow at 2pm for an hour"
+  expect: {skill: meeting-room-booking, action: book_meeting_room}
+  tags: [meeting-room, conference-room]
+- id: conference-room-availability-explicit
+  text: "is the conference room free tomorrow at 2pm?"
+  expect: {skill: meeting-room-booking, action: check_room_availability}
+  tags: [meeting-room, conference-room]
+- id: conference-room-cancel-explicit
+  text: "cancel my conference room booking tomorrow"
+  expect: {skill: meeting-room-booking, action: cancel_meeting_room}
+  tags: [meeting-room, conference-room]
