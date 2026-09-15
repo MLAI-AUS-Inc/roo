@@ -1,4 +1,5 @@
 import asyncio
+import json
 import sys
 from pathlib import Path
 
@@ -41,6 +42,59 @@ def test_public_surface_preserves_reviewed_public_skills_and_has_no_private_skil
         user_id="UANYONE",
         channel_type="channel",
     )
+
+
+@pytest.mark.parametrize("retention_days", [0, 366])
+def test_coworking_intent_retention_is_bounded(retention_days):
+    with pytest.raises(
+        ValidationError,
+        match="COWORKING_INTENT_RETENTION_DAYS must be between 1 and 365",
+    ):
+        settings(COWORKING_INTENT_RETENTION_DAYS=retention_days)
+
+    configured = settings(COWORKING_INTENT_RETENTION_DAYS=30)
+    assert configured.COWORKING_INTENT_RETENTION_DAYS == 30
+
+
+def test_founder_tools_link_origins_are_validated_by_environment():
+    configured = settings(
+        FOUNDER_ACCOUNT_LINK_ENABLED=True,
+        FOUNDER_TOOLS_LINK_ORIGINS="https://mlai.au",
+    )
+    assert configured.founder_tools_link_origins == frozenset({"https://mlai.au"})
+
+    local = settings(
+        FOUNDER_TOOLS_LINK_ORIGINS="http://localhost:3000",
+        ROO_ENVIRONMENT="development",
+    )
+    assert local.founder_tools_link_origins == frozenset({"http://localhost:3000"})
+
+    with pytest.raises(ValidationError, match="localhost origins"):
+        settings(
+            FOUNDER_TOOLS_LINK_ORIGINS="http://localhost:3000",
+            ROO_ENVIRONMENT="production",
+        )
+    with pytest.raises(ValidationError, match="must use HTTPS"):
+        settings(FOUNDER_TOOLS_LINK_ORIGINS="http://mlai.au")
+
+    with pytest.raises(ValidationError, match="invalid origin"):
+        settings(FOUNDER_TOOLS_LINK_ORIGINS="https://mlai.au/path")
+
+    with pytest.raises(ValidationError, match="allowed origin in production"):
+        settings(
+            ROO_ENVIRONMENT="production",
+            FOUNDER_ACCOUNT_LINK_ENABLED=True,
+            FOUNDER_TOOLS_LINK_ORIGINS="",
+        )
+
+
+def test_founder_link_action_is_fail_closed_until_enabled():
+    disabled = settings()
+    enabled = settings(FOUNDER_ACCOUNT_LINK_ENABLED=True)
+
+    assert "mlai-points:link_founder_account" not in disabled.implicit_action_allowlist
+    assert "mlai-points:link_founder_account" in enabled.implicit_action_allowlist
+    assert "mlai-points:link_account" not in enabled.implicit_action_allowlist
 
 
 def test_linear_channel_issue_writes_fail_closed_without_public_backend_credentials():
@@ -176,6 +230,7 @@ def test_internal_admin_worker_has_no_slack_or_public_runtime_credentials():
         OPENAI_API_KEY=None,
         ROO_ENVIRONMENT="production",
         ROO_SURFACE="admin",
+        FOUNDER_TOOLS_LINK_ORIGINS="",
         ROO_ADMIN_INTERNAL_ONLY=True,
         ROO_ENABLED_SKILLS="admin-brain",
         ORG_BRAIN_ENABLED=True,
@@ -401,3 +456,31 @@ def test_admin_readiness_reports_the_enforced_runtime_shape(monkeypatch):
     assert payload["org_brain_enabled"] is True
     assert payload["org_brain_actions_enabled"] is False
     assert payload["contextual_shadow_mode"] is False
+
+
+def test_public_readiness_degrades_with_required_retry_worker(monkeypatch):
+    configured = settings(ROO_SURFACE="public")
+    monkeypatch.setattr(main_module, "get_settings", lambda: configured)
+    monkeypatch.setattr(main_module.app.state, "startup_complete", True, raising=False)
+    monkeypatch.setattr(
+        main_module.app.state,
+        "coworking_retry_health",
+        {
+            "status": "degraded",
+            "consecutive_failures": 3,
+            "last_error_type": "OperationalError",
+        },
+        raising=False,
+    )
+
+    response = asyncio.run(main_module.readiness_check())
+    payload = json.loads(response.body)
+
+    assert response.status_code == 503
+    assert payload == {
+        "status": "not_ready",
+        "service": "roo",
+        "component": "coworking_booking_retry_worker",
+        "component_status": "degraded",
+        "consecutive_failures": 3,
+    }

@@ -3,6 +3,16 @@
 # (verdict must never be `misroute`); in full mode they measure whether the
 # LLM layer generalises. Grow this file from real Slack misroutes.
 
+# --- Founder Tools account linking ---
+- id: para-founder-tools-link
+  text: "link my Founder Tools account"
+  expect: {skill: mlai-points, action: link_founder_account}
+  tags: [paraphrase]
+- id: para-monthly-update-account-link
+  text: "connect my Roo account to the account I use for monthly updates"
+  expect: {skill: mlai-points, action: link_founder_account}
+  tags: [paraphrase]
+
 # --- connect-users (no trigger keywords exist; LLM-only today) ---
 - id: para-connect-rl
   text: "who in the community knows about reinforcement learning?"

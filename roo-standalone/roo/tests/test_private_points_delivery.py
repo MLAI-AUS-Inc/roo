@@ -9,9 +9,15 @@ os.environ.setdefault("SLACK_SIGNING_SECRET", "private-points-signing-test")
 
 from roo import agent as agent_module
 from roo import coworking_booking_intents as coworking_module
+from roo.coworking_booking_schema_v3 import migrate_coworking_booking_intents_v3
 from roo.agent import RooAgent
 from roo.skills import executor as executor_module
 from roo.skills.executor import SkillExecutor
+
+
+def coworking_intent_store(db_path):
+    migrate_coworking_booking_intents_v3(db_path)
+    return coworking_module.CoworkingBookingIntentStore(db_path)
 
 
 @pytest.mark.parametrize(
@@ -388,13 +394,14 @@ async def test_fast_coworking_booking_surfaces_terminal_backend_reason(
     monkeypatch,
     tmp_path,
 ):
-    store = coworking_module.CoworkingBookingIntentStore(tmp_path / "coworking.db")
+    store = coworking_intent_store(tmp_path / "coworking.db")
+    posted_messages = []
 
     class TerminalCoworkingClient:
         def __init__(self, *args, **kwargs):
             pass
 
-        async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None):
+        async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None, *, operation_id=None):
             request = httpx.Request(
                 "POST",
                 "https://backend.test/api/v1/points/coworking/book/",
@@ -422,6 +429,11 @@ async def test_fast_coworking_booking_surfaces_terminal_backend_reason(
     agent.skills = [FakeSkill()]
     agent.skill_executor = SkillExecutor()
     monkeypatch.setattr(executor_module, "get_coworking_intent_store", lambda: store)
+    monkeypatch.setattr(
+        coworking_module,
+        "_safe_post_message",
+        lambda **kwargs: posted_messages.append(kwargs) or True,
+    )
     monkeypatch.setattr("roo.slack_client.get_bot_user_id", lambda: "UROO")
     monkeypatch.setattr(
         agent_module,
@@ -442,23 +454,39 @@ async def test_fast_coworking_booking_surfaces_terminal_backend_reason(
         thread_ts="111.222",
     )
 
-    assert result["message"] == (
+    assert result["message"] == ""
+    assert result["suppress_post"] is True
+    assert posted_messages[0]["text"] == (
         "🛑 I couldn't book you in for **2026-08-25**: "
         "Please link your Slack account first"
     )
-    assert result["data"] == {"action": "book_coworking"}
-    assert "connecting" not in result["message"]
+    assert result["data"] == {
+        "action": "book_coworking",
+        "booking_blocked": True,
+        "notification_status": "delivered",
+    }
+    assert "connecting" not in posted_messages[0]["text"]
 
 
 class CoworkingClient:
     def __init__(self, *, balance=9):
         self.balance = balance
 
-    async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None):
+    async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None, *, operation_id=None):
         return {
+            "id": "00000000-0000-4000-8000-000000000003",
+            "date": booking_date,
+            "status": "booked",
             "points_cost": 4,
+            "standard_points_cost": 8,
             "monthly_update_discount_applied": True,
+            "founder_tools_explicitly_linked": False,
+            "founder_tools_connection_type": None,
+            "founder_tools_account_linked": False,
         }
+
+    async def get_my_bookings(self, slack_user_id, *, booking_id=None):
+        return [{"id": booking_id, "status": "booked"}]
 
     async def get_balance(self, slack_user_id):
         return {"balance": self.balance}
@@ -470,7 +498,7 @@ async def test_channel_coworking_confirmation_keeps_remaining_balance_in_member_
     tmp_path,
 ):
     direct_messages, _ = _capture_private_delivery(monkeypatch)
-    store = coworking_module.CoworkingBookingIntentStore(tmp_path / "coworking.db")
+    store = coworking_intent_store(tmp_path / "coworking.db")
     monkeypatch.setattr(executor_module, "get_coworking_intent_store", lambda: store)
 
     result = await SkillExecutor()._book_coworking_with_intent(
@@ -496,7 +524,14 @@ async def test_dm_coworking_confirmation_returns_remaining_balance_directly(
     tmp_path,
 ):
     direct_messages, _ = _capture_private_delivery(monkeypatch)
-    store = coworking_module.CoworkingBookingIntentStore(tmp_path / "coworking.db")
+    current_dm_messages = []
+
+    def post_current_dm(**kwargs):
+        current_dm_messages.append(kwargs)
+        return {"ok": True, "ts": "333.444"}
+
+    monkeypatch.setattr("roo.slack_client.post_message", post_current_dm)
+    store = coworking_intent_store(tmp_path / "coworking.db")
     monkeypatch.setattr(executor_module, "get_coworking_intent_store", lambda: store)
 
     result = await SkillExecutor()._book_coworking_with_intent(
@@ -510,7 +545,10 @@ async def test_dm_coworking_confirmation_returns_remaining_balance_directly(
         admin_checkin=False,
     )
 
-    assert "Balance remaining: 9 points" in result["message"]
+    assert result["message"] == ""
+    assert result["suppress_post"] is True
+    assert "Balance remaining: 9 points" in current_dm_messages[0]["text"]
+    assert current_dm_messages[0]["client_msg_id"]
     assert direct_messages == []
 
 
@@ -520,7 +558,7 @@ async def test_admin_coworking_confirmation_never_exposes_target_balance(
     tmp_path,
 ):
     direct_messages, _ = _capture_private_delivery(monkeypatch)
-    store = coworking_module.CoworkingBookingIntentStore(tmp_path / "coworking.db")
+    store = coworking_intent_store(tmp_path / "coworking.db")
     monkeypatch.setattr(executor_module, "get_coworking_intent_store", lambda: store)
 
     result = await SkillExecutor()._book_coworking_with_intent(

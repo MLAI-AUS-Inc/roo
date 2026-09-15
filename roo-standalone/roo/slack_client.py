@@ -3,8 +3,10 @@ Slack Client Utilities
 
 Handles Slack API interactions including posting messages and user lookups.
 """
-from typing import Optional, Dict, Any
+import re
 from functools import lru_cache
+from typing import Optional, Dict, Any, Protocol
+
 import httpx
 
 from .config import get_settings
@@ -12,8 +14,11 @@ from .config import get_settings
 SLACK_FILES_READ_SCOPE = "files:read"
 
 
-class SlackIdentityLookupError(RuntimeError):
-    """Raised when Slack cannot provide a trustworthy member identity."""
+class SlackApiResponse(Protocol):
+    """Common response surface implemented by SlackResponse and test doubles."""
+
+    def get(self, key: str, default: Any = None) -> Any:
+        ...
 
 
 # Lazy-loaded Slack client
@@ -47,7 +52,7 @@ def get_bot_user_id() -> str:
         client = get_slack_client()
         response = client.auth_test()
         _bot_user_id = response["user_id"]
-        print(f"🤖 Bot user ID: {_bot_user_id}")
+        print("🤖 Bot identity loaded")
     return _bot_user_id
 
 
@@ -55,8 +60,9 @@ def post_message(
     channel: str,
     text: str,
     thread_ts: Optional[str] = None,
+    _redact_destination: bool = False,
     **kwargs
-) -> Dict[str, Any]:
+) -> SlackApiResponse:
     """
     Post a message to a Slack channel or thread.
     
@@ -82,15 +88,18 @@ def post_message(
         )
         
         if response.get("ok"):
-            suffix = f" (thread: {thread_ts})" if thread_ts else ""
-            print(f"✅ Message posted to {channel}{suffix}")
+            destination_type = "dm" if str(channel).startswith("D") else "channel"
+            print(
+                "✅ Slack message posted "
+                f"destination_type={destination_type} in_thread={bool(thread_ts)}"
+            )
         else:
-            print(f"❌ Failed to post message: {response}")
+            print("❌ Slack message failed reason_code=slack_api_error")
         
         return response
         
     except Exception as e:
-        print(f"❌ Slack post error: {e}")
+        print(f"❌ Slack message failed error_type={e.__class__.__name__}")
         raise
 
 
@@ -100,7 +109,7 @@ def post_ephemeral(
     text: str,
     thread_ts: Optional[str] = None,
     **kwargs,
-) -> Dict[str, Any]:
+) -> SlackApiResponse:
     """Post a private message visible only to one member in a Slack channel."""
     client = get_slack_client()
 
@@ -113,12 +122,13 @@ def post_ephemeral(
             **kwargs,
         )
         if response.get("ok"):
-            print(f"✅ Private message posted in {channel} for {user}")
-        else:
             print(
-                "❌ Failed to post private message: "
-                f"error={response.get('error', 'unknown')}"
+                "✅ Private Slack message posted "
+                f"destination_type={'dm' if str(channel).startswith('D') else 'channel'} "
+                f"in_thread={bool(thread_ts)}"
             )
+        else:
+            print("❌ Private Slack message failed reason_code=slack_api_error")
         return response
     except Exception as exc:
         print(f"❌ Slack private post error: error_type={exc.__class__.__name__}")
@@ -170,8 +180,11 @@ def upload_file(
         )
 
         if response.get("ok"):
-            suffix = f" (thread: {thread_ts})" if thread_ts else ""
-            print(f"✅ File uploaded to {channel}{suffix}: {filename}")
+            print(
+                "✅ Slack file uploaded "
+                f"destination_type={'dm' if str(channel).startswith('D') else 'channel'} "
+                f"in_thread={bool(thread_ts)}"
+            )
         else:
             print(f"❌ Failed to upload file: {response}")
 
@@ -265,7 +278,7 @@ def get_thread_messages(
         return ThreadMessages(messages, complete=False)
         
     except Exception as e:
-        print(f"❌ Thread history error: {e}")
+        print(f"❌ Thread history failed error_type={e.__class__.__name__}")
         return ThreadMessages(complete=False)
 
 
@@ -307,17 +320,20 @@ def get_recent_channel_messages(
             return []
         messages = [_normalize_slack_message(message) for message in response.get("messages", [])]
         messages.reverse()
-        print(f"📚 Retrieved {len(messages)} recent messages from {channel}")
+        print(f"📚 Retrieved {len(messages)} recent Slack messages")
         return messages
     except Exception as exc:
         retry_after = _slack_retry_after(exc)
         if retry_after:
             print(
-                f"⚠️ Slack channel history rate limited for {channel}; "
+                "⚠️ Slack channel history rate limited; "
                 f"retry after {retry_after}s"
             )
         else:
-            print(f"❌ Channel history error for {channel}: {exc}")
+            print(
+                "❌ Channel history failed "
+                f"error_type={exc.__class__.__name__}"
+            )
         return []
 
 
@@ -367,7 +383,7 @@ def get_message(channel: str, message_ts: str) -> Optional[Dict[str, Any]]:
         return None
 
     except Exception as e:
-        print(f"❌ Slack message lookup error for {channel}:{message_ts}: {e}")
+        print(f"❌ Slack message lookup failed error_type={e.__class__.__name__}")
         return None
 
 
@@ -386,7 +402,7 @@ def get_file_info(file_id: str) -> Dict[str, Any]:
         error = response.get("error") or "unknown_error"
         raise RuntimeError(f"Slack files.info failed: {error}")
     except Exception as e:
-        print(f"❌ Slack file info error for {file_id}: {e}")
+        print(f"❌ Slack file info failed error_type={e.__class__.__name__}")
         raise
 
 
@@ -491,44 +507,8 @@ def get_user_info(user_id: str) -> Dict[str, Any]:
         return {"id": user_id, "name": "Unknown"}
 
     except Exception as e:
-        print(f"❌ User lookup error for {user_id}: {e}")
+        print(f"❌ User lookup failed error_type={e.__class__.__name__}")
         return {"id": user_id, "name": "Unknown"}
-
-
-def get_verified_user_email(user_id: str) -> str:
-    """Fetch an uncached email for the exact active human Slack member.
-
-    Account linking is an identity mutation, so it must not use the permissive
-    cached profile helper above or treat a stale/failed lookup as authoritative.
-    """
-    requested_user_id = str(user_id or "").strip()
-    if not requested_user_id:
-        raise SlackIdentityLookupError("Slack member ID is missing")
-
-    try:
-        response = get_slack_client().users_info(user=requested_user_id)
-    except Exception as exc:
-        raise SlackIdentityLookupError(
-            "Slack could not verify this member right now"
-        ) from exc
-
-    if not response.get("ok") or not isinstance(response.get("user"), dict):
-        raise SlackIdentityLookupError("Slack could not verify this member right now")
-
-    user = response["user"]
-    returned_user_id = str(user.get("id") or "").strip()
-    if returned_user_id != requested_user_id:
-        raise SlackIdentityLookupError("Slack returned a different member identity")
-    if user.get("is_bot") or user.get("deleted"):
-        raise SlackIdentityLookupError("This Slack profile cannot be linked")
-
-    profile = user.get("profile") or {}
-    email = str(profile.get("email") or "").strip().lower()
-    if not email:
-        raise SlackIdentityLookupError(
-            "Slack did not provide an email for this member"
-        )
-    return email
 
 
 def get_display_name(user_id: str) -> str:
@@ -549,10 +529,18 @@ def open_dm(user_id: str, *, raise_on_error: bool = False) -> Optional[str]:
     try:
         response = client.conversations_open(users=user_id)
         if response.get("ok"):
-            return response["channel"]["id"]
+            channel = response.get("channel")
+            channel_id = (
+                str(channel.get("id") or "").strip()
+                if isinstance(channel, dict)
+                else ""
+            )
+            if re.fullmatch(r"D[A-Z0-9]+", channel_id):
+                return channel_id
+            print("❌ Slack conversations.open returned a non-DM channel")
         return None
     except Exception as e:
-        print(f"❌ Failed to open DM with {user_id}: {e}")
+        print(f"❌ Slack DM channel open failed error_type={e.__class__.__name__}")
         if raise_on_error:
             raise
         return None
@@ -564,11 +552,16 @@ def send_dm(
     *,
     raise_on_error: bool = False,
     **kwargs,
-) -> Optional[Dict[str, Any]]:
+) -> Optional[SlackApiResponse]:
     """Send a direct message to a user."""
     dm_channel = open_dm(user_id, raise_on_error=raise_on_error)
     if dm_channel:
-        return post_message(dm_channel, text, **kwargs)
+        return post_message(
+            dm_channel,
+            text,
+            _redact_destination=True,
+            **kwargs,
+        )
     if raise_on_error:
         raise RuntimeError("Slack did not return a direct-message channel")
     return None
@@ -602,7 +595,10 @@ def get_channel_context(channel_id: str) -> Dict[str, Any]:
             _channel_name_cache[channel_id] = str(context["name"])
         return dict(context)
     except Exception as exc:
-        print(f"❌ Channel context lookup error for {channel_id}: {exc}")
+        print(
+            "❌ Channel context lookup failed "
+            f"error_type={exc.__class__.__name__}"
+        )
         return {}
 
 
@@ -616,7 +612,10 @@ def get_message_permalink(channel_id: str, message_ts: str) -> Optional[str]:
         if response.get("ok"):
             return str(response.get("permalink") or "") or None
     except Exception as exc:
-        print(f"⚠️ Slack permalink lookup failed for {channel_id}:{message_ts}: {exc}")
+        print(
+            "⚠️ Slack permalink lookup failed "
+            f"error_type={exc.__class__.__name__}"
+        )
     return None
 
 
@@ -651,7 +650,7 @@ def get_channel_id(channel_name: str) -> Optional[str]:
             
             for channel in result["channels"]:
                 if channel["name"] == target_name:
-                    print(f"✅ Found channel #{target_name}: {channel['id']}")
+                    print(f"✅ Found channel #{target_name}")
                     return channel["id"]
             
             cursor = result.get("response_metadata", {}).get("next_cursor")
@@ -662,5 +661,8 @@ def get_channel_id(channel_name: str) -> Optional[str]:
         return None
         
     except Exception as e:
-        print(f"❌ Failed to lookup channel {channel_name}: {e}")
+        print(
+            "❌ Slack channel lookup failed "
+            f"error_type={e.__class__.__name__}"
+        )
         return None
