@@ -1,0 +1,19 @@
+# Separate project so Public Roo --remove-orphans cannot remove the worker.
+name: roo-timesheets
+
+services:
+  timesheets:
+    build: .
+    command: ["python", "-m", "roo.timesheet_worker"]
+    env_file:
+      - .env.timesheets
+    environment:
+      TIMESHEET_DATA_DIR: /app/timesheets/data
+      TIMESHEET_QUEUE_DIR: /app/timesheets/queue
+    restart: unless-stopped
+    volumes:
+      - timesheet-data:/app/timesheets/data
+      - ./data/timesheet-queue:/app/timesheets/queue
+
+volumes:
+  timesheet-data:

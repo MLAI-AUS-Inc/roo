@@ -1,0 +1,8 @@
+# Opt-in override for the existing Public Roo project. Share request metadata
+# only; report snapshots and credentials belong exclusively to the worker.
+services:
+  roo:
+    environment:
+      TIMESHEET_QUEUE_DIR: /app/timesheets/queue
+    volumes:
+      - ./data/timesheet-queue:/app/timesheets/queue
