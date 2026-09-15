@@ -3,6 +3,10 @@
 # Database
 .env
 .env.admin
+.env.timesheets
+.env.timesheets-plane
+.env.timesheet-demo
+timesheet-preview/
 *.db
 data/
 
