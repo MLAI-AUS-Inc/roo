@@ -140,3 +140,24 @@ def test_signed_alan_dm_and_thread_requests_are_denied(app, event):
     assert client.post('/slack/events', content=body, headers=headers(body)).status_code == 200
     assert not (root / 'queue').exists()
     runtime._handle_app_mention_with_room_choice.assert_not_called()
+
+
+def test_timesheet_handoff_completes_event_lease_and_failure_releases_it(app, monkeypatch):
+    from roo.slack_security import get_slack_receipt_store
+    client, settings, root = app
+    body = json.dumps(payload()).encode()
+    fingerprint = runtime._retry_managed_slack_event_fingerprint(body, "unused")
+    store = get_slack_receipt_store(settings.SLACK_RECEIPTS_DB_PATH)
+    original = ReceiptStore.write
+    def fail(*args):
+        raise OSError("disk full")
+    monkeypatch.setattr(ReceiptStore, "write", fail)
+    assert client.post('/slack/events', content=body, headers=headers(body)).status_code == 503
+    # A failed handoff releases ownership immediately, allowing Slack's retry.
+    disposition, claim = store.claim_event(fingerprint)
+    assert disposition == "claimed"
+    store.release(fingerprint, claim_token=claim)
+    monkeypatch.setattr(ReceiptStore, "write", original)
+    assert client.post('/slack/events', content=body, headers=headers(body)).status_code == 200
+    assert store.claim_event(fingerprint) == ("completed", None)
+    assert len(list((root / 'queue').glob('*.json'))) == 1
