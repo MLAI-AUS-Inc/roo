@@ -3,11 +3,12 @@ name: meeting-room-booking
 description: Book rooms
 routing:
   use_when: >
-    Meeting Room requests.
+    Meeting Room requests, including explicit Conference Room requests.
   avoid_when: >
     Coworking, events, Google/Outlook sync, attendees, or unauthorized bookings.
   examples:
     - {text: "room calendar tomorrow?", action: check_room_availability}
+    - {text: "find a two-hour room slot tomorrow", action: check_room_availability}
     - {text: "book room tomorrow 2pm-4pm", action: book_meeting_room}
     - {text: "book <@U123> room tomorrow 1.5h", action: book_meeting_room}
     - {text: "my room bookings", action: list_my_room_bookings}
@@ -16,12 +17,13 @@ routing:
     - {text: "book coworking tomorrow", instead: mlai-points}
 actions:
   - name: check_room_availability
-    description: Check times.
+    description: Find free slots, optionally by duration. Omit times unless explicit.
     params:
       room: {type: string}
       date: {type: string}
       start_time: {type: string}
       end_time: {type: string}
+      duration_hours: {type: number}
   - name: book_meeting_room
     description: Book.
     params:
@@ -57,14 +59,31 @@ unless the member explicitly says `room` or `meeting room`.
   otherwise tomorrow. If it gives a vague or invalid date, ask for an explicit
   date. For an availability check with neither date nor time, use the next
   Melbourne calendar day; a booking with no time must ask for one.
-- The active choices are `Small Meeting Room` and `Big Meeting Room`. Treat
+- The default choices are `Small Meeting Room` and `Big Meeting Room`. Treat
   `large room` as the Big Meeting Room.
+- The Conference Room is supported only when the member explicitly asks for the
+  `conference room`. Never offer or suggest it in default choices or general
+  availability responses. The backend decides eligibility. If it returns
+  `room_unavailable`, say exactly `The Conference Room is unavailable.` privately;
+  do not disclose eligibility criteria, points thresholds, or progress towards them.
 - Derive an explicit room only from the member's message, never from a model-only
-  parameter. If availability does not name a room, show both. If a booking does
-  not name a room in a public channel, show Big and Small Meeting Room buttons
+  parameter. If availability does not name a room, show only Small and Big.
+  If a booking does not name a room in a public channel, show Big and Small
+  Meeting Room buttons
   in the same thread. Accept only that requester's first button click, then
   continue privately. In a DM, use private room-choice buttons.
 - Ask for a missing booking start time. Do not invent one.
+- For availability without a specific start, leave start_time and end_time unset.
+  Do not ask for a start: Roo lists available start times for both default rooms
+  on that date. Use duration_hours only when the member specifies a meeting length;
+  otherwise show one-hour slots. Support `one-hour slot`, `90 minutes`, and
+  `two-hour meeting` requests without turning them into bookings.
+- Availability ranges list inclusive start times every 30 minutes, not meeting
+  end times. Each complete meeting fits before midnight on the requested date.
+  The snapshot excludes bookings, blocks, past starts and ambiguous DST times;
+  it does not reserve a room or guarantee the member has enough points or daily
+  allowance. When the member chooses a room, date, start and duration, use the
+  normal booking preview and confirmation flow, which rechecks eligibility.
 - If the member gives a start but no duration or end, use one hour.
 - Bookings last 1 to 2 hours and use 30-minute increments. Accept phrases such
   as `an hour and a half`, `1.5 hours`, and `90 minutes`.

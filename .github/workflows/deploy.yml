@@ -41,22 +41,39 @@ jobs:
           SLACK_BOT_TOKEN: test
           SLACK_SIGNING_SECRET: test
           OPENAI_API_KEY: test
+          FOUNDER_TOOLS_LINK_ORIGINS: https://mlai.au
         run: |
+          # Several legacy suites install import-time module stubs. Keep the
+          # surface boundary gate isolated so collection order cannot weaken it.
+          python -m pytest roo/tests/test_surface_security.py -q
+          python -m pytest roo/tests/test_deployment_checks.py -q
+          # Meeting-room schema tests need the real skill parser, so keep them
+          # isolated from legacy suites that stub the frontmatter module.
           python -m pytest \
-            roo/tests/test_surface_security.py \
-            roo/tests/test_slack_security.py \
-            roo/tests/test_office_manager_actions.py \
-            roo/tests/test_coworking_booking_intents.py \
-            roo/tests/test_start_here_introductions.py \
-            roo/tests/test_backend_identity.py \
-            roo/tests/test_mlai_backend_client.py \
-            roo/tests/test_jobs_scheduler.py \
-            roo/tests/test_private_points_delivery.py \
-            roo/tests/test_points_flex.py \
-            roo/tests/test_agent_routing.py \
             roo/tests/test_meeting_room_booking.py \
             roo/tests/test_meeting_room_clarifications.py \
             roo/tests/test_meeting_room_actions.py \
+            -q
+          python -m pytest \
+            roo/tests/test_slack_security.py \
+            roo/tests/test_office_manager_actions.py \
+            roo/tests/test_internal_mentions.py \
+            roo/tests/test_coworking_dates.py \
+            roo/tests/test_backend_identity.py \
+            roo/tests/test_mlai_backend_client.py \
+            roo/tests/test_founder_account_link.py \
+            roo/tests/test_coworking_booking_intents.py \
+            roo/tests/test_coworking_admin_batch.py \
+            roo/tests/test_replay_failed_coworking.py \
+            roo/tests/test_points_requests.py::test_book_coworking_persists_intent_and_queues_backend_timeout \
+            roo/tests/test_points_requests.py::test_immediate_coworking_stale_worker_cannot_overwrite_winner \
+            roo/tests/test_points_requests.py::test_book_coworking_nudges_founder_when_charged_standard_price \
+            roo/tests/test_points_requests.py::test_book_coworking_treats_missing_link_state_as_commit_uncertain \
+            roo/tests/test_points_requests.py::test_book_coworking_omits_nudge_when_discount_applied \
+            roo/tests/test_points_requests.py::test_book_coworking_omits_link_nudge_when_accounts_are_linked \
+            roo/tests/test_jobs_scheduler.py \
+            roo/tests/test_private_points_delivery.py \
+            roo/tests/test_points_flex.py \
             roo/tests/test_admin_brain.py \
             roo/tests/test_admin_brain_interactions.py \
             roo/tests/test_admin_dispatch.py \
@@ -67,7 +84,6 @@ jobs:
             roo/tests/test_admin_pilot_smoke.py \
             roo/tests/test_admin_actions.py \
             roo/tests/test_router_catalog.py \
-            roo/tests/test_routing_eval_gate.py \
             roo/tests/test_linear_inference.py \
             roo/tests/test_linear_effort_sizing.py \
             roo/tests/test_linear_meeting_sources.py \
@@ -79,6 +95,10 @@ jobs:
             roo/tests/test_victor_ai_applications.py \
             bridge/tests \
             -q
+          # This legacy module installs an executor stub at import time, so run
+          # it in a separate process to keep the security suite isolated.
+          python -m pytest roo/tests/test_agent_routing.py -q
+          python -m pytest roo/tests/test_routing_eval_gate.py -q
           python -m compileall -q roo bridge
 
       - name: Validate production Compose configuration
@@ -149,11 +169,13 @@ jobs:
           MEETING_ROOM_BOOKING_ENABLED: ${{ vars.MEETING_ROOM_BOOKING_ENABLED || 'false' }}
           OFFICE_MANAGER_ACTIONS_ENABLED: ${{ vars.OFFICE_MANAGER_ACTIONS_ENABLED || 'false' }}
           LINEAR_CHANNEL_ISSUE_WRITES_ENABLED: ${{ vars.LINEAR_CHANNEL_ISSUE_WRITES_ENABLED || 'false' }}
+          FOUNDER_ACCOUNT_LINK_ENABLED: ${{ vars.FOUNDER_ACCOUNT_LINK_ENABLED || 'false' }}
+          COWORKING_INTENTS_V3_MIGRATION_APPROVED: ${{ vars.COWORKING_INTENTS_V3_MIGRATION_APPROVED || 'false' }}
         with:
           host: ${{ secrets.DO_HOST }}
           username: ${{ secrets.DO_USERNAME }}
           key: ${{ secrets.DO_SSH_KEY }}
-          envs: SIM_PATIENT_API_KEY,SIM_PATIENT_SAFETY_SALT,ROO_API_KEY,VICTOR_AI_ROO_SIGNING_SECRET,ROO_PUBLIC_HOST,ROO_PRIVATE_BASE_URL,MEETING_ROOM_BOOKING_ENABLED,OFFICE_MANAGER_ACTIONS_ENABLED,LINEAR_CHANNEL_ISSUE_WRITES_ENABLED,RELEASE_SHA
+          envs: SIM_PATIENT_API_KEY,SIM_PATIENT_SAFETY_SALT,ROO_API_KEY,VICTOR_AI_ROO_SIGNING_SECRET,ROO_PUBLIC_HOST,ROO_PRIVATE_BASE_URL,MEETING_ROOM_BOOKING_ENABLED,OFFICE_MANAGER_ACTIONS_ENABLED,LINEAR_CHANNEL_ISSUE_WRITES_ENABLED,FOUNDER_ACCOUNT_LINK_ENABLED,COWORKING_INTENTS_V3_MIGRATION_APPROVED,RELEASE_SHA
           script: |
             # Stop if any command fails
             set -eu
@@ -192,6 +214,16 @@ jobs:
               true|TRUE|True|1|yes|YES|Yes|on|ON|On) LINEAR_CHANNEL_ISSUE_WRITES_ENABLED=true ;;
               false|FALSE|False|0|no|NO|No|off|OFF|Off|'') LINEAR_CHANNEL_ISSUE_WRITES_ENABLED=false ;;
               *) echo "LINEAR_CHANNEL_ISSUE_WRITES_ENABLED must be boolean" >&2; exit 1 ;;
+            esac
+            case "$FOUNDER_ACCOUNT_LINK_ENABLED" in
+              true|TRUE|True|1|yes|YES|Yes|on|ON|On) FOUNDER_ACCOUNT_LINK_ENABLED=true ;;
+              false|FALSE|False|0|no|NO|No|off|OFF|Off|'') FOUNDER_ACCOUNT_LINK_ENABLED=false ;;
+              *) echo "FOUNDER_ACCOUNT_LINK_ENABLED must be boolean" >&2; exit 1 ;;
+            esac
+            case "$COWORKING_INTENTS_V3_MIGRATION_APPROVED" in
+              true|TRUE|True|1|yes|YES|Yes|on|ON|On) COWORKING_INTENTS_V3_MIGRATION_APPROVED=true ;;
+              false|FALSE|False|0|no|NO|No|off|OFF|Off|'') COWORKING_INTENTS_V3_MIGRATION_APPROVED=false ;;
+              *) echo "COWORKING_INTENTS_V3_MIGRATION_APPROVED must be boolean" >&2; exit 1 ;;
             esac
             
             # Define deployment directory
@@ -257,10 +289,17 @@ jobs:
               done
             }
 
+            schema_migration_started=0
             rollback_release() {
               status="$?"
               trap - EXIT
               if [ "$status" -ne 0 ]; then
+                if [ "$schema_migration_started" = "1" ]; then
+                  echo "Deployment failed after schema advancement; keeping Roo stopped for forward recovery" >&2
+                  docker compose stop roo || true
+                  rm -f "$previous_env_backup"
+                  exit "$status"
+                fi
                 echo "Roo rollout failed; restoring the previous release" >&2
                 if [ "$previous_env_present" -eq 1 ]; then
                   cp "$previous_env_backup" "$DEPLOY_DIR/roo-standalone/.env"
@@ -328,17 +367,36 @@ jobs:
             upsert_env "ROO_POINTS_STRIPE_CHECKOUT_HOSTS" "checkout.stripe.com"
             upsert_env "MEETING_ROOM_BOOKING_ENABLED" "$MEETING_ROOM_BOOKING_ENABLED"
             upsert_env "OFFICE_MANAGER_ACTIONS_ENABLED" "$OFFICE_MANAGER_ACTIONS_ENABLED"
+            upsert_env "FOUNDER_TOOLS_LINK_ORIGINS" "https://mlai.au"
+            upsert_env "FOUNDER_ACCOUNT_LINK_ENABLED" "$FOUNDER_ACCOUNT_LINK_ENABLED"
+            implicit_actions="respond_in_chat,mlai-points:balance,mlai-points:topup_points"
+            if [ "$FOUNDER_ACCOUNT_LINK_ENABLED" = "true" ]; then
+              implicit_actions="$implicit_actions,mlai-points:link_founder_account"
+            fi
+            upsert_env "ROO_IMPLICIT_ACTION_ALLOWLIST" "$implicit_actions"
             upsert_env "LINEAR_CHANNEL_ISSUE_WRITES_ENABLED" "$LINEAR_CHANNEL_ISSUE_WRITES_ENABLED"
             
-            # Build without replacing the running release. Every candidate must
-            # authenticate to the exact Office Manager backend contract even
-            # while action processing is staged off.
+            # Build first, then run or validate the explicitly approved schema
+            # migration before any new application process can report ready.
             docker compose build roo
             echo "Preflighting the Office Manager backend contract before cutover..."
             docker compose run --rm --no-deps roo python -c 'import asyncio; from roo.clients.mlai_backend import MLAIBackendClient; from roo.config import get_settings; from roo.main import _validate_office_manager_backend_contract; settings = get_settings(); payload = asyncio.run(MLAIBackendClient().get_office_manager_preflight()); _validate_office_manager_backend_contract(payload, timezone_name=settings.TIMEZONE)'
 
-            # Replace the app only after all enabled-feature preflights pass.
-            docker compose up -d --remove-orphans
+            if [ "$COWORKING_INTENTS_V3_MIGRATION_APPROVED" = "true" ]; then
+              # Stop every process that can write the shared SQLite volume
+              # before crossing the irreversible privacy/outbox boundary.
+              docker compose stop roo
+              schema_migration_started=1
+              docker compose run -T --rm --no-deps roo \
+                python scripts/migrate_coworking_booking_intents_v3.py </dev/null
+            else
+              docker compose run -T --rm --no-deps roo python -c \
+                'from roo.coworking_booking_intents import get_coworking_intent_store; get_coworking_intent_store().validate_schema()' \
+                </dev/null
+            fi
+
+            # Restart the app only after schema validation succeeds.
+            docker compose up -d --no-build --remove-orphans
 
             # Bounded readiness check. Never wait forever on a broken release.
             ready_attempt=0
@@ -347,10 +405,26 @@ jobs:
               ready_attempt=$((ready_attempt + 1))
               if [ "$ready_attempt" -ge 18 ]; then
                 echo "Roo readiness check timed out" >&2
-                exit 1
+                false
               fi
               sleep 5
             done
+
+            docker compose exec -T roo python -c 'from roo.config import get_settings; settings = get_settings(); actions = settings.implicit_action_allowlist; assert ("mlai-points:link_founder_account" in actions) is settings.FOUNDER_ACCOUNT_LINK_ENABLED; assert "mlai-points:link_account" not in actions'
+
+            if [ "$FOUNDER_ACCOUNT_LINK_ENABLED" = "true" ]; then
+              curl --silent --show-error --fail --max-time 8 \
+                http://127.0.0.1/healthz/dependencies | python -c '
+              import json, sys
+              payload = json.load(sys.stdin)
+              dependency = payload.get("dependencies", {}).get("mlai_backend", {})
+              assert payload.get("status") == "ok", payload
+              assert dependency.get("founder_account_link") == {
+                  "status": "ok",
+                  "contract": "slack-founder-link-v1",
+              }, payload
+              '
+            fi
 
             if [ "$MEETING_ROOM_BOOKING_ENABLED" = "true" ]; then
               echo "Verifying the Meeting Room skill is enabled on Public Roo..."
@@ -384,7 +458,7 @@ jobs:
                 --data '{"question":""}')"
               if [ "$private_status" != "422" ]; then
                 echo "Private authenticated validation check failed (status $private_status)" >&2
-                exit 1
+                false
               fi
             fi
 

@@ -18,6 +18,10 @@ class LinearIssueCreationInProgressError(RuntimeError):
     pass
 
 
+class LinearMeetingTeamAccessError(RuntimeError):
+    """Raised when the backend credential cannot see every required Linear team."""
+
+
 class LinearMeetingActionsClient:
     """Backend-backed client for Roo's Linear meeting-actions skill."""
 
@@ -82,6 +86,12 @@ class LinearMeetingActionsClient:
                 and error_payload.get("code") == "linear_issue_creation_in_progress"
             ):
                 raise LinearIssueCreationInProgressError(message)
+            if (
+                response.status_code == 503
+                and isinstance(error_payload, dict)
+                and error_payload.get("code") == "linear_team_access_incomplete"
+            ):
+                raise LinearMeetingTeamAccessError(message)
             raise RuntimeError(message)
         try:
             data = response.json()

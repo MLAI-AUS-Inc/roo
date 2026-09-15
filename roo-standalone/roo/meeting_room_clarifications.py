@@ -120,7 +120,7 @@ def parse_public_room_choice_action_value(raw_value: Any) -> dict[str, Any]:
         or not re.fullmatch(r"T[A-Z0-9]+", team_id)
         or not re.fullmatch(r"\d+(?:\.\d+)?", thread_ts)
         or not re.fullmatch(r"\d+(?:\.\d+)?", request_message_ts)
-        or room_slug not in ROOM_NAMES
+        or room_slug not in PUBLIC_ROOM_CHOICE_ACTION_IDS_BY_ROOM
     ):
         raise ValueError("This room choice is not valid. Ask Roo to start again.")
     return {
@@ -144,7 +144,7 @@ def public_room_choice_prompt(
         room
         for room in rooms
         if str(room.get("slug") or "") in available
-        and str(room.get("slug") or "") in ROOM_NAMES
+        and str(room.get("slug") or "") in PUBLIC_ROOM_CHOICE_ACTION_IDS_BY_ROOM
     ]
     if not choices:
         raise ValueError("No supported rooms are available for this clarification")
@@ -322,7 +322,7 @@ class MeetingRoomClarificationStore:
             {
                 str(slug).strip()
                 for slug in available_room_slugs
-                if str(slug).strip() in ROOM_NAMES
+                if str(slug).strip() in PUBLIC_ROOM_CHOICE_ACTION_IDS_BY_ROOM
             }
         )
         if not supported_rooms:

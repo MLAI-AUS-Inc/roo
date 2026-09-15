@@ -92,6 +92,9 @@ This skill turns pasted Slack meeting transcripts, summaries, supported Slack fi
    - Latest project update for each active project when available
    - Issue labels
    - Recent open issues for duplicate detection
+   - The backend's required-team access check. If it reports incomplete access,
+     stop before extraction or writes and explain that an admin must re-authorize
+     Roo's read/write credential for all required teams.
 3. For explicit direct issue commands, parse the command itself as the issue source, including project and assignee hints.
 4. Otherwise, extract concrete action items into structured candidates with title, description, owner hint, project terms, due expression/date, explicit-commitment flag, evidence message timestamp, source label, and confidence.
 5. Resolve the request-level project once and reuse that canonical match for both the project update and every extracted item. Compare namespace-independent names so a source such as `Project Acquire` can match `[Studio] Project Acquire`; never let the update and its tasks silently diverge to different projects.
@@ -129,6 +132,7 @@ This skill turns pasted Slack meeting transcripts, summaries, supported Slack fi
 - Honor an explicit fallback such as "if you can't find the right person or are unsure, assign them to Dr Sam" for otherwise unresolved action-item owners.
 - Project updates are created immediately only when affirmatively requested, not when the request says not to write one, and the project match is confident.
 - Never substitute a merely similar active project for an unresolved explicit destination. A full-catalogue lookup may use an inactive project only when the user's explicit title uniquely matches it.
+- Never turn a Linear catalogue, permission, or required-team access failure into `not found`; distinguish an unavailable/incomplete connection from a genuine completed full-catalogue search.
 - Apply the compatible `meeting-action` label if it already exists.
 - In project sizing `review` or `required` mode, apply exactly one of `Extra Small (XS)`, `Small (S)`, `Medium (M)`, `Large (L)`, or `Extra Large (XL)`. Fail closed if sizing context, structured output, or the compatible label is unavailable.
 - Project sizing `shadow` mode captures estimates without mutating issue labels or descriptions; `review` sends every candidate for approval; `required` may auto-create only a high-confidence, context-sufficient assessment.

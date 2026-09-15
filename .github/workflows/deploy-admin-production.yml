@@ -1,7 +1,9 @@
 name: Deploy internal Admin Brain production
 
 on:
-  push:
+  workflow_run:
+    workflows: [Deploy to Digital Ocean]
+    types: [completed]
     branches:
       - main
   workflow_dispatch:
@@ -17,9 +19,13 @@ concurrency:
 
 jobs:
   checks:
+    if: >-
+      ${{ github.event_name == 'workflow_dispatch' ||
+          (github.event.workflow_run.conclusion == 'success' &&
+           github.event.workflow_run.event == 'push') }}
     runs-on: ubuntu-latest
     env:
-      RELEASE_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.release_sha || github.sha }}
+      RELEASE_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.release_sha || github.event.workflow_run.head_sha }}
     defaults:
       run:
         working-directory: roo-standalone
@@ -70,7 +76,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: checks
     env:
-      RELEASE_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.release_sha || github.sha }}
+      RELEASE_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.release_sha || github.event.workflow_run.head_sha }}
     steps:
       - name: Validate internal Admin production secrets
         env:
@@ -162,7 +168,10 @@ jobs:
             }
 
             checkout_release "$ADMIN_DEPLOY_DIR"
-            checkout_release "$PUBLIC_DEPLOY_DIR"
+            # Admin must never advance Public Roo across an unapproved schema
+            # boundary. This also guards manual dispatch and recovery runs.
+            python3 "$ADMIN_DEPLOY_DIR/roo-standalone/roo/deployment_checks.py" \
+              --release-sha "$RELEASE_SHA" --public-directory "$PUBLIC_DEPLOY_DIR"
             test -f "$PUBLIC_ENV"
 
             mkdir -p "$OPERATIONS_DIR"

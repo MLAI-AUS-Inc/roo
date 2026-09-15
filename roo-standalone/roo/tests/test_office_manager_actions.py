@@ -770,6 +770,18 @@ async def test_development_public_lifespan_skips_backend_preflight_when_gates_of
 
     monkeypatch.setattr(backend_module, "MLAIBackendClient", UnexpectedBackendClient)
 
+    monkeypatch.setattr(main_module.app.state, "coworking_retry_health", None, raising=False)
+    # Startup validates the separately migrated coworking store even when
+    # Office Manager admission is disabled. Use a disposable v3 fixture.
+    from roo.coworking_booking_schema_v3 import migrate_coworking_booking_intents_v3
+    from roo.coworking_booking_intents import CoworkingBookingIntentStore
+    database = tmp_path / "coworking.db"
+    migrate_coworking_booking_intents_v3(database)
+    monkeypatch.setattr(
+        main_module, "get_coworking_intent_store",
+        lambda: CoworkingBookingIntentStore(database),
+    )
+
     async with main_module.lifespan(main_module.app):
         assert main_module.app.state.startup_complete is True
         assert main_module.app.state.office_manager_backend_contract is None

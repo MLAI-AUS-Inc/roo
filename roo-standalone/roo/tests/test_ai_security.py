@@ -8,6 +8,7 @@ import sys
 import hashlib
 import hmac
 import time
+import textwrap
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -416,6 +417,11 @@ def test_deploy_workflow_requires_and_secretly_upserts_security_values():
     assert "roo/tests/test_ai_security.py" in workflow
     assert "roo/tests/test_victor_ai_applications.py" in workflow
     assert "bridge/tests" in workflow
+    assert workflow.count("roo/tests/test_agent_routing.py") == 1
+    assert workflow.count("roo/tests/test_routing_eval_gate.py") == 1
+    assert workflow.count("roo/tests/test_meeting_room_booking.py") == 1
+    assert workflow.count("roo/tests/test_meeting_room_clarifications.py") == 1
+    assert workflow.count("roo/tests/test_meeting_room_actions.py") == 1
     assert "python -m compileall -q roo bridge" in workflow
     assert "docker compose config --quiet" in workflow
     assert "docker compose -f docker-compose.bridge.yml config --quiet" in workflow
@@ -427,8 +433,7 @@ def test_deploy_workflow_requires_and_secretly_upserts_security_values():
     assert "envs: SIM_PATIENT_API_KEY,SIM_PATIENT_SAFETY_SALT" in workflow
     assert (
         "envs: SIM_PATIENT_API_KEY,SIM_PATIENT_SAFETY_SALT,ROO_API_KEY,"
-        "VICTOR_AI_ROO_SIGNING_SECRET,ROO_PUBLIC_HOST,ROO_PRIVATE_BASE_URL,"
-        "MEETING_ROOM_BOOKING_ENABLED"
+        "VICTOR_AI_ROO_SIGNING_SECRET,ROO_PUBLIC_HOST,ROO_PRIVATE_BASE_URL,MEETING_ROOM_BOOKING_ENABLED,OFFICE_MANAGER_ACTIONS_ENABLED,LINEAR_CHANNEL_ISSUE_WRITES_ENABLED,FOUNDER_ACCOUNT_LINK_ENABLED,COWORKING_INTENTS_V3_MIGRATION_APPROVED"
     ) in workflow
     assert 'upsert_env "ROO_ENVIRONMENT" "production"' in workflow
     assert 'upsert_env "SIM_PATIENT_API_KEY" "$SIM_PATIENT_API_KEY"' in workflow
@@ -448,6 +453,14 @@ def test_deploy_workflow_requires_and_secretly_upserts_security_values():
         'upsert_env "MEETING_ROOM_BOOKING_ENABLED" '
         '"$MEETING_ROOM_BOOKING_ENABLED"'
     ) in workflow
+    assert (
+        'implicit_actions="respond_in_chat,mlai-points:balance,'
+        'mlai-points:topup_points"'
+    ) in workflow
+    assert 'if [ "$FOUNDER_ACCOUNT_LINK_ENABLED" = "true" ]; then' in workflow
+    assert 'upsert_env "FOUNDER_ACCOUNT_LINK_ENABLED"' in workflow
+    assert 'slack-founder-link-v1' in workflow
+    assert 'assert "mlai-points:link_account" not in actions' in workflow
     assert 'assert settings.MEETING_ROOM_BOOKING_ENABLED is True' in workflow
     assert (
         "python -c 'from roo.config import get_settings; settings = get_settings();"
@@ -455,13 +468,12 @@ def test_deploy_workflow_requires_and_secretly_upserts_security_values():
     assert 'assert "meeting-room-booking" in settings.enabled_skill_names' in workflow
     assert 'if [ "${#ROO_API_KEY}" -lt 32 ]' in workflow
     assert 'if [ "${#VICTOR_AI_ROO_SIGNING_SECRET}" -lt 32 ]' in workflow
-    assert workflow.index('upsert_env "ROO_API_KEY"') < workflow.index("docker compose up")
-    assert workflow.index('upsert_env "VICTOR_AI_SKILL_ENABLED"') < workflow.index(
-        "docker compose up"
-    )
+    deploy_start = workflow.index("docker compose up -d --no-build")
+    assert workflow.index('upsert_env "ROO_API_KEY"') < deploy_start
+    assert workflow.index('upsert_env "VICTOR_AI_SKILL_ENABLED"') < deploy_start
     assert workflow.index(
         'upsert_env "MEETING_ROOM_BOOKING_ENABLED"'
-    ) < workflow.index("docker compose up")
+    ) < deploy_start
     preflight = (
         "MLAIBackendClient().get_office_manager_preflight()"
     )
@@ -469,7 +481,7 @@ def test_deploy_workflow_requires_and_secretly_upserts_security_values():
     assert preflight in workflow
     assert "_validate_office_manager_backend_contract" in workflow
     assert workflow.index("docker compose build roo") < workflow.index(preflight)
-    assert workflow.index(preflight) < workflow.index("docker compose up")
+    assert workflow.index(preflight) < deploy_start
     assert "rollback_release()" in workflow
     assert "trap rollback_release EXIT" in workflow
     assert 'git checkout --detach "$previous_release_sha"' in workflow
@@ -480,7 +492,7 @@ def test_deploy_workflow_requires_and_secretly_upserts_security_values():
     ) in workflow
     assert workflow.index("previous_image_id=") < workflow.index("docker compose build roo")
     assert workflow.index("trap rollback_release EXIT") < workflow.index(
-        "docker compose up -d --remove-orphans"
+        "docker compose up -d --no-build --remove-orphans"
     )
     assert "systemctl restart slack-bridge.service" in workflow
     assert "docker compose -f docker-compose.bridge.yml up -d --build" in workflow
@@ -493,12 +505,20 @@ def test_deploy_workflow_requires_and_secretly_upserts_security_values():
     )[0]
     assert "restart_bridge_for_checkout" in rollback_body
     assert "Slack bridge rollback failed" in rollback_body
-    assert workflow.index("upsert_env \"SIM_PATIENT_API_KEY\"") < workflow.index("docker compose up")
+    assert workflow.index("upsert_env \"SIM_PATIENT_API_KEY\"") < deploy_start
     assert 'echo "$SIM_PATIENT_API_KEY"' not in workflow
     assert 'echo "$SIM_PATIENT_SAFETY_SALT"' not in workflow
     assert 'echo "$ROO_API_KEY"' not in workflow
     assert 'echo "$VICTOR_AI_ROO_SIGNING_SECRET"' not in workflow
     assert "http://127.0.0.1/healthz/ready" in workflow
+    assert "migrate_coworking_booking_intents_v3.py" in workflow
+    assert "COWORKING_INTENTS_V3_MIGRATION_APPROVED" in workflow
+    assert "rollback_release" in workflow
+    migration_start = workflow.index("schema_migration_started=1")
+    assert workflow.index("docker compose stop roo", migration_start - 200) < migration_start
+    assert workflow.index("keeping Roo stopped for forward recovery") < workflow.index(
+        "Roo rollout failed; restoring the previous release"
+    )
     assert "vars.ROO_PRIVATE_BASE_URL" in workflow
     assert '"${ROO_PRIVATE_BASE_URL%/}/api/sim-patient"' in workflow
     assert "http://10.126.0.5/api/sim-patient" not in workflow
@@ -513,6 +533,39 @@ def test_deploy_workflow_requires_and_secretly_upserts_security_values():
     assert workflow.index("expect_public_status 200 GET /healthz/ready") > (
         workflow.index("trap rollback_release EXIT")
     )
+
+
+def test_post_migration_deploy_failure_stops_roo_without_v1_rollback(tmp_path):
+    workflow = (REPO_ROOT / ".github/workflows/deploy.yml").read_text()
+    function_start = workflow.index("            rollback_release() {")
+    function_end = workflow.index(
+        "\n            }\n            trap rollback_release EXIT", function_start
+    ) + len("\n            }")
+    recovery_function = textwrap.dedent(workflow[function_start:function_end])
+    docker_log = tmp_path / "docker.log"
+    backup = tmp_path / "environment-backup"
+    backup.write_text("synthetic")
+    probe = recovery_function + r'''
+schema_migration_started=1
+previous_env_backup="$1"
+docker_log="$2"
+docker() {
+    printf '%s\n' "$*" >> "$docker_log"
+}
+git() { echo "unsafe old writer rollback"; exit 99; }
+trap rollback_release EXIT
+exit 23
+'''
+    completed = subprocess.run(
+        ["bash", "-c", probe, "probe", str(backup), str(docker_log)],
+        check=False, capture_output=True, text=True,
+    )
+    assert completed.returncode == 23, completed.stderr
+    assert docker_log.read_text().splitlines() == ["compose stop roo"]
+    assert not backup.exists()
+    assert "keeping Roo stopped for forward recovery" in completed.stderr
+    assert "restoring the previous release" not in completed.stderr
+    assert "unsafe old writer rollback" not in completed.stdout
 
 
 def test_nginx_exposes_only_slack_health_and_vpc_service_routes():
@@ -549,7 +602,8 @@ def test_admin_production_deploy_is_enforced_without_staging_or_shadow():
     dockerfile = (REPO_ROOT / "roo-standalone/Dockerfile").read_text()
     nginx = (REPO_ROOT / "roo-standalone/nginx/roo.conf").read_text()
 
-    assert "push:" in workflow
+    assert "workflow_run:" in workflow
+    assert "github.event.workflow_run.conclusion == 'success'" in workflow
     assert "branches:" in workflow
     assert "- main" in workflow
     assert "environment: admin-roo-staging" not in workflow
