@@ -2199,6 +2199,11 @@ def test_router_catalog_includes_explicit_conference_room_request():
 
 
 @pytest.mark.parametrize('text,params', [
+    ('book small room tomorrow from 2pm to 3:30pm', {'start_time': '2pm', 'end_time': '4pm'}),
+    ('book small room tomorrow 2pm-3:30pm', {'starts_at': '2026-09-15T14:00:00+10:00', 'ends_at': '2026-09-15T16:00:00+10:00'}),
+    ('book a 90-minute small room meeting tomorrow at 2pm', {'duration_hours': 2}),
+    ('book a 1.5-hour small room meeting tomorrow at 2pm', {'ends_at': '2026-09-15T16:00:00+10:00', 'starts_at': '2026-09-15T14:00:00+10:00'}),
+    ('book a 90\u2011minute meeting tomorrow at 2pm', {'end_time': '4pm'}),
     ('book small room tomorrow at 2pm for 90 minutes', {'duration_hours': 2}),
     ('book small room tomorrow at 2pm for 90 minutes', {'end_time': '4pm'}),
     ('book small room tomorrow from 2pm to 3:30pm', {}),
@@ -2223,6 +2228,29 @@ async def test_ninety_minute_request_asks_for_allowed_duration_without_preview(m
     assert 'exactly 1 or 2 hours' in result['message']
     assert not result.get('blocks')
     assert not any(call[0] == 'availability' for client in FakeMeetingRoomClient.instances for call in client.calls)
+
+
+@pytest.mark.asyncio
+async def test_explicit_ninety_minute_range_is_not_rounded_into_preview(monkeypatch):
+    _patch_executor(monkeypatch, _settings())
+    result = await SkillExecutor()._execute_meeting_room_booking(
+        text='book the small meeting room tomorrow from 2pm to 3:30pm',
+        params={'action': 'book_meeting_room', 'start_time': '2pm', 'end_time': '4pm'},
+        user_id='UOWNER', channel_id='DOWNER',
+    )
+    assert 'exactly 1 or 2 hours' in result['message']
+    assert not result.get('blocks')
+    assert not any(call[0] == 'availability' for client in FakeMeetingRoomClient.instances for call in client.calls)
+
+
+def test_explicit_allowed_range_wins_over_structured_timestamps():
+    start, end = resolve_interval(
+        'book tomorrow from 2:30pm to 4:30pm',
+        {'starts_at': '2026-09-15T14:00:00+10:00', 'ends_at': '2026-09-15T15:00:00+10:00'},
+        now=datetime(2026, 9, 14, 9, tzinfo=MELBOURNE),
+    )
+    assert start == datetime(2026, 9, 15, 14, 30, tzinfo=MELBOURNE)
+    assert end == datetime(2026, 9, 15, 16, 30, tzinfo=MELBOURNE)
 
 
 @pytest.mark.asyncio
