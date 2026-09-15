@@ -189,14 +189,14 @@ delivery. Scope changes may require reinstalling the development app.
 Optional Compose setup, once live development delivery is intended:
 
 ```bash
-docker compose -p roo-standalone -f docker-compose.yml -f docker-compose.timesheet-commands.yml up -d --build
+docker compose -p roo-standalone -f docker-compose.yml up -d --build
 docker compose -p roo-timesheets -f docker-compose.timesheets.yml up -d --build
 ```
 
-Both files resolve the same `./data/timesheet-queue` bind mount. Worker snapshots,
-ledger and delivery receipts use the separate `timesheet-data` volume. Keep all
-Public Roo restarts using the command override while the integration is enabled;
-otherwise its queue mount disappears. Do not share a data directory between dev
+The base public configuration and worker resolve the same `./data/timesheet-queue` bind mount. Worker snapshots,
+ledger and delivery receipts use the separate `timesheet-data` volume. Normal
+Public and Admin-driven Public Roo restarts retain the queue mount; the old
+command override is optional and remains compatible. Do not share a data directory between dev
 and production, switch storage between native/Compose mid-test, delete the worker
 volume, or run `down -v` to retry a report. Back up the entire worker data directory
 together. Two processes on one local filesystem serialize ledger writes with
@@ -211,6 +211,11 @@ before delivery. Confirmed message/file parts are never retried; known rate limi
 retry after the requested delay. A timeout after an attempted send becomes
 `needs_review`. A pending command receives a fixed private failure notice; raw
 provider errors, credentials and report contents are not logged.
+
+If a draft has no saved snapshot and its period has since been finalized, Roo
+rejects it with a private request to fetch the finalized report or request a
+fresh draft. It never silently reports zero hours using later allocations.
+Already saved draft snapshots retain their original content on delivery retries.
 
 The following commands inspect/export local state without network calls:
 

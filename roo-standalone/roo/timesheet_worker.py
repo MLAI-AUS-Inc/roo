@@ -103,6 +103,11 @@ class TimesheetService:
                 raise TimesheetError('report_busy')
             data = self.ledger.load()
             bind_ledger(config, data)
+            if draft and any(config.cutoff(period) > now for period in data['periods']):
+                # A delayed draft cannot use allocations from its future.
+                # Previously saved request snapshots remain replayable; only
+                # an unsnapshotted, now-obsolete draft needs a fresh request.
+                raise TimesheetError('draft_period_finalized')
             period = end.date().isoformat()
             if not draft and period in data['periods']:
                 if config.source == 'plane':
@@ -244,10 +249,13 @@ class TimesheetService:
                     request['retry_at'] = timestamp(now).timestamp() + 60
                     results.append({'request': key, 'status': 'error', 'reason': code})
                 if request['status'] in {'error', 'needs_review'}:
-                    terminal = request.get('error') in {'no_completed_fortnight', 'not_a_payment_cutoff', 'period_not_closed', 'invalid_timestamp'}
+                    terminal = request.get('error') in {'no_completed_fortnight', 'not_a_payment_cutoff', 'period_not_closed', 'invalid_timestamp', 'draft_period_finalized'}
                     notice = ('That fortnight is not available. Use `timesheet current` for an open-period draft.' if terminal else
                               'Roo could not finish your timesheet request yet. No unavailable data has been counted as zero. '
                               'Roo will retry safe failures; an uncertain Slack delivery needs operator review.')
+                    if request.get('error') == 'draft_period_finalized':
+                        notice = ('That draft\u2019s period has already been finalized. Request `timesheet` '
+                                  'for the saved report, or send a new `timesheet current` request for a fresh draft.')
                     try:
                         outcome = self.deliver_parts([{'kind': 'message', 'content': notice, 'status': 'pending'}],
                             request['actor'], 'notice-' + key, now)

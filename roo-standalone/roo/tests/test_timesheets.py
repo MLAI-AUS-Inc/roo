@@ -58,6 +58,45 @@ def api_for(dataset):
     return api
 
 
+@pytest.mark.parametrize('saved_snapshot', [False, True])
+def test_delayed_draft_after_finalization_never_sends_false_zero(config, saved_snapshot):
+    complete = '2026-09-24T01:00:00Z'
+    data = item(ticket(completedAt=complete, updatedAt=complete), [{
+        'id': 'completion', 'createdAt': complete, 'fromStateId': 'todo', 'toStateId': 'done',
+        'fromState': {'id': 'todo', 'type': 'unstarted'},
+        'toState': {'id': 'done', 'type': 'completed'},
+    }])
+    api = api_for([data])
+    service = TimesheetService(config, api)
+    before = timestamp('2026-09-24T04:00:00Z')
+    after = timestamp('2026-09-25T03:00:00Z')
+    draft = service.report('current', before)
+    assert sum(row['units'] for row in draft['rows']) == 4
+    enqueue(settings(config), team='T123', actor='USAM', channel='DSAM',
+            source_id='delayed-draft', text='timesheet current', dm=True, now=before)
+    path = next(config.queue.glob('*.json'))
+    if saved_snapshot:
+        with service.requests.locked(path.stem) as acquired:
+            assert acquired
+            service.requests.write(path.stem, draft)
+    final = service.report('latest', after)
+    assert sum(row['units'] for row in final['rows']) == 4
+    ledger = service.ledger.load()
+    results = service.commands(after)
+    if saved_snapshot:
+        assert results[0]['status'] == 'sent'
+        assert service.requests.read(path.stem) == draft
+        assert api.upload_csv.call_count == 2
+    else:
+        assert results[0]['reason'] == 'draft_period_finalized'
+        assert service.queue.read(path.stem)['status'] == 'rejected'
+        assert service.requests.read(path.stem) is None
+        api.upload_csv.assert_not_called()
+        assert 'already been finalized' in api.post_message.call_args.args[1]
+        assert service.commands(after + timedelta(minutes=2)) == []
+    assert service.ledger.load() == ledger
+
+
 @pytest.mark.parametrize('size,expected', [('Extra Small (XS)', .25), ('Small (S)', 1),
     ('Medium (M)', 2), ('Large (L)', 3), ('Extra Large (XL)', 5)])
 def test_fixed_upper_bounds(config, size, expected):

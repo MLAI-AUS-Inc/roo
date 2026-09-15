@@ -1,3 +1,5 @@
+name: roo-standalone
+
 services:
   roo:
     build: .
@@ -8,6 +10,8 @@ services:
     environment:
       # The existing deployment is permanently the Public Roo surface.
       ROO_SURFACE: public
+      # Shared request metadata must survive every public/admin deployment.
+      TIMESHEET_QUEUE_DIR: /app/timesheets/queue
       # Enforce contextual responses in the first allowlisted pilot channel.
       ROO_CONTEXTUAL_RESPONSES_ENABLED: "true"
       ROO_CONTEXTUAL_SHADOW_MODE: "false"
@@ -22,6 +26,7 @@ services:
     volumes:
       - ./skills:/app/skills:ro
       - roo-data:/app/data
+      - ./data/timesheet-queue:/app/timesheets/queue
     networks:
       - default
       - roo-admin-gateway

@@ -83,6 +83,7 @@ jobs:
             roo/tests/test_timesheets.py \
             roo/tests/test_timesheet_linear.py \
             roo/tests/test_timesheet_plane.py \
+            roo/tests/test_timesheet_deployment.py \
             roo/tests/test_timesheet_demo.py \
             roo/tests/test_timesheet_ingress.py -q
 
