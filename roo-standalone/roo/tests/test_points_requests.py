@@ -4027,16 +4027,19 @@ async def test_book_coworking_treats_missing_link_state_as_commit_uncertain(
 
 
 @pytest.mark.asyncio
-async def test_book_coworking_omits_nudge_when_discount_applied(tmp_path, monkeypatch):
+@pytest.mark.parametrize('office_manager', [False, True])
+async def test_book_coworking_omits_nudge_when_discount_applied(tmp_path, monkeypatch, office_manager):
     store = coworking_intent_store(tmp_path / "intents.db")
 
     class FakeCoworkingClient:
         async def book_coworking(self, slack_user_id, booking_date, slack_channel_id=None, *, operation_id=None):
             result = complete_coworking_booking_result(
                 booking_date,
-                cost=4,
-                discount_applied=True,
+                cost=0 if office_manager else 4,
+                discount_applied=not office_manager,
             )
+            if office_manager:
+                result['booking_source'] = 'office_manager'
             result.update(
                 {
                     "founder_tools_account_linked": True,
@@ -4068,7 +4071,7 @@ async def test_book_coworking_omits_nudge_when_discount_applied(tmp_path, monkey
     )
 
     assert "Booked you in for **2026-05-04**" in result["message"]
-    assert "Cost: 4 points" in result["message"]
+    assert f"Cost: {0 if office_manager else 4} points" in result["message"]
     assert "Balance remaining" not in result["message"]
     assert "may qualify for 4-point coworking" not in result["message"]
     assert "@Roo link" not in result["message"]

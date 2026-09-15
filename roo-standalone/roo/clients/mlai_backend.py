@@ -43,6 +43,14 @@ class MLAIBackendUnavailableError(RuntimeError):
         self.reason_code = reason_code
 
 
+def _valid_coworking_discount(source, points_cost, standard_cost, discount_applied):
+    # Free Office Manager bookings are a different benefit, not a monthly
+    # update discount. Older ordinary receipts may omit booking_source.
+    if source == "office_manager":
+        return points_cost == 0 and discount_applied is False
+    return source in (None, "points") and discount_applied is (points_cost < standard_cost)
+
+
 def validate_coworking_booking_result(
     payload: Any,
     *,
@@ -100,7 +108,9 @@ def validate_coworking_booking_result(
         and isinstance(explicitly_linked, bool)
         and isinstance(account_linked, bool)
         and connection_type in {None, "direct", "explicit"}
-        and discount_applied is (points_cost < standard_points_cost)
+        and _valid_coworking_discount(
+            payload.get("booking_source"), points_cost, standard_points_cost, discount_applied
+        )
         and account_linked is (connection_type is not None)
         and explicitly_linked is (connection_type == "explicit")
         and valid_replay_state
@@ -200,7 +210,9 @@ def validate_coworking_booking_batch_result(
             and row_standard_cost == standard_points_cost
             and row_standard_cost >= points_cost
             and isinstance(discount_applied, bool)
-            and discount_applied is (points_cost < row_standard_cost)
+            and _valid_coworking_discount(
+                booking.get("booking_source"), points_cost, row_standard_cost, discount_applied
+            )
             and isinstance(explicitly_linked, bool)
             and isinstance(account_linked, bool)
             and connection_type in {None, "direct", "explicit"}

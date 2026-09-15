@@ -393,6 +393,39 @@ def valid_coworking_booking_result():
     }
 
 
+@pytest.mark.parametrize('replayed', [False, True])
+def test_existing_free_office_manager_booking_and_mixed_batch_are_valid(replayed):
+    booking = {**valid_coworking_booking_result(), 'booking_source': 'office_manager',
+               'points_cost': 0, 'already_booked': True}
+    if replayed:
+        booking.update(operation_replayed=True, operation_booking_current_status='booked')
+    assert backend_module.validate_coworking_booking_result(booking) == booking
+    batch = valid_coworking_batch_result()
+    batch.update(created_count=1, already_booked_count=1)
+    row = batch['results'][0]
+    row.update(created=False, already_booked=True, points_cost=0)
+    row['booking'].update(booking_source='office_manager', points_cost=0)
+    if replayed:
+        batch['operation_replayed'] = True
+        for member in batch['results']:
+            member['booking']['operation_booking_current_status'] = 'booked'
+    assert backend_module.validate_coworking_booking_batch_result(
+        batch, expected_date='2026-07-04', expected_admin_slack_user_id='UADMIN',
+        expected_target_slack_user_ids=['U1', 'U2'],
+    ) == batch
+
+
+@pytest.mark.parametrize('source,cost,discount', [
+    ('office_manager', 4, False), ('office_manager', 0, True),
+    ('points', 4, False), (None, 0, False), ('unknown-benefit', 0, False),
+])
+def test_booking_cost_contract_still_rejects_contradictions(source, cost, discount):
+    payload = {**valid_coworking_booking_result(), 'booking_source': source,
+               'points_cost': cost, 'monthly_update_discount_applied': discount}
+    with pytest.raises(MLAIBackendUnavailableError):
+        backend_module.validate_coworking_booking_result(payload)
+
+
 def test_single_replay_requires_current_booking_status():
     payload = valid_coworking_booking_result()
     payload["operation_replayed"] = True

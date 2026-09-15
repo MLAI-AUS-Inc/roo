@@ -8,6 +8,13 @@ v2 will not rerun a corrected v2 body, so startup now requires schema version
 
 ## Migration
 
+Admin production deployment runs only after a successful Public Roo main
+deployment, using that deployment's exact SHA. Manual Admin dispatch also
+verifies the existing Public checkout, running release, SQLite v3 schema and
+readiness before changing routing or restarting Public Roo. Admin never advances
+the Public checkout. A failed or paused Public migration therefore cannot be
+bypassed by the Admin workflow.
+
 Deploy the companion backend migration and receipt-aware backend code before
 deploying this Roo build. The backend keeps `operation_id` optional during the
 upgrade, so the old Roo remains compatible. The new Roo must not go live until

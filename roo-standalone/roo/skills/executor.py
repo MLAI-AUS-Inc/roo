@@ -14321,7 +14321,7 @@ Chunk {index} source: {label}
             f"See you there, legend!"
         )
 
-        if discount_applied is False:
+        if discount_applied is False and cost > 0:
             message += (
                 "\n\n💡 Startup founders may qualify for 4-point coworking after "
                 "submitting an eligible monthly update. Submit yours here: "

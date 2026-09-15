@@ -213,7 +213,7 @@ async def test_admin_checkin_coworking_batches_deduped_targets(batch_runtime):
     rebooked_result = await _run_points_action(
         client,
         action="admin_checkin_coworking",
-        text="check <@U1> <@U2> in today after cancellation",
+        text="check <@U1> <@U2> in today",
     )
 
     assert "Processed **2** coworking check-ins" in rebooked_result

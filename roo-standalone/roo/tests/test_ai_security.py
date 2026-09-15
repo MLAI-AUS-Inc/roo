@@ -568,7 +568,8 @@ def test_admin_production_deploy_is_enforced_without_staging_or_shadow():
     dockerfile = (REPO_ROOT / "roo-standalone/Dockerfile").read_text()
     nginx = (REPO_ROOT / "roo-standalone/nginx/roo.conf").read_text()
 
-    assert "push:" in workflow
+    assert "workflow_run:" in workflow
+    assert "github.event.workflow_run.conclusion == 'success'" in workflow
     assert "branches:" in workflow
     assert "- main" in workflow
     assert "environment: admin-roo-staging" not in workflow
