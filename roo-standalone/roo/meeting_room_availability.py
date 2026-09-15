@@ -37,7 +37,7 @@ def resolve_search_duration(text: str, params: dict) -> int:
         ):
             raise MeetingRoomInputError(
                 "invalid_time",
-                "What meeting length should I look for? Try `1 hour`, `1.5 hours`, or `2 hours`.",
+                "What meeting length should I look for? Try `1 hour` or `2 hours`.",
             )
         value = 1
     return _duration_half_hours(value)
@@ -136,6 +136,6 @@ def format_day_availability(
         "These are room openings, subject to your booking limits and Roo Points. "
         f"To book, tell me the room, date and start time and say `for {booking_duration}`; "
         "I’ll recheck before showing Confirm booking. "
-        "Nothing is reserved yet. You can also ask for a 1.5-hour or 2-hour meeting.",
+        "Nothing is reserved yet. You can ask for a 1-hour or 2-hour meeting.",
     ])
     return "\n".join(lines)

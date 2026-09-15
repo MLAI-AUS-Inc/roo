@@ -292,26 +292,34 @@ def _duration_half_hours(
     if isinstance(value, bool):
         raise MeetingRoomInputError(
             "invalid_time",
-            "The duration must be between 1 and 2 hours in 30-minute increments.",
+            "Choose a meeting duration of exactly 1 or 2 hours.",
         )
     try:
         duration = Decimal(str(value).strip())
     except (InvalidOperation, ValueError):
         raise MeetingRoomInputError(
             "invalid_time",
-            "The duration must be between 1 and 2 hours in 30-minute increments.",
+            "Choose a meeting duration of exactly 1 or 2 hours.",
         )
     if not duration.is_finite():
         raise MeetingRoomInputError(
-            "invalid_time", "The duration must be between 1 and 2 hours in 30-minute increments.",
+            "invalid_time", "Choose a meeting duration of exactly 1 or 2 hours.",
         )
     half_hours = duration * 2
     if half_hours != half_hours.to_integral_value():
         raise MeetingRoomInputError(
             "invalid_time",
-            "The duration must use 30-minute increments, such as 1 or 1.5 hours.",
+            "Choose a meeting duration of exactly 1 or 2 hours.",
         )
     result = int(half_hours)
+    if (
+        minimum == MIN_BOOKING_HALF_HOURS
+        and maximum == MAX_BOOKING_HALF_HOURS
+        and result not in (2, 4)
+    ):
+        raise MeetingRoomInputError(
+            "invalid_time", "Meeting Room bookings must be exactly 1 or 2 hours.",
+        )
     if result < minimum or result > maximum:
         if minimum == MIN_AVAILABILITY_HALF_HOURS and maximum == MAX_AVAILABILITY_HALF_HOURS:
             message = "Availability checks must be between 30 minutes and 24 hours."
@@ -326,6 +334,15 @@ def _duration_half_hours(
 
 def _natural_duration(text: str) -> Optional[str]:
     normalized = str(text or "").lower()
+    # A duration used as an adjective is still the member's explicit request.
+    # Normalize only the duration phrase, leaving dates and time ranges intact.
+    adjective = re.search(
+        r"\b((?:\d+(?:\.\d+)?|one|two|half)[-\u2010-\u2013]"
+        r"(?:hours?|hrs?|minutes?|mins?))\b",
+        normalized,
+    )
+    if adjective:
+        return _natural_duration("for " + re.sub(r"[-\u2010-\u2013]", " ", adjective.group(1)))
     if re.search(
         r"\bfor\s+(?:half\s+(?:an?\s+)?hour|an?\s+half[- ]hour)\b",
         normalized,
@@ -358,7 +375,7 @@ def _natural_duration(text: str) -> Optional[str]:
     ):
         raise MeetingRoomInputError(
             "invalid_time",
-            "I could not understand that duration. Try `1 hour`, `1.5 hours`, or `90 minutes`.",
+            "I could not understand that duration. Try `1 hour` or `2 hours`.",
         )
     return None
 
@@ -415,6 +432,14 @@ def _validate_resolved_interval(
             "Meeting Room bookings must use 30-minute increments.",
         )
     duration_half_hours = int(duration_seconds // 1800)
+    if (
+        minimum_half_hours == MIN_BOOKING_HALF_HOURS
+        and maximum_half_hours == MAX_BOOKING_HALF_HOURS
+        and duration_half_hours not in (2, 4)
+    ):
+        raise MeetingRoomInputError(
+            "invalid_time", "Meeting Room bookings must be exactly 1 or 2 hours.",
+        )
     if duration_half_hours < minimum_half_hours:
         minimum_message = (
             "Availability checks must be at least 30 minutes."
@@ -479,6 +504,24 @@ def resolve_interval(
 ) -> tuple[datetime, datetime]:
     params = params or {}
     reference_now = now or get_current_datetime()
+    if (
+        minimum_half_hours == MIN_BOOKING_HALF_HOURS
+        and maximum_half_hours == MAX_BOOKING_HALF_HOURS
+    ):
+        # Do not let a model-supplied end or duration silently round a member's
+        # explicit 90-minute request into an allowed booking.
+        natural_duration = _natural_duration(text)
+        if natural_duration is not None:
+            _duration_half_hours(natural_duration)
+        natural_start, natural_end = _natural_time_tokens(text)
+        if natural_start is not None and natural_end is not None:
+            # An explicit member range must go through local-time/DST and
+            # duration validation unchanged, even if the model supplies ISO
+            # timestamps or rounds its structured end to an allowed duration.
+            params = {
+                key: value for key, value in params.items()
+                if key not in {"starts_at", "ends_at", "start_time", "end_time", "duration_hours"}
+            }
     exact_start = _parse_iso_timestamp(params.get("starts_at"))
     exact_end = _parse_iso_timestamp(params.get("ends_at"))
     if exact_start or exact_end:

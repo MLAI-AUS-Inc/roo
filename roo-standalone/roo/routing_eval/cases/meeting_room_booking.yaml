@@ -13,7 +13,11 @@
 - id: meeting-room-find-ninety-minutes
   text: "when is the small meeting room free for 90 minutes tomorrow?"
   expect: {skill: meeting-room-booking, action: check_room_availability}
-  tags: [meeting-room, availability]
+  tags: [meeting-room, availability, unsupported-duration]
+- id: meeting-room-book-whole-hours
+  text: "book the big room tomorrow at 2:30pm for 2 hours"
+  expect: {skill: meeting-room-booking, action: book_meeting_room}
+  tags: [meeting-room, whole-hours]
 - id: meeting-room-check-tomorrow-typo
   text: "is the meeting room free tommorrow at 1pm?"
   expect: {skill: meeting-room-booking, action: check_room_availability}
