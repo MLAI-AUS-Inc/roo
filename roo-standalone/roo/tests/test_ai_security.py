@@ -242,6 +242,8 @@ def test_production_dotenv_does_not_mount_docs_or_schema(tmp_path):
         "SLACK_BOT_TOKEN=test\n"
         "SLACK_SIGNING_SECRET=test\n"
         "OPENAI_API_KEY=test\n"
+        "MLAI_BACKEND_URL=https://api.mlai.au\n"
+        "ROO_API_KEY=roo-test-key\n"
     )
     code = (
         "from roo.main import app; "
@@ -431,9 +433,7 @@ def test_deploy_workflow_requires_and_secretly_upserts_security_values():
     assert "envs: SIM_PATIENT_API_KEY,SIM_PATIENT_SAFETY_SALT" in workflow
     assert (
         "envs: SIM_PATIENT_API_KEY,SIM_PATIENT_SAFETY_SALT,ROO_API_KEY,"
-        "VICTOR_AI_ROO_SIGNING_SECRET,ROO_PRIVATE_BASE_URL,"
-        "MEETING_ROOM_BOOKING_ENABLED,LINEAR_CHANNEL_ISSUE_WRITES_ENABLED,"
-        "FOUNDER_ACCOUNT_LINK_ENABLED,COWORKING_INTENTS_V3_MIGRATION_APPROVED"
+        "VICTOR_AI_ROO_SIGNING_SECRET,ROO_PUBLIC_HOST,ROO_PRIVATE_BASE_URL,MEETING_ROOM_BOOKING_ENABLED,OFFICE_MANAGER_ACTIONS_ENABLED,LINEAR_CHANNEL_ISSUE_WRITES_ENABLED,FOUNDER_ACCOUNT_LINK_ENABLED,COWORKING_INTENTS_V3_MIGRATION_APPROVED"
     ) in workflow
     assert 'upsert_env "ROO_ENVIRONMENT" "production"' in workflow
     assert 'upsert_env "SIM_PATIENT_API_KEY" "$SIM_PATIENT_API_KEY"' in workflow
@@ -474,9 +474,37 @@ def test_deploy_workflow_requires_and_secretly_upserts_security_values():
     assert workflow.index(
         'upsert_env "MEETING_ROOM_BOOKING_ENABLED"'
     ) < deploy_start
+    preflight = (
+        "MLAIBackendClient().get_office_manager_preflight()"
+    )
+    assert "docker compose build roo" in workflow
+    assert preflight in workflow
+    assert "_validate_office_manager_backend_contract" in workflow
+    assert workflow.index("docker compose build roo") < workflow.index(preflight)
+    assert workflow.index(preflight) < deploy_start
+    assert "rollback_release()" in workflow
+    assert "trap rollback_release EXIT" in workflow
+    assert 'git checkout --detach "$previous_release_sha"' in workflow
+    assert 'docker image tag "$previous_image_id" "$previous_image_ref"' in workflow
+    assert (
+        "docker compose --ansi never up -d --no-build --force-recreate "
+        "--remove-orphans"
+    ) in workflow
+    assert workflow.index("previous_image_id=") < workflow.index("docker compose build roo")
+    assert workflow.index("trap rollback_release EXIT") < workflow.index(
+        "docker compose up -d --no-build --remove-orphans"
+    )
     assert "systemctl restart slack-bridge.service" in workflow
     assert "docker compose -f docker-compose.bridge.yml up -d --build" in workflow
     assert "Slack bridge readiness check timed out" in workflow
+    assert workflow.index("previous_bridge_mode=") < workflow.index(
+        "rollback_release()"
+    )
+    rollback_body = workflow.split("rollback_release() {", 1)[1].split(
+        "trap rollback_release EXIT", 1
+    )[0]
+    assert "restart_bridge_for_checkout" in rollback_body
+    assert "Slack bridge rollback failed" in rollback_body
     assert workflow.index("upsert_env \"SIM_PATIENT_API_KEY\"") < deploy_start
     assert 'echo "$SIM_PATIENT_API_KEY"' not in workflow
     assert 'echo "$SIM_PATIENT_SAFETY_SALT"' not in workflow
@@ -485,53 +513,59 @@ def test_deploy_workflow_requires_and_secretly_upserts_security_values():
     assert "http://127.0.0.1/healthz/ready" in workflow
     assert "migrate_coworking_booking_intents_v3.py" in workflow
     assert "COWORKING_INTENTS_V3_MIGRATION_APPROVED" in workflow
-    assert "restore_previous_release" in workflow
+    assert "rollback_release" in workflow
     migration_start = workflow.index("schema_migration_started=1")
     assert workflow.index("docker compose stop roo", migration_start - 200) < migration_start
-    assert workflow.index("keeping Roo safely stopped") < workflow.index(
-        "restoring the previous Roo release"
+    assert workflow.index("keeping Roo stopped for forward recovery") < workflow.index(
+        "Roo rollout failed; restoring the previous release"
     )
-    assert workflow.rindex("trap - ERR") > workflow.index("healthz/dependencies")
     assert "vars.ROO_PRIVATE_BASE_URL" in workflow
     assert '"${ROO_PRIVATE_BASE_URL%/}/api/sim-patient"' in workflow
     assert "http://10.126.0.5/api/sim-patient" not in workflow
     assert 'if [ "$private_status" != "422" ]' in workflow
     assert "Verify public Roo containment" in workflow
-    assert "expect_status 404 GET /docs" in workflow
-    assert "expect_status 404 POST /api/mention" in workflow
-    assert "expect_status 403 POST /api/sim-patient" in workflow
+    assert "expect_public_status 404 GET /docs" in workflow
+    assert "expect_public_status 404 POST /api/mention" in workflow
+    assert "expect_public_status 403 POST /api/sim-patient" in workflow
+    assert workflow.index("expect_public_status 200 GET /healthz/ready") < (
+        workflow.index("docker image prune -f")
+    )
+    assert workflow.index("expect_public_status 200 GET /healthz/ready") > (
+        workflow.index("trap rollback_release EXIT")
+    )
 
 
-def test_post_migration_deploy_failure_stops_roo_without_v1_rollback():
+def test_post_migration_deploy_failure_stops_roo_without_v1_rollback(tmp_path):
     workflow = (REPO_ROOT / ".github/workflows/deploy.yml").read_text()
-    function_start = workflow.index("            restore_previous_release() {")
+    function_start = workflow.index("            rollback_release() {")
     function_end = workflow.index(
-        "\n            }\n            trap restore_previous_release ERR",
-        function_start,
+        "\n            }\n            trap rollback_release EXIT", function_start
     ) + len("\n            }")
     recovery_function = textwrap.dedent(workflow[function_start:function_end])
+    docker_log = tmp_path / "docker.log"
+    backup = tmp_path / "environment-backup"
+    backup.write_text("synthetic")
     probe = recovery_function + r'''
 schema_migration_started=1
-previous_env_backup="$(mktemp)"
-docker_log="$(mktemp)"
+previous_env_backup="$1"
+docker_log="$2"
 docker() {
     printf '%s\n' "$*" >> "$docker_log"
 }
-trap restore_previous_release ERR
-false
-grep -Fx 'compose stop roo' "$docker_log"
+git() { echo "unsafe old writer rollback"; exit 99; }
+trap rollback_release EXIT
+exit 23
 '''
-
     completed = subprocess.run(
-        ["bash", "-c", probe],
-        check=False,
-        capture_output=True,
-        text=True,
+        ["bash", "-c", probe, "probe", str(backup), str(docker_log)],
+        check=False, capture_output=True, text=True,
     )
-
-    assert completed.returncode == 0, completed.stderr
-    assert "keeping Roo safely stopped" in completed.stdout
-    assert "restoring the previous Roo release" not in completed.stdout
+    assert completed.returncode == 23, completed.stderr
+    assert docker_log.read_text().splitlines() == ["compose stop roo"]
+    assert not backup.exists()
+    assert "keeping Roo stopped for forward recovery" in completed.stderr
+    assert "restoring the previous release" not in completed.stderr
+    assert "unsafe old writer rollback" not in completed.stdout
 
 
 def test_nginx_exposes_only_slack_health_and_vpc_service_routes():

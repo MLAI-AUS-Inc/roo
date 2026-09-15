@@ -664,7 +664,7 @@ def test_send_dm_posts_only_after_validating_a_dm_channel(monkeypatch):
     assert posted == [
         (
             ("DPRIVATE123", "private"),
-            {"_redact_destination": True, "blocks": []},
+            {"redact_logs": False, "_redact_destination": True, "blocks": []},
         )
     ]
 

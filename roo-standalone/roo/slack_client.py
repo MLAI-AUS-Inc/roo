@@ -14,6 +14,10 @@ from .config import get_settings
 SLACK_FILES_READ_SCOPE = "files:read"
 
 
+class SlackIdentityLookupError(RuntimeError):
+    """Raised when Slack cannot provide a trustworthy member identity."""
+
+
 class SlackApiResponse(Protocol):
     """Common response surface implemented by SlackResponse and test doubles."""
 
@@ -32,7 +36,9 @@ def get_slack_client():
         from slack_sdk import WebClient
         
         settings = get_settings()
-        _slack_client = WebClient(token=settings.SLACK_BOT_TOKEN)
+        # Bound synchronous calls so durable outbox leases can fence every
+        # in-flight Slack mutation until its worker thread has drained.
+        _slack_client = WebClient(token=settings.SLACK_BOT_TOKEN, timeout=30)
         print("🔌 Slack client initialized")
     
     return _slack_client
@@ -42,6 +48,24 @@ def get_slack_client():
 _bot_user_id = None
 
 
+@lru_cache(maxsize=1)
+def get_slack_app_identity() -> Dict[str, str]:
+    """Return the non-secret identity bound to Roo's configured Slack token."""
+    response = get_slack_client().auth_test()
+    if response.get("ok") is not True:
+        raise SlackIdentityLookupError("Slack auth.test did not succeed")
+    identity = {
+        "team_id": str(response.get("team_id") or "").strip(),
+        "bot_id": str(response.get("bot_id") or "").strip(),
+        "user_id": str(response.get("user_id") or "").strip(),
+    }
+    if any(not value for value in identity.values()):
+        raise SlackIdentityLookupError(
+            "Slack auth.test did not return team_id, bot_id, and user_id"
+        )
+    return identity
+
+
 def get_bot_user_id() -> str:
     """Get Roo's own Slack user ID via auth.test.
     
@@ -49,9 +73,7 @@ def get_bot_user_id() -> str:
     """
     global _bot_user_id
     if _bot_user_id is None:
-        client = get_slack_client()
-        response = client.auth_test()
-        _bot_user_id = response["user_id"]
+        _bot_user_id = get_slack_app_identity()["user_id"]
         print("🤖 Bot identity loaded")
     return _bot_user_id
 
@@ -60,6 +82,7 @@ def post_message(
     channel: str,
     text: str,
     thread_ts: Optional[str] = None,
+    redact_logs: bool = False,
     _redact_destination: bool = False,
     **kwargs
 ) -> SlackApiResponse:
@@ -108,6 +131,7 @@ def post_ephemeral(
     user: str,
     text: str,
     thread_ts: Optional[str] = None,
+    redact_logs: bool = False,
     **kwargs,
 ) -> SlackApiResponse:
     """Post a private message visible only to one member in a Slack channel."""
@@ -522,7 +546,12 @@ def get_display_name(user_id: str) -> str:
     )
 
 
-def open_dm(user_id: str, *, raise_on_error: bool = False) -> Optional[str]:
+def open_dm(
+    user_id: str,
+    *,
+    raise_on_error: bool = False,
+    redact_logs: bool = False,
+) -> Optional[str]:
     """Open a DM channel with a user."""
     client = get_slack_client()
     
@@ -551,14 +580,20 @@ def send_dm(
     text: str,
     *,
     raise_on_error: bool = False,
+    redact_logs: bool = False,
     **kwargs,
 ) -> Optional[SlackApiResponse]:
     """Send a direct message to a user."""
-    dm_channel = open_dm(user_id, raise_on_error=raise_on_error)
+    dm_channel = open_dm(
+        user_id,
+        raise_on_error=raise_on_error,
+        redact_logs=redact_logs,
+    )
     if dm_channel:
         return post_message(
             dm_channel,
             text,
+            redact_logs=redact_logs,
             _redact_destination=True,
             **kwargs,
         )

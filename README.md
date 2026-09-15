@@ -278,6 +278,9 @@ runtime owner.
 For the local, channel-bound Linear issue reader workflow, see
 [`roo-standalone/docs/linear-channel-issues.md`](roo-standalone/docs/linear-channel-issues.md).
 
+For the backend-first Office Manager action rollout and rollback procedure, see
+[`roo-standalone/docs/office-manager.md`](roo-standalone/docs/office-manager.md).
+
 ## Scheduled jobs
 
 Builder payment reminders have a separate, opt-in worker. It DMs each configured
