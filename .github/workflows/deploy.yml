@@ -99,6 +99,14 @@ jobs:
           python -m pytest roo/tests/test_agent_routing.py -q
           python -m pytest roo/tests/test_routing_eval_gate.py -q
           python -m compileall -q roo bridge
+          # Isolate these from older tests that install module-level doubles.
+          python -m pytest \
+            roo/tests/test_timesheets.py \
+            roo/tests/test_timesheet_linear.py \
+            roo/tests/test_timesheet_plane.py \
+            roo/tests/test_timesheet_deployment.py \
+            roo/tests/test_timesheet_demo.py \
+            roo/tests/test_timesheet_ingress.py -q
 
       - name: Validate production Compose configuration
         working-directory: roo-standalone

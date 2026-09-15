@@ -54,6 +54,14 @@ class Settings(BaseSettings):
     SLACK_MODERATOR_USER_ID: str = ""
     SLACK_MODERATOR_TEAM_ID: str = ""
 
+    # Exact, signed timesheet commands enqueue work without Linear credentials.
+    TIMESHEET_COMMANDS_ENABLED: bool = False
+    TIMESHEET_SLACK_TEAM_ID: str = ""
+    TIMESHEET_SLACK_BOT_USER_ID: str = ""
+    TIMESHEET_RECIPIENT_SLACK_ID: str = ""
+    TIMESHEET_FIRST_CUTOFF: str = "2026-09-11"
+    TIMESHEET_QUEUE_DIR: str = "/app/timesheets/queue"
+
     # Context-aware channel replies. Disabled by default and restricted to an
     # explicit channel allowlist before any untagged message can be considered.
     ROO_CONTEXTUAL_RESPONSES_ENABLED: bool = False

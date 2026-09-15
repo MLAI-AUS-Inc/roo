@@ -23,6 +23,7 @@ from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.responses import JSONResponse
 
 from .config import get_settings, Settings, validate_runtime_security
+from .timesheet_commands import enqueue as enqueue_timesheet, enqueue_event as enqueue_timesheet_event
 from .agent import RooAgent, get_agent
 from .addressing import (
     candidate_reason_for_message,
@@ -2986,6 +2987,23 @@ async def slack_events(
         print("✅ Slack URL verification challenge")
         return {"challenge": payload.get("challenge")}
 
+    # Resume this durable handoff even when the generic signature receipt exists:
+    # a previous attempt may have failed to persist the command before its 200.
+    timesheet_event = payload.get("event") or {}
+    timesheet_settings = _request_settings(request)
+    if _is_slack_context_allowed(
+        timesheet_settings, channel_id=timesheet_event.get("channel"),
+        user_id=timesheet_event.get("user"), channel_type=timesheet_event.get("channel_type"),
+    ):
+        try:
+            queued = await asyncio.to_thread(enqueue_timesheet_event, timesheet_settings, payload)
+        except Exception:
+            raise HTTPException(status_code=503, detail="Timesheet request could not be saved; retry")
+        if queued.get("handled"):
+            if queued.get("new") and queued.get("text"):
+                asyncio.create_task(_timesheet_ack(timesheet_event, queued["text"]))
+            return JSONResponse(status_code=200, content={})
+
     if _is_duplicate_slack_request(request):
         disposition = _slack_event_disposition(request)
         if disposition == "processing":
@@ -3211,6 +3229,19 @@ async def _handle_slack_mention(
     )
     with use_backend_actor_context(context):
         return await _handle_mention(event)
+
+
+async def _timesheet_ack(event: dict, text: str):
+    """Fixed acknowledgement only; report content is delivered by the worker."""
+    try:
+        channel = str(event.get("channel") or "")
+        if re.fullmatch(r"D[A-Z0-9]+", channel):
+            await asyncio.to_thread(post_message, channel=channel, text=text)
+        elif re.fullmatch(r"[CG][A-Z0-9]+", channel):
+            await asyncio.to_thread(post_ephemeral, channel=channel, user=event.get("user"), text=text)
+    except Exception:
+        # The durable request remains queued if its cosmetic acknowledgement fails.
+        pass
 
 
 async def _handle_mention(event: dict):
@@ -3536,6 +3567,20 @@ async def slack_commands(
 ):
     """Slack Slash Commands webhook."""
     form = await request.form()
+    timesheet_settings = _request_settings(request)
+    if form.get("command") in {"/roo", "/roo-dev"} and _is_slack_context_allowed(
+        timesheet_settings, channel_id=form.get("channel_id"), user_id=form.get("user_id"), channel_type=None,
+    ):
+        try:
+            queued = await asyncio.to_thread(
+                enqueue_timesheet, timesheet_settings,
+                team=form.get("team_id"), actor=form.get("user_id"), channel=form.get("channel_id"),
+                source_id=form.get("trigger_id"), text=form.get("text"), dm=True,
+            )
+        except Exception:
+            raise HTTPException(status_code=503, detail="Timesheet request could not be saved; retry")
+        if queued.get("handled"):
+            return {"response_type": "ephemeral", "text": queued.get("text", "This timesheet request is already queued.")}
     if _is_duplicate_slack_request(request):
         print("↩️ Ignoring duplicate signed Slack command request")
         return {}
