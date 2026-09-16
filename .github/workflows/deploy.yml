@@ -47,6 +47,9 @@ jobs:
           # surface boundary gate isolated so collection order cannot weaken it.
           python -m pytest roo/tests/test_surface_security.py -q
           python -m pytest roo/tests/test_deployment_checks.py -q
+          # Chart rendering and binary uploads run offline, isolated from legacy stubs.
+          python -m pytest roo/tests/test_coworking_charts.py roo/tests/test_slack_file_upload.py -q
+          python -m pytest roo/tests/test_points_requests.py -k coworking -q
           # Meeting-room schema tests need the real skill parser, so keep them
           # isolated from legacy suites that stub the frontmatter module.
           python -m pytest \

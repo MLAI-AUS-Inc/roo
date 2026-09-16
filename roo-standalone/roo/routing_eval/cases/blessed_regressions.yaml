@@ -237,6 +237,22 @@
   text: "coworking summary last 6 months"
   expect: {skill: mlai-points, action: coworking_report}
   tags: [blessed]
+- id: blessed-coworking-daily-chart
+  text: "show a chart of daily checked in people at coworking for the last 3 months with a trend line"
+  expect: {skill: mlai-points, action: coworking_report}
+  tags: [blessed]
+- id: blessed-coworking-text-only
+  text: "coworking report last 3 months, text only without charts"
+  expect: {skill: mlai-points, action: coworking_report}
+  tags: [blessed]
+- id: blessed-coworking-daily-chart-6-months
+  text: "show me a daily coworking bookings chart for the last 6 months"
+  expect: {skill: mlai-points, action: coworking_report}
+  tags: [blessed]
+- id: blessed-coworking-daily-chart-12-months
+  text: "plot daily coworking bookings with a trend line for the last 12 months"
+  expect: {skill: mlai-points, action: coworking_report}
+  tags: [blessed]
 - id: blessed-coworking-usage-week
   text: "how many people used the coworking space this week"
   expect: {skill: mlai-points, action: coworking_report}

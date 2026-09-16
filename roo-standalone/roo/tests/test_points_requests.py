@@ -3120,6 +3120,186 @@ class FakeCoworkingReportClient:
         )
 
 
+@pytest.fixture(autouse=True)
+def coworking_chart_uploads(monkeypatch, request):
+    """Keep existing report tests offline; real PNG rendering has its own tests."""
+    uploads = []
+    monkeypatch.setattr(executor_module, "render_coworking_chart", lambda *args, **kwargs: b"test-png")
+    monkeypatch.setattr(executor_module, "upload_file", lambda **kwargs: uploads.append(kwargs) or {"ok": True})
+    if request.node.name.startswith("test_coworking_"):
+        monkeypatch.setattr("roo.utils.get_current_date", lambda: date(2026, 9, 16))
+
+        async def offline_chat(*args, **kwargs):
+            raise RuntimeError("LLM disabled in report tests")
+
+        monkeypatch.setattr(executor_module, "chat", offline_chat)
+    return uploads
+
+
+async def run_chart_report(**overrides):
+    kwargs = {
+        "client": FakeCoworkingReportClient(),
+        "action": "coworking_report",
+        "params": {},
+        "text": "show a daily coworking chart for the last 3 months",
+        "user_id": executor_module.POINTS_SUPER_ADMIN_SLACK_ID,
+        "channel_id": "C123",
+        "thread_ts": "111.222",
+        "skill": SimpleNamespace(name="mlai-points"),
+    }
+    kwargs.update(overrides)
+    return await SkillExecutor()._handle_points_action(**kwargs)
+
+
+@pytest.mark.asyncio
+async def test_coworking_daily_chart_uses_report_dates_and_same_thread(monkeypatch, coworking_chart_uploads):
+    monkeypatch.setattr("roo.utils.get_current_date", lambda: date(2026, 9, 16))
+    rendered = []
+    monkeypatch.setattr(executor_module, "render_coworking_chart", lambda report, **kwargs: rendered.append(report) or b"png")
+    result = await run_chart_report()
+    assert len(rendered[0]["daily"]) == 92
+    assert coworking_chart_uploads == [{
+        "channel": "C123", "content": b"png",
+        "filename": "coworking-usage-2026-06-17-to-2026-09-16.png",
+        "title": "Coworking usage · 2026-06-17 to 2026-09-16", "thread_ts": "111.222",
+    }]
+    assert "chart attached" in result
+    assert "not door check-ins" in result
+    assert "*Daily*" not in result
+    assert "*Weekly*" in result
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("overrides", [
+    {"params": {"include_chart": False}},
+    {"text": "coworking report last 3 months text only"},
+    {"text": "coworking report last 3 months without charts"},
+    {"text": "coworking report last 3 months text only", "params": {"include_chart": True}},
+    {"channel_id": None},
+])
+async def test_coworking_text_only_or_no_slack_context_skips_upload(overrides, coworking_chart_uploads):
+    result = await run_chart_report(**overrides)
+    assert "*Coworking usage*" in result
+    assert "chart attached" not in result
+    assert coworking_chart_uploads == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("months", [3, 6, 12])
+async def test_coworking_ordinary_reports_do_not_attach_charts(months, coworking_chart_uploads):
+    result = await run_chart_report(text=f"coworking report last {months} months")
+    assert "*Coworking usage*" in result
+    assert "chart attached" not in result
+    assert coworking_chart_uploads == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("months,start,days", [
+    (3, "2026-06-17", 92), (6, "2026-03-17", 184), (12, "2025-09-17", 365),
+])
+async def test_coworking_requested_chart_fetches_only_selected_lookback(monkeypatch, coworking_chart_uploads, months, start, days):
+    from roo.coworking_charts import render_coworking_chart
+
+    client = FakeCoworkingReportClient()
+    rendered = []
+
+    def render(report, **kwargs):
+        rendered.append(report)
+        return render_coworking_chart(report, **kwargs)
+
+    monkeypatch.setattr(executor_module, "render_coworking_chart", render)
+    result = await run_chart_report(client=client, text=f"show daily coworking bookings as a chart for the last {months} months")
+    assert client.calls == [(executor_module.POINTS_SUPER_ADMIN_SLACK_ID, start, "2026-09-16")]
+    assert len(rendered[0]["daily"]) == days
+    assert len(coworking_chart_uploads) == 1
+    assert coworking_chart_uploads[0]["filename"] == f"coworking-usage-{start}-to-2026-09-16.png"
+    assert coworking_chart_uploads[0]["content"].startswith(b"\x89PNG\r\n\x1a\n")
+    assert "chart attached" in result
+
+
+@pytest.mark.asyncio
+async def test_coworking_chart_can_be_requested_by_parameter(coworking_chart_uploads):
+    result = await run_chart_report(text="coworking report last 6 months", params={"include_chart": True})
+    assert "chart attached" in result
+    assert len(coworking_chart_uploads) == 1
+
+
+@pytest.mark.asyncio
+async def test_coworking_report_renders_real_png_before_upload(monkeypatch, coworking_chart_uploads):
+    from roo.coworking_charts import render_coworking_chart
+
+    monkeypatch.setattr(executor_module, "render_coworking_chart", render_coworking_chart)
+    result = await run_chart_report()
+    assert "chart attached" in result
+    assert coworking_chart_uploads[0]["content"].startswith(b"\x89PNG\r\n\x1a\n")
+
+
+@pytest.mark.asyncio
+async def test_coworking_comparison_attaches_only_primary_range(coworking_chart_uploads):
+    result = await run_chart_report(text="compare coworking last week with the week prior with a chart")
+    assert "*Comparison*" in result
+    assert len(coworking_chart_uploads) == 1
+    assert coworking_chart_uploads[0]["filename"] == "coworking-usage-2026-09-06-to-2026-09-12.png"
+
+
+@pytest.mark.asyncio
+async def test_coworking_chart_permission_denial_never_renders_or_uploads(monkeypatch, coworking_chart_uploads):
+    def forbidden(*args, **kwargs):
+        pytest.fail("Must not render an unauthorized report")
+    monkeypatch.setattr(executor_module, "render_coworking_chart", forbidden)
+    result = await run_chart_report(user_id="UNOTADMIN")
+    assert "need to be a Points Admin" in result
+    assert coworking_chart_uploads == []
+
+
+@pytest.mark.asyncio
+async def test_coworking_chart_render_failure_keeps_text(monkeypatch, coworking_chart_uploads):
+    def fail_render(*args, **kwargs):
+        raise RuntimeError("render failed")
+    monkeypatch.setattr(executor_module, "render_coworking_chart", fail_render)
+    result = await run_chart_report()
+    assert "Booked user-days: 3" in result
+    assert "couldn't render" in result
+    assert "chart attached" not in result
+    assert coworking_chart_uploads == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error,as_exception", [("missing_scope", True), ("missing_scope", False), ("channel_not_found", False), ("timeout", True)])
+async def test_coworking_chart_upload_failure_keeps_text(monkeypatch, error, as_exception):
+    from slack_sdk.errors import SlackApiError
+
+    def fail_upload(**kwargs):
+        if as_exception:
+            raise SlackApiError("Upload failed", response={"ok": False, "error": error})
+        return {"ok": False, "error": error}
+    monkeypatch.setattr(executor_module, "upload_file", fail_upload)
+    result = await run_chart_report()
+    assert "Booked user-days: 3" in result
+    assert "couldn't attach" in result
+    assert "chart attached" not in result
+    if error == "missing_scope":
+        assert "files:write" in result
+
+
+@pytest.mark.asyncio
+async def test_coworking_chart_transport_failure_keeps_text(monkeypatch):
+    def fail_upload(**kwargs):
+        raise TimeoutError("Slack unreachable")
+    monkeypatch.setattr(executor_module, "upload_file", fail_upload)
+    result = await run_chart_report()
+    assert "Booked user-days: 3" in result
+    assert "couldn't attach" in result
+    assert "chart attached" not in result
+
+
+def test_daily_chart_only_expands_raw_table_when_explicitly_requested():
+    executor = SkillExecutor()
+    assert not executor._coworking_report_flags("daily coworking chart")["raw_requested"]
+    assert executor._coworking_report_flags("daily coworking chart with raw table")["raw_requested"]
+    assert executor._coworking_report_flags("daily coworking breakdown")["raw_requested"]
+
+
 @pytest.mark.asyncio
 async def test_coworking_report_exact_range_formats_slack_report():
     client = FakeCoworkingReportClient()

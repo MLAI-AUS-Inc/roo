@@ -35,6 +35,7 @@ from ..content_factory_identity import (
     resolve_content_factory_identity_context,
 )
 from ..content_intent import detect_content_action, is_explicit_scan_request
+from ..coworking_charts import render_coworking_chart
 from ..linear_meeting_sources import (
     ParsedSource,
     SourceParseResult,
@@ -13650,7 +13651,12 @@ Chunk {index} source: {label}
     def _coworking_report_flags(self, text: str) -> dict:
         """Identify optional analysis behaviors requested by the user."""
         text_lower = text.lower()
+        chart_requested = bool(re.search(r"\b(?:charts?|graphs?|plots?|trend\s*lines?)\b", text_lower))
         return {
+            "chart_requested": chart_requested,
+            "chart_disabled": bool(re.search(
+                r"\b(?:text[- ]only|(?:no|without)\s+(?:a\s+)?(?:charts?|graphs?|images?))\b", text_lower,
+            )),
             "comparison_requested": bool(
                 re.search(
                     r"\b(?:compare|compared|comparison|versus|vs\.?|prior|previous|week before|month before)\b",
@@ -13658,7 +13664,10 @@ Chunk {index} source: {label}
                 )
             ),
             "detail_requested": bool(re.search(r"\b(?:detail|detailed|breakdown|table)\b", text_lower)),
-            "raw_requested": bool(re.search(r"\b(?:raw|daily|day by day|each day)\b", text_lower)),
+            "raw_requested": bool(
+                re.search(r"\b(?:raw|table)\b", text_lower)
+                or (not chart_requested and re.search(r"\b(?:daily|day by day|each day)\b", text_lower))
+            ),
             "busiest_requested": bool(re.search(r"\b(?:busiest|peak|highest|most used)\b", text_lower)),
             "quietest_requested": bool(re.search(r"\b(?:quietest|lowest|least used)\b", text_lower)),
             "trend_requested": bool(re.search(r"\b(?:trend|trends|pattern|patterns|changed|change)\b", text_lower)),
@@ -14198,6 +14207,44 @@ Chunk {index} source: {label}
         """Format a coworking booking report for Slack."""
         context = self._build_coworking_analysis_context("coworking report", report, None, None)
         return self._format_coworking_analysis_fallback(context)
+
+    async def _upload_coworking_chart(
+        self,
+        report: dict,
+        *,
+        channel_id: str,
+        thread_ts: Optional[str],
+    ) -> str:
+        """Attach the aggregate chart; keep the text report usable on any failure."""
+        from ..utils import get_current_date
+
+        try:
+            png = await asyncio.to_thread(render_coworking_chart, report, today=get_current_date())
+        except Exception as exc:
+            print(f"⚠️ Coworking chart rendering failed: error_type={exc.__class__.__name__}")
+            return "I couldn't render the daily booking chart this time; the text report is still available above."
+
+        report_range = report["range"]
+        start, end = report_range["start_date"], report_range["end_date"]
+        try:
+            response = await asyncio.to_thread(
+                upload_file,
+                channel=channel_id,
+                content=png,
+                filename=f"coworking-usage-{start}-to-{end}.png",
+                title=f"Coworking usage · {start} to {end}",
+                thread_ts=thread_ts,
+            )
+            error = response.get("error", "") if not response.get("ok") else ""
+            if response.get("ok"):
+                return "📈 Daily booking chart attached. Trend: trailing 7-day average where a complete window is available."
+        except Exception as exc:
+            response = getattr(exc, "response", None)
+            error = response.get("error", "") if response is not None else ""
+            print(f"⚠️ Coworking chart upload failed: error_type={exc.__class__.__name__}")
+        if error == "missing_scope":
+            return "I couldn't attach the chart: Roo needs Slack's `files:write` permission. The text report is still available above."
+        return "I couldn't attach the chart to Slack this time; the text report is still available above."
 
     def _resolve_coworking_booking_date(
         self,
@@ -15739,7 +15786,18 @@ Chunk {index} source: {label}
                 comparison_report,
                 comparison_range,
             )
-            return await self._format_coworking_analysis_response(context)
+            message = await self._format_coworking_analysis_response(context)
+            include_chart = self._coerce_optional_bool(params.get("include_chart"))
+            if include_chart is None:
+                include_chart = context["flags"]["chart_requested"]
+            if context["flags"]["chart_disabled"]:
+                include_chart = False
+            if channel_id and include_chart:
+                chart_note = await self._upload_coworking_chart(
+                    report, channel_id=channel_id, thread_ts=thread_ts,
+                )
+                message = f"{message}\n\n{chart_note}"
+            return message
 
         elif action == "admin_checkin_coworking":
             from ..slack_client import get_bot_user_id
