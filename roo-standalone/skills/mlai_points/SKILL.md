@@ -3,8 +3,8 @@ name: mlai-points
 description: Manage MLAI points system - check balance, book coworking, claim tasks, redeem rewards
 routing:
   use_when: >
-    Roo points balances/history, flexes, top-ups, requests, rewards, community tasks,
-    coworking, Slack-Founder Tools linking, and points administration.
+    Roo points, rewards, community tasks, coworking bookings/reports/charts,
+    Slack-Founder Tools linking and points administration.
   avoid_when: >
     Linear tasks or meetings (linear-meeting-actions), event attendance (luma-events),
     meeting rooms, GitHub linking, and founder introductions.
@@ -98,10 +98,11 @@ actions:
       date: {type: string, description: "Preserve the user's date phrase, including any year; the handler resolves natural dates or asks for clarification."}
       target_users: {type: array}
   - name: coworking_report
-    description: Usage report/trends/comparisons for the coworking space.
+    description: Coworking booking reports/charts/trends/comparisons.
     params:
       start_date: {type: string}
       end_date: {type: string}
+      include_chart: {type: boolean, description: "True for requested charts; false for text-only; otherwise omit."}
   - name: list_rewards
     description: Show the rewards catalog.
   - name: request_reward
@@ -206,6 +207,7 @@ Example responses:
 - **date**: Preserve the date phrase for coworking booking, check-in, and availability actions. The handler converts named dates (including `sept 18th` and `18 September`), weekdays, `today`, `tomorrow`, `day after tomorrow`, and `in two days` to YYYY-MM-DD using Roo's configured timezone. Without a year, a named date means its next occurrence. `next Friday` means the next Friday strictly after today; `this Friday` means Friday of this calendar week. Numeric dates with one valid day/month interpretation (such as `16/09/2026`, `09/16/2026`, or `18/9`) are accepted, using a four-digit year when supplied and the next occurrence otherwise. Slash and hyphen separators are supported. Ambiguous numeric dates such as `09/10`, invalid dates, and multiple dates require clarification. Backend booking limits still apply.
 - **start_date**: Start date for coworking reports (YYYY-MM-DD format)
 - **end_date**: End date for coworking reports (YYYY-MM-DD format)
+- **include_chart**: Include the daily booking PNG and seven-day trend only when requested (ordinary reports are text-only; false explicitly suppresses charts)
 - **points**: The number of points to award (integer, positive only)
 - **reason**: A short description of why the points are being awarded or requested
 - **target_user**: A single Slack User ID (e.g., U012ABC) or mention (e.g., <@U012ABC>) of the person receiving points. For single-user awards.
@@ -253,12 +255,13 @@ Parse user messages to identify the action and parameters:
 | `coworking check <date>` | check_coworking | "Is there space on Dec 20?" |
 | `coworking report from <start> to <end>` | coworking_report | "Coworking report from 2026-01-01 to 2026-03-31" |
 | `coworking report <start> <end>` | coworking_report | "Coworking report 2026-01-01 2026-03-31" |
+| `coworking chart/graph/trend line` | coworking_report | "Show daily coworking check-ins for the last 3 months as a chart" |
 | `coworking report this week` | coworking_report | "How many people used the coworking space this week?" |
 | `coworking report last week` | coworking_report | "How many people used the coworking space last week?" |
 | `coworking compare ...` | coworking_report | "How did coworking usage last week compare to the week prior?" |
 | `coworking busiest/quietest ...` | coworking_report | "Which day was busiest for coworking last month?" |
 | `coworking trends/recommendations ...` | coworking_report | "Show coworking trends for the last 3 months and recommendations" |
-| `coworking report last 3/6 months` | coworking_report | "Coworking report last 3 months" |
+| `coworking report last 3/6/12 months` | coworking_report | "Coworking report last 3 months" |
 | `coworking report last year` | coworking_report | "Coworking report last year" |
 | `coworking book <date/today>` | book_coworking | "Book me in", "Book me in for today", "@Roo coworking book" |
 | `check/book <@USER...> in <date/today>` | admin_checkin_coworking | (Admin) "Check <@U123> in", "Book <@U123> <@U456> in today", "Check <@U123>, <@U456>, <@U789> in tomorrow" |
@@ -319,7 +322,13 @@ For super admin actions (promote admin, revoke admin, change allowance):
 For coworking report actions:
 - Roo must fail fast unless the requester is a full Points Admin or report-only partner
 - Count only active bookings (`status=booked`), not cancelled bookings
-- Support exact inclusive date ranges and presets: this week, last week, last 3 months, last 6 months, last year
+- Ordinary reports are text-only. Attach a PNG of daily booked people and the trailing seven-calendar-day average to the same Slack channel/thread only when the user asks for a chart, graph, plot or trend line (`include_chart: true`); explicit text-only requests or `include_chart: false` suppress it
+- Generate only the requested range (including last 3, 6 or 12 months); do not automatically add other lookback reports or schedule recurring reports
+- Call the metric booked people, never verified attendance or door check-ins: the current API contains bookings, including those created by Roo's admin check-in command
+- Preserve zero-booking days and show missing data as gaps; compute the trend only for complete seven-day windows
+- A daily chart request does not require a long daily text table unless the user also requests raw data or a table
+- If rendering or Slack upload fails, return the text report with a short explanation; never claim an image was attached when upload failed
+- Support exact inclusive date ranges and presets: this week, last week, last 3 months, last 6 months, last 12 months, last year
 - Format the response insight-first, with compact detail tables only when useful or requested
 - For comparison/trend/recommendation questions, compute report metrics deterministically from backend JSON, then use GPT-5.4 only to explain the bounded numbers
 - Label broader suggestions as interpretation or recommendations, never as measured attendance facts

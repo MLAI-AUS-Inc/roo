@@ -27,6 +27,7 @@ httpx>=0.25.0
 python-dotenv>=1.0.0
 PyMuPDF>=1.24.0
 python-docx>=1.1.0
+matplotlib>=3.8.0,<4.0
 
 # Testing
 pytest>=7.4.0

@@ -180,23 +180,25 @@ def delete_message(channel: str, message_ts: str) -> Dict[str, Any]:
 
 def upload_file(
     channel: str,
-    content: str,
+    content: str | bytes,
     filename: str,
     title: Optional[str] = None,
     thread_ts: Optional[str] = None,
     initial_comment: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    Upload an in-memory text file to Slack.
+    Upload an in-memory text or binary file to Slack.
 
     Requires the Slack bot token to have the files:write scope.
     """
     client = get_slack_client()
 
     try:
+        # Binary images/workbooks use the SDK file path; content is for text.
+        payload = {"file": content} if isinstance(content, bytes) else {"content": content}
         response = client.files_upload_v2(
             channel=channel,
-            content=content,
+            **payload,
             filename=filename,
             title=title or filename,
             thread_ts=thread_ts,
@@ -210,12 +212,12 @@ def upload_file(
                 f"in_thread={bool(thread_ts)}"
             )
         else:
-            print(f"❌ Failed to upload file: {response}")
+            print("❌ Failed to upload file: reason_code=slack_api_error")
 
         return response
 
     except Exception as e:
-        print(f"❌ Slack file upload error: {e}")
+        print(f"❌ Slack file upload error: error_type={e.__class__.__name__}")
         raise
 
 
