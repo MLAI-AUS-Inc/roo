@@ -12605,7 +12605,7 @@ Chunk {index} source: {label}
             or hostname.endswith(".")
             or parsed.username
             or parsed.password
-            or parsed.path != "/founder-tools/link-roo"
+            or parsed.path not in {"/founder-tools/link-roo", "/my-startup/link-roo"}
             or parsed.fragment
             or port is None and parsed.netloc.endswith(":")
             or len(query) != 1

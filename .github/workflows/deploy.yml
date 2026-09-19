@@ -379,7 +379,7 @@ jobs:
             upsert_env "ROO_POINTS_STRIPE_CHECKOUT_HOSTS" "checkout.stripe.com"
             upsert_env "MEETING_ROOM_BOOKING_ENABLED" "$MEETING_ROOM_BOOKING_ENABLED"
             upsert_env "OFFICE_MANAGER_ACTIONS_ENABLED" "$OFFICE_MANAGER_ACTIONS_ENABLED"
-            upsert_env "FOUNDER_TOOLS_LINK_ORIGINS" "https://mlai.au"
+            upsert_env "FOUNDER_TOOLS_LINK_ORIGINS" "https://mlai.au,https://chat.mlai.au"
             upsert_env "FOUNDER_ACCOUNT_LINK_ENABLED" "$FOUNDER_ACCOUNT_LINK_ENABLED"
             implicit_actions="respond_in_chat,mlai-points:balance,mlai-points:topup_points"
             if [ "$FOUNDER_ACCOUNT_LINK_ENABLED" = "true" ]; then

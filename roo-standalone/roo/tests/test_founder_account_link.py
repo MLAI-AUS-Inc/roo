@@ -538,3 +538,13 @@ async def test_malformed_success_payload_is_rejected_without_delivery(
         "I couldn't create a trusted Founder Tools account link right now. "
         "Please try `link` again shortly."
     )
+
+
+def test_chat_startup_link_uses_same_strict_token_and_origin_checks():
+    from types import SimpleNamespace
+    settings = SimpleNamespace(founder_tools_link_origins={"https://mlai.au", "https://chat.mlai.au"}, is_production=True)
+    validator = executor_module.SkillExecutor._is_safe_founder_account_link_url
+    assert validator(f"https://chat.mlai.au/my-startup/link-roo?token={LINK_TOKEN}", settings=settings)
+    assert not validator(f"https://chat.mlai.au.evil/my-startup/link-roo?token={LINK_TOKEN}", settings=settings)
+    assert not validator(f"https://chat.mlai.au/my-startup/link-roo?token={LINK_TOKEN}&next=/", settings=settings)
+    assert not validator(f"https://chat.mlai.au/my-startup/link-roo/extra?token={LINK_TOKEN}", settings=settings)
