@@ -94,6 +94,7 @@ from .office_manager_actions import (
     office_manager_action_retry_loop,
     process_office_manager_action,
 )
+from .coworking_snapshot import handle_command as handle_coworking_command
 from .coworking_booking_intents import (
     coworking_booking_retry_loop,
     get_coworking_intent_store,
@@ -3813,12 +3814,31 @@ async def slack_commands(
         settings,
         channel_id=form.get("channel_id"),
         user_id=user_id,
-        channel_type=None,
+        channel_type=(
+            "im" if command == "/coworking-today" and str(form.get("channel_id") or "").startswith("D")
+            else None
+        ),
     ):
         return {
             "response_type": "ephemeral",
             "text": "This Roo deployment is not available in this context.",
         }
+    if command == "/coworking-today":
+        from .clients.mlai_backend import MLAIBackendClient
+
+        # Do not fall back to a generic/internal credential for this private read.
+        if not settings.ROO_API_KEY or not settings.MLAI_BACKEND_URL:
+            return {
+                "response_type": "ephemeral",
+                "text": "Couldn't load coworking bookings. Please try again.",
+            }
+        client = MLAIBackendClient(
+            base_url=settings.MLAI_BACKEND_URL,
+            api_key=settings.ROO_API_KEY,
+            surface=settings.ROO_SURFACE,
+        )
+        return await handle_coworking_command(text, user_id, client)
+
     if settings.ROO_SURFACE == "admin":
         return {
             "response_type": "ephemeral",
