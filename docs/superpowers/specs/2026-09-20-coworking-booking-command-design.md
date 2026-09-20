@@ -17,10 +17,12 @@ Admins need a quick list of people booked into the coworking space, separate fro
 
 Example:
 
-> Coworking bookings · 21 September 2026  
-> 3 people booked  
-> Alice Smith  
-> Ben Jones  
-> Casey Lee
+```text
+Coworking bookings · 21 September 2026
+3 people booked
+Alice Smith
+Ben Jones
+Casey Lee
+```
 
 Implementation details proposed by the plan: a small dedicated read endpoint, strict ISO date validation, a bounded synchronous Slack response, and a narrow exception for this read-only command on the admin surface. These details are for review with the plan.
