@@ -1,64 +1,70 @@
 # Private coworking booking list
 
-Admins can use `/coworking-today` for today's active bookings, or
-`/coworking-today 2026-09-21` for a specific date. Today uses Australia/Melbourne,
-including daylight saving. The reply lists names and the number of people
-booked, and is visible only to the requester. This reports bookings, not who
-physically arrived or remains in the office.
+Send a message using Slack's actual Roo mention:
 
-This is a deterministic command: no Roo AI routing, prompts, report generation,
-or booking writes. Cancelled bookings are excluded. Empty dates explicitly say
-there are no active bookings. A failed lookup is an error, never an empty list.
-The backend supplies active Points Admin authorisation for admin, committee and
-portfolio-lead roles, plus existing configured bootstrap admins. A partner's
-permission to request ordinary coworking reports does not grant this command.
+```text
+@Roo coworking-today
+@Roo coworking-today 2026-09-21
+```
 
-## Service configuration
+Today uses Australia/Melbourne, including daylight saving. The reply lists the
+names and number of people with active bookings. It reports bookings, not who
+physically arrived or remains in the office. Cancelled bookings are excluded;
+empty dates explicitly say there are no active bookings.
+
+The request is an ordinary message visible to the conversation's members.
+**The result is private to the requester.** In a channel, Roo sends a private
+reply at channel level. In an existing thread, it sends that private reply in
+the same thread. Roo must have access to the conversation; this is not a command
+that can be run from arbitrary DMs with other people. In a DM to Roo, include
+the explicit mention too. Select the real Roo user from Slack's mention picker;
+typing plain text that merely looks like `@Roo` does not count as a mention.
+
+## Deterministic behaviour
+
+The event handler intercepts a leading Roo mention followed by the exact
+`coworking-today` token before AI, contextual conversation or meeting-room
+routing. It validates the optional `YYYY-MM-DD`, calls the separate booking-list
+endpoint and formats the result directly. Extra arguments or invalid dates get
+fixed usage instructions. Other messages retain normal Roo behaviour.
+
+The backend checks the current full Points Admin policy: active admin, committee
+or portfolio-lead roles, plus existing configured bootstrap admins. Partner-only
+report access does not grant this command. Being a Slack workspace admin alone
+is insufficient. Failed lookups return private errors, never an empty list.
+
+Names are literal text, so stored names cannot trigger Slack mentions. Long
+lists are split into blocks; over-limit lists give an explicit error rather than
+dropping names silently. The existing two-second lookup budget is retained.
+
+## Service configuration and rollout
 
 Deploy the backend endpoint before Roo:
 `GET /api/v1/points/coworking/bookings-for-date/` with `slack_user_id` from the
-verified Slack payload and a strict ISO `date`. Set Roo's `MLAI_BACKEND_URL` and
-its dedicated `ROO_API_KEY` to match the backend. Generic/internal credential
-fallback is deliberately disabled for this command. Never add Admin Roo's
-organisational-memory key to the public runtime.
+verified event and a strict ISO `date`. Set Roo's `MLAI_BACKEND_URL` and dedicated
+`ROO_API_KEY` to match the backend. Generic/internal credential fallback is
+not used. Keep Public Roo and Admin Roo credentials separate.
 
-Signed requests, replay protection and deployment context allowlists remain in
-force. Admin Roo permits this one command in its allowed channels, or in direct
-messages from `ROO_ALLOWED_DM_USER_IDS`. A signed `D…` channel ID identifies the
-DM for this command. Other admin slash commands retain their existing gates.
+Use Roo's existing Events API subscription to `app_mention` (and `message.im`
+for DMs), with `chat:write` for private replies. **No new slash command needs
+registration.** `/coworking-today` is retired; if a stale registration still
+exists, it returns private guidance only. Remove that registration during an
+authorised rollout if it was previously added.
 
-The lookup has a two-second total budget and no transport retries. Slow or
-unavailable backends produce a private retry message, with no delayed public
-message. Stored names are rendered as literal text, so names cannot trigger
-Slack mentions. Long lists are split into blocks; an over-limit list produces an
-explicit error instead of dropping people silently.
+Signed requests, event receipts and deployment context allowlists remain in
+force. Admin Roo still limits access to allowed channels and DM users. The bot
+mention must match the bot ID obtained from that deployment's Slack identity.
+The channel's `app_mention` event owns delivery; its duplicate `message` event
+is ignored so the same request does not also enter AI routing.
 
-## Slack registration (rollout step)
+Roo's existing event lease requests Slack retries until background processing
+finishes. Successful delivery completes the receipt; a failed private delivery
+releases it for retry. No failure falls back to a public reply or AI. Private
+Slack messages are ephemeral and their delivery is not guaranteed by Slack.
 
-Register the command in the **one existing Slack app** whose signed requests
-reach the chosen Roo deployment. Do not register competing copies on Public
-and Admin Roo apps in the same workspace.
-
-| Setting | Value |
-| --- | --- |
-| Command | `/coworking-today` |
-| Request URL | Chosen deployment's verified **HTTPS** `/slack/commands` URL |
-| Description | Privately list coworking bookings for a date |
-| Usage hint | `[YYYY-MM-DD]` |
-| Escape channels, users, and links | Off |
-| OAuth scope | `commands` (already requested by Roo) |
-
-The tracked `slack-app-manifests/roo-public.yaml` currently contains legacy HTTP
-addresses. Do not copy that address for this private command or guess a TLS
-hostname. During an authorised rollout, export the selected app's actual
-manifest, verify its HTTPS command endpoint, and add the command entry to its
-`features.slash_commands`, preserving other entries. Save that verified manifest
-back to the tracked file if Public Roo is the selected app. For an Admin Roo
-app, update its own manifest; never replace the public app's configuration with
-admin configuration. Reinstall only if Slack requires it. No additional
-message scopes or `response_url` delivery are needed.
-
-Registration and deployment have not been performed by this change.
+The tracked manifest contains legacy HTTP addresses; verify the selected app's
+HTTPS Events API URL during rollout, and do not copy a legacy address or guess
+a TLS hostname. This change has not deployed or updated any live Slack app.
 
 ## Validation
 
@@ -67,28 +73,26 @@ From `roo-standalone`, with synthetic credentials only:
 ```sh
 SLACK_BOT_TOKEN=xoxb-test SLACK_SIGNING_SECRET=test OPENAI_API_KEY=test \
   .venv/bin/python -m pytest roo/tests/test_coworking_snapshot.py \
-  roo/tests/test_slack_security.py roo/tests/test_surface_security.py -q
+  roo/tests/test_coworking_snapshot_mentions.py roo/tests/test_slack_security.py \
+  roo/tests/test_surface_security.py -q
 ```
 
-After obtaining the backend repository's required approval for disposable test
-migrations, run its `tests.test_coworking_snapshot` and existing
-`roo.tests.CoworkingServiceTests` with the Django test runner and isolated SQLite
-settings. No model change or new migration is required.
+After the backend repository's required approval for disposable migrations,
+run its `tests.test_coworking_snapshot` plus coworking service, API and report
+regressions. No new migration or model change is required.
 
-Before enabling in a real workspace, use authorised staging fixtures to verify:
+Before enabling in a real workspace, verify with authorised staging fixtures:
 
-- An admin sees only active bookings for the selected date, privately, even
-  when the command is invoked in a public channel.
-- A non-admin or deactivated admin gets denial, with no names.
+- Admin channel and thread requests get private active-booking lists.
+- Non-admins and deactivated admins get only private denial.
+- Wrong-bot mentions, duplicate message events and retries do not leak or
+  duplicate results; no AI processing occurs for matched commands.
 - Invalid arguments show usage; empty dates say no active bookings.
-- Allowlisted Admin Roo DMs work; non-allowlisted contexts are denied.
-- A delayed backend returns a private retry response before Slack's deadline.
-- The existing coworking reports continue to work independently.
+- Allowlisted Admin Roo channels/DMs work; other contexts are ignored.
+- Backend and delivery failures never produce a public result.
+- Ordinary coworking reports still work independently.
 
-Slack's [slash-command documentation](https://docs.slack.dev/interactivity/implementing-slash-commands/)
-specifies the three-second acknowledgement deadline and ephemeral replies.
-The local handler tests cover a delayed backend; deployment latency still
-needs staging verification.
-
-Rollback: remove this slash-command registration from the selected Slack app.
-The additive read-only backend endpoint may remain deployed.
+Slack documents private replies and the requirement for an existing active
+thread in [chat.postEphemeral](https://docs.slack.dev/reference/methods/chat.postEphemeral/).
+Staging delivery checks remain necessary. To roll back this entry point, revert
+the mention-routing change; the read-only backend endpoint can remain deployed.

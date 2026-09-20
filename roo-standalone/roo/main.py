@@ -94,7 +94,10 @@ from .office_manager_actions import (
     office_manager_action_retry_loop,
     process_office_manager_action,
 )
-from .coworking_snapshot import handle_command as handle_coworking_command
+from .coworking_snapshot_mentions import (
+    parse_command as parse_coworking_mention,
+    handle_mention as handle_coworking_mention,
+)
 from .coworking_booking_intents import (
     coworking_booking_retry_loop,
     get_coworking_intent_store,
@@ -3249,6 +3252,19 @@ async def slack_events(
         await _complete_slack_event_receipt(request)
         return JSONResponse(status_code=200, content={})
 
+    if event_type in {"app_mention", "message"} and parse_coworking_mention(str(event.get("text") or "")) is not None:
+        # Channel message subscriptions can deliver the same mention separately.
+        # app_mention owns channel requests; message.im owns explicit DM requests.
+        if (
+            not event.get("bot_id") and not event.get("subtype")
+            and event.get("user") and event.get("channel")
+            and (event_type == "app_mention" or event.get("channel_type") == "im")
+        ):
+            _start_slack_event_task(request, handle_coworking_mention(event, settings))
+            return _slack_event_response(request, work_pending=True)
+        await _complete_slack_event_receipt(request)
+        return JSONResponse(status_code=200, content={})
+
     if getattr(settings, "ROO_SURFACE", "public") == "admin":
         is_admin_dm = (
             event_type == "message"
@@ -3814,30 +3830,17 @@ async def slack_commands(
         settings,
         channel_id=form.get("channel_id"),
         user_id=user_id,
-        channel_type=(
-            "im" if command == "/coworking-today" and str(form.get("channel_id") or "").startswith("D")
-            else None
-        ),
+        channel_type=None,
     ):
         return {
             "response_type": "ephemeral",
             "text": "This Roo deployment is not available in this context.",
         }
     if command == "/coworking-today":
-        from .clients.mlai_backend import MLAIBackendClient
-
-        # Do not fall back to a generic/internal credential for this private read.
-        if not settings.ROO_API_KEY or not settings.MLAI_BACKEND_URL:
-            return {
-                "response_type": "ephemeral",
-                "text": "Couldn't load coworking bookings. Please try again.",
-            }
-        client = MLAIBackendClient(
-            base_url=settings.MLAI_BACKEND_URL,
-            api_key=settings.ROO_API_KEY,
-            surface=settings.ROO_SURFACE,
-        )
-        return await handle_coworking_command(text, user_id, client)
+        return {
+            "response_type": "ephemeral",
+            "text": "Use @Roo coworking-today [YYYY-MM-DD] in a message instead.",
+        }
 
     if settings.ROO_SURFACE == "admin":
         return {

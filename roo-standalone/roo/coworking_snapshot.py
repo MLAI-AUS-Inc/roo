@@ -14,7 +14,7 @@ from .clients.mlai_backend import MLAIBackendClient
 logger = logging.getLogger(__name__)
 MELBOURNE = ZoneInfo('Australia/Melbourne')
 LOOKUP_BUDGET = 2.0
-USAGE = 'Usage: /coworking-today [YYYY-MM-DD]'
+USAGE = 'Usage: @Roo coworking-today [YYYY-MM-DD]'
 LOAD_ERROR = "Couldn't load coworking bookings. Please try again."
 TOO_LARGE = 'The booking list is too large to display safely in Slack. Please contact the Roo maintainer.'
 

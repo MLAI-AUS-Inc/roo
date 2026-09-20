@@ -1,5 +1,9 @@
 # Coworking command implementation evidence
 
+Historical evidence for the original slash-command version. The subsequently
+approved mention entry point is documented in
+[the current guide](../../../roo-standalone/docs/coworking-today-command.md).
+
 Implemented on `codex/coworking-booking-command` in both repositories, starting
 from current `origin/main` snapshots. Code commits:
 
@@ -62,3 +66,24 @@ Reviewer exclusions were resolved as follows:
   as explicit release gates. The command is not live until those are completed.
 - Preserve existing authorization and replay mechanisms rather than redesign
   them. This change does not claim to repair unrelated pre-existing weaknesses.
+
+## Approved mention follow-up
+
+The user subsequently approved replacing the slash-command entry point with
+`@Roo coworking-today [YYYY-MM-DD]`. The backend contract is unchanged.
+
+- Real leading bot mention and exact command token are required.
+- Matched commands bypass AI/contextual routing; malformed arguments get usage.
+- Channel and existing-thread results remain private; channel message copies
+  and completed event retries do not trigger another reply.
+- Failed private delivery releases the existing receipt for retry, never for
+  public fallback. A stale slash registration only shows mention guidance.
+- Focused tests: **119 passed**. Full Roo suite: **2,085 passed**, with the same
+  upstream Starlette/AnyIO deprecation warning.
+- Independent follow-up review: **no actionable findings**; ready to merge.
+
+Live scopes/subscriptions/delivery remain staging checks. The review preserves
+existing event-lease crash/uncertain-delivery behaviour and bootstrap-admin
+policy; it does not claim exactly-once Slack delivery or redesign those shared
+mechanisms. No new backend runtime changes, migrations, external messages,
+production configuration, or deployments were made in this follow-up.

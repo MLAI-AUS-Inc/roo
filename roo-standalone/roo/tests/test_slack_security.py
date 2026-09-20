@@ -866,113 +866,20 @@ def test_threaded_internal_reply_requires_public_service_credential(tmp_path, mo
     post.assert_called_once()
 
 
-@pytest.fixture
-def coworking_command_setup(tmp_path, monkeypatch):
+def test_retired_coworking_slash_command_only_gives_mention_guidance(tmp_path, monkeypatch):
     from unittest.mock import AsyncMock
-    import httpx
     from roo.clients.mlai_backend import MLAIBackendClient
 
-    backend = AsyncMock(return_value=httpx.Response(200,
-        request=httpx.Request('GET', 'https://backend.example.test/'),
-        json={'date':'2026-09-21', 'count':1, 'people':[{'user_id':'42', 'name':'Alice Smith'}]}))
+    configured = _settings(tmp_path)
+    main_module.app.dependency_overrides[get_settings] = lambda: configured
+    backend = AsyncMock(side_effect=AssertionError("Retired slash command must not call backend"))
     monkeypatch.setattr(MLAIBackendClient, '_request', backend)
-    def no_agent(*args, **kwargs):
-        raise AssertionError('Coworking command must never invoke AI')
-    monkeypatch.setattr(main_module, 'get_agent', no_agent)
-
-    def post(*, surface='public', channel='C123', actor='UADMIN', text='2026-09-21',
-             command='/coworking-today', tamper=False, duplicate=False, **overrides):
-        configured = _settings(tmp_path, ROO_SURFACE=surface, ROO_ALLOWED_CHANNEL_IDS='GADMIN123',
-            ROO_ALLOWED_DM_USER_IDS='UADMIN', MLAI_BACKEND_URL='https://backend.example.test',
-            **{'ROO_API_KEY':'synthetic-roo-key', **overrides})
-        main_module.app.dependency_overrides[get_settings] = lambda: configured
-        body = urlencode({'command':command, 'text':text, 'user_id':actor, 'channel_id':channel}).encode()
-        headers = _signed_headers(configured.SLACK_SIGNING_SECRET, int(time.time()), body,
-                                  'application/x-www-form-urlencoded')
-        client = TestClient(main_module.app)
-        response = client.post('/slack/commands', content=body + (b'X' if tamper else b''), headers=headers)
-        if duplicate:
-            repeated = client.post('/slack/commands', content=body, headers=headers)
-            assert repeated.json() == {}
-        return response
-    return post, backend
-
-
-@pytest.mark.parametrize(('surface','channel'), [('public','C123'),('admin','GADMIN123'),('admin','D123')])
-def test_coworking_command_returns_private_names_without_ai(coworking_command_setup, surface, channel):
-    post, backend = coworking_command_setup
-    response = post(surface=surface, channel=channel, duplicate=True)
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload['response_type'] == 'ephemeral'
-    assert '1 person booked' in payload['text']
-    assert 'Alice Smith' in payload['blocks'][0]['text']['text']
-    assert payload['blocks'][0]['text']['type'] == 'plain_text'
-    backend.assert_awaited_once()
-    assert backend.call_args.kwargs['params'] == {'slack_user_id':'UADMIN','date':'2026-09-21'}
-
-
-def test_coworking_command_preserves_context_allowlist(coworking_command_setup):
-    post, backend = coworking_command_setup
-    response = post(surface='admin', channel='CPUBLIC123')
+    # Even unrelated command text must not escape into the old GitHub handler.
+    body = urlencode({'command':'/coworking-today','text':'connect github',
+                      'user_id':'UADMIN','channel_id':'C123'}).encode()
+    headers = _signed_headers(configured.SLACK_SIGNING_SECRET, int(time.time()), body,
+                              'application/x-www-form-urlencoded')
+    response = TestClient(main_module.app).post('/slack/commands', content=body, headers=headers)
     assert response.json()['response_type'] == 'ephemeral'
-    assert 'not available' in response.json()['text']
-    backend.assert_not_awaited()
-
-
-def test_coworking_command_rejects_tampered_signature(coworking_command_setup):
-    post, backend = coworking_command_setup
-    assert post(tamper=True).status_code == 403
-    backend.assert_not_awaited()
-
-
-def test_coworking_command_does_not_enable_other_admin_commands(coworking_command_setup):
-    post, backend = coworking_command_setup
-    response = post(surface='admin', channel='GADMIN123', command='/roo', text='hello')
-    assert 'not enabled' in response.json()['text']
-    backend.assert_not_awaited()
-
-
-def test_coworking_arguments_cannot_trigger_github_or_spoof_actor(coworking_command_setup):
-    post, backend = coworking_command_setup
-    response = post(text='connect github UOTHER')
-    assert 'Usage:' in response.json()['text']
-    backend.assert_not_awaited()
-
-
-def test_coworking_requires_dedicated_key(coworking_command_setup):
-    post, backend = coworking_command_setup
-    response = post(ROO_API_KEY='', MLAI_API_KEY='generic-must-not-be-used')
-    assert response.json()['response_type'] == 'ephemeral'
-    assert "Couldn't load" in response.json()['text']
-    backend.assert_not_awaited()
-
-
-def test_coworking_slow_backend_returns_private_retry_before_slack_deadline(coworking_command_setup):
-    import asyncio
-    post, backend = coworking_command_setup
-    async def slow(*args, **kwargs):
-        await asyncio.sleep(10)
-    backend.side_effect = slow
-    start = time.monotonic()
-    response = post()
-    assert time.monotonic() - start < 3
-    assert response.json()['response_type'] == 'ephemeral'
-    assert 'try again' in response.json()['text']
-
-
-def test_coworking_backend_denial_is_private(coworking_command_setup):
-    import httpx
-    post, backend = coworking_command_setup
-    backend.return_value = httpx.Response(403, request=httpx.Request('GET', 'https://backend.example.test/'))
-    response = post(actor='UNONADMIN')
-    assert response.json()['response_type'] == 'ephemeral'
-    assert 'Only active' in response.json()['text']
-    assert 'Alice Smith' not in response.text
-
-
-def test_coworking_admin_dm_requires_allowlisted_actor(coworking_command_setup):
-    post, backend = coworking_command_setup
-    response = post(surface='admin', channel='D123', actor='UOUTSIDER')
-    assert 'not available' in response.json()['text']
-    backend.assert_not_awaited()
+    assert '@Roo coworking-today' in response.json()['text']
+    backend.assert_not_called()
