@@ -1,4 +1,4 @@
-"""Private, deterministic coworking booking list (no AI or booking writes)."""
+"""Deterministic coworking booking list (no AI or booking writes)."""
 from __future__ import annotations
 
 import asyncio
@@ -54,7 +54,7 @@ def render_snapshot(data: dict, day: date) -> dict:
     if len(chunks) > 45:
         return private(TOO_LARGE)
     return {
-        'response_type': 'ephemeral',
+        'response_type': 'in_channel',
         # Names stay in plain-text blocks, never in the mrkdwn fallback.
         'text': heading + ' — ' + summary + (' — No active bookings for this date.' if not count else ''),
         'blocks': [{'type': 'section', 'text': {'type': 'plain_text', 'text': chunk}} for chunk in chunks],

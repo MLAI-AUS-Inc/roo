@@ -1,4 +1,4 @@
-"""Signed mention delivery stays private and never enters model routing."""
+"""Signed mention delivery shares successful reports and never enters model routing."""
 import asyncio
 import hashlib
 import hmac
@@ -29,6 +29,9 @@ def setup(tmp_path, monkeypatch):
     monkeypatch.setattr('roo.slack_client.get_channel_id', lambda name: None)
     private = Mock(return_value={'ok':True})
     monkeypatch.setattr(mentions, 'post_ephemeral', private)
+    public = Mock(return_value={'ok':True})
+    monkeypatch.setattr(mentions, 'post_message', public)
+    private.public = public
     forbidden = AsyncMock(side_effect=AssertionError('AI/normal routing must not run'))
     for name in ['_handle_app_mention_with_room_choice','_handle_public_message_with_room_choice','_handle_mention']:
         monkeypatch.setattr(runtime, name, forbidden)
@@ -56,17 +59,18 @@ async def send(data, *, event_id='Ev1', tamper=False):
 
 
 @pytest.mark.parametrize('thread', [None, '100.001'])
-def test_channel_and_thread_return_private_plain_text(setup, thread):
+def test_channel_and_thread_return_visible_plain_text(setup, thread):
     _, backend, private, forbidden = setup
     result = asyncio.run(send(event(**({'thread_ts':thread} if thread else {}))))
-    # Roo's existing event lease asks Slack to retry until private delivery is
+    # Roo's existing event lease asks Slack to retry until delivery is
     # complete, then acknowledges without running the command again.
     assert result.status_code == 503
     assert asyncio.run(send(event(**({'thread_ts':thread} if thread else {})))).status_code == 200
-    private.assert_called_once()
-    reply = private.call_args.kwargs
-    assert reply['channel'] == 'C123' and reply['user'] == 'UADMIN'
-    assert reply['thread_ts'] == thread  # roots must not create invisible ephemeral threads
+    private.assert_not_called()
+    private.public.assert_called_once()
+    reply = private.public.call_args.kwargs
+    assert reply['channel'] == 'C123' and 'user' not in reply
+    assert reply['thread_ts'] == thread
     assert reply['blocks'][0]['text']['type'] == 'plain_text'
     assert 'Alice <@UEVERYONE>' in reply['blocks'][0]['text']['text']
     assert backend.call_args.kwargs['params'] == {'slack_user_id':'UADMIN','date':'2026-09-21'}
@@ -109,7 +113,8 @@ def test_duplicate_channel_message_and_retries_do_not_duplicate_reply(setup):
         await send(event(), event_id='EvMention')
     asyncio.run(run())
     backend.assert_awaited_once()
-    private.assert_called_once()
+    private.assert_not_called()
+    private.public.assert_called_once()
     forbidden.assert_not_called()
 
 
@@ -119,7 +124,8 @@ def test_admin_dm_allowlist_and_explicit_mention(setup, allowed):
     configured.ROO_SURFACE='admin'
     configured.ROO_ALLOWED_DM_USER_IDS='UADMIN' if allowed else 'UOTHER'
     asyncio.run(send(event(type='message', channel_type='im', channel='D123')))
-    assert private.call_count == int(allowed)
+    assert private.public.call_count == int(allowed)
+    private.assert_not_called()
     assert backend.await_count == int(allowed)
     forbidden.assert_not_called()
 
@@ -146,6 +152,7 @@ def test_denied_admin_receives_private_denial_without_names(setup):
     _, backend, private, forbidden = setup
     backend.return_value = httpx.Response(403,request=httpx.Request('GET','https://backend.example.test'))
     asyncio.run(send(event()))
+    private.public.assert_not_called()
     assert 'Only active' in private.call_args.kwargs['text']
     assert not private.call_args.kwargs.get('blocks')
     forbidden.assert_not_called()
@@ -161,14 +168,15 @@ def test_missing_key_fails_privately_without_fallback(setup):
     forbidden.assert_not_called()
 
 
-def test_failed_private_delivery_releases_receipt_for_retry_without_ai(setup):
+def test_failed_public_delivery_releases_receipt_for_retry_without_ai(setup):
     _, backend, private, forbidden = setup
-    private.side_effect = [{'ok':False}, {'ok':True}]
+    private.public.side_effect = [{'ok':False}, {'ok':True}]
     async def run():
         await send(event())
         await send(event())
     asyncio.run(run())
-    assert private.call_count == 2
+    assert private.public.call_count == 2
+    private.assert_not_called()
     forbidden.assert_not_called()
 
 
@@ -201,6 +209,7 @@ def test_backend_failure_stays_private_in_existing_thread(setup):
     _, backend, private, normal = setup
     backend.side_effect = httpx.ConnectError('sensitive backend diagnostic')
     asyncio.run(send(event(thread_ts='100.001')))
+    private.public.assert_not_called()
     assert 'try again' in private.call_args.kwargs['text']
     assert 'sensitive' not in private.call_args.kwargs['text']
     assert private.call_args.kwargs['thread_ts'] == '100.001'
