@@ -864,3 +864,22 @@ def test_threaded_internal_reply_requires_public_service_credential(tmp_path, mo
     assert allowed.status_code == 200
     assert allowed.json()["reply_delivered"] is True
     post.assert_called_once()
+
+
+def test_retired_coworking_slash_command_only_gives_mention_guidance(tmp_path, monkeypatch):
+    from unittest.mock import AsyncMock
+    from roo.clients.mlai_backend import MLAIBackendClient
+
+    configured = _settings(tmp_path)
+    main_module.app.dependency_overrides[get_settings] = lambda: configured
+    backend = AsyncMock(side_effect=AssertionError("Retired slash command must not call backend"))
+    monkeypatch.setattr(MLAIBackendClient, '_request', backend)
+    # Even unrelated command text must not escape into the old GitHub handler.
+    body = urlencode({'command':'/coworking-today','text':'connect github',
+                      'user_id':'UADMIN','channel_id':'C123'}).encode()
+    headers = _signed_headers(configured.SLACK_SIGNING_SECRET, int(time.time()), body,
+                              'application/x-www-form-urlencoded')
+    response = TestClient(main_module.app).post('/slack/commands', content=body, headers=headers)
+    assert response.json()['response_type'] == 'ephemeral'
+    assert '@Roo coworking-today' in response.json()['text']
+    backend.assert_not_called()

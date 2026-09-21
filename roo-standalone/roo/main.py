@@ -94,6 +94,10 @@ from .office_manager_actions import (
     office_manager_action_retry_loop,
     process_office_manager_action,
 )
+from .coworking_snapshot_mentions import (
+    parse_command as parse_coworking_mention,
+    handle_mention as handle_coworking_mention,
+)
 from .coworking_booking_intents import (
     coworking_booking_retry_loop,
     get_coworking_intent_store,
@@ -3248,6 +3252,19 @@ async def slack_events(
         await _complete_slack_event_receipt(request)
         return JSONResponse(status_code=200, content={})
 
+    if event_type in {"app_mention", "message"} and parse_coworking_mention(str(event.get("text") or "")) is not None:
+        # Channel message subscriptions can deliver the same mention separately.
+        # app_mention owns channel requests; message.im owns explicit DM requests.
+        if (
+            not event.get("bot_id") and not event.get("subtype")
+            and event.get("user") and event.get("channel")
+            and (event_type == "app_mention" or event.get("channel_type") == "im")
+        ):
+            _start_slack_event_task(request, handle_coworking_mention(event, settings))
+            return _slack_event_response(request, work_pending=True)
+        await _complete_slack_event_receipt(request)
+        return JSONResponse(status_code=200, content={})
+
     if getattr(settings, "ROO_SURFACE", "public") == "admin":
         is_admin_dm = (
             event_type == "message"
@@ -3819,6 +3836,12 @@ async def slack_commands(
             "response_type": "ephemeral",
             "text": "This Roo deployment is not available in this context.",
         }
+    if command == "/coworking-today":
+        return {
+            "response_type": "ephemeral",
+            "text": "Use @Roo coworking-today [YYYY-MM-DD] in a message instead.",
+        }
+
     if settings.ROO_SURFACE == "admin":
         return {
             "response_type": "ephemeral",
