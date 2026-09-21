@@ -7,7 +7,7 @@ import re
 from .clients.mlai_backend import MLAIBackendClient
 from .config import Settings
 from .coworking_snapshot import LOAD_ERROR, handle_command, private
-from .slack_client import get_bot_user_id, post_ephemeral
+from .slack_client import get_bot_user_id, post_ephemeral, post_message
 
 _COMMAND = re.compile(r'\A\s*<@([A-Z0-9]+)>\s+coworking-today(?:\s+(.*))?\s*\Z', re.DOTALL)
 
@@ -35,16 +35,18 @@ async def handle_mention(event: dict, settings: Settings) -> None:
         client = MLAIBackendClient(base_url=settings.MLAI_BACKEND_URL,
             api_key=settings.ROO_API_KEY, surface=settings.ROO_SURFACE)
         result = await handle_command(arguments, str(event.get('user') or ''), client)
+    successful = result['response_type'] == 'in_channel'
+    destination = {'channel': event['channel']}
+    if not successful:
+        destination['user'] = event['user']
     response = await asyncio.to_thread(
-        post_ephemeral,
-        channel=event['channel'], user=event['user'],
+        post_message if successful else post_ephemeral,
+        **destination,
         text=result['text'], blocks=result.get('blocks'),
-        # Only use a parent supplied by an existing thread. An ephemeral message
-        # cannot create a new visible thread on a top-level request.
         thread_ts=event.get('thread_ts'),
         redact_logs=True,
     )
     if not response.get('ok'):
-        # Let the event lease release for Slack retries. Never retry via AI or a
-        # public message if private delivery fails.
-        raise RuntimeError('Coworking private reply failed')
+        # Release the event lease for retries without changing visibility or
+        # falling back to conversational routing.
+        raise RuntimeError('Coworking reply failed')

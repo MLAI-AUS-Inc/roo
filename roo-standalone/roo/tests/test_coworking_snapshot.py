@@ -29,7 +29,7 @@ def test_today_uses_melbourne_calendar_day(instant, expected):
     client = client_with(empty(expected))
     result = asyncio.run(command.handle_command('', 'UADMIN', client, now=datetime.fromisoformat(instant)))
     client.get_coworking_snapshot.assert_awaited_once_with('UADMIN', expected)
-    assert result['response_type'] == 'ephemeral'
+    assert result['response_type'] == 'in_channel'
     assert 'No active bookings' in result['text']
 
 
