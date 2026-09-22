@@ -15,6 +15,14 @@
   thread: {skill: studio-hours}
   expect: {skill: studio-hours, action: detailed}
   tags: [studio-hours, follow-up]
+- id: studio-hours-last-three-months
+  text: "Give me a high level Studio hours report and chart for the last 3 months"
+  expect: {skill: studio-hours, action: summary, params: {month: recent, months: 3}}
+  tags: [studio-hours]
+- id: studio-hours-three-full-months
+  text: "Show my Studio hours for the last three full months"
+  expect: {skill: studio-hours, action: summary, params: {month: last_complete, months: 3}}
+  tags: [studio-hours]
 - id: studio-hours-trap-coworking
   text: "How many people used coworking last month?"
   expect: {skill: mlai-points, action: coworking_report}

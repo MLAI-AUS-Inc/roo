@@ -251,6 +251,73 @@ def test_relative_month_uses_local_calendar():
     assert params['month'] == '2026-08'
 
 
+@pytest.mark.parametrize('now,mode,start,end', [
+    ('2026-09-22T04:00:00Z', 'recent', '2026-07', '2026-10'),
+    ('2026-09-22T04:00:00Z', 'last_complete', '2026-06', '2026-09'),
+    ('2026-08-31T15:00:00Z', 'recent', '2026-07', '2026-10'),
+    ('2026-01-01T00:00:00Z', 'recent', '2025-11', '2026-02'),
+    ('2026-01-01T00:00:00Z', 'last_complete', '2025-10', '2026-01'),
+])
+def test_three_month_periods_use_melbourne_calendar_and_cross_years(now, mode, start, end):
+    selector, beginning, ending = resolve_period({'month': mode, 'months': 3}, timestamp(now))
+    assert selector == {'month': start, 'months': 3, 'action': 'summary'}
+    assert beginning.strftime('%Y-%m') == start and ending.strftime('%Y-%m') == end
+    assert beginning.hour == ending.hour == 0
+
+
+def test_month_count_without_start_defaults_to_recent_period_and_detail_reuses_it(setup):
+    queue(setup, params={'months': 3})
+    queue(setup, event='detail', params={'action': 'detailed'}, now=NOW + timedelta(seconds=1))
+    requests = [setup.service.queue.read(path.stem) for path in setup.config.queue.glob('*.json')]
+    assert {item['selector']['month'] for item in requests} == {'2026-07'}
+    assert {item['selector']['months'] for item in requests} == {3}
+    assert {item['selector']['action'] for item in requests} == {'summary', 'detailed'}
+
+
+def test_three_month_summary_is_compact_with_reconciled_project_and_builder_totals(setup):
+    setup.clients['UMARK']['monthly_hours'] = None
+    result = report(setup, [ticket(1, size='Large (L)', completed='2026-07-10T00:00:00Z'),
+                            ticket(2, size='Medium (M)', completed='2026-08-10T00:00:00Z'),
+                            ticket(3, project=P2, builder=B2), ticket(4, project=P3, title='Private')],
+                    month='recent', months=3)
+    text = summary(result)
+    assert 'July 2026 – September 2026' in text
+    assert '6 hours used across 3 months' in text
+    assert 'July 2026 — 3 hours used' in text and 'August 2026 — 2 hours used' in text
+    assert 'September 2026 — 1 hours used* · month to date' in text
+    assert text.count('Master App:') == 1 and 'Master App: 5h' in text
+    assert text.count('Cybertest:') == 1 and 'Cybertest: 1h' in text
+    assert 'Alice 5h' in text and 'Bob 1h' in text
+    assert 'Private' not in text and 'Work 1' not in text
+    assert 'studio-hours-work.csv' not in artifacts(result)
+
+
+def test_three_month_client_allowances_remain_separate_and_partial_total_is_clear(setup):
+    result = report(setup, [ticket(1), ticket(2, labels=[])], month='recent', months=3)
+    text = summary(result)
+    assert '1 hours used across 3 months* · partial total' in text
+    assert text.count('of 40 hours used') == 3
+    assert '120' not in text and 'no rollover' in text
+    assert "Remaining hours aren't confirmed" in text
+    assert 'studio-hours-unresolved.csv' in artifacts(result)
+
+
+def test_monthly_chart_marks_only_current_month_to_date(setup, monkeypatch):
+    from matplotlib.axes import Axes
+
+    labels = []
+    original = Axes.bar
+    def capture(axes, x, *args, **kwargs):
+        labels.extend(x)
+        return original(axes, x, *args, **kwargs)
+    monkeypatch.setattr(Axes, 'bar', capture)
+    assert render_chart(report(setup, [], month='recent', months=3)).startswith(b'\x89PNG')
+    assert labels == ['Jul 2026', 'Aug 2026', 'Sep 2026\n(to date)']
+    labels.clear()
+    assert render_chart(report(setup, [], month='last_complete', months=3)).startswith(b'\x89PNG')
+    assert labels == ['Jun 2026', 'Jul 2026', 'Aug 2026']
+
+
 def test_queue_identity_cannot_be_overridden_and_retries_deduplicate(setup):
     assert 'DM' in queue(setup, params={'actor': 'UOTHER', 'project_ids': [P3], 'monthly_hours': 999})
     assert 'already' in queue(setup)

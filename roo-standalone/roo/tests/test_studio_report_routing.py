@@ -22,7 +22,10 @@ def test_report_skill_is_opt_in_and_never_default_admin():
 
 
 @pytest.mark.asyncio
-async def test_real_executor_queues_authenticated_request_and_returns_text(tmp_path, monkeypatch):
+@pytest.mark.parametrize('params', [
+    {'action': 'summary'}, {'action': 'summary', 'month': 'recent', 'months': 3},
+    {'action': 'summary', 'month': 'last_complete', 'months': 3}])
+async def test_real_executor_queues_authenticated_request_and_returns_text(tmp_path, monkeypatch, params):
     # Some legacy agent tests register a lightweight executor stub.
     current = sys.modules.get('roo.skills.executor')
     if current is not None and not getattr(current, '__file__', None):
@@ -35,11 +38,13 @@ async def test_real_executor_queues_authenticated_request_and_returns_text(tmp_p
     context = BackendActorContext('T123', 'UMARK', 'C123', '1.0', 'Ev123')
     with use_backend_actor_context(context):
         result = await executor.SkillExecutor().execute(skill, 'show my Studio hours', 'UMARK',
-            channel_id='C123', thread_ts='1.0', param_overrides={'action': 'summary'})
+            channel_id='C123', thread_ts='1.0', param_overrides=params)
     assert result.success and isinstance(result.message, str) and 'DM' in result.message
     request = ReceiptStore(tmp_path).read(next(tmp_path.glob('*.json')).stem)
     assert request['actor'] == 'UMARK'
     assert request['selector']['action'] == 'summary'
+    assert request['selector']['months'] == params.get('months', 1)
+    assert request['selector']['month'] not in {'recent', 'last_complete'}
     # Backend/API callers without the verified Slack task context cannot queue.
     result = await executor.SkillExecutor().execute(skill, 'show Mark hours', 'UMARK',
         channel_id='C123', thread_ts='1.0', param_overrides={'action': 'detailed'})
