@@ -29,13 +29,14 @@ def month_offset(month, offset):
 def resolve_period(params, now):
     """Relative periods are resolved in Melbourne, never in the model's timezone."""
     current = timestamp(now).astimezone(TZ).strftime('%Y-%m')
-    month = params.get('month') or 'current'
-    if month in {'current', 'last'}:
-        month = month_offset(current, -1 if month == 'last' else 0).strftime('%Y-%m')
-    start = month_offset(month, 0)
     count = params.get('months', 1)
     if type(count) is not int or not 1 <= count <= 12:
         raise TimesheetError('invalid_month_count')
+    month = params.get('month') or ('recent' if count > 1 else 'current')
+    if month in {'current', 'last', 'recent', 'last_complete'}:
+        offset = {'current': 0, 'last': -1, 'recent': 1 - count, 'last_complete': -count}[month]
+        month = month_offset(current, offset).strftime('%Y-%m')
+    start = month_offset(month, 0)
     end = month_offset(month, count)
     if start > timestamp(now) or month_offset(month, count - 1) > timestamp(now):
         raise TimesheetError('future_month')
@@ -140,14 +141,40 @@ def month_label(key):
     return month_offset(key, 0).strftime('%B %Y')
 
 
+def project_breakdown(report, selected):
+    parts = []
+    for project_id, project_name in report['projects'].items():
+        rows = [row for row in selected if row['project_id'] == project_id]
+        builders = {}
+        for row in rows:
+            key = (row['builder_id'], row['builder'])
+            builders[key] = builders.get(key, 0) + row['units']
+        parts.append(f"• *{_escape(project_name)}: {display_hours(sum(row['units'] for row in rows))}h*")
+        if builders:
+            parts.append('  ' + ' · '.join(f'{_escape(name)} {display_hours(units)}h'
+                for (_, name), units in sorted(builders.items(), key=lambda pair: (-pair[1], pair[0]))))
+        else:
+            parts.append('  No counted completed work.')
+    return parts
+
+
 def summary(report):
     detailed = report['selector']['action'] == 'detailed'
     parts = [f"*Your Studio hours · {_escape(report['client'])}*"]
+    many = len(report['monthly']) > 1
+    current = timestamp(report['generated_at']).astimezone(TZ).strftime('%Y-%m')
+    if many:
+        monthly = report['monthly']
+        parts.append(f"{month_label(monthly[0]['month'])} – {month_label(monthly[-1]['month'])}")
+        total = display_hours(sum(month['units'] for month in monthly))
+        parts.append(f"*{total} hours used across {len(monthly)} months*"
+                     + (' · partial total' if not report['complete'] else ''))
     for month in report['monthly']:
         used, allowance = month['units'], month['allowance_units']
         usage = (f'{display_hours(used)} hours used' if allowance is None else
                  f'{display_hours(used)} of {display_hours(allowance)} hours used')
-        parts.append(f"\n*{month_label(month['month'])} — {usage}*")
+        parts.append(f"\n*{month_label(month['month'])} — {usage}*"
+                     + (' · month to date' if many and month['month'] == current else ''))
         if month['unresolved']:
             parts.append(f"⚠️ Partial total: {month['unresolved']} completed work items need review."
                          + (" Remaining hours aren't confirmed yet." if allowance is not None else ''))
@@ -155,21 +182,16 @@ def summary(report):
             parts.append(f"*{display_hours(used - allowance)} hours over your allowance.*")
         elif allowance is not None:
             parts.append(f"*{display_hours(allowance - used)} hours remaining* · {used / allowance:.0%} used")
-        parts.append('Project overview · no combined monthly allowance.' if allowance is None
-                     else 'Shared monthly allowance across all your projects.')
-        selected = [row for row in report['rows'] if row['month'] == month['month']]
-        for project_id, project_name in report['projects'].items():
-            rows = [row for row in selected if row['project_id'] == project_id]
-            builders = {}
-            for row in rows:
-                key = (row['builder_id'], row['builder'])
-                builders[key] = builders.get(key, 0) + row['units']
-            parts.append(f"• *{_escape(project_name)}: {display_hours(sum(row['units'] for row in rows))}h*")
-            if builders:
-                parts.append('  ' + ' · '.join(f'{_escape(name)} {display_hours(units)}h'
-                    for (_, name), units in sorted(builders.items(), key=lambda pair: (-pair[1], pair[0]))))
-            else:
-                parts.append('  No counted completed work.')
+        if not many:
+            parts.append('Project overview · no combined monthly allowance.' if allowance is None
+                         else 'Shared monthly allowance across all your projects.')
+            parts.extend(project_breakdown(report, report['rows']))
+    if many:
+        parts.append('Monthly allowances are shared across projects and reset each month; no rollover.'
+                     if any(month['allowance_units'] is not None for month in report['monthly']) else
+                     'Project overview · no combined monthly allowance.')
+        parts.append('\n*Projects · total for this period*')
+        parts.extend(project_breakdown(report, report['rows']))
     parts.append('\nHours are based on completed-ticket sizes; work in progress and clocked time are not included.')
     parts.append('Updated ' + timestamp(report['generated_at']).astimezone(TZ).strftime('%d %b %Y, %I:%M %p %Z') + '.')
     if detailed:
@@ -246,12 +268,16 @@ def render_chart(report):
         figure.text(.06, .93, 'Your Studio hours', fontsize=22, weight='bold', color='#142c3a')
         if many:
             labels = [month_offset(m['month'], 0).strftime('%b %Y') for m in monthly]
+            current = timestamp(report['generated_at']).astimezone(TZ).strftime('%Y-%m')
+            axis_labels = [label + ('\n(to date)' if month['month'] == current else '')
+                           for label, month in zip(labels, monthly)]
             values = [m['units'] / 4 for m in monthly]
             allowances = [m['allowance_units'] / 4 if m['allowance_units'] is not None else None for m in monthly]
             configured = [value for value in allowances if value is not None]
-            axes.bar(labels, values, color='#147d92', width=.55)
+            axes.bar(axis_labels, values, color=['#65aebb' if month['month'] == current else '#147d92'
+                                                for month in monthly], width=.55)
             if configured:
-                axes.plot(labels, allowances, color='#ad5514',
+                axes.plot(axis_labels, allowances, color='#ad5514',
                           marker='_', linestyle='--', label='Monthly allowance')
                 axes.legend(frameon=False)
             axes.set_ylabel('Hours used')

@@ -12,6 +12,8 @@ snapshots and delivery receipts. The feature is disabled by default.
 - “Break down my Studio hours by project and builder.”
 - “Studio hours for August 2026.”
 - “Show my monthly Studio hours from July to September 2026.”
+- “Give me a high-level Studio hours report and chart for the last 3 months.”
+- “Show my Studio hours for the last three full months.”
 - “Give me the in-depth report on what those hours were spent on.”
 
 The summary leads with **hours used out of the monthly allowance**, followed by
@@ -20,6 +22,18 @@ A private chart shows project usage, or month-by-month usage for a date range.
 Zero-usage projects and months remain visible. The detailed follow-up includes
 every counted work item's title, completion date, builder and size-based hours,
 both in Slack and a CSV. Longer reports are split into readable messages.
+
+“Last three months” includes the current month to date plus the previous two
+calendar months (for example, July–September when requested in September).
+“Last three full months” excludes the current month (June–August in that example).
+Roo resolves these periods in Melbourne time using `month: recent` or
+`month: last_complete`, with `months: 3`; the model does not calculate dates.
+A month count without a starting month also ends in the current month.
+
+Multi-month summaries lead with total usage, one short section per month, and
+project/builder totals across the whole period. Project lists are shown once.
+The chart compares monthly hours and marks the current month “to date.” Client
+allowances stay separate for each month; staff overviews have no combined budget.
 
 A detailed follow-up inherits the last requested period for the same verified
 client, including when the summary was requested in a channel and the follow-up
