@@ -9,6 +9,7 @@ from threading import Lock
 from zoneinfo import ZoneInfo
 
 from .payment_reminders import _escape
+from .studio_report_backfill import apply_backfill, replacements
 from .timesheets import LABELS, UNITS, TimesheetError, csv_file, reconstruct, timestamp
 
 TZ = ZoneInfo('Australia/Melbourne')
@@ -64,7 +65,7 @@ def display_hours(units):
     return format(Decimal(units) / 4, 'f').rstrip('0').rstrip('.') if units % 4 else str(units // 4)
 
 
-def build_client_report(config, client, selector, dataset, now):
+def build_client_report(config, client, selector, dataset, now, backfill=None):
     selector, start, end = resolve_period(selector, now)
     as_of = timestamp(now)
     projects = {key: config.projects[key] for key in client['project_ids']}
@@ -75,6 +76,7 @@ def build_client_report(config, client, selector, dataset, now):
                         'allowance_units': allowance_units(client.get('monthly_allowances', {}).get(
                             key, client.get('monthly_hours', 40)))})
     by_month = {item['month']: item for item in monthly}
+    replaced = replacements(backfill)
     rows, exceptions, seen = [], [], set()
     for item in dataset:
         original = item['issue']
@@ -123,6 +125,12 @@ def build_client_report(config, client, selector, dataset, now):
         project_id = (issue.get('project') or {}).get('id')
         if project_id not in projects:
             continue
+        if original['id'] in replaced:
+            # Invoice ownership is independently reviewed, but a linked ticket
+            # must still prove the same historical project and builder.
+            if replaced[original['id']] != (project_id, (issue.get('assignee') or {}).get('id')):
+                raise TimesheetError('invoice_ticket_scope_mismatch')
+            continue
         month = completed.astimezone(TZ).strftime('%Y-%m')
         try:
             if missing_effort_history:
@@ -147,10 +155,11 @@ def build_client_report(config, client, selector, dataset, now):
             exceptions.append({'month': month, 'project': projects[project_id],
                                'identifier': original['identifier'], 'reason': str(exc)})
     rows.sort(key=lambda row: (row['month'], row['project'], row['completed_at'], row['identifier']))
-    return {'selector': selector, 'client': client['name'], 'projects': projects,
+    report = {'selector': selector, 'client': client['name'], 'projects': projects,
             'monthly': monthly, 'rows': rows, 'exceptions': exceptions,
             'generated_at': as_of.astimezone(TZ).isoformat(), 'complete': not exceptions,
             'basis': 'completed_ticket_size_hours'}
+    return apply_backfill(report, backfill, config, as_of.astimezone(TZ))
 
 
 def month_label(key):
@@ -170,7 +179,7 @@ def project_breakdown(report, selected):
             parts.append('  ' + ' · '.join(f'{_escape(name)} {display_hours(units)}h'
                 for (_, name), units in sorted(builders.items(), key=lambda pair: (-pair[1], pair[0]))))
         else:
-            parts.append('  No counted completed work.')
+            parts.append('  No counted work recorded.')
     return parts
 
 
@@ -192,7 +201,8 @@ def summary(report):
         parts.append(f"\n*{month_label(month['month'])} — {usage}*"
                      + (' · month to date' if many and month['month'] == current else ''))
         if month['unresolved']:
-            parts.append(f"⚠️ Partial total: {month['unresolved']} completed work items need review."
+            kind = 'work items or invoice records' if report['basis'] != 'completed_ticket_size_hours' else 'completed work items'
+            parts.append(f"⚠️ Partial total: {month['unresolved']} {kind} need review."
                          + (" Remaining hours aren't confirmed yet." if allowance is not None else ''))
         elif allowance is not None and used > allowance:
             parts.append(f"*{display_hours(used - allowance)} hours over your allowance.*")
@@ -208,7 +218,14 @@ def summary(report):
                      'Project overview · no combined monthly allowance.')
         parts.append('\n*Projects · total for this period*')
         parts.extend(project_breakdown(report, report['rows']))
-    parts.append('\nHours are based on completed-ticket sizes; work in progress and clocked time are not included.')
+    if report['basis'] == 'completed_ticket_size_hours':
+        parts.append('\nHours are based on completed-ticket sizes; work in progress and clocked time are not included.')
+    else:
+        invoiced = sum(row['units'] for row in report['rows'] if row.get('source') == 'reviewed_invoice')
+        estimated = sum(row['units'] for row in report['rows'] if row.get('source') != 'reviewed_invoice')
+        parts.append(f'\nIncludes {display_hours(invoiced)}h from reviewed invoices and '
+                     f'{display_hours(estimated)}h from completed-ticket estimates. Matched work is counted once.')
+        parts.append('Invoice hours use the work period; unresolved dates or allocations are excluded from the backfill.')
     parts.append('Updated ' + timestamp(report['generated_at']).astimezone(TZ).strftime('%d %b %Y, %I:%M %p %Z') + '.')
     if detailed:
         parts.append('The attached breakdown lists every counted work item, completion date, builder and hours, grouped by month and project.')
@@ -221,14 +238,18 @@ def summary(report):
 
 
 def detail_messages(report):
-    lines = ['*Work breakdown*', 'Each entry shows the full ticket’s size-based hours; no hourly activity log is inferred.']
+    lines = ['*Work breakdown*', 'Entries show invoice work periods or full ticket size estimates with completion dates. No hourly activity log is inferred.']
     previous = None
     for row in report['rows']:
         group = (row['month'], row['project'])
         if group != previous:
             lines.append(f"\n*{month_label(row['month'])} · {_escape(row['project'])}*")
             previous = group
-        lines.append(f"• {row['completed_at'][:10]} · {_escape(row['builder'])} · *{display_hours(row['units'])}h*"
+        period = row['completed_at'][:10]
+        if row.get('source') == 'reviewed_invoice':
+            period = row['work_start'] + (' – ' + row['work_end'] if row['work_end'] != row['work_start'] else '')
+            period += ' · invoice'
+        lines.append(f"• {period} · {_escape(row['builder'])} · *{display_hours(row['units'])}h*"
                      f" — {_escape(row['title'])} ({_escape(row['identifier'])})")
     if not report['rows']:
         lines.append('No counted completed work in this period.')
@@ -258,9 +279,11 @@ def artifacts(report):
     result = {}
     if report['selector']['action'] == 'detailed':
         result['studio-hours-work.csv'] = csv_file(
-            ['month', 'project', 'builder', 'completed_at_melbourne', 'issue', 'work', 'size', 'size_based_hours'],
+            ['month', 'project', 'builder', 'completion_date_or_work_period_end', 'issue_or_invoice', 'work', 'size', 'hours',
+             'source', 'work_period_start', 'work_period_end'],
             [[r['month'], r['project'], r['builder'], r['completed_at'], r['identifier'], r['title'],
-              r['size'], Decimal(r['units']) / 4] for r in report['rows']])
+              r['size'], Decimal(r['units']) / 4, r.get('source', 'completed_ticket_size'),
+              r.get('work_start', ''), r.get('work_end', '')] for r in report['rows']])
     if report['exceptions']:
         result['studio-hours-unresolved.csv'] = csv_file(['month', 'project', 'issue', 'reason'],
             [[r['month'], r['project'], r['identifier'], r['reason']] for r in report['exceptions']])
@@ -324,7 +347,9 @@ def render_chart(report):
         for spine in axes.spines.values():
             spine.set_visible(False)
         axes.tick_params(length=0, pad=8)
-        figure.text(.06, .065, 'Completed-ticket size hours · excludes work in progress'
+        basis = ('Reviewed invoice hours + completed-ticket estimates' if report['basis'] != 'completed_ticket_size_hours'
+                 else 'Completed-ticket size hours · excludes work in progress')
+        figure.text(.06, .065, basis
                     + ('\nPartial totals: some completed work needs review.' if not report['complete'] else ''),
                     fontsize=10, color='#465d67')
         with BytesIO() as output:

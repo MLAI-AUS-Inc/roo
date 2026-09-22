@@ -15,6 +15,7 @@ from roo.studio_report_worker import StudioReportAPI, StudioReportService, confi
 from roo.studio_reports import (artifacts, build_client_report, detail_messages, render_chart,
                                 resolve_period, summary)
 from roo.timesheets import TimesheetError, timestamp
+from roo.studio_report_backfill import load_backfill, validate_backfill
 
 P1 = '00000000-0000-0000-0000-000000000001'
 P2 = '00000000-0000-0000-0000-000000000002'
@@ -64,6 +65,108 @@ def ticket(number=1, *, project=P1, builder=B1, size='Small (S)', completed='202
 
 def report(setup, data, **selector):
     return build_client_report(setup.config, setup.clients['UMARK'], selector, data, NOW)
+
+
+def invoice_manifest(setup, **updates):
+    value = {'version': 1, 'team': setup.config.team, 'organization': setup.config.organization,
+        'sources': {'alice-001': {'invoice': 'Invoice 001', 'message_id': 'private-mail-id',
+            'sha256': 'a' * 64, 'builder_id': B1, 'hours': '4'}},
+        'entries': [{'id': 'alice-001:1', 'line_id': '1', 'source_id': 'alice-001',
+            'project_id': P1, 'builder_id': B1, 'start': '2026-08-20', 'end': '2026-08-21',
+            'hours': '2.5', 'description': 'Historical work', 'review_note': 'Matched invoice line to ticket',
+            'replaces': ['issue-1']}], 'pending': [], **updates}
+    return value
+
+
+def test_invoice_replaces_estimate_across_months_and_preserves_work_period(setup):
+    backfill = validate_backfill(invoice_manifest(setup), setup.config)
+    data = [ticket(1, size='Extra Large (XL)'), ticket(2)]
+    result = build_client_report(setup.config, setup.clients['UMARK'],
+        {'month': 'recent', 'months': 3, 'action': 'detailed'}, data, NOW, backfill)
+    assert [m['units'] for m in result['monthly']] == [0, 10, 4]
+    assert '2.5h from reviewed invoices and 1h from completed-ticket estimates' in summary(result)
+    assert '2026-08-20 – 2026-08-21 · invoice' in '\n'.join(detail_messages(result))
+    csv = artifacts(result)['studio-hours-work.csv']
+    assert 'reviewed_invoice,2026-08-20,2026-08-21' in csv
+    assert 'private-mail-id' not in json.dumps(result) and 'a' * 64 not in json.dumps(result)
+    # September-only excludes the August invoice and its September ticket copy.
+    sept = build_client_report(setup.config, setup.clients['UMARK'], {}, data, NOW, backfill)
+    assert sept['monthly'][0]['units'] == 4
+
+
+def test_invoice_can_resolve_missing_effort_without_bypassing_ownership(setup):
+    value = invoice_manifest(setup)
+    backfill = validate_backfill(value, setup.config)
+    result = build_client_report(setup.config, setup.clients['UMARK'], {'months': 3},
+        [historical_ticket_with_deleted_label()], NOW, backfill)
+    assert result['complete'] and sum(m['units'] for m in result['monthly']) == 10
+    with pytest.raises(TimesheetError, match='invoice_ticket_scope_mismatch'):
+        build_client_report(setup.config, setup.clients['UMARK'], {'months': 3},
+            [ticket(builder=B2)], NOW, backfill)
+
+
+def test_invoice_rows_pending_and_sources_are_scoped_to_owned_projects(setup):
+    value = invoice_manifest(setup)
+    value['entries'][0].update(project_id=P3, description='Other client private work', replaces=[])
+    value['pending'] = [{'project_id': P3, 'months': ['2026-09'],
+                         'reference': 'Secret invoice', 'reason': 'Secret work dates missing'}]
+    backfill = validate_backfill(value, setup.config)
+    result = build_client_report(setup.config, setup.clients['UMARK'], {'months': 3}, [], NOW, backfill)
+    assert result['complete'] and not result['rows'] and 'Secret' not in json.dumps(result)
+    assert 'Other client private' not in json.dumps(result)
+
+
+@pytest.mark.parametrize('mutation', ['duplicate', 'duplicate_source', 'wrong_org', 'bad_project',
+    'bad_builder', 'cross_month', 'negative', 'nan', 'fraction', 'over_invoice', 'no_review', 'bad_hash'])
+def test_invalid_invoice_manifest_is_rejected_in_full(setup, mutation):
+    from copy import deepcopy
+    value = invoice_manifest(setup)
+    entry = value['entries'][0]
+    if mutation == 'duplicate': value['entries'].append(deepcopy(entry))
+    elif mutation == 'duplicate_source': value['sources']['copy'] = deepcopy(value['sources']['alice-001'])
+    elif mutation == 'wrong_org': value['organization'] = 'another-org'
+    elif mutation == 'bad_project': entry['project_id'] = 'unknown'
+    elif mutation == 'bad_builder': entry['builder_id'] = B2
+    elif mutation == 'cross_month': entry['end'] = '2026-09-01'
+    elif mutation == 'negative': entry['hours'] = '-1'
+    elif mutation == 'nan': entry['hours'] = 'NaN'
+    elif mutation == 'fraction': entry['hours'] = '0.333'
+    elif mutation == 'over_invoice': entry['hours'] = '5'
+    elif mutation == 'no_review': entry['review_note'] = ''
+    elif mutation == 'bad_hash': value['sources']['alice-001']['sha256'] = 'missing'
+    with pytest.raises(TimesheetError, match='invalid_invoice_backfill'):
+        validate_backfill(value, setup.config)
+
+
+def test_unresolved_invoice_dates_prevent_false_remaining_hours(setup):
+    value = invoice_manifest(setup)
+    value['pending'] = [{'project_id': P1, 'months': ['2026-08', '2026-09'],
+                        'reference': 'Invoice 002', 'reason': 'Monthly split needs review'}]
+    result = build_client_report(setup.config, setup.clients['UMARK'], {'months': 3}, [], NOW,
+                                  validate_backfill(value, setup.config))
+    assert not result['complete'] and [m['unresolved'] for m in result['monthly']] == [0, 1, 1]
+    assert "Remaining hours aren't confirmed" in summary(result)
+    assert 'Invoice 002' in artifacts(result)['studio-hours-unresolved.csv']
+
+
+def test_missing_or_changed_backfill_blocks_delivery_and_unknown_actor_reads_nothing(setup, tmp_path):
+    path = tmp_path / 'invoices.json'
+    with pytest.raises(TimesheetError, match='invoice_backfill_unavailable'):
+        load_backfill(path, setup.config)
+    path.write_text(json.dumps(invoice_manifest(setup)))
+    service = StudioReportService(setup.config, setup.api, setup.clients, path)
+    request = {'team': 'T123', 'actor': 'UMARK', 'selector': {'months': 3}, 'requested_at': NOW.isoformat()}
+    result = service.report_for_request(request)
+    value = invoice_manifest(setup); value['entries'][0]['hours'] = '3'
+    path.write_text(json.dumps(value))
+    with pytest.raises(TimesheetError, match='invoice_backfill_changed'):
+        service.deliver_request(result, request, 'test', NOW)
+    terminal, notice = service.failure_notice({'error': 'invoice_backfill_changed'})
+    assert terminal and 'request a new report' in notice
+    setup.api.post_message.assert_not_called()
+    path.unlink()
+    with pytest.raises(TimesheetError, match='client_access_not_configured'):
+        service.report_for_request({**request, 'actor': 'UUNKNOWN'})
 
 
 def queue(setup, *, actor='UMARK', event='Ev1', params=None, now=NOW):
