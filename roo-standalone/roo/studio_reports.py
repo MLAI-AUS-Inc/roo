@@ -370,18 +370,24 @@ def render_chart(report, breakdown=None):
     with _chart_lock:
         scale = report.get('unit_scale', 4)
         monthly = report['monthly']
-        many = len(monthly) > 1 and breakdown is None
-        project_ids = list(report['projects'])
+        monthly_view = breakdown is None
+        project_ids = sorted(report['projects'], key=lambda key: (report['projects'][key].casefold(), key))
+        palette = ('#147d92', '#e69f00', '#7465ab', '#009e73', '#d55e00',
+                   '#0072b2', '#cc79a7', '#6b7136', '#575757', '#56b4e9')
+        project_colors = {key: palette[index % len(palette)] for index, key in enumerate(project_ids)}
         bars = len(report.get('client_groups', [])) if breakdown == 'clients' else len(project_ids)
-        figure = Figure(figsize=(10, 4.8 if many else max(4.8, 2.8 + bars * .65)), dpi=150)
+        legend_rows = (len(project_ids) + int(any(m['allowance_units'] is not None for m in monthly)) + 1) // 2
+        height = 5.4 + .3 * legend_rows if monthly_view else max(4.8, 2.8 + bars * .65)
+        figure = Figure(figsize=(10, height), dpi=150)
         canvas = FigureCanvasAgg(figure)
         axes = figure.add_subplot(111)
-        figure.subplots_adjust(left=.34 if not many else .10, right=.92, top=.76, bottom=.22)
+        bottom = (1.15 + .3 * legend_rows) / height if monthly_view else .22
+        figure.subplots_adjust(left=.10 if monthly_view else .34, right=.92, top=.76, bottom=bottom)
         figure.text(.06, .93, 'Studio hours' if report['selector'].get('client') else 'Your Studio hours',
                     fontsize=22, weight='bold', color='#142c3a')
         if report['selector'].get('client'):
             figure.text(.06, .86, textwrap.shorten(report['client'], width=90, placeholder='…'), fontsize=12, color='#334b58')
-        if many:
+        if monthly_view:
             labels = [month_offset(m['month'], 0).strftime('%b %Y') for m in monthly]
             current = timestamp(report['generated_at']).astimezone(TZ).strftime('%Y-%m')
             axis_labels = [label + ('\n(to date)' if month['month'] == current else '')
@@ -389,47 +395,57 @@ def render_chart(report, breakdown=None):
             values = [m['units'] / scale for m in monthly]
             allowances = [m['allowance_units'] / scale if m['allowance_units'] is not None else None for m in monthly]
             configured = [value for value in allowances if value is not None]
-            colors = ['#65aebb' if month['month'] == current else '#147d92' for month in monthly]
+            month_keys = [month['month'] for month in monthly]
             if report.get('unallocated_units'):
                 axis_labels.append('Month\nunallocated')
+                month_keys.append('')
                 values.append(report['unallocated_units'] / scale)
-                colors.append('#ad5514')
-            axes.bar(axis_labels, values, color=colors, width=.55)
+            month_index = {key: index for index, key in enumerate(month_keys)}
+            project_units = {key: [0] * len(month_keys) for key in project_ids}
+            for row in report['rows']:
+                if row['project_id'] in project_units and row['month'] in month_index:
+                    project_units[row['project_id']][month_index[row['month']]] += row['units']
+            bottom_units = [0] * len(month_keys)
+            for project_id in project_ids:
+                units = project_units[project_id]
+                axes.bar(axis_labels, [value / scale for value in units],
+                         bottom=[value / scale for value in bottom_units],
+                         color=project_colors[project_id], width=.55, edgecolor='white', linewidth=.5,
+                         label=textwrap.shorten(report['projects'][project_id], width=40, placeholder='…'))
+                bottom_units = [base + value for base, value in zip(bottom_units, units)]
             if configured:
-                axes.plot(axis_labels[:len(monthly)], allowances, color='#ad5514',
+                axes.plot(axis_labels[:len(monthly)], allowances, color='#35434a',
                           marker='_', linestyle='--', label='Monthly allowance')
-                axes.legend(frameon=False)
+            handles, legend_labels = axes.get_legend_handles_labels()
+            figure.legend(handles, legend_labels, loc='upper left',
+                          bbox_to_anchor=(.09, (.6 + .3 * legend_rows) / height),
+                          ncol=2, frameon=False, fontsize=9)
+            axes.set_xlabel('Month')
             axes.set_ylabel('Hours recorded' if report['basis'] == 'invoice_first_recorded_hours' else 'Hours used')
             axes.tick_params(axis='x', labelrotation=30 if len(monthly) > 6 else 0)
             for index, value in enumerate(values):
                 label = ('No dated\nhours' if value == 0 and index < len(monthly) and monthly[index]['unresolved']
                          else f'{value:g}h')
                 axes.annotate(label, (index, value), xytext=(0, 5),
-                              textcoords='offset points', ha='center')
+                              textcoords='offset points', ha='center', zorder=4,
+                              bbox={'facecolor': 'white', 'edgecolor': 'none', 'pad': 1})
             axes.set_ylim(0, max([1, *values, *configured]) * 1.2)
-            subtitle = f"{labels[0]} – {labels[-1]} · " + (
-                'one shared allowance each month' if len(configured) == len(monthly) else
-                'monthly usage and configured allowances' if configured else 'monthly project usage')
+            period = labels[0] + (f' – {labels[-1]}' if len(labels) > 1 else '')
+            subtitle = f'{period} · monthly hours by project'
         else:
-            if breakdown:
-                period = month_offset(monthly[0]['month'], 0).strftime('%b %Y')
-                if len(monthly) > 1:
-                    period += ' – ' + month_offset(monthly[-1]['month'], 0).strftime('%b %Y')
-                subtitle = f'{period} · total hours by {"client" if breakdown == "clients" else "project"}'
-                if monthly[-1]['month'] == timestamp(report['generated_at']).astimezone(TZ).strftime('%Y-%m'):
-                    subtitle += ' · to date'
-            else:
-                month = monthly[0]
-                used, allocated = month['units'], month['allowance_units']
-                usage = (f'{display_hours(used, scale)} hours used' if allocated is None else
-                         f'{display_hours(used, scale)} of {display_hours(allocated, scale)} hours used')
-                subtitle = f"{month_label(month['month'])} · {usage}"
+            period = month_offset(monthly[0]['month'], 0).strftime('%b %Y')
+            if len(monthly) > 1:
+                period += ' – ' + month_offset(monthly[-1]['month'], 0).strftime('%b %Y')
+            subtitle = f'{period} · total hours by {"client" if breakdown == "clients" else "project"}'
+            if monthly[-1]['month'] == timestamp(report['generated_at']).astimezone(TZ).strftime('%Y-%m'):
+                subtitle += ' · to date'
             groups = (report['client_groups'] if breakdown == 'clients' else
                       [{'name': report['projects'][key], 'project_ids': [key]} for key in project_ids])
             groups = sorted(groups, key=lambda group: -sum(r['units'] for r in report['rows'] if r['project_id'] in group['project_ids']))
             values = [sum(r['units'] for r in report['rows'] if r['project_id'] in group['project_ids']) / scale for group in groups]
             names = ['\n'.join(textwrap.wrap(group['name'], 29)) for group in groups]
-            axes.barh(range(len(names)), values, color='#147d92', height=.5)
+            colors = '#147d92' if breakdown == 'clients' else [project_colors[group['project_ids'][0]] for group in groups]
+            axes.barh(range(len(names)), values, color=colors, height=.5)
             axes.set_yticks(range(len(names)), names)
             axes.invert_yaxis()
             axes.set_xlabel('Hours used by client' if breakdown == 'clients' else 'Hours used by project')
