@@ -56,6 +56,14 @@ One shared **40-hour monthly allowance per client** is the default. Explicit
 and dated allowance changes. Months use Australia/Melbourne midnight boundaries
 and daylight saving. There is no implicit rollover, prorating or payment action.
 
+For a staff overview spanning clients, explicitly set `monthly_hours` to JSON
+`null`. This shows usage by month, project and builder without a combined budget,
+remaining balance or overage. The same applies to a `null` monthly override;
+omitting the setting retains the 40-hour client default. Staff access still uses
+an explicit list of verified project IDs, with the same private delivery and
+access checks. Adding staff access does not widen any client's project list.
+New projects require an explicit configuration update before they are visible.
+
 Each ticket counts once, in its **first completion month**, using its project,
 assignee, title and effort label reconstructed at that completion. Reopening,
 recompleting or moving a ticket does not count it again or expose another
