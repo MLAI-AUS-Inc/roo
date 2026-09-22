@@ -20,6 +20,7 @@ from .studio_reports import (allowance_units, artifacts, build_client_report, de
                              month_offset, render_chart, resolve_period, split_messages, summary)
 from .timesheet_worker import TimesheetService
 from .studio_report_source import StudioSourceAPI
+from .studio_report_backfill import load_backfill
 from .timesheets import TimesheetConfig, TimesheetError, fingerprint, flag, timestamp
 
 
@@ -66,9 +67,10 @@ class StudioReportAPI(StudioSourceAPI):
 
 
 class StudioReportService(TimesheetService):
-    def __init__(self, config, api, clients):
+    def __init__(self, config, api, clients, backfill_path=None):
         super().__init__(config, api)
         self.clients = clients
+        self.backfill_path = backfill_path
 
     def request_authorized(self, request):
         # Unknown clients receive a private, generic setup message. No source read.
@@ -98,8 +100,9 @@ class StudioReportService(TimesheetService):
         self.api.verify_recipient(actor, self.config.team)
         self.api.verify(source)
         dataset = self.api.collect(source, now, {})
-        report = build_client_report(self.config, client, selector, dataset, now)
-        report.update(actor=actor, scope=scope)
+        backfill = load_backfill(self.backfill_path, self.config)
+        report = build_client_report(self.config, client, selector, dataset, now, backfill)
+        report.update(actor=actor, scope=scope, backfill_digest=fingerprint(backfill))
         # Freeze rendered parts too. A delivery retry uses the same content hash
         # even when font versions or optional chart availability change.
         parts = [{'kind': 'message', 'content': chunk, 'status': 'pending'} for chunk in split_messages(summary(report))]
@@ -121,6 +124,8 @@ class StudioReportService(TimesheetService):
             raise TimesheetError('not_authorized')
         if report.get('scope') != self.scope_fingerprint(request['actor']):
             raise TimesheetError('client_access_changed')
+        if report.get('backfill_digest', fingerprint(None)) != fingerprint(load_backfill(self.backfill_path, self.config)):
+            raise TimesheetError('invoice_backfill_changed')
         return self.deliver_parts(report['parts'], request['actor'], key, now)
 
     def deliver_parts(self, parts, recipient, delivery_key, now):
@@ -139,6 +144,8 @@ class StudioReportService(TimesheetService):
 
     def failure_notice(self, request):
         error = request.get('error')
+        if error == 'invoice_backfill_changed':
+            return True, 'Your Studio hours records were updated while this report was being prepared. Please request a new report for the latest totals.'
         if error in {'client_access_not_configured', 'client_access_changed'}:
             return True, ('Your Studio project access needs to be set up or refreshed. '
                           'Please ask the MLAI Studio team to link your Slack account to your projects, then request a new report.')
@@ -176,7 +183,7 @@ def main(argv=None):
         with httpx.Client(timeout=30, follow_redirects=False) as client:
             api = StudioReportAPI(client, linear_key=env.get('TIMESHEET_LINEAR_READ_API_KEY'),
                                   slack_token=env.get('TIMESHEET_SLACK_BOT_TOKEN'))
-            service = StudioReportService(config, api, clients)
+            service = StudioReportService(config, api, clients, env.get('STUDIO_REPORTS_BACKFILL_FILE'))
             if args.recover:
                 if args.part is None or not (args.confirmed_absent or args.delivered_reference):
                     raise TimesheetError('delivery_confirmation_required')

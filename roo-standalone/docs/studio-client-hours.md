@@ -111,6 +111,52 @@ be reconstructed from evidence the source no longer exposes.
 
 ## Configure and preview
 
+### Reviewed invoice backfills
+
+`STUDIO_REPORTS_BACKFILL_FILE` optionally points to a reviewed JSON manifest in
+the private worker data volume. This supplements client reports only: it does
+not create Linear tasks, change payroll, pay invoices, or give Public Roo mailbox
+access. Original invoices, bank details, email bodies and review notes stay out
+of client exports and Git. Keep the originals and SHA-256 audit records in a
+restricted operator archive.
+
+Use schema version 1 with the exact `team`, `organization`, `sources`, `entries`
+and `pending`. Each source has a unique key, `builder_id`, `invoice`, `message_id`,
+original attachment `sha256` and decimal-string total `hours`. Each entry has:
+
+- `id` equal to `source_id:line_id`, plus `source_id` and `line_id`.
+- Verified `project_id` and `builder_id`, client-safe `description`, and private
+  `review_note` explaining the reconciliation.
+- `start` and `end` inclusive work dates within one calendar month, and decimal
+  string `hours`. This initial import format accepts quarter-hour amounts only;
+  other precision requires review and must never be silently rounded.
+- `replaces`: explicit Linear issue UUIDs for the same work (or an empty list
+  after checking that no matching ticket exists). Matched tickets contribute no
+  additional estimate, including if their completion month differs from the
+  invoice work month. Their historical project and builder still have to match.
+
+Reconcile voided/revised invoices and duplicate email copies before importing.
+Invoice line totals cannot exceed the source invoice's hours. Do not use an
+invoice date, payment date, guessed daily allocation, or surcharge-adjusted
+billing hours as evidence of when/how long work occurred. Cross-month totals
+without a supported split remain pending. Each pending record has `project_id`,
+`months` (YYYY-MM strings), a client-safe `reference` and `reason`; only owners of
+that project see it, and its months remain explicitly partial.
+
+Validate with `roo.studio_report_backfill.validate_backfill(manifest, config)`
+and preview all affected clients/months before activation. Back up the old file,
+write the new file with mode 0600, then rename it atomically at the configured
+path. New requests reread the manifest. Missing/invalid files fail closed; a
+changed manifest blocks delivery of an older snapshot. Never delete delivery
+receipts to force a refresh. Rollback restores the prior manifest and setting.
+
+The summary and chart label combined invoice hours and ticket estimates. The
+detailed CSV includes source type, invoice reference and work-period dates;
+quarter-hour entries preserve the amounts in the reviewed evidence. Imported
+data always follows the existing explicit client/project grants.
+
+### Worker setup
+
 1. Copy `.env.studio-reports.example` to ignored `.env.studio-reports`.
 2. Configure dedicated development source and Roo Dev credentials, the verified
    workspace/organization IDs, project IDs, and builder mappings.
