@@ -46,6 +46,10 @@ def resolve_period(params, now):
 
 
 def allowance_units(value):
+    # An explicit null is an overview without a shared client budget. Omitted
+    # configuration still defaults to 40; request parameters cannot change it.
+    if value is None:
+        return None
     try:
         number = Decimal(str(value)) * 4
         if not number.is_finite() or number <= 0 or number != number.to_integral_value():
@@ -141,14 +145,18 @@ def summary(report):
     parts = [f"*Your Studio hours · {_escape(report['client'])}*"]
     for month in report['monthly']:
         used, allowance = month['units'], month['allowance_units']
-        parts.append(f"\n*{month_label(month['month'])} — {display_hours(used)} of {display_hours(allowance)} hours used*")
+        usage = (f'{display_hours(used)} hours used' if allowance is None else
+                 f'{display_hours(used)} of {display_hours(allowance)} hours used')
+        parts.append(f"\n*{month_label(month['month'])} — {usage}*")
         if month['unresolved']:
-            parts.append(f"⚠️ Partial total: {month['unresolved']} completed work items need review. Remaining hours aren't confirmed yet.")
-        elif used > allowance:
+            parts.append(f"⚠️ Partial total: {month['unresolved']} completed work items need review."
+                         + (" Remaining hours aren't confirmed yet." if allowance is not None else ''))
+        elif allowance is not None and used > allowance:
             parts.append(f"*{display_hours(used - allowance)} hours over your allowance.*")
-        else:
+        elif allowance is not None:
             parts.append(f"*{display_hours(allowance - used)} hours remaining* · {used / allowance:.0%} used")
-        parts.append('Shared monthly allowance across all your projects.')
+        parts.append('Project overview · no combined monthly allowance.' if allowance is None
+                     else 'Shared monthly allowance across all your projects.')
         selected = [row for row in report['rows'] if row['month'] == month['month']]
         for project_id, project_name in report['projects'].items():
             rows = [row for row in selected if row['project_id'] == project_id]
@@ -239,21 +247,28 @@ def render_chart(report):
         if many:
             labels = [month_offset(m['month'], 0).strftime('%b %Y') for m in monthly]
             values = [m['units'] / 4 for m in monthly]
+            allowances = [m['allowance_units'] / 4 if m['allowance_units'] is not None else None for m in monthly]
+            configured = [value for value in allowances if value is not None]
             axes.bar(labels, values, color='#147d92', width=.55)
-            axes.plot(labels, [m['allowance_units'] / 4 for m in monthly], color='#ad5514',
-                      marker='_', linestyle='--', label='Monthly allowance')
-            axes.legend(frameon=False)
+            if configured:
+                axes.plot(labels, allowances, color='#ad5514',
+                          marker='_', linestyle='--', label='Monthly allowance')
+                axes.legend(frameon=False)
             axes.set_ylabel('Hours used')
             axes.tick_params(axis='x', labelrotation=30 if len(monthly) > 6 else 0)
             for index, value in enumerate(values):
                 axes.annotate(f'{value:g}h', (index, value), xytext=(0, 5),
                               textcoords='offset points', ha='center')
-            axes.set_ylim(0, max([1, *values, *[m['allowance_units'] / 4 for m in monthly]]) * 1.2)
-            subtitle = f"{labels[0]} – {labels[-1]} · one shared allowance each month"
+            axes.set_ylim(0, max([1, *values, *configured]) * 1.2)
+            subtitle = f"{labels[0]} – {labels[-1]} · " + (
+                'one shared allowance each month' if len(configured) == len(monthly) else
+                'monthly usage and configured allowances' if configured else 'monthly project usage')
         else:
             month = monthly[0]
             used, allocated = month['units'], month['allowance_units']
-            subtitle = f"{month_label(month['month'])} · {display_hours(used)} of {display_hours(allocated)} hours used"
+            usage = (f'{display_hours(used)} hours used' if allocated is None else
+                     f'{display_hours(used)} of {display_hours(allocated)} hours used')
+            subtitle = f"{month_label(month['month'])} · {usage}"
             values = [sum(r['units'] for r in report['rows'] if r['project_id'] == key) / 4 for key in project_ids]
             names = ['\n'.join(textwrap.wrap(report['projects'][key], 29)) for key in project_ids]
             axes.barh(range(len(names)), values, color='#147d92', height=.5)

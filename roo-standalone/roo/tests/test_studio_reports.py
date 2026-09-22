@@ -112,6 +112,77 @@ def test_monthly_history_has_separate_allowances_and_zero_months(setup):
     assert [m['allowance_units'] for m in result['monthly']] == [160, 80, 160]
 
 
+@pytest.mark.parametrize('months', [1, 3])
+def test_staff_overview_has_no_combined_budget_in_text_or_chart(setup, months, monkeypatch):
+    from matplotlib.figure import Figure
+
+    setup.clients['UMARK']['monthly_hours'] = None
+    result = report(setup, [ticket(), ticket(2, labels=[])],
+                    month='2026-07' if months == 3 else '2026-09', months=months)
+    text = summary(result)
+    assert 'September 2026 — 1 hours used' in text
+    assert 'Partial total: 1 completed work items need review.' in text
+    assert 'remaining' not in text.lower() and 'of 40' not in text
+    assert 'no combined monthly allowance' in text
+    labels = []
+    original = Figure.text
+
+    def capture(figure, x, y, text, **kwargs):
+        labels.append(text)
+        return original(figure, x, y, text, **kwargs)
+
+    monkeypatch.setattr(Figure, 'text', capture)
+    assert render_chart(result).startswith(b'\x89PNG')
+    assert 'allowance' not in ' '.join(labels) and 'of 40' not in ' '.join(labels)
+
+
+def test_overview_monthly_overrides_handle_budgeted_and_unbudgeted_months(setup):
+    setup.clients['UMARK'].update(monthly_hours=None, monthly_allowances={'2026-08': 20})
+    result = report(setup, [], month='2026-07', months=3)
+    assert [m['allowance_units'] for m in result['monthly']] == [None, 80, None]
+    text = summary(result)
+    assert 'July 2026 — 0 hours used' in text
+    assert 'August 2026 — 0 of 20 hours used' in text
+    assert 'September 2026 — 0 hours used' in text
+    assert render_chart(result).startswith(b'\x89PNG')
+    # Explicit dated nulls can also remove an otherwise configured allowance.
+    setup.clients['UMARK'].update(monthly_hours=40, monthly_allowances={'2026-09': None})
+    assert report(setup, [])['monthly'][0]['allowance_units'] is None
+
+
+def test_staff_access_does_not_widen_client_scope_or_invalidate_client_reports(setup):
+    before = setup.service.scope_fingerprint('UMARK')
+    setup.env['STUDIO_REPORTS_CLIENTS_JSON'] = json.dumps({**setup.clients,
+        'USTAFF': {'name': 'Staff', 'project_ids': [P1, P2, P3], 'monthly_hours': None}})
+    config, clients = configuration(setup.env)
+    service = StudioReportService(config, setup.api, clients)
+    setup.api.collect.return_value = [ticket(), ticket(2, project=P3, title='Other client work')]
+    request = {'team': 'T123', 'selector': {}, 'requested_at': NOW.isoformat()}
+    overview = service.report_for_request({**request, 'actor': 'USTAFF'})
+    assert set(setup.api.collect.call_args.args[0].projects) == {P1, P2, P3}
+    assert overview['monthly'][0]['units'] == 8
+    assert overview['monthly'][0]['allowance_units'] is None
+    client = service.report_for_request({**request, 'actor': 'UMARK'})
+    assert set(setup.api.collect.call_args.args[0].projects) == {P1, P2}
+    assert client['monthly'][0]['units'] == 4
+    assert client['monthly'][0]['allowance_units'] == 160
+    assert 'Other client work' not in json.dumps(client)
+    assert service.scope_fingerprint('UMARK') == before
+    # Staff access is still an explicit grant and revocation invalidates snapshots.
+    clients['USTAFF']['project_ids'].remove(P3)
+    with pytest.raises(TimesheetError, match='client_access_changed'):
+        service.deliver_request(overview, {**request, 'actor': 'USTAFF'}, 'old', NOW)
+    setup.api.post_message.assert_not_called()
+
+
+@pytest.mark.parametrize('value', [0, -1, 'invalid', 'NaN', 0.1, False])
+def test_invalid_budget_does_not_silently_become_staff_overview(setup, value):
+    setup.clients['UMARK']['monthly_hours'] = value
+    setup.env['STUDIO_REPORTS_CLIENTS_JSON'] = json.dumps(setup.clients)
+    with pytest.raises(TimesheetError, match='invalid_monthly_allowance'):
+        configuration(setup.env)
+
+
 def test_reopened_ticket_uses_first_completion_and_historical_project_size_builder(setup):
     data = ticket(project=P3, builder=B2, size='Extra Large (XL)', completed='2026-09-20T00:00:00Z')
     data['history'] = [
