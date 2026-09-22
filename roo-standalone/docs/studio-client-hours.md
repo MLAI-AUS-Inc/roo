@@ -210,6 +210,24 @@ balances. A full-period total sums dated rows **plus** unallocated rows; its
 monthly chart shows an additional “Month unallocated” bar, and its project chart
 shows the full total. A zero dated subtotal never proves zero actual work.
 
+When the user explicitly asks for estimated monthly allocation, a version 2
+entry with undated or cross-month source work may add `allocation_month: YYYY-MM`
+and a client-safe `allocation_note` explaining the assumption. The month must
+be inside reviewed coverage and the project must use invoice-first reporting.
+Original `start`, `end`, `date_status` and source quantities are retained; an
+estimate cannot override an already dated single-month entry. To split an
+aggregate across months, use separate canonical line IDs whose quantities sum
+to the original entry, with the original source window and an assumption on
+each row. Invoice caps and duplicate checks still apply.
+
+An allocated row counts once in its assigned month, including single-month
+requests. Reports show the estimated quantity, charts mark affected months with
+an asterisk, and detail/CSV exports preserve the original work window alongside
+`month_allocation` and `allocation_note`. Estimated monthly totals never produce
+confirmed remaining-hour or overage claims. This changes the reporting allocation,
+not the invoice quantity or source work dates. Keep the previous manifest and
+the allocation rationale in the private operator archive.
+
 Invoice-first quantities may include approved billing adjustments or unresolved
 invoice discrepancies only when explicitly accepted in the reconciliation.
 Preserve those qualifications in client-safe text; do not call these quantities

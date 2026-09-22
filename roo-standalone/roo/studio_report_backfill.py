@@ -94,6 +94,17 @@ def validate_backfill(value, config):
                 raise ValueError
             entry['units'] = int(units)
             entry['month'] = month
+            if 'allocation_month' in entry or 'allocation_note' in entry:
+                # A reviewed reporting estimate never overwrites source dates.
+                if version != 2 or month or project not in value['invoice_first_projects']:
+                    raise ValueError
+                allocation = entry['allocation_month']
+                if not isinstance(allocation, str) or not re.fullmatch(r'\d{4}-\d{2}', allocation):
+                    raise ValueError
+                date.fromisoformat(allocation + '-01')
+                if not beginning.strftime('%Y-%m') <= allocation <= through.strftime('%Y-%m'):
+                    raise ValueError
+                _text(entry['allocation_note'])
             totals[entry['source_id']] += Decimal(entry['hours'])
             if not isinstance(entry['replaces'], list):
                 raise ValueError
@@ -152,6 +163,7 @@ def apply_backfill(report, backfill, config, now):
     by_month = {month['month']: month for month in report['monthly']}
     first, last = min(by_month), max(by_month)
     report['unallocated_units'] = 0
+    report['estimated_month_units'] = 0
     invoice_first = set(backfill.get('invoice_first_projects', [])) & set(report['projects'])
     report['invoice_first_projects'] = sorted(invoice_first)
     report['qualifications'] = [note for note in backfill.get('qualifications', []) if note['project_id'] in report['projects']]
@@ -164,11 +176,17 @@ def apply_backfill(report, backfill, config, now):
                 'identifier': source.get('invoice', source.get('reference')), 'reason': reason})
 
     for entry in backfill['entries']:
-        project, month = entry['project_id'], entry['month']
+        project = entry['project_id']
+        allocation = entry.get('allocation_month')
+        month = allocation or entry['month']
         if project not in report['projects']:
             continue
         if entry['end'] and date.fromisoformat(entry['end']) > now.date():
             raise TimesheetError('future_invoice_work')
+        if allocation:
+            if (date.fromisoformat(allocation + '-01') > now.date() or
+                    (not entry['end'] and date.fromisoformat(backfill['coverage']['through']) > now.date())):
+                raise TimesheetError('future_invoice_work')
         if not month:
             window = backfill['coverage'] if not entry['start'] else {'start': entry['start'], 'through': entry['end']}
             if date.fromisoformat(window['through']) > now.date():
@@ -193,9 +211,14 @@ def apply_backfill(report, backfill, config, now):
             'size': '', 'units': entry['units'],
             'source': 'reviewed_recorded_time' if source.get('kind') == 'recorded_time' else 'reviewed_invoice',
             'date_note': entry.get('date_note', ''),
+            'month_allocation': 'estimated' if allocation else 'unallocated' if not month else 'work_dates',
+            'allocation_note': entry.get('allocation_note', ''),
         })
         if month:
             by_month[month]['units'] += entry['units']
+            if allocation:
+                by_month[month]['estimated_units'] = by_month[month].get('estimated_units', 0) + entry['units']
+                report['estimated_month_units'] += entry['units']
         else:
             report['unallocated_units'] += entry['units']
     for pending in backfill['pending']:
@@ -207,7 +230,7 @@ def apply_backfill(report, backfill, config, now):
             by_month[month]['unresolved'] += 1
             report['exceptions'].append({'month': month, 'project': report['projects'][pending['project_id']],
                 'identifier': pending['reference'], 'reason': pending['reason']})
-    report['complete'] = not report['exceptions'] and not report['qualifications']
+    report['complete'] = not report['exceptions'] and not report['qualifications'] and not report['estimated_month_units']
     report['basis'] = ('invoice_first_recorded_hours' if invoice_first == set(report['projects']) and
                        all(row.get('source') in {'reviewed_invoice', 'reviewed_recorded_time'} for row in report['rows']) else
                        'reviewed_invoices_and_completed_ticket_sizes')

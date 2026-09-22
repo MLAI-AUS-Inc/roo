@@ -63,7 +63,9 @@ and consecutive month count.
 For “project to date”, “all time” or “from the beginning”, use month=all. The
 private worker resolves the beginning of reviewed history. Unallocated invoice
 hour-units count toward the full reviewed period, separately from dated monthly
-hours. Never assign work to an invoice or payment month without evidence.
+hours. The private worker may apply reviewed month estimates when explicitly
+requested; these are labelled in charts and detail. Never invent allocations
+from the conversation or change source dates yourself.
 Do not silently narrow an ambiguous date request; ask which period is wanted.
 The report labels its sources. Invoice-first projects use reviewed invoices and
 additional recorded work for reviewed history; later ticket estimates are labelled separately.
