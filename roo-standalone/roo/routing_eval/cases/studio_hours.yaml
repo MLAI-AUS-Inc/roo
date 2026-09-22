@@ -1,0 +1,21 @@
+- id: studio-hours-this-month
+  text: "How many of my 40 Studio hours have we used this month?"
+  expect: {skill: studio-hours, action: summary}
+  tags: [studio-hours]
+- id: studio-hours-projects-builders
+  text: "Break down my Studio hours by project and builder"
+  expect: {skill: studio-hours, action: summary}
+  tags: [studio-hours]
+- id: studio-hours-monthly-history
+  text: "Show my monthly Studio hours from July to September 2026"
+  expect: {skill: studio-hours, action: summary, params: {month: "2026-07", months: 3}}
+  tags: [studio-hours]
+- id: studio-hours-detail-followup
+  text: "Give me the in-depth report on what those hours were spent on"
+  thread: {skill: studio-hours}
+  expect: {skill: studio-hours, action: detailed}
+  tags: [studio-hours, follow-up]
+- id: studio-hours-trap-coworking
+  text: "How many people used coworking last month?"
+  expect: {skill: mlai-points, action: coworking_report}
+  tags: [studio-hours, trap]

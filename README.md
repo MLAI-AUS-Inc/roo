@@ -37,6 +37,10 @@ Studio timesheet commands, local testing, cutoff rules and recovery are describe
 in [the timesheet guide](roo-standalone/docs/studio-timesheets.md). The feature is
 disabled by default and uses a separate report worker.
 
+Client-owned monthly usage reports, project/builder breakdowns and detailed
+work exports are described in [the client hours guide](roo-standalone/docs/studio-client-hours.md).
+They use a separate opt-in worker and verified client/project mappings.
+
 ## Requirements
 
 - Python 3.11

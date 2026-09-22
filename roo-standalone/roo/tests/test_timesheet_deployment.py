@@ -13,10 +13,12 @@ def test_base_public_restart_keeps_worker_queue(tmp_path):
     root = Path(__file__).resolve().parents[2]
     # Compose v2 still checks env_file existence with --no-env-resolution.
     # Render copied real configs with empty test environments, never .env data.
-    for filename in ('docker-compose.yml', 'docker-compose.timesheet-commands.yml', 'docker-compose.timesheets.yml'):
+    for filename in ('docker-compose.yml', 'docker-compose.timesheet-commands.yml', 'docker-compose.timesheets.yml',
+                     'docker-compose.studio-reports.yml'):
         shutil.copyfile(root / filename, tmp_path / filename)
     (tmp_path / '.env').write_text('')
     (tmp_path / '.env.timesheets').write_text('')
+    (tmp_path / '.env.studio-reports').write_text('')
     def config(*files):
         command = ['docker', 'compose']
         for name in files:
@@ -37,3 +39,13 @@ def test_base_public_restart_keeps_worker_queue(tmp_path):
     assert queue(base['services']['roo']) == queue(legacy['services']['roo']) == queue(worker['services']['timesheets'])
     assert base['services']['roo']['environment']['TIMESHEET_QUEUE_DIR'] == '/app/timesheets/queue'
     assert not any(mount['target'] == '/app/timesheets/data' for mount in base['services']['roo']['volumes'])
+    studio = config('docker-compose.studio-reports.yml')
+    assert studio['name'] == 'roo-studio-reports'
+    public = base['services']['roo']
+    client_worker = studio['services']['studio-reports']
+    def studio_queue(service):
+        return next(m['source'] for m in service['volumes'] if m['target'] == '/app/studio-reports/queue')
+    assert studio_queue(public) == studio_queue(client_worker)
+    assert studio_queue(public) != queue(public)
+    assert public['environment']['STUDIO_REPORTS_QUEUE_DIR'] == '/app/studio-reports/queue'
+    assert not any(m['target'] == '/app/studio-reports/data' for m in public['volumes'])

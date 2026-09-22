@@ -1,0 +1,18 @@
+name: roo-studio-reports
+
+services:
+  studio-reports:
+    build: .
+    command: ["python", "-m", "roo.studio_report_worker"]
+    env_file:
+      - .env.studio-reports
+    environment:
+      STUDIO_REPORTS_DATA_DIR: /app/studio-reports/data
+      STUDIO_REPORTS_QUEUE_DIR: /app/studio-reports/queue
+    restart: unless-stopped
+    volumes:
+      - studio-report-data:/app/studio-reports/data
+      - ./data/studio-report-queue:/app/studio-reports/queue
+
+volumes:
+  studio-report-data:

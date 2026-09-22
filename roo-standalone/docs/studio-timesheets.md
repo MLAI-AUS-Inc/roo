@@ -2,7 +2,8 @@
 
 Roo supports private, on-demand timesheets and an optional fortnightly delivery
 to Sam. This is separate from the existing builder payment reminder. It does not
-execute payments, change tickets, or implement client project reporting.
+execute payments or change tickets. Client project reporting uses a separate
+[monthly hours worker](studio-client-hours.md).
 
 ## Commands
 
