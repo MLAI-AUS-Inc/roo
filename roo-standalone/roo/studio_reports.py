@@ -247,22 +247,30 @@ def summary(report):
     if report.get('unallocated_units'):
         parts.append(f"*{hours(report['unallocated_units'])}h included in this total have no confirmed monthly split.* "
                      'They are shown separately from monthly usage, not assigned to invoice/payment dates.')
+    if report.get('estimated_month_units'):
+        parts.append(f"*{hours(report['estimated_month_units'])}h have estimated month assignments.* "
+                     'These redistribute existing hours; the detailed report explains each invoice/work-date assumption.')
     for month in report['monthly']:
         used, allowance = month['units'], month['allowance_units']
         usage = (f'{hours(used)} hours used' if allowance is None else
                  f'{hours(used)} of {hours(allowance)} hours used')
         if report['basis'] == 'invoice_first_recorded_hours':
-            usage = f'{hours(used)}h dated subtotal' + (f' · {hours(allowance)}h allowance' if allowance is not None else '')
+            usage = f'{hours(used)}h ' + ('allocated total' if month.get('estimated_units') else 'dated subtotal')
+            usage += f' · {hours(allowance)}h allowance' if allowance is not None else ''
         parts.append(f"\n*{month_label(month['month'])} — {usage}*"
                      + (' · month to date' if many and month['month'] == current else ''))
+        if month.get('estimated_units'):
+            parts.append(f"Includes {hours(month['estimated_units'])}h assigned using estimated work months."
+                         + (" Remaining hours and overages aren't confirmed."
+                            if allowance is not None and not month['unresolved'] else ''))
         if month['unresolved']:
             kind = 'work items or invoice records' if report['basis'] != 'completed_ticket_size_hours' else 'completed work items'
-            parts.append(('Monthly allocation is incomplete.' if invoice_first else
+            parts.append(('Some recorded work still needs review.' if invoice_first else
                           f"⚠️ Partial total: {month['unresolved']} {kind} need review.")
                          + (" Remaining hours aren't confirmed yet." if allowance is not None else ''))
-        elif allowance is not None and used > allowance:
+        elif allowance is not None and used > allowance and not month.get('estimated_units'):
             parts.append(f"*{hours(used - allowance)} hours over your allowance.*")
-        elif allowance is not None:
+        elif allowance is not None and not month.get('estimated_units'):
             parts.append(f"*{hours(allowance - used)} hours remaining* · {used / allowance:.0%} used")
         if not many:
             parts.append('Project overview · no combined monthly allowance.' if allowance is None
@@ -320,8 +328,12 @@ def detail_messages(report):
         if row.get('source') in {'reviewed_invoice', 'reviewed_recorded_time'}:
             period = row['work_start'] + (' – ' + row['work_end'] if row['work_end'] != row['work_start'] else '')
             period = (period or 'Work month unconfirmed') + (' · invoice' if row['source'] == 'reviewed_invoice' else ' · recorded work')
+        if row.get('month_allocation') == 'estimated':
+            period += ' · estimated allocation to ' + month_label(row['month'])
         lines.append(f"• {period} · {_escape(row['builder'])} · *{display_hours(row['units'], report.get('unit_scale', 4))}h*"
                      f" — {_escape(row['title'])} ({_escape(row['identifier'])})")
+        if row.get('allocation_note'):
+            lines.append('  Allocation assumption: ' + _escape(row['allocation_note']))
     if not report['rows']:
         lines.append('No counted completed work in this period.')
     return split_messages('\n'.join(lines))
@@ -351,10 +363,11 @@ def artifacts(report):
     if report['selector']['action'] == 'detailed':
         result['studio-hours-work.csv'] = csv_file(
             ['month', 'project', 'builder', 'completion_date_or_work_period_end', 'issue_or_invoice', 'work', 'size', 'hours',
-             'source', 'work_period_start', 'work_period_end', 'date_note'],
+             'source', 'work_period_start', 'work_period_end', 'date_note', 'month_allocation', 'allocation_note'],
             [[r['month'], r['project'], r['builder'], r['completed_at'], r['identifier'], r['title'],
               r['size'], Decimal(r['units']) / report.get('unit_scale', 4), r.get('source', 'completed_ticket_size'),
-              r.get('work_start', ''), r.get('work_end', ''), r.get('date_note', '')] for r in report['rows']])
+              r.get('work_start', ''), r.get('work_end', ''), r.get('date_note', ''),
+              r.get('month_allocation', 'work_dates'), r.get('allocation_note', '')] for r in report['rows']])
     if report['exceptions']:
         result['studio-hours-unresolved.csv'] = csv_file(['month', 'project', 'issue', 'reason'],
             [[r['month'], r['project'], r['identifier'], r['reason']] for r in report['exceptions']])
@@ -390,7 +403,8 @@ def render_chart(report, breakdown=None):
         if monthly_view:
             labels = [month_offset(m['month'], 0).strftime('%b %Y') for m in monthly]
             current = timestamp(report['generated_at']).astimezone(TZ).strftime('%Y-%m')
-            axis_labels = [label + ('\n(to date)' if month['month'] == current else '')
+            axis_labels = [label + ('*' if month.get('estimated_units') else '')
+                           + ('\n(to date)' if month['month'] == current else '')
                            for label, month in zip(labels, monthly)]
             values = [m['units'] / scale for m in monthly]
             allowances = [m['allowance_units'] / scale if m['allowance_units'] is not None else None for m in monthly]
@@ -464,6 +478,10 @@ def render_chart(report, breakdown=None):
             basis = f"{display_hours(total_units(report), scale)}h supported total · invoice hour-units + additional recorded work"
         caution = ('\nMonthly allocation incomplete; see report qualifications.' if report.get('unallocated_units') else
                    '\nPartial totals: some completed work needs review.' if not report['complete'] else '')
+        if report.get('estimated_month_units'):
+            caution = '\n* Includes estimated month assignments; see the detailed report for assumptions.'
+            if report.get('unallocated_units'):
+                caution += ' Some hours remain unallocated.'
         figure.text(.06, .065, basis
                     + caution,
                     fontsize=10, color='#465d67')

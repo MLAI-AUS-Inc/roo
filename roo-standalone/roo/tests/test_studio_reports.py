@@ -751,3 +751,82 @@ def test_reviewed_cutoff_preserves_later_live_work_with_separate_basis(setup):
     assert result['monthly'][-1]['units'] == 100
     assert result['basis'] == 'reviewed_invoices_and_completed_ticket_sizes'
     assert '1h from completed-ticket estimates' in summary(result)
+
+
+def test_estimated_month_counts_once_and_preserves_source_dates_and_disclosure(setup, monkeypatch):
+    from matplotlib.axes import Axes
+    from matplotlib.figure import Figure
+    value = invoice_first_manifest(setup)
+    entry = value['entries'][0]
+    entry.update(allocation_month='2026-06', allocation_note='June invoice used as an estimated work month.')
+    backfill = validate_backfill(value, setup.config)
+    full = build_client_report(setup.config, setup.clients['UMARK'], {'month':'all','action':'detailed'}, [], NOW, backfill)
+    assert sum(r['units'] for r in full['rows']) == 1283
+    assert [m['units'] for m in full['monthly']] == [0, 1283, 0, 0, 0]
+    assert full['unallocated_units'] == 0 and full['estimated_month_units'] == 1283
+    assert full['rows'][0]['work_start'] == full['rows'][0]['work_end'] == ''
+    assert full['rows'][0]['month_allocation'] == 'estimated'
+    assert not full['complete']
+    text = summary(full)
+    assert '12.83h have estimated month assignments' in text
+    detail = '\n'.join(detail_messages(full))
+    assert 'estimated allocation to June 2026' in detail and entry['allocation_note'] in detail
+    csv = artifacts(full)['studio-hours-work.csv']
+    assert 'month_allocation,allocation_note' in csv and ',estimated,June invoice' in csv
+    assert 'private-mail-id' not in csv and entry['review_note'] not in csv
+    single = build_client_report(setup.config, setup.clients['UMARK'], {'month':'2026-06'}, [], NOW, backfill)
+    assert sum(r['units'] for r in single['rows']) == 1283
+    assert 'hours remaining' not in summary(single) and 'hours over your allowance' not in summary(single)
+    other = build_client_report(setup.config, setup.clients['UMARK'], {'month':'2026-07'}, [], NOW, backfill)
+    assert not other['rows'] and other['estimated_month_units'] == 0
+    labels, notes = [], []
+    original_bar, original_text = Axes.bar, Figure.text
+    def bar(self, x, *args, **kwargs):
+        labels.extend(x)
+        return original_bar(self, x, *args, **kwargs)
+    def text_capture(self, x, y, s, **kwargs):
+        notes.append(s)
+        return original_text(self, x, y, s, **kwargs)
+    monkeypatch.setattr(Axes, 'bar', bar)
+    monkeypatch.setattr(Figure, 'text', text_capture)
+    assert render_chart(full).startswith(b'\x89PNG')
+    assert 'Jun 2026*' in labels and 'Month\nunallocated' not in labels
+    assert any('estimated month assignments' in note for note in notes)
+
+
+def test_estimated_cross_month_split_reconciles_original_invoice_without_rewriting_window(setup):
+    from copy import deepcopy
+    value = invoice_first_manifest(setup)
+    entry = value['entries'][0]
+    entry.update(date_status='work_period', start='2026-08-12', end='2026-09-10',
+        hours='7.25', allocation_month='2026-08', allocation_note='August share from time log.')
+    remainder = deepcopy(entry)
+    remainder.update(id='alice-001:2', line_id='2', hours='5.58', allocation_month='2026-09', allocation_note='September balance preserves the invoice total.')
+    value['entries'].append(remainder)
+    backfill = validate_backfill(value, setup.config)
+    results = [build_client_report(setup.config, setup.clients['UMARK'], {'month':month}, [], NOW, backfill)
+               for month in ['2026-08', '2026-09']]
+    assert [r['monthly'][0]['units'] for r in results] == [725, 558]
+    assert all(r['unallocated_units'] == 0 for r in results)
+    assert all(r['rows'][0]['work_start']=='2026-08-12' and r['rows'][0]['work_end']=='2026-09-10' for r in results)
+    assert sum(r['estimated_month_units'] for r in results) == 1283
+    scoped = build_client_report(setup.config, setup.clients['UOTHER'], {'months':5}, [], NOW, backfill)
+    assert not scoped['rows'] and scoped['estimated_month_units'] == 0
+
+
+@pytest.mark.parametrize('mutation', ['missing_note','empty_note','missing_month','invalid_month','outside_coverage','confirmed_month','v1'])
+def test_estimated_allocation_requires_valid_reviewed_month_and_ambiguous_source(setup, mutation):
+    value = invoice_first_manifest(setup)
+    entry = value['entries'][0]
+    entry.update(allocation_month='2026-06', allocation_note='Reviewed invoice-month assumption.')
+    if mutation == 'missing_note': entry.pop('allocation_note')
+    elif mutation == 'empty_note': entry['allocation_note'] = ''
+    elif mutation == 'missing_month': entry.pop('allocation_month')
+    elif mutation == 'invalid_month': entry['allocation_month'] = '2026-13'
+    elif mutation == 'outside_coverage': entry['allocation_month'] = '2026-04'
+    elif mutation == 'confirmed_month': entry.update(date_status='work_period',start='2026-08-01',end='2026-08-05')
+    elif mutation == 'v1':
+        value = invoice_manifest(setup)
+        value['entries'][0].update(allocation_month='2026-06', allocation_note='Not permitted for legacy manifest.')
+    with pytest.raises(TimesheetError, match='invalid_invoice_backfill'):
+        validate_backfill(value, setup.config)
