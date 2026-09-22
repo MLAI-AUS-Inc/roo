@@ -62,7 +62,12 @@ retain this selector, so subsequent requests include the latest month.
 
 Multi-month summaries lead with total usage, one short section per month, and
 project/builder totals across the whole period. Project lists are shown once.
-The chart compares monthly hours and marks the current month “to date.” Client
+The monthly chart uses stacked bars: months on the x axis, hours on the y axis,
+and a colour-coded segment for each project with a legend. Project colours match
+the separate project-total chart for the same report. Totals appear above each
+stack; months without dated records remain explicitly marked. Hours without a
+confirmed month appear in a separate “Month unallocated” stack using the same
+project colours. The chart marks the current month “to date.” Client
 allowances stay separate for each month; staff overviews have no combined budget.
 
 A detailed follow-up inherits the last requested period for the same verified

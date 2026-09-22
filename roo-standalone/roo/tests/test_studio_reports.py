@@ -450,7 +450,8 @@ def test_monthly_chart_marks_only_current_month_to_date(setup, monkeypatch):
     labels = []
     original = Axes.bar
     def capture(axes, x, *args, **kwargs):
-        labels.extend(x)
+        if not labels:
+            labels.extend(x)
         return original(axes, x, *args, **kwargs)
     monkeypatch.setattr(Axes, 'bar', capture)
     assert render_chart(report(setup, [], month='recent', months=3)).startswith(b'\x89PNG')
@@ -711,23 +712,34 @@ def test_invoice_first_qualifications_and_undated_rows_never_cross_project_acces
 
 def test_charts_preserve_exact_period_and_monthly_reconciliation(setup, monkeypatch):
     from matplotlib.axes import Axes
-    calls = {}
+    calls = {'monthly': []}
     real_bar, real_barh = Axes.bar, Axes.barh
     def bar(self, x, height, *args, **kwargs):
-        calls['monthly'] = (x, height)
+        if kwargs.get('label'):
+            calls['monthly'].append((list(x), list(height), list(kwargs['bottom']), kwargs['label'], kwargs['color']))
         return real_bar(self, x, height, *args, **kwargs)
     def barh(self, y, width, *args, **kwargs):
         calls['projects'] = width
+        calls['project_colors'] = kwargs['color']
         return real_barh(self, y, width, *args, **kwargs)
     monkeypatch.setattr(Axes, 'bar', bar)
     monkeypatch.setattr(Axes, 'barh', barh)
     value = validate_backfill(invoice_first_manifest(setup), setup.config)
-    result = build_client_report(setup.config, setup.clients['UMARK'], {'month':'all'}, [], NOW, value)
+    result = build_client_report(setup.config, setup.clients['UMARK'], {'month':'all'},
+        [ticket(2, project=P2, completed='2026-08-20T00:00:00Z'), ticket(3, project=P2)], NOW, value)
     assert render_chart(result).startswith(b'\x89PNG')
-    labels, values = calls['monthly']
-    assert labels[-1] == 'Month\nunallocated' and sum(values) == 12.83
+    stacks = {name: (labels, heights, bottoms, color) for labels, heights, bottoms, name, color in calls['monthly']}
+    assert set(stacks) == {'Master App', 'Cybertest'}
+    assert stacks['Master App'][0][-1] == 'Month\nunallocated'
+    assert stacks['Master App'][1] == [0, 0, 0, 0, 0, 12.83]
+    assert stacks['Cybertest'][1] == [0, 0, 0, 1, 1, 0]
+    assert stacks['Master App'][2] == [0, 0, 0, 1, 1, 0]
+    assert stacks['Cybertest'][2] == [0] * 6
+    assert stacks['Master App'][3] != stacks['Cybertest'][3]
+    assert sum(sum(heights) for _, heights, _, _, _ in calls['monthly']) == 14.83
     assert render_chart(result, breakdown='projects').startswith(b'\x89PNG')
-    assert calls['projects'] == [12.83, 0]
+    assert calls['projects'] == [12.83, 2]
+    assert calls['project_colors'] == [stacks['Master App'][3], stacks['Cybertest'][3]]
 
 
 def test_reviewed_cutoff_preserves_later_live_work_with_separate_basis(setup):
