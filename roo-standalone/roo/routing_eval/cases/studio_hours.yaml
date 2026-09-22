@@ -2,6 +2,10 @@
   text: "How many of my 40 Studio hours have we used this month?"
   expect: {skill: studio-hours, action: summary}
   tags: [studio-hours]
+- id: studio-hours-project-to-date
+  text: "Show all project-to-date Studio hours for Mark Ghiasy, including May and June"
+  expect: {skill: studio-hours, action: summary, params: {month: all, client: "Mark Ghiasy"}}
+  tags: [studio-hours, client-scope]
 - id: studio-hours-projects-builders
   text: "Break down my Studio hours by project and builder"
   expect: {skill: studio-hours, action: summary}

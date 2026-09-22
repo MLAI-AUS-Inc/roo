@@ -17,6 +17,7 @@ snapshots and delivery receipts. The feature is disabled by default.
 - “Give me the in-depth report on what those hours were spent on.”
 - “Give me a breakdown for the last three months on all projects and hours we've done for Mark Ghiasy the client.”
 - “Show hours per client and project for the last three months.”
+- “Show project-to-date Studio hours for Mark Ghiasy, including May and June.”
 
 Named-client requests use `client: "Mark Ghiasy"`; “all projects for Mark” stays
 scoped to Mark. `client: "all"` groups accessible projects by their configured
@@ -53,6 +54,11 @@ calendar months (for example, July–September when requested in September).
 Roo resolves these periods in Melbourne time using `month: recent` or
 `month: last_complete`, with `months: 3`; the model does not calculate dates.
 A month count without a starting month also ends in the current month.
+“Project to date”, “all time” and “from the beginning” use `month: all`. The
+private worker resolves the start from reviewed backfill coverage, through the
+current month (up to 120 months). Public Roo does not receive the coverage file.
+Without configured history, Roo asks for an explicit date range. Detail follow-ups
+retain this selector, so subsequent requests include the latest month.
 
 Multi-month summaries lead with total usage, one short section per month, and
 project/builder totals across the whole period. Project lists are shown once.
@@ -178,6 +184,37 @@ The summary and chart label combined invoice hours and ticket estimates. The
 detailed CSV includes source type, invoice reference and work-period dates;
 quarter-hour entries preserve the amounts in the reviewed evidence. Imported
 data always follows the existing explicit client/project grants.
+
+Schema **version 2** additionally supports invoice-first reporting. It uses exact
+integer hundredths for reports, preserving quantities such as 12.83h; payroll's
+quarter-hour ledger is unchanged. Add `coverage: {start: YYYY-MM-DD, through:
+YYYY-MM-DD}`, `invoice_first_projects: [verified project IDs]`, and optional
+`qualifications: [{project_id, reference, reason}]`. Coverage describes the reviewed
+reporting interval, not invented work dates. Ticket estimates through the reviewed
+coverage cutoff for these projects are excluded to avoid overlap; unmatched completed tickets remain in
+the exceptions CSV for review. Other projects retain their existing source rules.
+
+Sources default to `kind: invoice`; additional reviewed time claims use
+`kind: recorded_time` and `reference` instead of `invoice`, with their own source
+hash, builder and total. Cross-month work windows are allowed. Where even the
+work month is unknown, use `date_status: unallocated`, null `start`/`end`, and a
+client-safe `date_note`. These entries count once only when the requested period
+contains their full work window (or reviewed coverage for undated entries).
+Shorter requests explicitly exclude them and withhold unconfirmed remaining
+balances. A full-period total sums dated rows **plus** unallocated rows; its
+monthly chart shows an additional “Month unallocated” bar, and its project chart
+shows the full total. A zero dated subtotal never proves zero actual work.
+
+Invoice-first quantities may include approved billing adjustments or unresolved
+invoice discrepancies only when explicitly accepted in the reconciliation.
+Preserve those qualifications in client-safe text; do not call these quantities
+independently verified clock time. Exclude void/superseded invoices, duplicate
+payments and work belonging to other projects. Additional time needs distinct
+reviewed evidence, not a ticket-size estimate. Later completed work retains live
+ticket estimates, explicitly labelled separately from invoice/recorded hours.
+Review and refresh the private manifest and coverage cutoff to reconcile later
+invoices/logs. This policy does not expand access or change
+accounting records. Back up both code and the versioned manifest for rollback.
 
 ### Worker setup
 

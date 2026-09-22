@@ -17,9 +17,25 @@ def _text(value, limit=2000):
 def validate_backfill(value, config):
     """Reject the entire manifest if its provenance, scope or arithmetic is invalid."""
     try:
-        if (value['version'] != 1 or value['team'] != config.team
+        version = value['version']
+        if (type(version) is not int or version not in {1, 2} or value['team'] != config.team
                 or value['organization'] != config.organization):
             raise ValueError
+        scale = 100 if version == 2 else 4
+        if version == 2:
+            coverage = value['coverage']
+            beginning, through = date.fromisoformat(coverage['start']), date.fromisoformat(coverage['through'])
+            if beginning > through:
+                raise ValueError
+            projects = value['invoice_first_projects']
+            if (not isinstance(projects, list) or any(not isinstance(p, str) or p not in config.projects for p in projects)
+                    or len(set(projects)) != len(projects)):
+                raise ValueError
+            for note in value.get('qualifications', []):
+                if note['project_id'] not in projects:
+                    raise ValueError
+                _text(note['reference'])
+                _text(note['reason'])
         sources = value['sources']
         if (not isinstance(sources, dict) or not isinstance(value['entries'], list)
                 or not isinstance(value['pending'], list) or len(value['entries']) > 10000):
@@ -28,11 +44,14 @@ def validate_backfill(value, config):
         totals = {}
         for source_id, source in sources.items():
             _text(source_id)
-            _text(source['invoice'])
+            kind = source.get('kind', 'invoice')
+            if kind not in ({'invoice', 'recorded_time'} if version == 2 else {'invoice'}):
+                raise ValueError
+            _text(source['invoice'] if kind == 'invoice' else source['reference'])
             _text(source['message_id'])
             if not re.fullmatch('[a-f0-9]{64}', source['sha256']):
                 raise ValueError
-            invoice_key = (source['builder_id'], source['invoice'])
+            invoice_key = (source['builder_id'], kind, source.get('invoice') if kind == 'invoice' else source['reference'])
             if source['builder_id'] not in config.builders or invoice_key in invoices or source['sha256'] in hashes:
                 raise ValueError
             invoices.add(invoice_key)
@@ -57,15 +76,24 @@ def validate_backfill(value, config):
                 raise ValueError
             _text(entry['description'])
             _text(entry['review_note'])
-            start, end = date.fromisoformat(entry['start']), date.fromisoformat(entry['end'])
-            # Never assign a cross-month aggregate to its invoice/payment month.
-            if start > end or start.strftime('%Y-%m') != end.strftime('%Y-%m'):
-                raise ValueError
-            units = Decimal(entry['hours']) * 4
+            undated = version == 2 and entry.get('date_status') == 'unallocated'
+            if undated:
+                if entry['start'] is not None or entry['end'] is not None:
+                    raise ValueError
+                _text(entry['date_note'])
+                month = ''
+            else:
+                if entry.get('date_status', 'work_period') != 'work_period':
+                    raise ValueError
+                start, end = date.fromisoformat(entry['start']), date.fromisoformat(entry['end'])
+                if start > end or (version == 1 and start.strftime('%Y-%m') != end.strftime('%Y-%m')):
+                    raise ValueError
+                month = start.strftime('%Y-%m') if start.strftime('%Y-%m') == end.strftime('%Y-%m') else ''
+            units = Decimal(entry['hours']) * scale
             if not units.is_finite() or units <= 0 or units != units.to_integral_value():
                 raise ValueError
             entry['units'] = int(units)
-            entry['month'] = start.strftime('%Y-%m')
+            entry['month'] = month
             totals[entry['source_id']] += Decimal(entry['hours'])
             if not isinstance(entry['replaces'], list):
                 raise ValueError
@@ -107,25 +135,69 @@ def replacements(backfill):
             for entry in (backfill or {}).get('entries', []) for issue in entry['replaces']}
 
 
+def history_beginning(backfill, projects):
+    if not backfill:
+        raise TimesheetError('all_time_coverage_not_configured')
+    dates = [entry['start'] for entry in backfill['entries'] if entry['project_id'] in projects and entry['start']]
+    if set(projects) & set(backfill.get('invoice_first_projects', [])):
+        dates.append(backfill['coverage']['start'])
+    if not dates:
+        raise TimesheetError('all_time_coverage_not_configured')
+    return min(dates)[:7]
+
+
 def apply_backfill(report, backfill, config, now):
     if not backfill:
         return report
     by_month = {month['month']: month for month in report['monthly']}
+    first, last = min(by_month), max(by_month)
+    report['unallocated_units'] = 0
+    invoice_first = set(backfill.get('invoice_first_projects', [])) & set(report['projects'])
+    report['invoice_first_projects'] = sorted(invoice_first)
+    report['qualifications'] = [note for note in backfill.get('qualifications', []) if note['project_id'] in report['projects']]
+
+    def exception(entry, months, reason):
+        source = backfill['sources'][entry['source_id']]
+        for month in months:
+            by_month[month]['unresolved'] += 1
+            report['exceptions'].append({'month': month, 'project': report['projects'][entry['project_id']],
+                'identifier': source.get('invoice', source.get('reference')), 'reason': reason})
+
     for entry in backfill['entries']:
         project, month = entry['project_id'], entry['month']
-        if project not in report['projects'] or month not in by_month:
+        if project not in report['projects']:
             continue
-        if date.fromisoformat(entry['end']) > now.date():
+        if entry['end'] and date.fromisoformat(entry['end']) > now.date():
             raise TimesheetError('future_invoice_work')
+        if not month:
+            window = backfill['coverage'] if not entry['start'] else {'start': entry['start'], 'through': entry['end']}
+            if date.fromisoformat(window['through']) > now.date():
+                raise TimesheetError('future_invoice_work')
+            relevant = [key for key in by_month if window['start'][:7] <= key <= window['through'][:7]]
+            if not relevant:
+                continue
+            contained = first <= window['start'][:7] and last >= window['through'][:7]
+            reason = ('Included in period total; work month unallocated.' if contained else
+                      'Excluded from this subtotal; hours span or may belong outside the requested months.')
+            exception(entry, relevant, reason)
+            if not contained:
+                continue
+        elif month not in by_month:
+            continue
         source = backfill['sources'][entry['source_id']]
         report['rows'].append({
             'month': month, 'project_id': project, 'project': report['projects'][project],
             'builder_id': entry['builder_id'], 'builder': config.builders[entry['builder_id']]['name'],
-            'issue_id': entry['id'], 'identifier': source['invoice'], 'title': entry['description'],
-            'completed_at': entry['end'], 'work_start': entry['start'], 'work_end': entry['end'],
-            'size': '', 'units': entry['units'], 'source': 'reviewed_invoice',
+            'issue_id': entry['id'], 'identifier': source.get('invoice', source.get('reference')), 'title': entry['description'],
+            'completed_at': entry['end'] or '', 'work_start': entry['start'] or '', 'work_end': entry['end'] or '',
+            'size': '', 'units': entry['units'],
+            'source': 'reviewed_recorded_time' if source.get('kind') == 'recorded_time' else 'reviewed_invoice',
+            'date_note': entry.get('date_note', ''),
         })
-        by_month[month]['units'] += entry['units']
+        if month:
+            by_month[month]['units'] += entry['units']
+        else:
+            report['unallocated_units'] += entry['units']
     for pending in backfill['pending']:
         if pending['project_id'] not in report['projects']:
             continue
@@ -135,7 +207,9 @@ def apply_backfill(report, backfill, config, now):
             by_month[month]['unresolved'] += 1
             report['exceptions'].append({'month': month, 'project': report['projects'][pending['project_id']],
                 'identifier': pending['reference'], 'reason': pending['reason']})
-    report['complete'] = not report['exceptions']
-    report['basis'] = 'reviewed_invoices_and_completed_ticket_sizes'
+    report['complete'] = not report['exceptions'] and not report['qualifications']
+    report['basis'] = ('invoice_first_recorded_hours' if invoice_first == set(report['projects']) and
+                       all(row.get('source') in {'reviewed_invoice', 'reviewed_recorded_time'} for row in report['rows']) else
+                       'reviewed_invoices_and_completed_ticket_sizes')
     report['rows'].sort(key=lambda r: (r['month'], r['project'], r['completed_at'], r['identifier']))
     return report
