@@ -222,6 +222,45 @@ def test_source_errors_missing_history_and_duplicates_cannot_report_zero(setup):
             report(setup, data)
 
 
+def historical_ticket_with_deleted_label():
+    item = ticket(completed='2026-07-10T00:00:00Z')
+    item['history'] = [{'id': 'deleted-label', 'createdAt': '2026-08-10T00:00:00Z',
+                        'removedLabelIds': ['old-effort'], 'removedLabels': []}]
+    return item
+
+
+def test_deleted_historical_labels_are_scoped_partial_items_without_guessed_hours(setup):
+    result = report(setup, [historical_ticket_with_deleted_label(), ticket(2)], month='recent', months=3)
+    assert [month['units'] for month in result['monthly']] == [0, 0, 4]
+    assert [month['unresolved'] for month in result['monthly']] == [1, 0, 0]
+    assert result['exceptions'] == [{'month':'2026-07', 'project':'Master App', 'identifier':'STU-1',
+                                     'reason':'historical_effort_labels_unavailable'}]
+    assert not result['complete'] and 'partial total' in summary(result)
+    assert 'historical_effort_labels_unavailable' in artifacts(result)['studio-hours-unresolved.csv']
+    assert [row['identifier'] for row in result['rows']] == ['STU-2']
+
+
+def test_deleted_labels_do_not_expose_another_projects_historical_work(setup):
+    item = historical_ticket_with_deleted_label()
+    # The ticket moved into Mark's project after it was completed elsewhere.
+    item['history'].append({'id':'move', 'createdAt':'2026-08-01T00:00:00Z',
+                           'fromProjectId':P3, 'toProjectId':P1,
+                           'fromProject':{'id':P3}, 'toProject':{'id':P1}})
+    result = report(setup, [item], month='recent', months=3)
+    assert result['rows'] == result['exceptions'] == []
+    assert 'STU-1' not in json.dumps(result)
+
+
+@pytest.mark.parametrize('from_project,to_project', [(None,P1), ({'id':P3},P2)])
+def test_deleted_labels_still_block_when_project_history_cannot_be_verified(setup, from_project, to_project):
+    item = historical_ticket_with_deleted_label()
+    item['history'].append({'id':'move', 'createdAt':'2026-08-01T00:00:00Z',
+                           'fromProjectId':P3, 'toProjectId':to_project,
+                           'fromProject':from_project, 'toProject':{'id':to_project}})
+    with pytest.raises(TimesheetError, match='source_evidence_incomplete'):
+        report(setup, [item], month='recent', months=3)
+
+
 def test_open_and_future_work_do_not_count(setup):
     result = report(setup, [ticket(1, completed=None, state={'type': 'started'}),
                             ticket(2, completed='2026-09-23T00:00:00Z')])
