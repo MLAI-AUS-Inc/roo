@@ -18,7 +18,8 @@ import httpx
 
 from .studio_reports import (allowance_units, artifacts, build_client_report, detail_messages,
                              month_offset, render_chart, resolve_period, split_messages, summary)
-from .timesheet_worker import ReportAPI, TimesheetService
+from .timesheet_worker import TimesheetService
+from .studio_report_source import StudioSourceAPI
 from .timesheets import TimesheetConfig, TimesheetError, fingerprint, flag, timestamp
 
 
@@ -57,7 +58,7 @@ def configuration(env):
     return config, raw
 
 
-class StudioReportAPI(ReportAPI):
+class StudioReportAPI(StudioSourceAPI):
     def upload_csv(self, channel, filename, content):
         if filename.endswith('.png'):
             content = base64.b64decode(content, validate=True)
@@ -93,7 +94,7 @@ class StudioReportService(TimesheetService):
         # month, even for months older than the payroll worker's initial cutoff.
         source = SimpleNamespace(team=self.config.team, organization=self.config.organization,
                                  projects={key: self.config.projects[key] for key in client['project_ids']},
-                                 beginning=start)
+                                 beginning=start, directory=self.config.directory)
         self.api.verify_recipient(actor, self.config.team)
         self.api.verify(source)
         dataset = self.api.collect(source, now, {})

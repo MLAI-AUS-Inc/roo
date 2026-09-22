@@ -10,6 +10,7 @@ from pathlib import Path
 import re
 import signal
 import threading
+import time
 from urllib.parse import urlsplit
 
 import httpx
@@ -219,6 +220,7 @@ class TimesheetService:
 
     def commands(self, now):
         results = []
+        started = time.monotonic()
         if not self.config.queue.exists():
             return results
         for path in sorted(self.config.queue.glob('*.json')):
@@ -259,7 +261,10 @@ class TimesheetService:
                 except Exception as exc:
                     code = str(exc) if isinstance(exc, TimesheetError) else type(exc).__name__
                     request['status'], request['error'] = 'error', code
-                    request['retry_at'] = timestamp(now).timestamp() + 60
+                    # Source collection may take minutes. Back off from the
+                    # failure, not the stale timestamp at the start of the scan.
+                    request['retry_at'] = max(timestamp(now).timestamp() + time.monotonic() - started + 60,
+                                              getattr(exc, 'retry_at', 0))
                     results.append({'request': key, 'status': 'error', 'reason': code})
                 if request['status'] in {'error', 'needs_review'}:
                     terminal, notice = self.failure_notice(request)

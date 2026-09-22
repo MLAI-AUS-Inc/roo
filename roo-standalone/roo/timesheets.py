@@ -31,6 +31,14 @@ class TimesheetError(ValueError):
     """Fixed reason code, safe to log without provider text."""
 
 
+class SourceRetryError(TimesheetError):
+    """A source-wide failure with an absolute earliest retry time."""
+
+    def __init__(self, code, retry_at):
+        super().__init__(code)
+        self.retry_at = retry_at
+
+
 def timestamp(value):
     try:
         result = datetime.fromisoformat(value.replace('Z', '+00:00')) if isinstance(value, str) else value
