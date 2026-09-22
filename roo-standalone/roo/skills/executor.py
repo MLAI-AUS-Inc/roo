@@ -291,6 +291,14 @@ class SkillExecutor:
                     slack_team_id=kwargs.get("slack_team_id"),
                     request_message_ts=kwargs.get("current_message_ts"),
                 )
+            elif skill.name == "studio-hours":
+                from ..studio_report_commands import enqueue as enqueue_studio_report
+
+                message = await asyncio.to_thread(
+                    enqueue_studio_report, get_settings(), get_backend_actor_context(), params,
+                    user_id=user_id, channel_id=channel_id, thread_ts=thread_ts,
+                )
+                result = message
             elif skill.name == "mlai-data-query":
                 result = await self._execute_mlai_data_query(
                     skill,

@@ -6,6 +6,8 @@
 .env.timesheets
 .env.timesheets-plane
 .env.timesheet-demo
+.env.studio-reports
+studio-report-preview/
 timesheet-preview/
 *.db
 data/

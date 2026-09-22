@@ -94,6 +94,12 @@ class Settings(BaseSettings):
     TIMESHEET_FIRST_CUTOFF: str = "2026-09-11"
     TIMESHEET_QUEUE_DIR: str = "/app/timesheets/queue"
 
+    # Client reporting queues contain request metadata only; source credentials
+    # and owner/project mappings live in the separate Studio report worker.
+    STUDIO_REPORTS_ENABLED: bool = False
+    STUDIO_REPORTS_SLACK_TEAM_ID: str = ""
+    STUDIO_REPORTS_QUEUE_DIR: str = "/app/studio-reports/queue"
+
     # Context-aware channel replies. Disabled by default and restricted to an
     # explicit channel allowlist before any untagged message can be considered.
     ROO_CONTEXTUAL_RESPONSES_ENABLED: bool = False
@@ -286,6 +292,8 @@ class Settings(BaseSettings):
                 enabled.add("victor-ai-applications")
             if self.MEETING_ROOM_BOOKING_ENABLED:
                 enabled.add("meeting-room-booking")
+            if self.STUDIO_REPORTS_ENABLED:
+                enabled.add("studio-hours")
             return frozenset(enabled)
         return frozenset()
 

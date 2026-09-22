@@ -12,6 +12,7 @@ services:
       ROO_SURFACE: public
       # Shared request metadata must survive every public/admin deployment.
       TIMESHEET_QUEUE_DIR: /app/timesheets/queue
+      STUDIO_REPORTS_QUEUE_DIR: /app/studio-reports/queue
       # Enforce contextual responses in the first allowlisted pilot channel.
       ROO_CONTEXTUAL_RESPONSES_ENABLED: "true"
       ROO_CONTEXTUAL_SHADOW_MODE: "false"
@@ -27,6 +28,7 @@ services:
       - ./skills:/app/skills:ro
       - roo-data:/app/data
       - ./data/timesheet-queue:/app/timesheets/queue
+      - ./data/studio-report-queue:/app/studio-reports/queue
     networks:
       - default
       - roo-admin-gateway

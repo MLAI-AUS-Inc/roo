@@ -27,7 +27,7 @@ class ReportAPI(TimesheetAPI):
         return self._upload_csv(channel, filename, content)
 
     def _upload_csv(self, channel, filename, content, *, thread_ts=None):
-        data = content.encode('utf-8')
+        data = content if isinstance(content, bytes) else content.encode('utf-8')
         response = self.client.get('https://slack.com/api/files.getUploadURLExternal',
             headers={'Authorization': 'Bearer ' + self.slack_token},
             params={'filename': filename, 'length': len(data)})
@@ -204,6 +204,19 @@ class TimesheetService:
     def request_authorized(self, request):
         return request.get('team') == self.config.team and request.get('actor') == self.config.recipient
 
+    def report_for_request(self, request):
+        return self.report(request['selector'], timestamp(request['requested_at']))
+
+    def failure_notice(self, request):
+        terminal = request.get('error') in {'no_completed_fortnight', 'not_a_payment_cutoff', 'period_not_closed', 'invalid_timestamp', 'draft_period_finalized'}
+        notice = ('That fortnight is not available. Use `timesheet current` for an open-period draft.' if terminal else
+                  'Roo could not finish your timesheet request yet. No unavailable data has been counted as zero. '
+                  'Roo will retry safe failures; an uncertain Slack delivery needs operator review.')
+        if request.get('error') == 'draft_period_finalized':
+            notice = ('That draft’s period has already been finalized. Request `timesheet` '
+                      'for the saved report, or send a new `timesheet current` request for a fresh draft.')
+        return terminal, notice
+
     def commands(self, now):
         results = []
         if not self.config.queue.exists():
@@ -234,7 +247,7 @@ class TimesheetService:
                     # Keep source evidence out of the queue mounted in Public Roo.
                     report = self.requests.read(key)
                     if report is None:
-                        report = self.report(request['selector'], timestamp(request['requested_at']))
+                        report = self.report_for_request(request)
                         with self.requests.locked(key) as acquired_snapshot:
                             if not acquired_snapshot:
                                 raise TimesheetError('report_busy')
@@ -249,13 +262,7 @@ class TimesheetService:
                     request['retry_at'] = timestamp(now).timestamp() + 60
                     results.append({'request': key, 'status': 'error', 'reason': code})
                 if request['status'] in {'error', 'needs_review'}:
-                    terminal = request.get('error') in {'no_completed_fortnight', 'not_a_payment_cutoff', 'period_not_closed', 'invalid_timestamp', 'draft_period_finalized'}
-                    notice = ('That fortnight is not available. Use `timesheet current` for an open-period draft.' if terminal else
-                              'Roo could not finish your timesheet request yet. No unavailable data has been counted as zero. '
-                              'Roo will retry safe failures; an uncertain Slack delivery needs operator review.')
-                    if request.get('error') == 'draft_period_finalized':
-                        notice = ('That draft\u2019s period has already been finalized. Request `timesheet` '
-                                  'for the saved report, or send a new `timesheet current` request for a fresh draft.')
+                    terminal, notice = self.failure_notice(request)
                     try:
                         outcome = self.deliver_parts([{'kind': 'message', 'content': notice, 'status': 'pending'}],
                             request['actor'], 'notice-' + key, now)

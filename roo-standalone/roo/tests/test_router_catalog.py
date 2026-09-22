@@ -62,9 +62,12 @@ def test_catalog_stays_within_token_budget():
             channel_name=channel_name,
         )
         approx_tokens = len(json.dumps(tools)) / 4
-        assert approx_tokens < 6000, (
+        # The all-features Victor channel includes the opt-in Studio client
+        # report tool (~325 tokens). The ordinary public/admin cap stays fixed.
+        budget = 6400 if surface == "victor-channel" else 6000
+        assert approx_tokens < budget, (
             f"{surface} tool catalog ≈{approx_tokens:.0f} tokens "
-            "(budget 6000) — "
+            f"(budget {budget}) — "
             "trim SKILL.md routing descriptions/examples"
         )
 
