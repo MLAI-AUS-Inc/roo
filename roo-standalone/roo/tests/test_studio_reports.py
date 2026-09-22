@@ -593,3 +593,149 @@ def test_png_upload_uses_binary_and_private_destination_without_forwarding_token
         with pytest.raises(TimesheetError, match='private_destination_required'):
             api.upload_csv('CPUBLIC', 'studio-hours.png', encoded)
     assert len(calls) == 3
+
+
+def invoice_first_manifest(setup):
+    value = invoice_manifest(setup, version=2,
+        coverage={'start': '2026-05-01', 'through': '2026-09-22'},
+        invoice_first_projects=[P1], qualifications=[
+            {'project_id': P1, 'reference': 'Invoice 001', 'reason': 'Includes approved billing hour-units.'}])
+    value['sources']['alice-001']['hours'] = '12.83'
+    value['entries'][0].update(hours='12.83', start=None, end=None,
+        date_status='unallocated', date_note='Source has no confirmed monthly split.')
+    return value
+
+
+def test_invoice_first_exact_hundredths_unallocated_and_no_duplicate_estimates(setup):
+    value = validate_backfill(invoice_first_manifest(setup), setup.config)
+    result = build_client_report(setup.config, setup.clients['UMARK'],
+        {'month': '2026-05', 'months': 5, 'action': 'detailed'},
+        [ticket(1), ticket(2, size='Extra Large (XL)'), ticket(3, project=P2)], NOW, value)
+    assert result['unit_scale'] == 100
+    assert result['unallocated_units'] == 1283
+    assert sum(m['units'] for m in result['monthly']) == 100  # Other project still uses its estimate.
+    assert sum(r['units'] for r in result['rows']) == 1383
+    assert all(m['allowance_units'] == 4000 for m in result['monthly'])
+    text = summary(result)
+    assert '13.83 hours used' in text and '12.83h included' in text
+    assert 'Master App: 12.83h' in text and 'Cybertest: 1h' in text
+    assert 'hours remaining' not in text
+    assert 'Includes approved billing hour-units.' in text
+    csv = artifacts(result)['studio-hours-work.csv']
+    assert '12.83,reviewed_invoice,,,Source has no confirmed monthly split.' in csv
+    assert 'Work month unconfirmed' in '\n'.join(detail_messages(result))
+    assert 'private-mail-id' not in json.dumps(result)
+    assert 'ticket_not_added_to_invoice_total' in artifacts(result)['studio-hours-unresolved.csv']
+    narrow = build_client_report(setup.config, setup.clients['UMARK'], {'months': 3}, [], NOW, value)
+    assert not narrow['rows'] and not narrow['complete']
+    assert any('Excluded from this subtotal' in e['reason'] for e in narrow['exceptions'])
+
+
+def test_cross_month_recorded_work_is_counted_only_for_containing_period(setup):
+    value = invoice_first_manifest(setup)
+    source = value['sources']['alice-001']
+    source.update(kind='recorded_time', reference='LOG-123', hours='8.66')
+    source.pop('invoice')
+    value['entries'][0].update(date_status='work_period', start='2026-08-28', end='2026-09-03', hours='8.66')
+    value = validate_backfill(value, setup.config)
+    full = build_client_report(setup.config, setup.clients['UMARK'], {'months': 2}, [], NOW, value)
+    assert full['unallocated_units'] == 866 and len(full['rows']) == 1
+    assert '8.66h from additional recorded work' in summary(full)
+    assert not sum(m['units'] for m in full['monthly'])
+    for month in ['2026-08', '2026-09']:
+        narrow = build_client_report(setup.config, setup.clients['UMARK'], {'month': month}, [], NOW, value)
+        assert not narrow['rows'] and narrow['monthly'][0]['unresolved'] == 1
+
+
+def test_project_to_date_worker_resolves_private_coverage_and_keeps_recipient(setup, tmp_path):
+    path = tmp_path / 'invoice.json'
+    path.write_text(json.dumps(invoice_first_manifest(setup)))
+    service = StudioReportService(setup.config, setup.api, setup.clients, path)
+    result = service.report_for_request({'team': 'T123', 'actor': 'UMARK',
+        'selector': {'month': 'all'}, 'requested_at': NOW.isoformat()})
+    assert result['selector'] == {'month': '2026-05', 'months': 5, 'action': 'summary', 'project_to_date': True}
+    assert [m['month'] for m in result['monthly']] == ['2026-05', '2026-06', '2026-07', '2026-08', '2026-09']
+    assert setup.api.collect.call_args.args[0].beginning.strftime('%Y-%m') == '2026-05'
+    setup.api.verify_recipient.assert_called_once_with('UMARK', 'T123')
+    setup.api.post_message.assert_not_called()
+    queue(setup, params={'month': 'all'})
+    queue(setup, event='Ev2', params={'action': 'detailed'}, now=NOW + timedelta(seconds=1))
+    requests = [json.loads(p.read_text()) for p in setup.config.queue.glob('*.json')]
+    assert all(r['selector']['month'] == 'all' for r in requests)
+    with pytest.raises(TimesheetError, match='all_time_coverage_not_configured'):
+        setup.service.report_for_request({'team':'T123','actor':'UMARK','selector':{'month':'all'},'requested_at':NOW.isoformat()})
+
+
+def test_project_to_date_can_cover_more_than_one_year(setup):
+    selector, start, end = resolve_period({'month': 'all', 'months': 5}, NOW)
+    assert selector == {'month': 'all', 'months': 1, 'action': 'summary'}
+    assert start is None and end is None
+    value = invoice_first_manifest(setup)
+    value['coverage']['start'] = '2025-05-01'
+    result = build_client_report(setup.config, setup.clients['UMARK'], {'month': 'all'}, [], NOW,
+                                 validate_backfill(value, setup.config))
+    assert len(result['monthly']) == 17 and result['unallocated_units'] == 1283
+    # A resolved private selector remains valid when building the report again.
+    assert resolve_period(result['selector'], NOW)[0]['months'] == 17
+
+
+@pytest.mark.parametrize('mutation', ['precision', 'unknown_policy', 'duplicate_policy', 'missing_note',
+    'undated_has_date', 'bad_coverage', 'secret_qualification', 'source_duplicate', 'source_overcount'])
+def test_version_two_manifest_rejects_invalid_accounting_and_scope(setup, mutation):
+    from copy import deepcopy
+    value = invoice_first_manifest(setup)
+    entry = value['entries'][0]
+    if mutation == 'precision': entry['hours'] = '1.001'
+    elif mutation == 'unknown_policy': value['invoice_first_projects'] = ['unknown']
+    elif mutation == 'duplicate_policy': value['invoice_first_projects'] = [P1, P1]
+    elif mutation == 'missing_note': entry.pop('date_note')
+    elif mutation == 'undated_has_date': entry['start'] = '2026-05-01'
+    elif mutation == 'bad_coverage': value['coverage']['start'] = '2027-01-01'
+    elif mutation == 'secret_qualification': value['qualifications'][0]['project_id'] = P3
+    elif mutation == 'source_duplicate': value['sources']['copy'] = deepcopy(value['sources']['alice-001'])
+    elif mutation == 'source_overcount': entry['hours'] = '12.84'
+    with pytest.raises(TimesheetError, match='invalid_invoice_backfill'):
+        validate_backfill(value, setup.config)
+
+
+def test_invoice_first_qualifications_and_undated_rows_never_cross_project_access(setup):
+    value = invoice_first_manifest(setup)
+    value['invoice_first_projects'] = [P3]
+    value['entries'][0].update(project_id=P3, replaces=[])
+    value['qualifications'][0].update(project_id=P3, reason='Another client secret')
+    result = build_client_report(setup.config, setup.clients['UMARK'], {'months': 5}, [], NOW,
+                                 validate_backfill(value, setup.config))
+    assert not result['rows'] and not result['qualifications'] and result['complete']
+    assert 'Another client secret' not in json.dumps(result)
+
+
+def test_charts_preserve_exact_period_and_monthly_reconciliation(setup, monkeypatch):
+    from matplotlib.axes import Axes
+    calls = {}
+    real_bar, real_barh = Axes.bar, Axes.barh
+    def bar(self, x, height, *args, **kwargs):
+        calls['monthly'] = (x, height)
+        return real_bar(self, x, height, *args, **kwargs)
+    def barh(self, y, width, *args, **kwargs):
+        calls['projects'] = width
+        return real_barh(self, y, width, *args, **kwargs)
+    monkeypatch.setattr(Axes, 'bar', bar)
+    monkeypatch.setattr(Axes, 'barh', barh)
+    value = validate_backfill(invoice_first_manifest(setup), setup.config)
+    result = build_client_report(setup.config, setup.clients['UMARK'], {'month':'all'}, [], NOW, value)
+    assert render_chart(result).startswith(b'\x89PNG')
+    labels, values = calls['monthly']
+    assert labels[-1] == 'Month\nunallocated' and sum(values) == 12.83
+    assert render_chart(result, breakdown='projects').startswith(b'\x89PNG')
+    assert calls['projects'] == [12.83, 0]
+
+
+def test_reviewed_cutoff_preserves_later_live_work_with_separate_basis(setup):
+    value = validate_backfill(invoice_first_manifest(setup), setup.config)
+    later = timestamp('2026-10-10T04:00:00Z')
+    data = [ticket(2, completed='2026-10-01T04:00:00Z')]
+    result = build_client_report(setup.config, setup.clients['UMARK'], {'month':'all'}, data, later, value)
+    assert sum(r['units'] for r in result['rows']) == 1383
+    assert result['monthly'][-1]['units'] == 100
+    assert result['basis'] == 'reviewed_invoices_and_completed_ticket_sizes'
+    assert '1h from completed-ticket estimates' in summary(result)

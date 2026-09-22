@@ -16,13 +16,13 @@ actions:
   - name: summary
     description: Hours and charts by month, client and project. Default current month.
     params:
-      month: {type: string, description: "Start YYYY-MM/current/last; recent includes current, last_complete excludes it, previous reuses prior period."}
+      month: {type: string, description: "Start YYYY-MM/current/last/recent/last_complete/previous; all for project-to-date."}
       months: {type: integer, description: "Number of consecutive months from month, 1–12; default 1."}
       client: {type: string, description: "Client name/email/mention; all for per-client totals, self/omitted for own projects. Never grants access."}
   - name: detailed
     description: Dated work and CSV. Inherits last period and client unless specified.
     params:
-      month: {type: string, description: "Start YYYY-MM/current/last/recent/last_complete/previous. Omit to reuse prior period."}
+      month: {type: string, description: "Start YYYY-MM/current/last/recent/last_complete/previous/all. Omit to reuse prior period."}
       months: {type: integer, description: "Number of consecutive months, 1–12."}
       client: {type: string, description: "Client name/email/mention or all/self; omit to retain prior filter."}
 ---
@@ -60,7 +60,11 @@ Multi-month summaries show the period total, a short monthly comparison, one
 combined project/builder breakdown, and a monthly chart. No ticket-level detail
 is needed unless requested. For explicit date ranges, select a starting month
 and consecutive month count.
+For “project to date”, “all time” or “from the beginning”, use month=all. The
+private worker resolves the beginning of reviewed history. Unallocated invoice
+hour-units count toward the full reviewed period, separately from dated monthly
+hours. Never assign work to an invoice or payment month without evidence.
 Do not silently narrow an ambiguous date request; ask which period is wanted.
-The current implementation combines completed-ticket size estimates and reviewed
-invoice work hours where configured; the report labels its data sources.
+The report labels its sources. Invoice-first projects use reviewed invoices and
+additional recorded work for reviewed history; later ticket estimates are labelled separately.
 Do not invent hourly activities, billable hours, source access or project ownership.

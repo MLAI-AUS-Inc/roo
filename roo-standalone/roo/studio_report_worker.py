@@ -20,7 +20,7 @@ from .studio_reports import (allowance_units, artifacts, build_client_report, de
                              month_offset, render_chart, resolve_period, split_messages, summary)
 from .timesheet_worker import TimesheetService
 from .studio_report_source import StudioSourceAPI
-from .studio_report_backfill import load_backfill
+from .studio_report_backfill import history_beginning, load_backfill
 from .studio_report_clients import select_client, validate_client_reporting
 from .timesheets import TimesheetConfig, TimesheetError, fingerprint, flag, timestamp
 
@@ -98,6 +98,10 @@ class StudioReportService(TimesheetService):
         selector, start, _ = resolve_period(request['selector'], now)
         scope = self.scope_fingerprint(actor, selector)
         client, groups, _ = select_client(self.clients, actor, selector)
+        backfill = load_backfill(self.backfill_path, self.config)
+        if start is None:
+            selector, start, _ = resolve_period(selector, now,
+                beginning=history_beginning(backfill, client['project_ids']))
         # The collection window must include project moves since the requested
         # month, even for months older than the payroll worker's initial cutoff.
         source = SimpleNamespace(team=self.config.team, organization=self.config.organization,
@@ -106,7 +110,6 @@ class StudioReportService(TimesheetService):
         self.api.verify_recipient(actor, self.config.team)
         self.api.verify(source)
         dataset = self.api.collect(source, now, {})
-        backfill = load_backfill(self.backfill_path, self.config)
         report = build_client_report(self.config, client, selector, dataset, now, backfill)
         if groups:
             report['client_groups'] = groups
@@ -158,6 +161,8 @@ class StudioReportService(TimesheetService):
 
     def failure_notice(self, request):
         error = request.get('error')
+        if error == 'all_time_coverage_not_configured':
+            return True, 'The beginning of your project history has not been configured. Please request a specific month or date range.'
         if error in {'report_client_unavailable', 'invalid_report_client'}:
             return True, ('I couldn’t match that client to your report access. Please use their full configured '
                           'name, or ask the Studio team to check your client reporting access.')
