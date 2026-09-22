@@ -97,6 +97,8 @@ recompleting or moving a ticket does not count it again or expose another
 client's historical work. Archived completed work remains eligible. Unknown
 builders and missing/conflicting effort labels produce partial totals and an
 exceptions CSV; remaining hours are withheld until those items are resolved.
+Deleted historical labels are also listed for review, with no hours inferred,
+when all non-label history (including project ownership) can still be verified.
 Incomplete ownership/history evidence or a source outage blocks the report,
 never silently replacing unavailable hours with zero.
 

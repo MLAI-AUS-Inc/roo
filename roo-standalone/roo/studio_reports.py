@@ -100,9 +100,23 @@ def build_client_report(config, client, selector, dataset, now):
         completed = min(completions)  # Reopen/recomplete never consumes hours twice.
         if not start <= completed < end:
             continue
+        missing_effort_history = False
         try:
             issue = reconstruct(original, history, completed)
-        except (TimesheetError, KeyError, TypeError) as exc:
+        except TimesheetError as exc:
+            if str(exc) != 'missing_label_history':
+                raise TimesheetError('source_evidence_incomplete') from exc
+            # Deleted labels prevent proving effort, but do not automatically
+            # invalidate ownership. Reconstruct every non-label field before
+            # exposing even an exception; this ticket will contribute no hours.
+            try:
+                issue = reconstruct({**original, 'labels': []},
+                    [{**event, 'addedLabelIds': [], 'removedLabelIds': [], 'removedLabels': []}
+                     for event in history], completed)
+            except (TimesheetError, KeyError, TypeError) as ownership_error:
+                raise TimesheetError('source_evidence_incomplete') from ownership_error
+            missing_effort_history = True
+        except (KeyError, TypeError) as exc:
             raise TimesheetError('source_evidence_incomplete') from exc
         if issue is None:
             raise TimesheetError('source_evidence_incomplete')
@@ -111,6 +125,8 @@ def build_client_report(config, client, selector, dataset, now):
             continue
         month = completed.astimezone(TZ).strftime('%Y-%m')
         try:
+            if missing_effort_history:
+                raise TimesheetError('historical_effort_labels_unavailable')
             if issue.get('trashed') or issue['state']['type'] != 'completed':
                 raise TimesheetError('completion_needs_review')
             builder_id = (issue.get('assignee') or {}).get('id')
