@@ -39,7 +39,7 @@ def resolve_period(params, now, *, beginning=None):
     if month == 'all':
         if beginning is None:
             # Public Roo has no private coverage data. The worker resolves this.
-            selector, _, _ = resolve_period({**params, 'month': 'current'}, now)
+            selector, _, _ = resolve_period({**params, 'month': 'current', 'months': 1}, now)
             return {**selector, 'month': 'all'}, None, None
         month = beginning
         day = month_offset(month, 0)

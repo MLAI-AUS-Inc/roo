@@ -667,6 +667,9 @@ def test_project_to_date_worker_resolves_private_coverage_and_keeps_recipient(se
 
 
 def test_project_to_date_can_cover_more_than_one_year(setup):
+    selector, start, end = resolve_period({'month': 'all', 'months': 5}, NOW)
+    assert selector == {'month': 'all', 'months': 1, 'action': 'summary'}
+    assert start is None and end is None
     value = invoice_first_manifest(setup)
     value['coverage']['start'] = '2025-05-01'
     result = build_client_report(setup.config, setup.clients['UMARK'], {'month': 'all'}, [], NOW,
