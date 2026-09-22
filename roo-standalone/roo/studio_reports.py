@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 
 from .payment_reminders import _escape
 from .studio_report_backfill import apply_backfill, replacements
+from .studio_report_clients import client_key
 from .timesheets import LABELS, UNITS, TimesheetError, csv_file, reconstruct, timestamp
 
 TZ = ZoneInfo('Australia/Melbourne')
@@ -44,7 +45,11 @@ def resolve_period(params, now):
     action = params.get('action', 'summary')
     if action not in {'summary', 'detailed'}:
         raise TimesheetError('invalid_report_action')
-    return {'month': month, 'months': count, 'action': action}, start, end
+    selector = {'month': month, 'months': count, 'action': action}
+    if 'client' in params:
+        client_key(params['client'])
+        selector['client'] = ' '.join(params['client'].split())
+    return selector, start, end
 
 
 def allowance_units(value):
@@ -166,9 +171,11 @@ def month_label(key):
     return month_offset(key, 0).strftime('%B %Y')
 
 
-def project_breakdown(report, selected):
+def project_breakdown(report, selected, project_ids=None):
     parts = []
     for project_id, project_name in report['projects'].items():
+        if project_ids is not None and project_id not in project_ids:
+            continue
         rows = [row for row in selected if row['project_id'] == project_id]
         builders = {}
         for row in rows:
@@ -183,9 +190,20 @@ def project_breakdown(report, selected):
     return parts
 
 
+def client_breakdown(report):
+    parts = ['\n*Clients and projects · total for this period*']
+    for group in report['client_groups']:
+        rows = [row for row in report['rows'] if row['project_id'] in group['project_ids']]
+        total = display_hours(sum(row['units'] for row in rows))
+        parts.append(f"\n*{_escape(group['name'])} · {total}h*")
+        parts.extend(project_breakdown(report, rows, group['project_ids']))
+    return parts
+
+
 def summary(report):
     detailed = report['selector']['action'] == 'detailed'
-    parts = [f"*Your Studio hours · {_escape(report['client'])}*"]
+    heading = 'Studio hours' if report['selector'].get('client') else 'Your Studio hours'
+    parts = [f"*{heading} · {_escape(report['client'])}*"]
     many = len(report['monthly']) > 1
     current = timestamp(report['generated_at']).astimezone(TZ).strftime('%Y-%m')
     if many:
@@ -211,13 +229,17 @@ def summary(report):
         if not many:
             parts.append('Project overview · no combined monthly allowance.' if allowance is None
                          else 'Shared monthly allowance across all your projects.')
-            parts.extend(project_breakdown(report, report['rows']))
+            if not report.get('client_groups'):
+                parts.extend(project_breakdown(report, report['rows']))
     if many:
         parts.append('Monthly allowances are shared across projects and reset each month; no rollover.'
                      if any(month['allowance_units'] is not None for month in report['monthly']) else
                      'Project overview · no combined monthly allowance.')
-        parts.append('\n*Projects · total for this period*')
-        parts.extend(project_breakdown(report, report['rows']))
+        if not report.get('client_groups'):
+            parts.append('\n*Projects · total for this period*')
+            parts.extend(project_breakdown(report, report['rows']))
+    if report.get('client_groups'):
+        parts.extend(client_breakdown(report))
     if report['basis'] == 'completed_ticket_size_hours':
         parts.append('\nHours are based on completed-ticket sizes; work in progress and clocked time are not included.')
     else:
@@ -233,6 +255,7 @@ def summary(report):
         selector = report['selector']
         parts.append(f'Ask “Studio hours detailed for {selector["month"]}'
                      + (f' for {selector["months"]} months' if selector['months'] > 1 else '')
+                     + (f' for client {_escape(selector["client"])}' if selector.get('client') else '')
                      + '” for the full work breakdown.')
     return '\n'.join(parts)
 
@@ -290,7 +313,7 @@ def artifacts(report):
     return result
 
 
-def render_chart(report):
+def render_chart(report, breakdown=None):
     """Local chart: client data never goes to a third-party chart service."""
     from matplotlib.backends.backend_agg import FigureCanvasAgg
     from matplotlib.figure import Figure
@@ -298,13 +321,17 @@ def render_chart(report):
 
     with _chart_lock:
         monthly = report['monthly']
-        many = len(monthly) > 1
+        many = len(monthly) > 1 and breakdown is None
         project_ids = list(report['projects'])
-        figure = Figure(figsize=(10, 4.8 if many else max(4.8, 2.8 + len(project_ids) * .65)), dpi=150)
+        bars = len(report.get('client_groups', [])) if breakdown == 'clients' else len(project_ids)
+        figure = Figure(figsize=(10, 4.8 if many else max(4.8, 2.8 + bars * .65)), dpi=150)
         canvas = FigureCanvasAgg(figure)
         axes = figure.add_subplot(111)
         figure.subplots_adjust(left=.34 if not many else .10, right=.92, top=.76, bottom=.22)
-        figure.text(.06, .93, 'Your Studio hours', fontsize=22, weight='bold', color='#142c3a')
+        figure.text(.06, .93, 'Studio hours' if report['selector'].get('client') else 'Your Studio hours',
+                    fontsize=22, weight='bold', color='#142c3a')
+        if report['selector'].get('client'):
+            figure.text(.06, .86, textwrap.shorten(report['client'], width=90, placeholder='…'), fontsize=12, color='#334b58')
         if many:
             labels = [month_offset(m['month'], 0).strftime('%b %Y') for m in monthly]
             current = timestamp(report['generated_at']).astimezone(TZ).strftime('%Y-%m')
@@ -329,21 +356,32 @@ def render_chart(report):
                 'one shared allowance each month' if len(configured) == len(monthly) else
                 'monthly usage and configured allowances' if configured else 'monthly project usage')
         else:
-            month = monthly[0]
-            used, allocated = month['units'], month['allowance_units']
-            usage = (f'{display_hours(used)} hours used' if allocated is None else
-                     f'{display_hours(used)} of {display_hours(allocated)} hours used')
-            subtitle = f"{month_label(month['month'])} · {usage}"
-            values = [sum(r['units'] for r in report['rows'] if r['project_id'] == key) / 4 for key in project_ids]
-            names = ['\n'.join(textwrap.wrap(report['projects'][key], 29)) for key in project_ids]
+            if breakdown:
+                period = month_offset(monthly[0]['month'], 0).strftime('%b %Y')
+                if len(monthly) > 1:
+                    period += ' – ' + month_offset(monthly[-1]['month'], 0).strftime('%b %Y')
+                subtitle = f'{period} · total hours by {"client" if breakdown == "clients" else "project"}'
+                if monthly[-1]['month'] == timestamp(report['generated_at']).astimezone(TZ).strftime('%Y-%m'):
+                    subtitle += ' · to date'
+            else:
+                month = monthly[0]
+                used, allocated = month['units'], month['allowance_units']
+                usage = (f'{display_hours(used)} hours used' if allocated is None else
+                         f'{display_hours(used)} of {display_hours(allocated)} hours used')
+                subtitle = f"{month_label(month['month'])} · {usage}"
+            groups = (report['client_groups'] if breakdown == 'clients' else
+                      [{'name': report['projects'][key], 'project_ids': [key]} for key in project_ids])
+            groups = sorted(groups, key=lambda group: -sum(r['units'] for r in report['rows'] if r['project_id'] in group['project_ids']))
+            values = [sum(r['units'] for r in report['rows'] if r['project_id'] in group['project_ids']) / 4 for group in groups]
+            names = ['\n'.join(textwrap.wrap(group['name'], 29)) for group in groups]
             axes.barh(range(len(names)), values, color='#147d92', height=.5)
             axes.set_yticks(range(len(names)), names)
             axes.invert_yaxis()
-            axes.set_xlabel('Hours used by project')
+            axes.set_xlabel('Hours used by client' if breakdown == 'clients' else 'Hours used by project')
             axes.set_xlim(0, max([1, *values]) * 1.23)
             for index, value in enumerate(values):
                 axes.text(value + max([1, *values]) * .025, index, f'{value:g}h', va='center', weight='bold')
-        figure.text(.06, .845, subtitle, fontsize=12, color='#334b58')
+        figure.text(.06, .805 if report['selector'].get('client') else .845, subtitle, fontsize=12, color='#334b58')
         for spine in axes.spines.values():
             spine.set_visible(False)
         axes.tick_params(length=0, pad=8)

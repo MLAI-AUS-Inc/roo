@@ -29,22 +29,26 @@ def enqueue(settings, context, params, *, user_id, channel_id, thread_ts, now=No
             raise TimesheetError('queue_busy')
         if store.read(key):
             return 'This Studio hours request has already been queued for private delivery.'
-        selected = {k: params[k] for k in ('month', 'months', 'action') if k in params}
-        if selected.get('month') == 'previous' or (
-                selected.get('action') == 'detailed' and not selected.get('month')):
+        selected = {k: params[k] for k in ('month', 'months', 'action', 'client') if k in params}
+        if selected.get('month') == 'previous' or selected.get('action') == 'detailed':
             previous = []
             for path in store.directory.glob('*.json'):
                 candidate = store.read(path.stem)
                 if (candidate and candidate.get('actor') == user_id
                         and candidate.get('team') == context.slack_team_id
-                        and candidate.get('status') not in {'denied', 'rejected'}):
+                        and candidate.get('status') not in {'denied', 'rejected', 'error'}):
                     previous.append(candidate)
             prior = max(previous, key=lambda request: request['requested_at']) if previous else None
-            selected['month'] = prior['selector']['month'] if prior else 'current'
-            selected.setdefault('months', prior['selector']['months'] if prior else 1)
+            if not selected.get('month') or selected.get('month') == 'previous':
+                selected['month'] = prior['selector']['month'] if prior else 'current'
+                selected.setdefault('months', prior['selector']['months'] if prior else 1)
+            if prior and 'client' in prior['selector']:
+                selected.setdefault('client', prior['selector']['client'])
         try:
             selector, _, _ = resolve_period(selected, now)
-        except TimesheetError:
+        except TimesheetError as exc:
+            if str(exc) == 'invalid_report_client':
+                return 'Please provide a client name, or ask for all clients.'
             return ('Please choose a calendar month, such as “Studio hours for September 2026”, '
                     'or a range of up to 12 months ending no later than this month.')
         store.write(key, {'team': context.slack_team_id, 'actor': user_id,
