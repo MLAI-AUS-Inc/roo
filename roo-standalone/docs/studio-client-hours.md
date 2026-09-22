@@ -15,6 +15,30 @@ snapshots and delivery receipts. The feature is disabled by default.
 - “Give me a high-level Studio hours report and chart for the last 3 months.”
 - “Show my Studio hours for the last three full months.”
 - “Give me the in-depth report on what those hours were spent on.”
+- “Give me a breakdown for the last three months on all projects and hours we've done for Mark Ghiasy the client.”
+- “Show hours per client and project for the last three months.”
+
+Named-client requests use `client: "Mark Ghiasy"`; “all projects for Mark” stays
+scoped to Mark. `client: "all"` groups accessible projects by their configured
+client, with unmatched projects under “Projects without a client mapping”. The
+summary shows client/project totals; separate private charts show monthly usage,
+project totals, and (for all-clients reports) client totals. Zero-hour projects
+remain visible. A detailed follow-up retains both the period and client filter,
+even when it specifies a different month; `client: "self"` resets to the
+requester's own overview. All results are delivered to the requester, never to
+the named client or the originating channel.
+
+Configure optional `aliases` on an existing verified owner entry and explicit
+`report_client_ids` on each staff entry in `STUDIO_REPORTS_CLIENTS_JSON`. For
+example, an owner may have `"aliases":["Example Client","client@example.com"]`,
+and staff `"report_client_ids":["UEXAMPLECLIENT"]`. Every target owner's full
+project list must be contained in the requester's existing `project_ids`.
+Reporting grants must not overlap project ownership; ambiguous names and
+unavailable clients fail closed without reading source data or listing other
+clients. No fuzzy matching or inferred grants are used. An ordinary client can
+select their own name but cannot select other clients. Adding an alias does not
+grant project access. Changes to either the requester or selected owner invalidate
+saved report delivery. Public Roo never receives these private mappings.
 
 The summary leads with **hours used out of the monthly allowance**, followed by
 remaining hours or overage, project totals and builders within each project.
@@ -171,6 +195,9 @@ data always follows the existing explicit client/project grants.
 ```bash
 python -m roo.studio_report_worker --env-file .env.studio-reports \
   --preview current --actor VERIFIED_CLIENT_SLACK_ID --detailed
+# Authorized staff preview for a named client:
+python -m roo.studio_report_worker --env-file .env.studio-reports \
+  --preview recent --months 3 --actor VERIFIED_STAFF_SLACK_ID --client 'Example Client'
 ```
 
 Preview verifies Slack/source identities and reads Linear. It writes local

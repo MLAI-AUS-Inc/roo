@@ -27,3 +27,15 @@
   text: "How many people used coworking last month?"
   expect: {skill: mlai-points, action: coworking_report}
   tags: [studio-hours, trap]
+- id: studio-hours-named-client-without-studio
+  text: "Give me a breakdown for the last three months on all projects and hours we've done for mark ghiasy the client"
+  expect: {skill: studio-hours, action: summary, params: {month: recent, months: 3, client: "mark ghiasy"}}
+  tags: [studio-hours, client-scope]
+- id: studio-hours-all-clients
+  text: "Show hours per client and project for the last three months"
+  expect: {skill: studio-hours, action: summary, params: {month: recent, months: 3, client: all}}
+  tags: [studio-hours, client-scope]
+- id: studio-hours-own-reset
+  text: "Show my own Studio projects this month"
+  expect: {skill: studio-hours, action: summary, params: {month: current, client: self}}
+  tags: [studio-hours, client-scope]

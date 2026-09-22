@@ -113,6 +113,7 @@ jobs:
             roo/tests/test_timesheet_demo.py \
             roo/tests/test_timesheet_ingress.py \
             roo/tests/test_studio_reports.py \
+            roo/tests/test_studio_report_clients.py \
             roo/tests/test_studio_report_source.py \
             roo/tests/test_studio_report_routing.py -q
 

@@ -21,6 +21,7 @@ from .studio_reports import (allowance_units, artifacts, build_client_report, de
 from .timesheet_worker import TimesheetService
 from .studio_report_source import StudioSourceAPI
 from .studio_report_backfill import load_backfill
+from .studio_report_clients import select_client, validate_client_reporting
 from .timesheets import TimesheetConfig, TimesheetError, fingerprint, flag, timestamp
 
 
@@ -56,6 +57,7 @@ def configuration(env):
         for month, value in overrides.items():
             month_offset(month, 0)
             allowance_units(value)
+    validate_client_reporting(raw)
     return config, raw
 
 
@@ -77,21 +79,25 @@ class StudioReportService(TimesheetService):
         return (request.get('team') == self.config.team
                 and re.fullmatch(r'[UW][A-Z0-9]+', str(request.get('actor', ''))) is not None)
 
-    def scope_fingerprint(self, actor):
+    def scope_fingerprint(self, actor, selector=None):
         if actor not in self.clients:
             raise TimesheetError('client_access_not_configured')
         client = self.clients[actor]
-        return fingerprint({'actor': actor, 'team': self.config.team, 'organization': self.config.organization,
-                            'client': client, 'projects': {key: self.config.projects[key] for key in client['project_ids']}})
+        _, groups, targets = select_client(self.clients, actor, selector or {})
+        scope = {'actor': actor, 'team': self.config.team, 'organization': self.config.organization,
+                 'client': client, 'projects': {key: self.config.projects[key] for key in client['project_ids']}}
+        if targets:
+            scope.update(targets=targets, groups=groups)
+        return fingerprint(scope)
 
     def report_for_request(self, request):
         if not self.request_authorized(request):
             raise TimesheetError('not_authorized')
         actor = request['actor']
-        scope = self.scope_fingerprint(actor)
-        client = self.clients[actor]
         now = timestamp(request['requested_at'])
         selector, start, _ = resolve_period(request['selector'], now)
+        scope = self.scope_fingerprint(actor, selector)
+        client, groups, _ = select_client(self.clients, actor, selector)
         # The collection window must include project moves since the requested
         # month, even for months older than the payroll worker's initial cutoff.
         source = SimpleNamespace(team=self.config.team, organization=self.config.organization,
@@ -102,6 +108,8 @@ class StudioReportService(TimesheetService):
         dataset = self.api.collect(source, now, {})
         backfill = load_backfill(self.backfill_path, self.config)
         report = build_client_report(self.config, client, selector, dataset, now, backfill)
+        if groups:
+            report['client_groups'] = groups
         report.update(actor=actor, scope=scope, backfill_digest=fingerprint(backfill))
         # Freeze rendered parts too. A delivery retry uses the same content hash
         # even when font versions or optional chart availability change.
@@ -110,6 +118,12 @@ class StudioReportService(TimesheetService):
             chart = render_chart(report)
             parts.append({'kind': 'file', 'filename': 'studio-hours.png',
                           'content': base64.b64encode(chart).decode('ascii'), 'status': 'pending'})
+            if selector.get('client') and len(report['monthly']) > 1:
+                parts.append({'kind': 'file', 'filename': 'studio-hours-projects.png',
+                              'content': base64.b64encode(render_chart(report, breakdown='projects')).decode('ascii'), 'status': 'pending'})
+            if groups:
+                parts.append({'kind': 'file', 'filename': 'studio-hours-clients.png',
+                              'content': base64.b64encode(render_chart(report, breakdown='clients')).decode('ascii'), 'status': 'pending'})
         except Exception:
             parts.append({'kind': 'message', 'content': 'The chart is unavailable this time; the full totals are above.', 'status': 'pending'})
         if selector['action'] == 'detailed':
@@ -122,7 +136,7 @@ class StudioReportService(TimesheetService):
     def deliver_request(self, report, request, key, now):
         if not self.request_authorized(request) or report.get('actor') != request['actor']:
             raise TimesheetError('not_authorized')
-        if report.get('scope') != self.scope_fingerprint(request['actor']):
+        if report.get('scope') != self.scope_fingerprint(request['actor'], request['selector']):
             raise TimesheetError('client_access_changed')
         if report.get('backfill_digest', fingerprint(None)) != fingerprint(load_backfill(self.backfill_path, self.config)):
             raise TimesheetError('invoice_backfill_changed')
@@ -144,6 +158,9 @@ class StudioReportService(TimesheetService):
 
     def failure_notice(self, request):
         error = request.get('error')
+        if error in {'report_client_unavailable', 'invalid_report_client'}:
+            return True, ('I couldn’t match that client to your report access. Please use their full configured '
+                          'name, or ask the Studio team to check your client reporting access.')
         if error == 'invoice_backfill_changed':
             return True, 'Your Studio hours records were updated while this report was being prepared. Please request a new report for the latest totals.'
         if error in {'client_access_not_configured', 'client_access_changed'}:
@@ -164,6 +181,7 @@ def main(argv=None):
     group.add_argument('--recover', metavar='DELIVERY_KEY')
     parser.add_argument('--actor', help='Verified client Slack ID for local preview only')
     parser.add_argument('--months', type=int, default=1)
+    parser.add_argument('--client', help='Configured client name/alias, or all; never changes the requester')
     parser.add_argument('--detailed', action='store_true')
     parser.add_argument('--output-dir', default='./studio-report-preview')
     parser.add_argument('--part', type=int)
@@ -204,7 +222,8 @@ def main(argv=None):
                 return 0
             if args.preview:
                 report = service.report_for_request({'actor': args.actor, 'team': config.team,
-                    'selector': {'month': args.preview, 'months': args.months, 'action': 'detailed' if args.detailed else 'summary'},
+                    'selector': {'month': args.preview, 'months': args.months, 'action': 'detailed' if args.detailed else 'summary',
+                                 **({'client': args.client} if args.client else {})},
                     'requested_at': datetime.now(timezone.utc).isoformat()})
                 directory = Path(args.output_dir)
                 directory.mkdir(parents=True, exist_ok=True, mode=0o700)
