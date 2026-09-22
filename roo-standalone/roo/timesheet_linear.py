@@ -1,19 +1,20 @@
 """Read-only Linear evidence collection for cutoff-bound timesheets."""
 from .payment_reminder_worker import ReminderAPI
-from .timesheets import TimesheetError, timestamp
+from .timesheets import SourceRetryError, TimesheetError, timestamp
 
 FIELDS = '''id identifier title url createdAt updatedAt completedAt archivedAt trashed
  assignee { id } project { id } state { id type }
  labels(first: 100, includeArchived: true) { nodes { id name } pageInfo { hasNextPage endCursor } }'''
 ISSUES = 'query TimesheetIssues($filter: IssueFilter!, $after: String) { issues(first: 100, after: $after, includeArchived: true, orderBy: createdAt, filter: $filter) { nodes { ' + FIELDS + ' } pageInfo { hasNextPage endCursor } } }'
 ISSUE = 'query TimesheetIssue($id: String!) { issue(id: $id) { ' + FIELDS + ' } }'
-HISTORY = '''query TimesheetHistory($id: String!, $after: String) {
- issue(id: $id) { id updatedAt history(first: 100, after: $after, includeArchived: true, orderBy: createdAt) {
- nodes { id createdAt fromTitle
+HISTORY_FIELDS = '''id createdAt fromTitle
  fromAssigneeId toAssigneeId fromAssignee { id } toAssignee { id }
  fromProjectId toProjectId fromProject { id } toProject { id }
  fromStateId toStateId fromState { id type } toState { id type }
- addedLabelIds removedLabelIds removedLabels { id name } }
+ addedLabelIds removedLabelIds removedLabels { id name }'''
+HISTORY = '''query TimesheetHistory($id: String!, $after: String) {
+ issue(id: $id) { id updatedAt history(first: 100, after: $after, includeArchived: true, orderBy: createdAt) {
+ nodes { ''' + HISTORY_FIELDS + ''' }
  pageInfo { hasNextPage endCursor }
  } }
 }'''
@@ -118,10 +119,13 @@ class TimesheetAPI(ReminderAPI):
         for issue_id in deferred:
             if issue_id not in issues:
                 issues[issue_id] = self.read_issue(issue_id)
+        self.prepare_evidence(issues)
         result = []
         for issue_id, original in issues.items():
             try:
                 item = self.evidence(issue_id)
+            except SourceRetryError:
+                raise
             except TimesheetError as exc:
                 if (original.get('project') or {}).get('id') in config.projects or issue_id in deferred:
                     result.append({'issue': original, 'history': [], 'error': str(exc)})
@@ -136,3 +140,6 @@ class TimesheetAPI(ReminderAPI):
             if relevant:
                 result.append(item)
         return result
+
+    def prepare_evidence(self, issues):
+        """Optional source optimization; the default payroll reader is unchanged."""

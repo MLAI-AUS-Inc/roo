@@ -28,6 +28,19 @@ calendar months, including the current month. Repeating a request with a new
 Slack event reads fresh source data; Slack delivery retries reuse its saved
 snapshot and rendered attachments.
 
+The private worker reads fresh Linear candidates on every request, reuses only
+unchanged, version-checked ticket evidence, and fetches missing evidence in small
+batches. Complete reads persist under its private `linear-evidence/` directory,
+so a rate limit or restart does not discard the entire scan. Changed tickets
+and longer histories receive fresh, fully paginated reads; ownership is still
+reconstructed and filtered separately for each client. This cache is never
+mounted in Public Roo.
+
+Linear rate limits (including GraphQL `RATELIMITED` responses with HTTP 400) keep
+the request queued until the provider's retry time. Other safe read failures
+wait at least a minute after the failure before retrying. Logs include sanitized
+source error codes and read counts/durations, without provider response text.
+
 Illustrative summary (synthetic data):
 
 ```text
@@ -160,6 +173,7 @@ From `roo-standalone`, with synthetic credentials only:
 ```bash
 SLACK_BOT_TOKEN=synthetic SLACK_SIGNING_SECRET=synthetic OPENAI_API_KEY=synthetic \
 .venv/bin/python -m pytest roo/tests/test_studio_reports.py \
+  roo/tests/test_studio_report_source.py \
   roo/tests/test_timesheets.py roo/tests/test_timesheet_linear.py \
   roo/tests/test_studio_report_routing.py roo/tests/test_router_catalog.py -q
 ```

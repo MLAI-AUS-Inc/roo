@@ -414,6 +414,7 @@ def test_worker_source_outage_notifies_privately_once_then_recovers(config):
 
 
 def test_queue_snapshot_failure_after_finalization_does_not_repeat_allocation(config, monkeypatch):
+    monkeypatch.setattr('roo.timesheet_worker.time.monotonic', lambda: 0)
     enqueue(settings(config), team='T123', actor='USAM', channel='DSAM', source_id='123.456', text='timesheet', dm=True, now=END)
     api = api_for([item()])
     service = TimesheetService(config, api)
