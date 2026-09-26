@@ -216,6 +216,7 @@ async def test_failed_account_link_task_releases_receipt_for_retry(tmp_path):
         ({"type": "message", "user": "U123", "text": "hello"}, True),
         ({"type": "message", "user": "U123", "text": "connect my Roo account"}, True),
         ({"type": "app_mention", "user": "U123", "text": "hello"}, True),
+        ({"type": "app_mention", "user": "UBRIDGE", "bot_id": "BBRIDGE", "text": "hello"}, True),
         ({"type": "message", "bot_id": "B123", "text": "hello"}, False),
         ({"type": "reaction_added", "user": "U123"}, False),
     ],
