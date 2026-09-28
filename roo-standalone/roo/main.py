@@ -4068,6 +4068,22 @@ async def api_mention(
     return await handle_internal_mention(payload, get_agent())
 
 
+@app.post("/api/chat-actions")
+async def api_chat_actions(request: Request, settings: Settings = Depends(get_settings)):
+    """Allow the account-authenticated Chat backend to select current Roo buttons."""
+    if settings.ROO_SURFACE != "public" or not settings.INTERNAL_MENTION_API_KEY:
+        raise HTTPException(status_code=404, detail="Not found")
+    if not hmac.compare_digest(request.headers.get("Authorization", ""), f"Bearer {settings.INTERNAL_MENTION_API_KEY}"):
+        raise HTTPException(status_code=401, detail="Invalid internal credentials")
+    from .chat_actions import handle_chat_action
+    from .slack_client import get_slack_client
+
+    return await handle_chat_action(
+        await request.json(), client=get_slack_client(),
+        dispatch=lambda payload: _handle_slack_action_payload(request, payload),
+    )
+
+
 @app.post("/api/sim-patient")
 async def api_sim_patient(
     request: Request,
@@ -7228,6 +7244,10 @@ async def slack_actions(
         return JSONResponse(status_code=400, content={"error": "Invalid JSON"})
     if not isinstance(payload, dict):
         return JSONResponse(status_code=400, content={"error": "Invalid payload"})
+    return await _handle_slack_action_payload(request, payload)
+
+
+async def _handle_slack_action_payload(request: Request, payload: dict):
     interactive_actions = payload.get("actions", [])
     office_manager_action = (
         interactive_actions[0]
