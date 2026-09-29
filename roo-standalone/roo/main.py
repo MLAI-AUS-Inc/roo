@@ -217,7 +217,7 @@ def _retry_managed_slack_event_fingerprint(
     raw_body: bytes,
     request_fingerprint: str,
 ) -> Optional[str]:
-    """Return a durable identity for every user message we process async."""
+    """Return a durable identity for messages and delegated bot app mentions."""
 
     try:
         payload = json.loads(raw_body)
@@ -226,7 +226,7 @@ def _retry_managed_slack_event_fingerprint(
     event = payload.get("event") if isinstance(payload, dict) else None
     if not isinstance(event, dict) or event.get("type") not in {"app_mention", "message"}:
         return None
-    if event.get("bot_id"):
+    if event.get("bot_id") and event.get("type") != "app_mention":
         return None
     event_id = str(payload.get("event_id") or "").strip()
     if not event_id:
@@ -979,6 +979,20 @@ async def _handle_app_mention_with_room_choice(
     *,
     slack_team_id: str,
 ) -> Optional[dict[str, Any]]:
+    settings = get_settings()
+    if event.get("bot_id") or event.get("subtype") == "bot_message":
+        from .bridge_mentions import resolve_bridge_mention
+
+        event = await resolve_bridge_mention(
+            event, slack_team_id=slack_team_id,
+            surface=getattr(settings, "ROO_SURFACE", "public"),
+            backend=_make_mlai_backend_client(),
+        )
+        if event is None or not _is_slack_context_allowed(
+            settings, channel_id=event.get("channel"), user_id=event.get("user"),
+            channel_type=event.get("channel_type"),
+        ):
+            return None
     try:
         handled = await _handle_meeting_room_text_choice(
             event,
