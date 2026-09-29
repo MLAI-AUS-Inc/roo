@@ -299,6 +299,13 @@ class MLAIBackendClient:
         self._data_base = "/api/v1/data"
         self._admin_cache: Dict[str, bool] = {}
 
+    async def resolve_chat_bridge_actor(self, context: dict) -> httpx.Response:
+        """Read the verified author of an exact public Chat-to-Slack delivery."""
+        return await self._request(
+            "GET", "/api/v1/integrations/bridge/roo/actor",
+            params=context, timeout=5.0, transport_retries=1, redact_logs=True,
+        )
+
     def _backend_key(self) -> str:
         return self.base_url or "unconfigured"
 
