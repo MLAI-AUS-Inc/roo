@@ -1,0 +1,46 @@
+{
+  "checked_at_utc": "2026-09-30T00:17:44.127440Z",
+  "display_timezone": "Australia/Sydney",
+  "scope": "MLAI organisational memory; aggregate metadata only",
+  "method": "Read-only PostgreSQL transactions in the existing production backend container, plus read-only GitHub deployment inspection. No imports, repairs, migrations or deployments were triggered.",
+  "backend_release": "bf6a7cf0c8b3a2698626556b6da8d419a87a4eb6",
+  "roo_release": "c105c6e12fc577d972856f4f18f8b83e587eb480",
+  "backend_deployment_evidence": "https://github.com/MLAI-AUS-Inc/mlai-backend/actions/runs/36568200084",
+  "roo_deployment_evidence": "https://github.com/MLAI-AUS-Inc/roo/actions/runs/36573728843",
+  "active_connections": [{
+    "provider": "google_drive",
+    "last_successful_sync_at_utc": "2026-09-30T00:01:47.807478Z",
+    "last_sync_records_processed": 0,
+    "last_sync_pages_completed": 7,
+    "latest_nonempty_completed_sync_at_utc": "2026-09-22T19:06:24.324948Z",
+    "latest_nonempty_sync_records_processed": 2
+  }],
+  "private_corpus": {
+    "active_meeting_transcript_sources": 96,
+    "source_versions_including_history": 187,
+    "latest_source_version_captured_at_utc": "2026-09-22T19:04:01.026627Z",
+    "latest_source_updated_at_utc": "2026-09-22T05:55:34.526000Z",
+    "active_chunks": 1280,
+    "active_chunks_with_text_index": 1280,
+    "active_chunks_with_current_embedding": 1280,
+    "inactive_historical_chunks": 1759,
+    "embeddings_including_historical_chunks": 3039,
+    "embedding_model": "text-embedding-3-small",
+    "pgvector_extension_version": "0.8.2",
+    "latest_embedding_created_at_utc": "2026-09-22T19:05:37.468039Z",
+    "latest_successful_extraction_at_utc": "2026-09-22T19:06:19.152253Z",
+    "claims": {"active": 71, "candidate": 2521, "candidate_review_required": 2521, "stale": 3, "archived": 159}
+  },
+  "public_corpus": {"knowledge_items_all_statuses": 0, "publication_enabled": false},
+  "runtime_flags": {"private_query_api_enabled": true, "query_vector_flag": "unset; application default true"},
+  "prior_deployment_snapshot": {
+    "reported_at_utc": "2026-09-29T13:07:50Z",
+    "selected_source_scopes": 2,
+    "drive_inventory_active_artifacts": 191,
+    "drive_inventory_unsupported": 95,
+    "pilot_approved_actors": 1,
+    "pilot_approved_providers": 1,
+    "approved_public_channel_admin_scope": true
+  },
+  "interpretation": "A successful sync may process zero records. The latest captured source version, embedding and successful extraction agree with the 23 September Sydney-time nonempty import. Counts do not establish answer quality, universal source coverage, or a completed pilot exit evaluation. Candidate claims are not approved facts; raw source chunks are a separate retrieval lane."
+}
