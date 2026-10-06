@@ -137,6 +137,10 @@ class Settings(BaseSettings):
     LINEAR_DEFAULT_TEAM: Optional[str] = None
     LINEAR_CHANNEL_ISSUE_WRITES_ENABLED: bool = False
 
+    # Additional report-only access in one exact public Roo Slack context.
+    COWORKING_REPORT_SLACK_TEAM_ID: str = ""
+    COWORKING_REPORT_SLACK_CHANNEL_ID: str = ""
+
     # Public/Admin trust boundary. Admin starts with no skills and no private
     # memory access until an explicit allowlist and scoped credential exist.
     ROO_SURFACE: Literal["public", "admin"] = "public"

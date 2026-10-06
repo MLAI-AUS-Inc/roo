@@ -29,6 +29,32 @@ Slack documentation: [uploading files and replying in threads](https://docs.slac
 
 Tests use fake backend data and mocked Slack uploads; they do not publish reports to live Slack.
 
+## Shared chat report access
+
+Set `COWORKING_REPORT_SLACK_TEAM_ID` and `COWORKING_REPORT_SLACK_CHANNEL_ID`
+to the exact Stone & Chalk–MLAI Slack workspace/channel IDs in both Public Roo
+and `mlai-backend`. Both default to empty, disabling the additional grant.
+Use a channel ID (`C...` or `G...`), never a name or a DM ID.
+
+Everyone making a verified request inside that chat can generate the same text
+reports, comparisons and optional charts. Existing admin/partner access still
+works elsewhere. The channel grant creates no partner/admin records and grants
+no other privileges. Roo checks the requesting actor and reply destination
+against its verified Slack event context and forwards that scope under its
+`ROO_API_KEY`; the backend independently requires that strict service credential
+and its configured workspace/channel pair. Text or model parameters cannot
+supply report authority.
+
+Release the backend change and configure its pair before releasing/enabling the
+same pair on Roo. Removing either configured value disables the grant. No
+database migration, Slack scope change or recurring job is needed. A live
+request/upload has not been performed for this change.
+
+This permission applies to verified Slack human requests and the existing
+account-backed MLAI Chat actor resolver. A cross-workspace mirror using only a
+bot display name does not verify the requesting human; confirm the actual chat
+topology before rollout rather than granting report access to a bridge bot.
+
 ## Validation completed
 
 - 176 tests passed across the chart renderer, Slack upload helper, points/report actions and reconciliation reports.

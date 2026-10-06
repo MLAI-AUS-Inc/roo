@@ -1917,14 +1917,25 @@ class MLAIBackendClient:
 
     async def get_coworking_report(self, slack_user_id: str, start_date: str, end_date: str) -> dict:
         """Get active coworking booking report for an inclusive date range."""
+        user_id = self._clean_slack_id(slack_user_id)
+        params = {"slack_user_id": user_id, "start_date": start_date, "end_date": end_date}
+        actor = self.actor_context
+        if (
+            self.surface == "public"
+            and actor
+            and actor.event_id
+            and actor.acting_slack_user_id == user_id
+            and re.fullmatch(r"[UW][A-Z0-9]+", user_id)
+            and re.fullmatch(r"T[A-Z0-9]+", actor.slack_team_id)
+            and re.fullmatch(r"[CG][A-Z0-9]+", actor.slack_channel_id)
+        ):
+            # The strict Roo service credential attests to this verified event
+            # scope. The backend independently enforces its configured pair.
+            params.update(slack_team_id=actor.slack_team_id, slack_channel_id=actor.slack_channel_id)
         response = await self._request(
             "GET",
             f"{self._points_base}/coworking/report/",
-            params={
-                "slack_user_id": self._clean_slack_id(slack_user_id),
-                "start_date": start_date,
-                "end_date": end_date,
-            },
+            params=params,
             timeout=15.0,
             transport_retries=1,
             retry_backoff_seconds=0.25,
