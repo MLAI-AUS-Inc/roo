@@ -2341,7 +2341,7 @@ class SkillExecutor:
 
     @staticmethod
     def _points_backend_unavailable_message(action: Optional[str] = None) -> str:
-        if action == "view_rate_card":
+        if action in {"view_rate_card", "estimate_points"}:
             return "I couldn't load the rate card just now. Please try again in a moment."
 
         if action == "book_coworking":
@@ -12990,6 +12990,161 @@ Chunk {index} source: {label}
 
         return updates
 
+    def _score_rate_card_rows(self, query: str, rate_card) -> list[tuple[float, dict]]:
+        """Score rate-card rows the same way smart awards do.
+
+        A row scores +50 when the query is contained in its name, +30 when it
+        is contained in the description, and the SequenceMatcher ratio against
+        the name (0-100) when that ratio is above 60. Rows stay in their
+        incoming order when scores tie.
+        """
+        query_lower = str(query or "").lower()
+        scored: list[tuple[float, dict]] = []
+        for item in rate_card:
+            name = item.get("name", "")
+            desc = item.get("description", "") or ""
+            score = 0
+            if query_lower in name.lower():
+                score += 50
+            if query_lower in desc.lower():
+                score += 30
+            seq_score = SequenceMatcher(None, query_lower, name.lower()).ratio() * 100
+            if seq_score > 60:
+                score += seq_score
+            scored.append((score, item))
+        scored.sort(key=lambda row: row[0], reverse=True)
+        return scored
+
+    def _rate_card_name_ratio(self, query: str, item: dict) -> float:
+        """Name similarity used only to order equal smart-award scores."""
+        name = item.get("name", "") or ""
+        return SequenceMatcher(None, str(query or "").lower(), name.lower()).ratio()
+
+    def _is_explicit_rate_card_request(self, text: str) -> bool:
+        """True when the user asked to see the catalog itself."""
+        normalized = " ".join(str(text or "").lower().split())
+        if "standard point rates" in normalized or "all the ways to earn" in normalized:
+            return True
+        return bool(re.search(
+            r"\b(?:show|list|view|display)\b.{0,40}\brate card\b",
+            normalized,
+        ))
+
+    def _has_points_estimate_marker(self, normalized: str) -> bool:
+        if re.search(r"\bestimate\b", normalized):
+            return True
+        if "how many roo points" in normalized:
+            return True
+        return bool(re.search(r"\bhow many points is .+ worth\b", normalized))
+
+    def _substantive_task_description(self, candidate: str) -> str:
+        cleaned = " ".join(str(candidate or "").split()).strip(" \t\"'`:-–—")
+        if not cleaned:
+            return ""
+        if re.search(r"\b(?:do i have|have i got|is my balance|my balance)\b", cleaned.lower()):
+            return ""
+        filler = {
+            "this", "that", "it", "the", "a", "an", "task", "for", "please",
+            "roo", "points", "point", "pts", "worth", "new", "work", "my",
+        }
+        meaningful = [
+            word for word in re.findall(r"[a-z0-9][a-z0-9'+-]*", cleaned.lower())
+            if word not in filler and len(word) > 2
+        ]
+        if not meaningful:
+            return ""
+        return cleaned
+
+    def _extract_points_estimate_description(self, text: str) -> str:
+        """Pull the work being priced out of an estimate request."""
+        raw = re.sub(r"<@[A-Z0-9]+>", " ", str(text or ""), flags=re.IGNORECASE)
+        raw = re.sub(r"(?i)@roo\b", " ", raw)
+        raw = raw.replace("“", '"').replace("”", '"').replace("‘", "'").replace("’", "'")
+        normalized = " ".join(raw.split())
+
+        for quote in reversed(re.findall(r'"([^"]+)"', normalized)):
+            substantive = self._substantive_task_description(quote)
+            if substantive:
+                return substantive
+
+        worth = re.search(r"(?i)\bhow many points is (.+?) worth\b", normalized)
+        if worth:
+            substantive = self._substantive_task_description(worth.group(1))
+            if substantive:
+                return substantive
+
+        stripped = re.sub(
+            r"(?i)^(?:please\s+)?(?:"
+            r"estimate(?:\s+how\s+many(?:\s+roo)?\s+points)?"
+            r"|how\s+many\s+roo\s+points"
+            r"|how\s+many\s+points\s+is\s+this(?:\s+task)?\s+worth"
+            r")"
+            r"(?:\s+for(?:\s+this)?)?"
+            r"\s*[:\-–—]?\s*",
+            "",
+            normalized,
+        ).strip()
+        return self._substantive_task_description(stripped)
+
+    def _points_estimate_task_description(self, text: str, params: Optional[dict]) -> str:
+        explicit = str((params or {}).get("task_description") or "").strip()
+        if explicit:
+            return explicit
+        return self._extract_points_estimate_description(text)
+
+    def _is_points_estimate_request(self, text: str, params: Optional[dict] = None) -> bool:
+        """Estimate wording that should not dump the rate-card catalog."""
+        if self._is_explicit_rate_card_request(text):
+            return False
+        normalized = " ".join(str(text or "").lower().split())
+        if not self._has_points_estimate_marker(normalized):
+            return False
+        if self._points_estimate_task_description(text, params):
+            return True
+        # The work can be missing; estimate_points then asks what it is.
+        return bool(re.search(
+            r"\bhow many points is (?:this|that|it)(?:\s+task)? worth\b",
+            normalized,
+        ))
+
+    def _points_estimate_why(self, description: str, item: dict) -> str:
+        name = item.get("name") or "that rate"
+        points = item.get("points", 0)
+        query = description.lower()
+        item_name = str(item.get("name") or "").lower()
+        item_desc = str(item.get("description") or "").lower()
+        if query and query in item_name:
+            return f"That matches the '{name}' rate, which is worth {points} points."
+        if query and item_desc and query in item_desc:
+            return f"That matches the '{name}' description, which is worth {points} points."
+        return (
+            f"'{name}' is the closest rate-card row to this work, "
+            f"so {points} points is the recommendation."
+        )
+
+    def _format_points_estimate(self, description: str, card: list) -> str:
+        ranked = [
+            (score, self._rate_card_name_ratio(description, item), item)
+            for score, item in self._score_rate_card_rows(description, card)
+        ]
+        ranked.sort(key=lambda row: (row[0], row[1]), reverse=True)
+        closest = ranked[:3]
+        best = closest[0][2]
+        points = best.get("points", 0)
+        lines = [
+            f"I'd recommend **{points} points** for this.",
+            "",
+            "Closest matches:",
+        ]
+        for _, _, item in closest:
+            lines.append(
+                f"• **{item.get('name', 'Unknown')}** ({item.get('points', 0)} pts) - "
+                f"{item.get('description', '')}"
+            )
+        lines.append("")
+        lines.append(self._points_estimate_why(description, best))
+        return "\n".join(lines)
+
     def _resolve_routed_points_action(self, params: dict, text: str) -> str:
         """Normalize the router-supplied points action; safety guards only.
 
@@ -13004,6 +13159,10 @@ Chunk {index} source: {label}
         # member is an admin check-in, whatever the router said.
         if action == "book_coworking" and self._coworking_target_mentions_present(text, params):
             action = "admin_checkin_coworking"
+        # Prompt routing keeps sending estimate requests to the catalog dump.
+        if action == "view_rate_card" and self._is_points_estimate_request(text, params):
+            action = "estimate_points"
+            params["action"] = action
         return action
 
     def _resolve_points_admin_management_action(
@@ -16269,6 +16428,15 @@ Chunk {index} source: {label}
                  lines.append(f"• **{name}** ({pts} pts) - {desc}")
              
              return "\n".join(lines)
+
+        elif action == "estimate_points":
+            description = self._points_estimate_task_description(text, params)
+            if not description:
+                return "What work should I estimate Roo points for?"
+            card = await client.get_rate_card()
+            if not card:
+                return "No active point rates are configured."
+            return self._format_points_estimate(description, card)
         
         elif action == "approve_task":
             task_id = self._extract_task_identifier(text, params.get("task_id"))
@@ -16421,24 +16589,11 @@ Chunk {index} source: {label}
                     print(f"🕵️ No points specified. Checking Rate Card for '{reason}'...")
                     try:
                         rate_card = await client.get_rate_card()
-                        matches = []
-                        reason_lower = reason.lower()
-                        
-                        for item in rate_card:
-                            name = item.get("name", "")
-                            desc = item.get("description", "") or ""
-                            # Enhanced scoring
-                            score = 0
-                            if reason_lower in name.lower(): score += 50
-                            if reason_lower in desc.lower(): score += 30
-                            
-                            seq_score = SequenceMatcher(None, reason_lower, name.lower()).ratio() * 100
-                            if seq_score > 60: score += seq_score
-                            
-                            if score > 40:
-                                matches.append((score, item))
-                        
-                        matches.sort(key=lambda x: x[0], reverse=True)
+                        matches = [
+                            (score, item)
+                            for score, item in self._score_rate_card_rows(reason, rate_card)
+                            if score > 40
+                        ]
                         
                         if matches:
                             top_match = matches[0][1]

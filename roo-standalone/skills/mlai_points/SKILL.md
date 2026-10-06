@@ -3,11 +3,9 @@ name: mlai-points
 description: Manage MLAI points system - check balance, book coworking, claim tasks, redeem rewards
 routing:
   use_when: >
-    Roo points, rewards, community tasks, coworking bookings/reports/charts,
-    Slack-Founder Tools linking and points administration.
+    Roo points, rewards, tasks, coworking, and points admin.
   avoid_when: >
-    Linear tasks or meetings (linear-meeting-actions), event attendance (luma-events),
-    meeting rooms, GitHub linking, and founder introductions.
+    linear-meeting-actions, luma-events, meeting rooms, GitHub, and introductions.
   examples:
     - {text: "how do I earn points?", action: list_tasks}
     - {text: "what's my balance", action: balance}
@@ -20,21 +18,27 @@ routing:
     - {text: "how busy was the coworking space in may?", action: coworking_report}
     - {text: "give 10 points to @member for organising the meetup", action: award_points}
     - {text: "link", action: link_founder_account}
+    - {text: "estimate how many roo points for adding MFA after signup", action: estimate_points}
+    - {text: "how many points is this task worth", action: estimate_points}
+    - {text: "show the rate card", action: view_rate_card}
+    - {text: "show the standard point rates", action: view_rate_card}
+    - {text: "all the ways to earn", action: view_rate_card}
   negative_examples:
     - {text: "add a task to linear to fix the login bug", instead: linear-meeting-actions}
     - {text: "book club is meeting thursday, can you remind the channel?", instead: respond_in_chat}
     - {text: "how many people came to our last event?", instead: luma-events}
+    - {text: "estimate points for new work", instead: estimate_points}
 actions:
   - name: link_founder_account
     description: Link the user's Slack and Founder Tools accounts.
   - name: balance
-    description: Privately show the user their current points balance.
+    description: Show the points balance.
   - name: flex_points
-    description: Share the user's own lifetime-earned total in the request thread.
+    description: Share a lifetime-earned total.
   - name: delete_flex
     description: Privately delete the user's flex.
   - name: history
-    description: Privately show the user their recent points transactions.
+    description: Show recent points transactions.
     params:
       days: {type: integer, description: "How many days back (default 7)."}
       limit: {type: integer, description: "Max entries (default 10)."}
@@ -93,16 +97,16 @@ actions:
     params:
       date: {type: string, description: "Preserve the user's date phrase, including any year; the handler resolves natural dates or asks for clarification."}
   - name: admin_checkin_coworking
-    description: Admin — check one or more OTHER members in for coworking (message mentions someone else).
+    description: Admin — check other members in for coworking.
     params:
       date: {type: string, description: "Preserve the user's date phrase, including any year; the handler resolves natural dates or asks for clarification."}
       target_users: {type: array}
   - name: coworking_report
-    description: Coworking booking reports/charts/trends/comparisons.
+    description: Coworking reports and charts.
     params:
       start_date: {type: string}
       end_date: {type: string}
-      include_chart: {type: boolean, description: "True for requested charts; false for text-only; otherwise omit."}
+      include_chart: {type: boolean, description: "Include a chart when asked."}
   - name: list_rewards
     description: Show the rewards catalog.
   - name: request_reward
@@ -111,11 +115,15 @@ actions:
       reward_code: {type: string}
       quantity: {type: integer}
   - name: view_rate_card
-    description: Show how many points actions are worth.
+    description: List the rate card.
+  - name: estimate_points
+    description: Recommend points for new work.
+    params:
+      task_description: {type: string, description: "Work to price."}
   - name: topup_points
-    description: Buy a fixed top-up pack of Roo points ("top up", "buy/add roo points", "I need more points").
+    description: Buy a Roo points top-up pack.
   - name: request_points
-    description: Ask admins to grant the user points for something they did.
+    description: Ask admins to grant points.
     params:
       points: {type: integer}
       reason: {type: string}
@@ -210,6 +218,7 @@ Example responses:
 - **include_chart**: Include the daily booking PNG and seven-day trend only when requested (ordinary reports are text-only; false explicitly suppresses charts)
 - **points**: The number of points to award (integer, positive only)
 - **reason**: A short description of why the points are being awarded or requested
+- **task_description**: The new work to price for `estimate_points`. Estimate requests must not use `view_rate_card`.
 - **target_user**: A single Slack User ID (e.g., U012ABC) or mention (e.g., <@U012ABC>) of the person receiving points. For single-user awards.
 - **target_users**: A list of Slack User IDs extracted from mentions for multi-user awards or admin coworking check-ins. Extract ALL <@U...> patterns from the message. Example: ["U012ABC", "U034DEF"] or ["<@U012ABC>", "<@U034DEF>"]
 - **target_slack_id**: (Alias for target_user) A single Slack User ID
@@ -279,6 +288,9 @@ Parse user messages to identify the action and parameters:
 | `task reject <id/code>` | reject_task | (Admin) "Task reject ROO-0042 and ask for tests" |
 | `points award @user +5 reason` | award_points | (Admin) "Give @sam 5 points for helping out" |
 | `reward @user for <activity>` | award_points | (Admin) "Reward @sam for newsletter" (suggests points from rate card) |
+| `estimate how many roo points for <task>` | estimate_points | "estimate how many roo points for adding MFA after signup" |
+| `how many points is this task worth` | estimate_points | "how many points is this worth: phone 2FA after signup" |
+| `show the rate card` / `standard point rates` / `all the ways to earn` | view_rate_card | "show the rate card" |
 | `promote <@USER> to roo points admin` | promote_points_admin | (Super Admin) "Promote <@U123> to roo points admin" |
 | `make <@USER> a roo points admin` | promote_points_admin | (Super Admin) "Make <@U123> a roo points admin" |
 | `revoke <@USER> as roo points admin` | revoke_points_admin | (Super Admin) "Revoke <@U123> as roo points admin" |
