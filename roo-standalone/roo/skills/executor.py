@@ -2341,6 +2341,9 @@ class SkillExecutor:
 
     @staticmethod
     def _points_backend_unavailable_message(action: Optional[str] = None) -> str:
+        if action == "view_rate_card":
+            return "I couldn't load the rate card just now. Please try again in a moment."
+
         if action == "book_coworking":
             return (
                 "I couldn't confirm whether your coworking booking went through because MLAI backend timed out. "
@@ -16256,7 +16259,7 @@ Chunk {index} source: {label}
         elif action == "view_rate_card":
              card = await client.get_rate_card()
              if not card:
-                 return "Rate card is empty or unavailable."
+                 return "No active point rates are configured."
              
              lines = ["📋 **Standard Point Rates:**\n"]
              for item in card:
@@ -16400,11 +16403,12 @@ Chunk {index} source: {label}
             if not target_slack_ids:
                 return "Who should I award points to? Mention them like @user (e.g., 'award 5 points to @Jasmine')"
             
-            # Extract points amount if not in params
-            # Extract points amount if not in params
+            # Extract points amount if not in params.
             if not points:
-                # 1. Try Regex fallback first (in case params missed explicit points)
-                pts_match = re.search(r'(?<![a-zA-Z])([+-]?\d+)\s*(?:points?|pts?)?', text, re.IGNORECASE)
+                # Slack IDs contain digits that are not point amounts.
+                amount_text = re.sub(r'<@[A-Z0-9]+>', '', text)
+                # 1. Try Regex fallback first (in case params missed explicit points).
+                pts_match = re.search(r'(?<![a-zA-Z])([+-]?\d+)\s*(?:points?|pts?)?', amount_text, re.IGNORECASE)
                 if pts_match:
                     found_val = int(pts_match.group(1))
                     has_keyword = "point" in pts_match.group(0).lower() or "pts" in pts_match.group(0).lower()
@@ -16453,6 +16457,8 @@ Chunk {index} source: {label}
                                 options = [f"'{m[1].get('name')}' ({m[1].get('points')} pts)" for m in matches[:3]]
                                 return f"That sounds like it could be {options[0]} or {options[1] if len(options)>1 else ''}. Which one is it?{remaining_info}"
                                 
+                    except MLAIBackendUnavailableError:
+                        return self._points_backend_unavailable_message("view_rate_card")
                     except Exception as e:
                         print(f"⚠️ Smart award lookup failed: {e}")
 

@@ -3276,7 +3276,7 @@ class MLAIBackendClient:
         return response.json()
 
     async def get_rate_card(self) -> List[dict]:
-        """Get the automated rate card for point awards."""
+        """Return valid rates; distinguish failed reads from an empty card."""
         try:
             response = await self._request(
                 "GET",
@@ -3286,15 +3286,36 @@ class MLAIBackendClient:
                 retry_backoff_seconds=0.25,
                 circuit_breaker=True,
             )
-            if response.status_code == 404:
-                return []
             response.raise_for_status()
-            return response.json()
         except MLAIBackendUnavailableError:
             raise
-        except Exception as e:
-            print(f"❌ Failed to fetch rate card: {e}")
-            return []
+        except httpx.HTTPError as exc:
+            raise MLAIBackendUnavailableError(
+                "Rate card request failed", reason_code="rate_card_unavailable",
+            ) from exc
+
+        try:
+            card = response.json()
+        except ValueError as exc:
+            raise MLAIBackendUnavailableError(
+                "MLAI backend returned an invalid rate card",
+                reason_code="invalid_backend_response",
+            ) from exc
+
+        if not isinstance(card, list) or any(
+            not isinstance(item, dict)
+            or not isinstance(item.get("name"), str)
+            or not item["name"].strip()
+            or not isinstance(item.get("points"), int)
+            or isinstance(item["points"], bool)
+            or not isinstance(item.get("description"), str)
+            for item in card
+        ):
+            raise MLAIBackendUnavailableError(
+                "MLAI backend returned an invalid rate card",
+                reason_code="invalid_backend_response",
+            )
+        return card
 
     async def is_admin(self, slack_user_id: str) -> bool:
         """Check if a user is a full Points Admin (with caching)."""

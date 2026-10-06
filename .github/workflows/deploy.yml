@@ -65,6 +65,7 @@ jobs:
             roo/tests/test_coworking_dates.py \
             roo/tests/test_backend_identity.py \
             roo/tests/test_mlai_backend_client.py \
+            roo/tests/test_rate_card.py \
             roo/tests/test_founder_account_link.py \
             roo/tests/test_coworking_booking_intents.py \
             roo/tests/test_coworking_admin_batch.py \

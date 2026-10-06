@@ -1,7 +1,9 @@
 import importlib
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -37,6 +39,143 @@ class FakeAsyncClient:
 
     async def request(self, method, url, **kwargs):
         return await self._handler(method, url, **kwargs)
+
+
+RATE_CARD_ROW = {
+    "name": "Newsletter", "alias": "newsletter", "points": 5,
+    "description": "Write a newsletter", "is_active": True,
+}
+INVALID_RATE_CARD_JSON = object()
+
+
+def rate_card_client(monkeypatch, handler):
+    monkeypatch.setattr(
+        backend_module.httpx, "AsyncClient",
+        lambda *args, **kwargs: FakeAsyncClient(handler),
+    )
+    return MLAIBackendClient(
+        base_url="https://backend.test", api_key="roo-test-key",
+        internal_api_key="different-admin-test-key",
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("payload", [
+    [RATE_CARD_ROW], [],
+    [{**RATE_CARD_ROW, "points": 0, "extra": "preserved"}],
+    [{**RATE_CARD_ROW, "points": -1}],
+])
+async def test_rate_card_success_preserves_array_and_empty(monkeypatch, payload):
+    async def handler(method, url, **kwargs):
+        return httpx.Response(200, request=httpx.Request(method, url), json=payload)
+
+    client = rate_card_client(monkeypatch, handler)
+    assert await client.get_rate_card() == payload
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [401, 403, 404, 429, 500, 503])
+async def test_rate_card_http_failure_is_not_empty(monkeypatch, status):
+    async def handler(method, url, **kwargs):
+        return httpx.Response(
+            status, request=httpx.Request(method, url),
+            text="private-response-body roo-test-key",
+        )
+
+    client = rate_card_client(monkeypatch, handler)
+    with pytest.raises(MLAIBackendUnavailableError) as error:
+        await client.get_rate_card()
+    assert error.value.reason_code == "rate_card_unavailable"
+    assert "private-response-body" not in str(error.value)
+    assert "roo-test-key" not in str(error.value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("payload", [
+    INVALID_RATE_CARD_JSON, None, {}, {"results": []}, ["bad"],
+    [{k: v for k, v in RATE_CARD_ROW.items() if k != "name"}],
+    [{k: v for k, v in RATE_CARD_ROW.items() if k != "points"}],
+    [{k: v for k, v in RATE_CARD_ROW.items() if k != "description"}],
+    [{**RATE_CARD_ROW, "name": "  "}],
+    [{**RATE_CARD_ROW, "name": 5}],
+    [{**RATE_CARD_ROW, "points": True}],
+    [{**RATE_CARD_ROW, "points": "5"}],
+    [{**RATE_CARD_ROW, "points": 5.5}],
+    [{**RATE_CARD_ROW, "description": None}],
+    [RATE_CARD_ROW, {**RATE_CARD_ROW, "description": 5}],
+])
+async def test_rate_card_invalid_success_is_rejected(monkeypatch, payload):
+    async def handler(method, url, **kwargs):
+        content = b"invalid-private-body" if payload is INVALID_RATE_CARD_JSON else json.dumps(payload)
+        return httpx.Response(200, request=httpx.Request(method, url), content=content)
+
+    client = rate_card_client(monkeypatch, handler)
+    with pytest.raises(MLAIBackendUnavailableError) as error:
+        await client.get_rate_card()
+    assert error.value.reason_code == "invalid_backend_response"
+    assert "invalid-private-body" not in str(error.value)
+    assert "roo-test-key" not in str(error.value)
+
+
+@pytest.mark.asyncio
+async def test_rate_card_request_contract_and_service_header(monkeypatch):
+    captured = {}
+
+    async def handler(method, url, **kwargs):
+        captured["http_headers"] = kwargs["headers"]
+        return httpx.Response(200, request=httpx.Request(method, url), json=[])
+
+    client = rate_card_client(monkeypatch, handler)
+    request = client._request
+
+    async def spy_request(method, endpoint, **kwargs):
+        captured.update(method=method, endpoint=endpoint, options=kwargs)
+        return await request(method, endpoint, **kwargs)
+
+    monkeypatch.setattr(client, "_request", spy_request)
+    assert await client.get_rate_card() == []
+    assert captured["method"] == "GET"
+    assert captured["endpoint"] == "/api/v1/points/rate-card/"
+    assert captured["options"]["timeout"] == 5.0
+    assert captured["options"]["transport_retries"] == 1
+    assert captured["options"]["retry_backoff_seconds"] == 0.25
+    assert captured["options"]["circuit_breaker"] is True
+    assert captured["http_headers"]["X-API-Key"] == "roo-test-key"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scenario", ["timeout", "open-circuit", "passthrough"])
+async def test_rate_card_transport_failure_and_open_circuit_are_preserved(monkeypatch, scenario):
+    calls = []
+    sleep = AsyncMock()
+    monkeypatch.setattr(backend_module.asyncio, "sleep", sleep)
+
+    async def handler(method, url, **kwargs):
+        request = httpx.Request(method, url)
+        calls.append(request.url.path)
+        if scenario == "open-circuit":
+            assert request.url.path == "/healthz/ready"
+            return httpx.Response(503, request=request, json={"status": "error"})
+        raise httpx.ReadTimeout("test timeout", request=request)
+
+    client = rate_card_client(monkeypatch, handler)
+    original_error = MLAIBackendUnavailableError("test unavailable")
+    if scenario == "open-circuit":
+        MLAIBackendClient._backend_transport_failures[client.base_url] = client._transport_failure_threshold
+    elif scenario == "passthrough":
+        monkeypatch.setattr(client, "_request", AsyncMock(side_effect=original_error))
+
+    with pytest.raises(MLAIBackendUnavailableError) as error:
+        await client.get_rate_card()
+    if scenario == "passthrough":
+        assert error.value is original_error
+        assert calls == []
+    elif scenario == "open-circuit":
+        assert calls == ["/healthz/ready"]
+        sleep.assert_not_awaited()
+    else:
+        assert calls == ["/api/v1/points/rate-card/"] * 2
+        sleep.assert_awaited_once_with(0.25)
 
 
 @pytest.mark.asyncio
