@@ -36,6 +36,13 @@ to the exact Stone & Chalk–MLAI Slack workspace/channel IDs in both Public Roo
 and `mlai-backend`. Both default to empty, disabling the additional grant.
 Use a channel ID (`C...` or `G...`), never a name or a DM ID.
 
+For the Public Roo production rollout, set the matching names as GitHub
+repository variables. The normal `Deploy to Digital Ocean` workflow validates
+the complete pair and persists it in Public Roo's environment before restart.
+Leave both variables empty to disable this grant. Keep
+`COWORKING_INTENTS_V3_MIGRATION_APPROVED=false`; this report permission requires
+no production schema migration.
+
 Everyone making a verified request inside that chat can generate the same text
 reports, comparisons and optional charts. Existing admin/partner access still
 works elsewhere. The channel grant creates no partner/admin records and grants
