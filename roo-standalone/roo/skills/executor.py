@@ -3262,6 +3262,21 @@ Keep the response concise but informative."""
                 params.get("team_hint") or candidate.get("team_hint"),
                 getattr(settings, "LINEAR_DEFAULT_TEAM", None),
             )
+            if use_direct_issue_path:
+                owner_match, project_match, team_match = self._relax_unscoped_direct_issue_matches(
+                    owner_match=owner_match,
+                    project_match=project_match,
+                    team_match=team_match,
+                    teams=teams,
+                    owner_requested=bool(
+                        str(params.get("owner_hint") or params.get("owner") or "").strip()
+                    ),
+                    project_requested=bool(
+                        str(
+                            params.get("project_hint") or candidate.get("project_hint") or ""
+                        ).strip()
+                    ),
+                )
             duplicate = self._find_linear_meeting_duplicate(
                 candidate,
                 recent_issues,
@@ -3333,6 +3348,20 @@ Keep the response concise but informative."""
                         skip_reason = "Project unclear; mention the Linear project and I can add it."
                     elif float(team_match.get("confidence") or 0.0) < uncertain_threshold:
                         skip_reason = "Linear team unclear; mention the team and I can add it."
+                elif (
+                    use_direct_issue_path
+                    and not team_match.get("team")
+                    and float(owner_match.get("confidence") or 0.0) >= uncertain_threshold
+                    and float(project_match.get("confidence") or 0.0) >= uncertain_threshold
+                ):
+                    team_names = [
+                        str(team.get("key") or team.get("name") or "").strip()
+                        for team in teams
+                        if str(team.get("key") or team.get("name") or "").strip()
+                    ]
+                    skip_reason = "Linear team unclear; mention the team and I can add it."
+                    if team_names:
+                        skip_reason = f"{skip_reason} Teams: {', '.join(team_names[:8])}."
                 skipped.append({**display, "reason": skip_reason})
                 continue
 
@@ -4230,7 +4259,10 @@ Keep the response concise but informative."""
             return False
         has_creation_intent = bool(re.search(r'\b(create|add|open|file|make)\b', value))
         has_issue_noun = bool(
-            re.search(r'\b(?:to\s*do\s+items?|todo\s+items?|tasks?|issues?|tickets?)\b', value)
+            re.search(
+                r'\b(?:to\s*do\s+items?|todo\s+items?|tasks?|issues?|tickets?|prds?)\b',
+                value,
+            )
         )
         return has_creation_intent and has_issue_noun
 
@@ -4447,8 +4479,11 @@ Return the structured issue list. Preserve the parsed project and assignee hints
             candidate = {
                 **fallback,
                 **issue,
-                "owner_hint": issue.get("owner_hint") or owner_hint,
-                "project_hint": issue.get("project_hint") or project_hint,
+                # Keep the parsed command's assignee and project. A model-invented
+                # hint that nobody asked for becomes "Assignee unclear" and drops
+                # an explicit create.
+                "owner_hint": owner_hint,
+                "project_hint": project_hint,
                 "source_label": issue.get("source_label") or "Slack command",
                 "evidence": issue.get("evidence") or text[:700],
                 "confidence": issue.get("confidence", 0.96),
@@ -6330,6 +6365,52 @@ Chunk {index} source: {label}
                 return issue
         return None
 
+    def _relax_unscoped_direct_issue_matches(
+        self,
+        *,
+        owner_match: dict[str, Any],
+        project_match: dict[str, Any],
+        team_match: dict[str, Any],
+        teams: list[dict[str, Any]],
+        owner_requested: bool,
+        project_requested: bool,
+    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+        """Allow an explicit Linear command to omit the assignee and project.
+
+        A name the user never gave is not an unclear match. A hint that was
+        given and could not be matched still fails closed. The issue still
+        needs a team: the configured default, or the only accessible team.
+        """
+        if not owner_requested and not owner_match.get("user"):
+            owner_match = {
+                "user": None,
+                "confidence": 1.0,
+                "reason": "No assignee requested",
+            }
+        if not project_requested and not project_match.get("project"):
+            project_match = {
+                "project": None,
+                "confidence": 1.0,
+                "reason": "No project requested",
+            }
+        if not project_requested:
+            if (
+                team_match.get("team")
+                and team_match.get("reason") == "Using configured default team"
+            ):
+                team_match = {
+                    **team_match,
+                    "confidence": 0.9,
+                    "reason": "Using configured default team for a direct Linear command",
+                }
+            elif not team_match.get("team") and len(teams) == 1:
+                team_match = {
+                    "team": teams[0],
+                    "confidence": 0.9,
+                    "reason": "Only accessible Linear team",
+                }
+        return owner_match, project_match, team_match
+
     def _linear_meeting_candidate_decision(
         self,
         *,
@@ -6917,10 +6998,24 @@ Chunk {index} source: {label}
         owner = owner_match.get("user") or {}
         project = project_match.get("project") or {}
         team = team_match.get("team") or {}
+        assignee = owner.get("displayName") or owner.get("name") or owner.get("email")
+        if not assignee:
+            assignee = (
+                "Unassigned"
+                if owner_match.get("reason") == "No assignee requested"
+                else "Unresolved"
+            )
+        project_name = project.get("name")
+        if not project_name:
+            project_name = (
+                "No project"
+                if project_match.get("reason") == "No project requested"
+                else "Unresolved"
+            )
         return {
             "title": candidate.get("title") or "Untitled action",
-            "assignee": owner.get("displayName") or owner.get("name") or owner.get("email") or "Unresolved",
-            "project": project.get("name") or "Unresolved",
+            "assignee": assignee,
+            "project": project_name,
             "team": team.get("key") or team.get("name") or "Unresolved",
             "source": candidate.get("source_label") or "Slack thread",
             "evidence": candidate.get("evidence") or "",
