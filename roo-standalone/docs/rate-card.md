@@ -36,6 +36,11 @@ linking users, or notifying recipients. A valid empty card or no match
 keeps the existing manual-amount question. Explicit-amount awards keep their
 existing authorization and allowance checks and do not fetch the card.
 
+Slack user mentions are excluded when reading a points amount from award
+text. Digits in a user ID therefore cannot bypass a rate-card suggestion
+or its confirmation. Explicit amounts in the message still use the
+existing award flow.
+
 ## Local verification
 
 With development-only values and dotenv disabled, from `roo-standalone`:

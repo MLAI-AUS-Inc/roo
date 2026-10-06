@@ -16403,11 +16403,12 @@ Chunk {index} source: {label}
             if not target_slack_ids:
                 return "Who should I award points to? Mention them like @user (e.g., 'award 5 points to @Jasmine')"
             
-            # Extract points amount if not in params
-            # Extract points amount if not in params
+            # Extract points amount if not in params.
             if not points:
-                # 1. Try Regex fallback first (in case params missed explicit points)
-                pts_match = re.search(r'(?<![a-zA-Z])([+-]?\d+)\s*(?:points?|pts?)?', text, re.IGNORECASE)
+                # Slack IDs contain digits that are not point amounts.
+                amount_text = re.sub(r'<@[A-Z0-9]+>', '', text)
+                # 1. Try Regex fallback first (in case params missed explicit points).
+                pts_match = re.search(r'(?<![a-zA-Z])([+-]?\d+)\s*(?:points?|pts?)?', amount_text, re.IGNORECASE)
                 if pts_match:
                     found_val = int(pts_match.group(1))
                     has_keyword = "point" in pts_match.group(0).lower() or "pts" in pts_match.group(0).lower()
