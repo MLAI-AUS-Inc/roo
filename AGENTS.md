@@ -56,3 +56,23 @@ current application and configuration before using them as instructions.
 - Update skill routing tests when triggers, permissions, or side effects change.
 - For documentation-only changes, validate paths and links without contacting
   external services.
+
+## Cursor Cloud specific instructions
+
+- Run application commands from `roo-standalone` with its Python 3.11 `.venv`.
+- `pytest` imports settings at collection time. Use the same non-production
+  placeholders as `.github/workflows/deploy.yml`: `SLACK_BOT_TOKEN=test`,
+  `SLACK_SIGNING_SECRET=test`, `OPENAI_API_KEY=test`, and
+  `FOUNDER_TOOLS_LINK_ORIGINS=https://mlai.au`. Keep the suites split the way
+  that workflow does; some modules stub imports for the rest of the process.
+- `mlai-backend` is a separate public repository,
+  `github.com/MLAI-AUS-Inc/mlai-backend`, checked out at `/opt/mlai-backend`.
+  Roo calls it over HTTP. Local `MLAI_BACKEND_URL` is `http://127.0.0.1:8001`.
+  Do not point routine local work at `https://api.mlai.au`.
+- Do not start the backend Compose stack or run `manage.py migrate`. That web
+  service applies migrations on startup. Safe backend checks are
+  `makemigrations --check --dry-run` and `manage.py check` with a SQLite
+  `DATABASE_URL`, after that repo's own dependencies are installed.
+- Do not start `uvicorn` until `scripts/migrate_coworking_booking_intents_v3.py`
+  has explicit approval. Public Roo refuses to boot until that local SQLite
+  schema exists, and the script is a database migration.
