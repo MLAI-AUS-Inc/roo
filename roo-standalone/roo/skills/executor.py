@@ -13059,6 +13059,24 @@ Chunk {index} source: {label}
     def _can_generate_coworking_report_details(self, admin_details: Optional[dict]) -> bool:
         return self._points_admin_role(admin_details) in COWORKING_REPORT_ROLES
 
+    def _can_generate_coworking_report_in_channel(self, user_id: str, channel_id: str) -> bool:
+        """Use only verified Slack scope, never parameters inferred from text."""
+        settings = get_settings()
+        actor = get_backend_actor_context()
+        team = str(getattr(settings, "COWORKING_REPORT_SLACK_TEAM_ID", "") or "").strip()
+        channel = str(getattr(settings, "COWORKING_REPORT_SLACK_CHANNEL_ID", "") or "").strip()
+        return bool(
+            getattr(settings, "ROO_SURFACE", "public") == "public"
+            and re.fullmatch(r"T[A-Z0-9]+", team)
+            and re.fullmatch(r"[CG][A-Z0-9]+", channel)
+            and re.fullmatch(r"[UW][A-Z0-9]+", user_id)
+            and actor
+            and actor.event_id
+            and actor.acting_slack_user_id == user_id
+            and actor.slack_team_id == team
+            and actor.slack_channel_id == channel_id == channel
+        )
+
     def _full_points_admin_denial(self, admin_details: Optional[dict], action_label: str) -> str:
         if self._points_admin_role(admin_details) == "partner":
             return (
@@ -15766,9 +15784,10 @@ Chunk {index} source: {label}
             return f"Submitted! 📬 Task {display_id} is now pending approval.\n\nA reviewer will take a look soon. Legend! 🦘"
         
         elif action == "coworking_report":
-            admin_details = await client.get_admin_details(user_id)
-            if not self._can_generate_coworking_report_details(admin_details):
-                return self._coworking_report_points_admin_denial()
+            if not self._can_generate_coworking_report_in_channel(user_id, channel_id):
+                admin_details = await client.get_admin_details(user_id)
+                if not self._can_generate_coworking_report_details(admin_details):
+                    return self._coworking_report_points_admin_denial()
 
             llm_intent = await self._extract_coworking_report_intent_with_llm(text, params)
             start_date, end_date, error = self._resolve_coworking_report_range_from_intent(text, params, llm_intent)

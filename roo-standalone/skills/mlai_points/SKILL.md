@@ -320,7 +320,8 @@ For super admin actions (promote admin, revoke admin, change allowance):
 - The backend must still validate the requester for defense in depth
 
 For coworking report actions:
-- Roo must fail fast unless the requester is a full Points Admin or report-only partner
+- Roo must fail fast unless the requester is a full Points Admin, report-only partner, or a verified requester inside the configured coworking-report Slack workspace/channel
+- Channel access is enforced by Roo and the backend using the verified Slack event scope, never a channel or identity supplied in text/parameters. It grants reports/charts only; it does not promote the requester or permit point/task management
 - Count only active bookings (`status=booked`), not cancelled bookings
 - Ordinary reports are text-only. Attach a PNG of daily booked people and the trailing seven-calendar-day average to the same Slack channel/thread only when the user asks for a chart, graph, plot or trend line (`include_chart: true`); explicit text-only requests or `include_chart: false` suppress it
 - Generate only the requested range (including last 3, 6 or 12 months); do not automatically add other lookback reports or schedule recurring reports
