@@ -2341,6 +2341,9 @@ class SkillExecutor:
 
     @staticmethod
     def _points_backend_unavailable_message(action: Optional[str] = None) -> str:
+        if action == "view_rate_card":
+            return "I couldn't load the rate card just now. Please try again in a moment."
+
         if action == "book_coworking":
             return (
                 "I couldn't confirm whether your coworking booking went through because MLAI backend timed out. "
@@ -16256,7 +16259,7 @@ Chunk {index} source: {label}
         elif action == "view_rate_card":
              card = await client.get_rate_card()
              if not card:
-                 return "Rate card is empty or unavailable."
+                 return "No active point rates are configured."
              
              lines = ["📋 **Standard Point Rates:**\n"]
              for item in card:
@@ -16453,6 +16456,8 @@ Chunk {index} source: {label}
                                 options = [f"'{m[1].get('name')}' ({m[1].get('points')} pts)" for m in matches[:3]]
                                 return f"That sounds like it could be {options[0]} or {options[1] if len(options)>1 else ''}. Which one is it?{remaining_info}"
                                 
+                    except MLAIBackendUnavailableError:
+                        return self._points_backend_unavailable_message("view_rate_card")
                     except Exception as e:
                         print(f"⚠️ Smart award lookup failed: {e}")
 
