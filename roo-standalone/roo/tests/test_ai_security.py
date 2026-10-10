@@ -431,10 +431,18 @@ def test_deploy_workflow_requires_and_secretly_upserts_security_values():
     assert "secrets.ROO_API_KEY" in workflow
     assert "secrets.VICTOR_AI_ROO_SIGNING_SECRET" in workflow
     assert "envs: SIM_PATIENT_API_KEY,SIM_PATIENT_SAFETY_SALT" in workflow
-    assert (
-        "envs: SIM_PATIENT_API_KEY,SIM_PATIENT_SAFETY_SALT,ROO_API_KEY,"
-        "VICTOR_AI_ROO_SIGNING_SECRET,ROO_PUBLIC_HOST,ROO_PRIVATE_BASE_URL,MEETING_ROOM_BOOKING_ENABLED,OFFICE_MANAGER_ACTIONS_ENABLED,LINEAR_CHANNEL_ISSUE_WRITES_ENABLED,FOUNDER_ACCOUNT_LINK_ENABLED,COWORKING_INTENTS_V3_MIGRATION_APPROVED"
-    ) in workflow
+    forwarded_values = {
+        "SIM_PATIENT_API_KEY", "SIM_PATIENT_SAFETY_SALT", "ROO_API_KEY",
+        "VICTOR_AI_ROO_SIGNING_SECRET", "ROO_PUBLIC_HOST", "ROO_PRIVATE_BASE_URL",
+        "COWORKING_REPORT_SLACK_TEAM_ID", "COWORKING_REPORT_SLACK_CHANNEL_ID",
+        "MEETING_ROOM_BOOKING_ENABLED",
+        "OFFICE_MANAGER_ACTIONS_ENABLED", "LINEAR_CHANNEL_ISSUE_WRITES_ENABLED",
+        "FOUNDER_ACCOUNT_LINK_ENABLED", "COWORKING_INTENTS_V3_MIGRATION_APPROVED",
+    }
+    assert any(
+        forwarded_values <= set(line.strip().removeprefix("envs: ").split(","))
+        for line in workflow.splitlines() if line.strip().startswith("envs: ")
+    )
     assert 'upsert_env "ROO_ENVIRONMENT" "production"' in workflow
     assert 'upsert_env "SIM_PATIENT_API_KEY" "$SIM_PATIENT_API_KEY"' in workflow
     assert 'upsert_env "SIM_PATIENT_SAFETY_SALT" "$SIM_PATIENT_SAFETY_SALT"' in workflow
