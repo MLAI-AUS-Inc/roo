@@ -278,7 +278,8 @@ def test_known_pending_invoice_hours_disclosed_and_excluded_from_used_hours():
     files = artifacts(build(source, action='detailed'))
     invoices = list(csv.DictReader(StringIO(files['studio-contractor-invoices.csv'])))
     assert invoices[0]['pending_confirmation_hours'] == '25.000000'
-    assert invoices[0]['invoice_hours'] == '25.000000'
+    assert invoices[0]['included_client_hours'] == '0.000000'
+    assert 'invoice_hours' not in invoices[0]
 
 
 def test_unknown_later_invoice_hours_never_inferred_from_payable_money():
@@ -394,3 +395,26 @@ def test_reviewed_hour_total_is_independent_of_contractor_payable_amounts():
 def test_invalid_or_inexact_credit_conversion_fails_closed(rate, reason):
     with pytest.raises(TimesheetError, match=reason):
         build(dataset(allocation_rate_cents_per_hour=rate))
+
+
+def test_mixed_project_invoice_export_exposes_only_reviewed_client_hours():
+    invoice = {'id': 'eva-00013', 'number': '00013', 'supplier': 'Eva', 'date': '2026-09-10',
+               'hour_units': 60250000, 'excluded_hour_units': 5000000, 'unresolved_hour_units': 0,
+               'allocation_note': '60.25h total includes 5h on a project outside the client grant.'}
+    source = dataset(hours=[work(units=55250000)], contractor_invoices=[invoice])
+    report = build(source, action='detailed')
+    assert report['used_hour_units'] == 55250000
+    assert report['contractor_invoices'][0]['hour_units'] == 60250000
+    text = artifacts(report)['studio-contractor-invoices.csv']
+    rows = list(csv.DictReader(StringIO(text)))
+    assert rows[0]['included_client_hours'] == '55.250000'
+    assert rows[0]['pending_confirmation_hours'] == '0.000000'
+    assert rows[0]['invoice_number'] == '00013'
+    assert rows[0]['supplier'] == 'Eva'
+    assert rows[0]['evidence_date'] == '2026-09-10'
+    assert 'invoice_hours' not in rows[0]
+    assert 'excluded_from_client_hours' not in rows[0]
+    assert '60.25' not in text
+    assert ',5.000000,' not in text
+    assert '5h' not in text
+    assert 'Other work on this invoice is excluded' in rows[0]['review_note']

@@ -317,12 +317,16 @@ def artifacts(report):
     }
     if report['contractor_invoices']:
         result['studio-contractor-invoices.csv'] = csv_file(
-            ['invoice_id', 'invoice_number', 'supplier', 'evidence_date', 'date_kind', 'invoice_hours',
-             'excluded_from_client_hours', 'pending_confirmation_hours', 'allocation_note'],
+            ['invoice_id', 'invoice_number', 'supplier', 'evidence_date', 'date_kind', 'included_client_hours',
+             'pending_confirmation_hours', 'review_note'],
             [[invoice['id'], invoice['number'], invoice['supplier'], invoice['date'],
-              invoice.get('date_kind', 'invoice'), decimal_hours(invoice['hour_units']),
-              decimal_hours(invoice['excluded_hour_units']), decimal_hours(invoice['unresolved_hour_units']),
-              invoice['allocation_note']] for invoice in report['contractor_invoices']])
+              invoice.get('date_kind', 'invoice'),
+              decimal_hours(invoice['hour_units'] - invoice['excluded_hour_units'] - invoice['unresolved_hour_units']),
+              decimal_hours(invoice['unresolved_hour_units']),
+              'Reviewed client hours counted once.'
+              + (' Other work on this invoice is excluded.' if invoice['excluded_hour_units'] else '')
+              + (' Some hours await confirmation.' if invoice['unresolved_hour_units'] else '')]
+             for invoice in report['contractor_invoices']])
     if report['pending_work']:
         result['studio-work-pending-confirmation.csv'] = csv_file(
             ['source_id', 'supplier', 'invoice_number', 'evidence_date', 'hours_status', 'note'],
