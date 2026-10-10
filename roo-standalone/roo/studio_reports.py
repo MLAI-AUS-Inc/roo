@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from io import BytesIO
 import re
 from threading import Lock
@@ -81,6 +81,9 @@ def allowance_units(value, scale=4):
 
 
 def display_hours(units, scale=4):
+    if scale > 100:
+        number = (Decimal(units) / scale).quantize(Decimal('.01'), rounding=ROUND_HALF_UP)
+        return format(number, 'f').rstrip('0').rstrip('.')
     return format(Decimal(units) / scale, 'f').rstrip('0').rstrip('.') if units % scale else str(units // scale)
 
 
@@ -159,10 +162,10 @@ def build_client_report(config, client, selector, dataset, now, backfill=None):
             continue
         month = completed.astimezone(TZ).strftime('%Y-%m')
         try:
-            if (project_id in invoice_first and
-                    completed.astimezone(TZ).date().isoformat() <= backfill['coverage']['through']):
+            if project_id in invoice_first:
                 # Invoice quantities and explicitly reviewed logs are authoritative.
-                # Never add potentially overlapping ticket estimates to this basis.
+                # Delayed completion is not evidence of additional work after
+                # the invoice cutoff. Keep unmatched estimates out at all dates.
                 raise TimesheetError('ticket_not_added_to_invoice_total_may_overlap_or_need_recorded_hours')
             if missing_effort_history:
                 raise TimesheetError('historical_effort_labels_unavailable')
@@ -229,6 +232,7 @@ def client_breakdown(report):
 def summary(report):
     hours = lambda units: display_hours(units, report.get('unit_scale', 4))
     invoice_first = report['basis'] == 'invoice_first_recorded_hours'
+    quantity_label = 'invoice/recorded hour-units' if report.get('recorded_snapshot') else 'recorded hours'
     detailed = report['selector']['action'] == 'detailed'
     heading = 'Studio hours' if report['selector'].get('client') else 'Your Studio hours'
     parts = [f"*{heading} · {_escape(report['client'])}*"]
@@ -238,7 +242,7 @@ def summary(report):
         monthly = report['monthly']
         parts.append(f"{month_label(monthly[0]['month'])} – {month_label(monthly[-1]['month'])}")
         total = hours(total_units(report))
-        parts.append(f"*{total} {'recorded hours' if report['basis'] == 'invoice_first_recorded_hours' else 'hours used'} across {len(monthly)} months*"
+        parts.append(f"*{total} {quantity_label if invoice_first else 'hours used'} across {len(monthly)} months*"
                      + (' · invoice-first total; qualifications below' if invoice_first else
                         ' · partial total' if not report['complete'] else ''))
         if invoice_first and not report.get('client_groups'):
@@ -286,6 +290,15 @@ def summary(report):
             parts.extend(project_breakdown(report, report['rows']))
     if report.get('client_groups'):
         parts.extend(client_breakdown(report))
+    if report.get('recorded_snapshot'):
+        parts.append('\nThis view uses the same reviewed work records as the paid-credit chart. '
+                     'Amounts are invoice/recorded hour-units, not verified clock time or confirmed billable entitlement.')
+        parts.append('Source review: ' + report['source_as_of'][:10] +
+                     ' · coverage through ' + report['coverage_through'] + '.')
+        if report.get('partial'):
+            parts.append('Requested activity outside reviewed coverage is unavailable; it is not counted as zero.')
+        if report.get('pending_work_count'):
+            parts.append(str(report['pending_work_count']) + ' work sources remain unquantified and excluded.')
     if report['basis'] == 'completed_ticket_size_hours':
         parts.append('\nHours are based on completed-ticket sizes; work in progress and clocked time are not included.')
     else:
@@ -299,7 +312,7 @@ def summary(report):
             components.append(f'{hours(estimated)}h from completed-ticket estimates')
         parts.append('\nIncludes ' + ' and '.join(components) + '. Matched work is counted once.')
         if report.get('invoice_first_projects'):
-            parts.append('Ticket estimates are excluded from the reviewed invoice period. Recorded totals are not a complete clock-time total through today.')
+            parts.append('Ticket estimates are excluded for invoice-first projects, including later ticket completions. Recorded totals are not a complete clock-time total through today.')
         else:
             parts.append('Invoice hours use the work period; unresolved dates or allocations are excluded from the backfill.')
     for note in report.get('qualifications', []):
@@ -435,11 +448,12 @@ def render_chart(report, breakdown=None):
                           bbox_to_anchor=(.09, (.6 + .3 * legend_rows) / height),
                           ncol=2, frameon=False, fontsize=9)
             axes.set_xlabel('Month')
-            axes.set_ylabel('Hours recorded' if report['basis'] == 'invoice_first_recorded_hours' else 'Hours used')
+            axes.set_ylabel('Invoice/recorded hour-units' if report.get('recorded_snapshot') else
+                            'Hours recorded' if report['basis'] == 'invoice_first_recorded_hours' else 'Hours used')
             axes.tick_params(axis='x', labelrotation=30 if len(monthly) > 6 else 0)
             for index, value in enumerate(values):
                 label = ('No dated\nhours' if value == 0 and index < len(monthly) and monthly[index]['unresolved']
-                         else f'{value:g}h')
+                         else display_hours(round(value * scale), scale) + 'h')
                 axes.annotate(label, (index, value), xytext=(0, 5),
                               textcoords='offset points', ha='center', zorder=4,
                               bbox={'facecolor': 'white', 'edgecolor': 'none', 'pad': 1})
@@ -464,10 +478,10 @@ def render_chart(report, breakdown=None):
             axes.invert_yaxis()
             axes.set_xlabel('Hours used by client' if breakdown == 'clients' else 'Hours used by project')
             if report['basis'] == 'invoice_first_recorded_hours':
-                axes.set_xlabel('Recorded hours by project')
+                axes.set_xlabel('Invoice/recorded hour-units by project' if report.get('recorded_snapshot') else 'Recorded hours by project')
             axes.set_xlim(0, max([1, *values]) * 1.23)
             for index, value in enumerate(values):
-                axes.text(value + max([1, *values]) * .025, index, f'{value:g}h', va='center', weight='bold')
+                axes.text(value + max([1, *values]) * .025, index, display_hours(round(value * scale), scale) + 'h', va='center', weight='bold')
         figure.text(.06, .805 if report['selector'].get('client') else .845, subtitle, fontsize=12, color='#334b58')
         for spine in axes.spines.values():
             spine.set_visible(False)
@@ -476,6 +490,8 @@ def render_chart(report, breakdown=None):
                  else 'Completed-ticket size hours · excludes work in progress')
         if report['basis'] == 'invoice_first_recorded_hours':
             basis = f"{display_hours(total_units(report), scale)}h supported total · invoice hour-units + additional recorded work"
+        if report.get('recorded_snapshot'):
+            basis = f"{display_hours(total_units(report), scale)} invoice/recorded hour-units · clock time and billable entitlement unverified"
         caution = ('\nMonthly allocation incomplete; see report qualifications.' if report.get('unallocated_units') else
                    '\nPartial totals: some completed work needs review.' if not report['complete'] else '')
         if report.get('estimated_month_units'):

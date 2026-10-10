@@ -108,6 +108,22 @@ the permitted project scope is excluded and accounted for in invoice allocations
   invoice hour quantities remain reviewed accounting hours, not a clock-time claim.
   Do not silently count missing evidence as zero or turn this curve into invoice debt.
 
+## Shared project and monthly reporting
+
+Set `hours_reporting: true` on a reviewed owner dataset to use its exact work rows
+for ordinary Studio project and monthly charts as well. Each row must include a
+configured `builder_id`. Optional `qualifications: [{project_id, reference, reason}]`
+carry client-safe invoice quantity or attribution caveats. The worker replaces
+legacy rows for those projects; it does not stack invoice work with ticket sizes.
+
+All three views conserve integer millionths of an hour and use the same work dates,
+cutoff and source freshness checks. Cross-month windows receive an explicitly
+estimated uniform daily allocation. Ordinary exports omit receipt records,
+contractor money and private provenance. Existing requester/owner/project grants
+still govern each view. This opt-in labels invoice/recorded hour-units and the
+provisional difference against paid credits; neither establishes actual clock time,
+a chargeable shortfall, an amount owed or a monthly contractual allowance.
+
 ## Snapshot version 1
 
 The complete schema is enforced by
