@@ -77,6 +77,13 @@ def validate_balance_snapshot(value, config, clients):
                 _text(dataset['scope_label'], 150)
             if not isinstance(dataset['limitations'], list):
                 raise ValueError
+            if 'hours_reporting' in dataset and type(dataset['hours_reporting']) is not bool:
+                raise ValueError
+            for note in dataset.get('qualifications', []):
+                if note['project_id'] not in dataset['project_ids']:
+                    raise ValueError
+                _text(note['reason'])
+                _text(note['reference'])
             invoices = _records(dataset['invoices'])
             contractor_invoices = _records(dataset['contractor_invoices'])
             hours = _records(dataset['hours'])
@@ -161,6 +168,8 @@ def validate_balance_snapshot(value, config, clients):
                     _text(invoice['allocation_note'])
             for cost in hours.values():
                 provenance(cost)
+                if dataset.get('hours_reporting') and cost.get('builder_id') not in config.builders:
+                    raise ValueError
                 invoice_id = cost.get('invoice_id')
                 if ((invoice_id is not None and invoice_id not in contractor_invoices)
                         or cost['project_id'] not in dataset['project_ids']):
@@ -215,10 +224,15 @@ def select_balance_dataset(snapshot, config, clients, actor, selector, now, *, m
     dataset = snapshot['clients'].get(owner)
     if dataset is None or set(dataset['project_ids']) != set(client['project_ids']):
         raise TimesheetError('client_balance_access_unavailable')
+    validate_snapshot_age(dataset, now, max_age_days=max_age_days)
+    return client, dataset, owner
+
+
+def validate_snapshot_age(dataset, now, *, max_age_days=7):
+    """The same freshness boundary applies to every view of reviewed work."""
     as_of = timestamp(dataset['as_of'])
     current = timestamp(now)
     if type(max_age_days) is not int or not 1 <= max_age_days <= 31:
         raise TimesheetError('invalid_client_balance_max_age')
     if as_of > current + timedelta(minutes=5) or current - as_of > timedelta(days=max_age_days):
         raise TimesheetError('client_balance_source_stale')
-    return client, dataset, owner

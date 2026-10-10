@@ -106,20 +106,47 @@ class StudioReportService(TimesheetService):
         now = timestamp(request['requested_at'])
         selector, start, _ = resolve_period(request['selector'], now)
         scope = self.scope_fingerprint(actor, selector)
-        client, groups, _ = select_client(self.clients, actor, selector)
-        backfill = load_backfill(self.backfill_path, self.config)
+        client, groups, targets = select_client(self.clients, actor, selector)
+        reviewed, finance_owners, snapshot = [], [], None
+        if self.balance_enabled and self.balance_path:
+            from .studio_client_balance_source import load_balance_snapshot, validate_snapshot_age
+            from .studio_recorded_hours import build_recorded_report
+            snapshot = load_balance_snapshot(self.balance_path, self.config, self.clients)
+            owners = targets or {key: self.clients[key] for key in
+                                  [actor, *self.clients[actor].get('report_client_ids', [])]}
+            for owner, owner_client in owners.items():
+                data = snapshot['clients'].get(owner)
+                if (data is not None and data.get('hours_reporting')
+                        and set(owner_client['project_ids']) <= set(client['project_ids'])):
+                    validate_snapshot_age(data, now, max_age_days=self.balance_max_age_days)
+                    finance_owners.append(owner)
+        covered = {key for owner in finance_owners for key in self.clients[owner]['project_ids']}
+        legacy_projects = set(client['project_ids']) - covered
+        backfill = load_backfill(self.backfill_path, self.config) if legacy_projects else None
         if start is None:
+            beginnings = [snapshot['clients'][owner]['coverage']['start'][:7] for owner in finance_owners]
+            if legacy_projects or not beginnings:
+                beginnings.append(history_beginning(backfill, list(legacy_projects or client['project_ids'])))
             selector, start, _ = resolve_period(selector, now,
-                beginning=history_beginning(backfill, client['project_ids']))
+                beginning=min(beginnings))
         # The collection window must include project moves since the requested
         # month, even for months older than the payroll worker's initial cutoff.
         source = SimpleNamespace(team=self.config.team, organization=self.config.organization,
-                                 projects={key: self.config.projects[key] for key in client['project_ids']},
+                                 projects={key: self.config.projects[key] for key in legacy_projects},
                                  beginning=start, directory=self.config.directory)
         self.api.verify_recipient(actor, self.config.team)
-        self.api.verify(source)
-        dataset = self.api.collect(source, now, {})
+        dataset = []
+        if legacy_projects:
+            self.api.verify(source)
+            dataset = self.api.collect(source, now, {})
         report = build_client_report(self.config, client, selector, dataset, now, backfill)
+        if finance_owners:
+            from .studio_recorded_hours import overlay_recorded_reports
+            reviewed = [build_recorded_report(self.config, self.clients[owner], selector,
+                        snapshot['clients'][owner], now) for owner in finance_owners]
+            report = overlay_recorded_reports(report, reviewed)
+            report.update(finance_digest=fingerprint(snapshot), finance_owners=finance_owners,
+                          canonical_only=not legacy_projects)
         if groups:
             report['client_groups'] = groups
         report.update(actor=actor, scope=scope, backfill_digest=fingerprint(backfill))
@@ -190,7 +217,17 @@ class StudioReportService(TimesheetService):
             return self.deliver_parts(report['parts'], request['actor'], key, now)
         if request.get('report_kind', 'hours') != 'hours':
             raise TimesheetError('invalid_report_kind')
-        if report.get('backfill_digest', fingerprint(None)) != fingerprint(load_backfill(self.backfill_path, self.config)):
+        if report.get('finance_owners'):
+            from .studio_client_balance_source import load_balance_snapshot, validate_snapshot_age
+            if not self.balance_enabled:
+                raise TimesheetError('client_balance_not_configured')
+            snapshot = load_balance_snapshot(self.balance_path, self.config, self.clients)
+            if fingerprint(snapshot) != report.get('finance_digest'):
+                raise TimesheetError('client_balance_source_changed')
+            for owner in report['finance_owners']:
+                validate_snapshot_age(snapshot['clients'][owner], now, max_age_days=self.balance_max_age_days)
+        if (not report.get('canonical_only') and
+                report.get('backfill_digest', fingerprint(None)) != fingerprint(load_backfill(self.backfill_path, self.config))):
             raise TimesheetError('invoice_backfill_changed')
         return self.deliver_parts(report['parts'], request['actor'], key, now)
 
@@ -223,6 +260,8 @@ class StudioReportService(TimesheetService):
             return False, 'I couldn’t finish your client hours and purchased-hours report. Missing financial data has not been counted as zero; the Studio team can check the report source.'
         if error == 'all_time_coverage_not_configured':
             return True, 'The beginning of your project history has not been configured. Please request a specific month or date range.'
+        if error in {'client_balance_source_changed', 'client_balance_source_stale'}:
+            return True, 'The reviewed work-hours source changed or needs refreshing. Please request a new report after the reconciliation snapshot is refreshed.'
         if error in {'report_client_unavailable', 'invalid_report_client'}:
             return True, ('I couldn’t match that client to your report access. Please use their full configured '
                           'name, or ask the Studio team to check your client reporting access.')

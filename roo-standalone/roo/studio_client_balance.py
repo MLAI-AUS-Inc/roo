@@ -212,10 +212,13 @@ def build_balance_report(client, selector, dataset, now):
         'pending_work_count': len(pending_work), 'hours': rows,
         'payments': sorted(payments, key=lambda payment: (payment['date'], payment['id'])),
         'limitations': list(dict.fromkeys(limitations)),
+        'recorded_units_basis': dataset.get('hours_reporting', False),
     }
 
 
-def _balance_text(units):
+def _balance_text(units, *, recorded_units=False):
+    if recorded_units:
+        return f'*Provisional recorded-units minus paid-credits difference: {display_hours(units)}h*'
     if units > 0:
         return f'*{display_hours(units)}h used beyond purchased hours*'
     if units < 0:
@@ -225,18 +228,23 @@ def _balance_text(units):
 
 def summary(report):
     detailed = report['selector']['action'] == 'detailed'
+    recorded_units = report.get('recorded_units_basis', False)
     parts = [f"*Studio hours and paid credits · {_escape(report['client'])}*"]
     if report['period_has_coverage']:
         parts.extend([f"{report['start']} – {report['end']}",
-                      f"Recorded hours used: *{display_hours(report['used_hour_units'])}h*",
+                      f"{'Invoice/recorded hour-units' if recorded_units else 'Recorded hours used'}: *{display_hours(report['used_hour_units'])}h*",
                       f"Hours purchased: *{display_hours(report['credited_hour_units'])}h*"
                       f" · {money(report['payment_cents'])} received"])
         if report['opening_hour_units'] or detailed:
             parts.append(f"Hours used minus purchased, carried in: *{display_hours(report['opening_hour_units'])}h*")
-        parts.append(_balance_text(report['balance_hour_units']) + f" · at {report['end']}")
+        parts.append(_balance_text(report['balance_hour_units'], recorded_units=recorded_units) + f" · at {report['end']}")
     else:
         parts.extend([f"No reviewed activity is available for {report['requested_start']} – {report['requested_end']}.",
-                      _balance_text(report['balance_hour_units']) + f" · last known at {report['coverage_through']}"])
+                      _balance_text(report['balance_hour_units'], recorded_units=recorded_units) + f" · last known at {report['coverage_through']}"])
+    if recorded_units:
+        parts.append('Invoice quantities and separate person-time are counted once. '
+                     'These are not independently verified clock hours or confirmed client-billable entitlement; '
+                     'the difference is not an amount owed.')
     if report['scope_label']:
         parts.append(_escape(report['scope_label']))
     payments = [event for event in report['events'] if event['kind'] == 'payment']
@@ -344,11 +352,13 @@ def render_chart(report):
     import textwrap
 
     with _chart_lock:
+        recorded_units = report.get('recorded_units_basis', False)
         figure = Figure(figsize=(11, 7), dpi=150)
         canvas = FigureCanvasAgg(figure)
         axes = figure.add_subplot(111)
         figure.subplots_adjust(left=.12, right=.94, top=.69 if report['scope_label'] else .735, bottom=.25)
-        figure.text(.06, .94, 'Studio hours and paid credits', fontsize=22, weight='bold', color='#142c3a')
+        figure.text(.06, .94, 'Studio work units and paid credits' if recorded_units else 'Studio hours and paid credits',
+                    fontsize=22, weight='bold', color='#142c3a')
         figure.text(.06, .875, textwrap.shorten(report['client'], width=75, placeholder='…'), fontsize=14, color='#334b58')
         if not report['period_has_coverage']:
             axes.text(.5, .5, 'No reviewed activity for the requested period\n'
@@ -358,11 +368,14 @@ def render_chart(report):
         else:
             dates = [datetime.combine(_day(point['date']), datetime.min.time()) for point in report['points']]
             values = [point['balance_hour_units'] / HOUR_UNITS for point in report['points']]
-            axes.plot(dates, values, color='#147d92', linewidth=2.2, label='Hours used minus hours purchased', zorder=4)
+            axes.plot(dates, values, color='#147d92', linewidth=2.2,
+                      label='Recorded units minus paid credits' if recorded_units else 'Hours used minus hours purchased', zorder=4)
             axes.fill_between(dates, values, 0, where=[value >= 0 for value in values], interpolate=True,
-                              color='#f3c994', alpha=.65, label='Hours used beyond purchased hours')
+                              color='#f3c994', alpha=.65,
+                              label='Recorded units above paid credits' if recorded_units else 'Hours used beyond purchased hours')
             axes.fill_between(dates, values, 0, where=[value <= 0 for value in values], interpolate=True,
-                              color='#a7d9c4', alpha=.65, label='Purchased hours remaining')
+                              color='#a7d9c4', alpha=.65,
+                              label='Paid credits above recorded units' if recorded_units else 'Purchased hours remaining')
             axes.axhline(0, color='#647580', linewidth=1)
             payments = [point for point in report['points'] if point['stage'] == 'after_payment']
             nearby_days = max(5, (dates[-1] - dates[0]).days * .09)
@@ -392,7 +405,7 @@ def render_chart(report):
             axes.xaxis.set_major_formatter(ConciseDateFormatter(locator))
             axes.yaxis.set_major_formatter(FuncFormatter(lambda value, _: f'{"−" if value < 0 else ""}{abs(value):g}h'))
             axes.set_xlabel('Work / payment date')
-            axes.set_ylabel('Hours used minus hours purchased')
+            axes.set_ylabel('Recorded hour-units minus paid credits' if recorded_units else 'Hours used minus hours purchased')
             axes.grid(axis='y', color='#e8eef1', linewidth=.7)
             axes.set_axisbelow(True)
             for spine in axes.spines.values():
@@ -405,13 +418,16 @@ def render_chart(report):
                     fontsize=11, color='#334b58')
         if report['period_has_coverage']:
             balance_label = 'Beyond purchased hours' if report['balance_hour_units'] >= 0 else 'Purchased hours remaining'
-            figure.text(.06, .775, f"Hours used {display_hours(report['used_hour_units'])}h  ·  "
-                        f"Hours purchased {display_hours(report['credited_hour_units'])}h  ·  "
+            if recorded_units:
+                balance_label = 'Provisional difference'
+            figure.text(.06, .775, f"{'Recorded units' if recorded_units else 'Hours used'} {display_hours(report['used_hour_units'])}h  ·  "
+                        f"{'Paid credits' if recorded_units else 'Hours purchased'} {display_hours(report['credited_hour_units'])}h  ·  "
                         f"{balance_label} {display_hours(abs(report['balance_hour_units']))}h", fontsize=10, color='#334b58')
         if report['scope_label']:
             figure.text(.06, .735, textwrap.shorten(report['scope_label'], width=118, placeholder='…'),
                         fontsize=10, color='#334b58')
-        figure.text(.06, .065, f"Reviewed work hours · actual receipts buy hours at {money(report['allocation_rate_cents_per_hour'])}/h",
+        figure.text(.06, .065, (f"Invoice/recorded units · clock time and billable entitlement unverified · credits at {money(report['allocation_rate_cents_per_hour'])}/h"
+                    if recorded_units else f"Reviewed work hours · actual receipts buy hours at {money(report['allocation_rate_cents_per_hour'])}/h"),
                     fontsize=9, color='#334b58')
         note = ('Daily work timing estimated. ' if report['estimated_hour_units'] else '')
         if report['unresolved_hour_units']:

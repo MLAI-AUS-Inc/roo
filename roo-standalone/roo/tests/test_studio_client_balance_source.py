@@ -175,6 +175,74 @@ def test_unknown_kind_rejected_and_hours_worker_still_uses_existing_path(setup):
     setup.api.collect.assert_not_called()
 
 
+def enable_recorded_hours(setup):
+    setup.dataset['hours_reporting'] = True
+    setup.dataset['hours'][0]['builder_id'] = next(iter(setup.config.builders))
+    setup.path.write_text(json.dumps(setup.value))
+
+
+def test_project_monthly_and_paid_credit_views_use_identical_work_source(setup):
+    enable_recorded_hours(setup)
+    from roo.studio_reports import total_units, summary
+    balance = setup.service.report_for_request(request())
+    hours = setup.service.report_for_request({**request(), 'report_kind': 'hours'})
+    assert total_units(hours) == balance['used_hour_units'] == 123010000
+    assert sum(month['units'] for month in hours['monthly']) == total_units(hours)
+    assert hours['unit_scale'] == 1000000 and hours['finance_owners'] == ['UMARK']
+    assert all(row['source'] == 'reviewed_invoice' for row in hours['rows'])
+    assert all(month['allowance_units'] is None for month in hours['monthly'])
+    assert 'not verified clock time' in summary(hours)
+    assert 'Provisional recorded-units' in balance['parts'][0]['content']
+    setup.api.collect.assert_not_called()
+    setup.api.verify.assert_not_called()
+    setup.api.post_message.assert_not_called()
+    setup.api.upload_csv.assert_not_called()
+
+
+def test_shared_source_preserves_cross_month_microhours_and_staff_all_client_totals(setup):
+    enable_recorded_hours(setup)
+    setup.dataset['hours'][0].update(hour_units=333333, work_start='2026-09-30', work_end='2026-10-01')
+    setup.dataset['contractor_invoices'][0]['hour_units'] = 333333
+    setup.path.write_text(json.dumps(setup.value))
+    setup.api.collect.return_value = []
+    from roo.studio_reports import total_units
+    balance = setup.service.report_for_request(request('USAM', client='Mark'))
+    single = setup.service.report_for_request({**request(), 'report_kind': 'hours'})
+    all_clients = setup.service.report_for_request({**request('USAM', client='all'), 'report_kind': 'hours',
+                                                  'selector': {'client':'all','month':'recent','months':3}})
+    assert total_units(single) == total_units(all_clients) == balance['used_hour_units'] == 333333
+    assert [row['units'] for row in single['rows']] == [166667, 166666]
+    assert single['estimated_month_units'] == 333333
+    assert 'client_groups' in all_clients
+    # The legacy collector receives only the other accessible project.
+    assert set(setup.api.collect.call_args.args[0].projects) == {P2}
+
+
+def test_updated_or_stale_canonical_work_blocks_old_hours_delivery(setup):
+    enable_recorded_hours(setup)
+    req = {**request(), 'report_kind': 'hours'}
+    report = setup.service.report_for_request(req)
+    setup.dataset['limitations'].append('New review')
+    setup.path.write_text(json.dumps(setup.value))
+    with pytest.raises(TimesheetError, match='source_changed'):
+        setup.service.deliver_request(report, req, 'OLD', NOW)
+    setup.dataset['limitations'].pop()
+    setup.path.write_text(json.dumps(setup.value))
+    with pytest.raises(TimesheetError, match='source_stale'):
+        setup.service.deliver_request(report, req, 'OLD', NOW + timedelta(days=8))
+    setup.api.open_dm.assert_not_called()
+
+
+def test_canonical_hours_require_verified_builder_and_keep_existing_access_boundaries(setup):
+    setup.dataset['hours_reporting'] = True
+    with pytest.raises(TimesheetError, match='invalid_client_balance_snapshot'):
+        validate_balance_snapshot(setup.value, setup.config, setup.clients)
+    enable_recorded_hours(setup)
+    with pytest.raises(TimesheetError, match='report_client_unavailable'):
+        setup.service.report_for_request({**request('UOTHER', client='Mark'), 'report_kind':'hours'})
+    setup.api.verify_recipient.assert_not_called()
+
+
 def test_partial_bill_allocation_must_explicitly_account_for_excluded_work(setup):
     value = deepcopy(setup.value)
     bill = value['clients']['UMARK']['contractor_invoices'][0]
