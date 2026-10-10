@@ -41,6 +41,10 @@ Client-owned monthly usage reports, project/builder breakdowns and detailed
 work exports are described in [the client hours guide](roo-standalone/docs/studio-client-hours.md).
 They use a separate opt-in worker and verified client/project mappings.
 
+Client hours used versus purchased-hour credits, with a private balance chart and
+reviewed invoice/payment evidence, are described in the
+[hours and purchased-hours guide](roo-standalone/docs/studio-client-balance.md).
+
 The [30 September company-brain review](roo-standalone/docs/company-brain/2026-09-30-review-and-plan.md) preserves a dated, aggregate-only inspection and a proposed delivery plan. It is historical context and does not authorize changes to either runtime.
 
 ## Requirements
