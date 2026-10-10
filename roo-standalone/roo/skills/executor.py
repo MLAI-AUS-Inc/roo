@@ -237,6 +237,9 @@ class SkillExecutor:
             # LLM parameter-extraction call was removed in Phase 4 of the
             # routing redesign — handlers parse remaining details from the text.
             params = dict(param_overrides or {})
+            if skill.name == "studio-client-balance":
+                params = {key: value for key, value in params.items()
+                          if key in {"action", "month", "months", "client"}}
             if params:
                 print(f"   Routed params: {params}")
             
@@ -291,12 +294,17 @@ class SkillExecutor:
                     slack_team_id=kwargs.get("slack_team_id"),
                     request_message_ts=kwargs.get("current_message_ts"),
                 )
-            elif skill.name == "studio-hours":
+            elif skill.name in {"studio-hours", "studio-client-balance"}:
                 from ..studio_report_commands import enqueue as enqueue_studio_report
 
+                # The handler fixes the report capability. Model parameters
+                # may select a period/client, never another report kind.
+                report_options = ({'report_kind': 'client_balance'}
+                                  if skill.name == "studio-client-balance" else {})
                 message = await asyncio.to_thread(
                     enqueue_studio_report, get_settings(), get_backend_actor_context(), params,
                     user_id=user_id, channel_id=channel_id, thread_ts=thread_ts,
+                    **report_options,
                 )
                 result = message
             elif skill.name == "mlai-data-query":
