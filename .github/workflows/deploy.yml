@@ -60,7 +60,6 @@ jobs:
             -q
           python -m pytest \
             roo/tests/test_slack_security.py \
-            roo/tests/test_office_manager_actions.py \
             roo/tests/test_internal_mentions.py \
             roo/tests/test_coworking_dates.py \
             roo/tests/test_backend_identity.py \
@@ -97,7 +96,6 @@ jobs:
             roo/tests/test_sim_patient.py \
             roo/tests/test_diagnosis_check.py \
             roo/tests/test_llm_agent_tools.py \
-            roo/tests/test_victor_ai_applications.py \
             bridge/tests \
             -q
           # This legacy module installs an executor stub at import time, so run
@@ -154,7 +152,6 @@ jobs:
           SIM_PATIENT_API_KEY: ${{ secrets.SIM_PATIENT_API_KEY }}
           SIM_PATIENT_SAFETY_SALT: ${{ secrets.SIM_PATIENT_SAFETY_SALT }}
           ROO_API_KEY: ${{ secrets.ROO_API_KEY }}
-          VICTOR_AI_ROO_SIGNING_SECRET: ${{ secrets.VICTOR_AI_ROO_SIGNING_SECRET }}
         run: |
           set -eu
           if [ "${#SIM_PATIENT_API_KEY}" -lt 32 ]; then
@@ -169,11 +166,7 @@ jobs:
             echo "ROO_API_KEY is missing or shorter than 32 characters" >&2
             exit 1
           fi
-          if [ "${#VICTOR_AI_ROO_SIGNING_SECRET}" -lt 32 ]; then
-            echo "VICTOR_AI_ROO_SIGNING_SECRET is missing or shorter than 32 characters" >&2
-            exit 1
-          fi
-          if [ "$SIM_PATIENT_API_KEY" = "$SIM_PATIENT_SAFETY_SALT" ] || [ "$SIM_PATIENT_API_KEY" = "$ROO_API_KEY" ] || [ "$SIM_PATIENT_API_KEY" = "$VICTOR_AI_ROO_SIGNING_SECRET" ] || [ "$SIM_PATIENT_SAFETY_SALT" = "$ROO_API_KEY" ] || [ "$SIM_PATIENT_SAFETY_SALT" = "$VICTOR_AI_ROO_SIGNING_SECRET" ] || [ "$ROO_API_KEY" = "$VICTOR_AI_ROO_SIGNING_SECRET" ]; then
+          if [ "$SIM_PATIENT_API_KEY" = "$SIM_PATIENT_SAFETY_SALT" ] || [ "$SIM_PATIENT_API_KEY" = "$ROO_API_KEY" ] || [ "$SIM_PATIENT_SAFETY_SALT" = "$ROO_API_KEY" ]; then
             echo "Roo service credentials must be distinct" >&2
             exit 1
           fi
@@ -185,11 +178,9 @@ jobs:
           SIM_PATIENT_API_KEY: ${{ secrets.SIM_PATIENT_API_KEY }}
           SIM_PATIENT_SAFETY_SALT: ${{ secrets.SIM_PATIENT_SAFETY_SALT }}
           ROO_API_KEY: ${{ secrets.ROO_API_KEY }}
-          VICTOR_AI_ROO_SIGNING_SECRET: ${{ secrets.VICTOR_AI_ROO_SIGNING_SECRET }}
           ROO_PUBLIC_HOST: ${{ secrets.DO_HOST }}
           ROO_PRIVATE_BASE_URL: ${{ vars.ROO_PRIVATE_BASE_URL }}
           MEETING_ROOM_BOOKING_ENABLED: ${{ vars.MEETING_ROOM_BOOKING_ENABLED || 'false' }}
-          OFFICE_MANAGER_ACTIONS_ENABLED: ${{ vars.OFFICE_MANAGER_ACTIONS_ENABLED || 'false' }}
           LINEAR_CHANNEL_ISSUE_WRITES_ENABLED: ${{ vars.LINEAR_CHANNEL_ISSUE_WRITES_ENABLED || 'false' }}
           FOUNDER_ACCOUNT_LINK_ENABLED: ${{ vars.FOUNDER_ACCOUNT_LINK_ENABLED || 'false' }}
           COWORKING_REPORT_SLACK_TEAM_ID: ${{ vars.COWORKING_REPORT_SLACK_TEAM_ID }}
@@ -199,18 +190,18 @@ jobs:
           host: ${{ secrets.DO_HOST }}
           username: ${{ secrets.DO_USERNAME }}
           key: ${{ secrets.DO_SSH_KEY }}
-          envs: SIM_PATIENT_API_KEY,SIM_PATIENT_SAFETY_SALT,ROO_API_KEY,VICTOR_AI_ROO_SIGNING_SECRET,ROO_PUBLIC_HOST,ROO_PRIVATE_BASE_URL,MEETING_ROOM_BOOKING_ENABLED,OFFICE_MANAGER_ACTIONS_ENABLED,LINEAR_CHANNEL_ISSUE_WRITES_ENABLED,FOUNDER_ACCOUNT_LINK_ENABLED,COWORKING_REPORT_SLACK_TEAM_ID,COWORKING_REPORT_SLACK_CHANNEL_ID,COWORKING_INTENTS_V3_MIGRATION_APPROVED,RELEASE_SHA
+          envs: SIM_PATIENT_API_KEY,SIM_PATIENT_SAFETY_SALT,ROO_API_KEY,ROO_PUBLIC_HOST,ROO_PRIVATE_BASE_URL,MEETING_ROOM_BOOKING_ENABLED,LINEAR_CHANNEL_ISSUE_WRITES_ENABLED,FOUNDER_ACCOUNT_LINK_ENABLED,COWORKING_REPORT_SLACK_TEAM_ID,COWORKING_REPORT_SLACK_CHANNEL_ID,COWORKING_INTENTS_V3_MIGRATION_APPROVED,RELEASE_SHA
           script: |
             # Stop if any command fails
             set -eu
 
             # Fail before touching the existing environment if forwarding was
             # misconfigured. Values are intentionally never printed.
-            if [ "${#SIM_PATIENT_API_KEY}" -lt 32 ] || [ "${#SIM_PATIENT_SAFETY_SALT}" -lt 32 ] || [ "${#ROO_API_KEY}" -lt 32 ] || [ "${#VICTOR_AI_ROO_SIGNING_SECRET}" -lt 32 ]; then
+            if [ "${#SIM_PATIENT_API_KEY}" -lt 32 ] || [ "${#SIM_PATIENT_SAFETY_SALT}" -lt 32 ] || [ "${#ROO_API_KEY}" -lt 32 ]; then
               echo "Required Roo security secrets were not forwarded" >&2
               exit 1
             fi
-            if [ "$SIM_PATIENT_API_KEY" = "$SIM_PATIENT_SAFETY_SALT" ] || [ "$SIM_PATIENT_API_KEY" = "$ROO_API_KEY" ] || [ "$SIM_PATIENT_API_KEY" = "$VICTOR_AI_ROO_SIGNING_SECRET" ] || [ "$SIM_PATIENT_SAFETY_SALT" = "$ROO_API_KEY" ] || [ "$SIM_PATIENT_SAFETY_SALT" = "$VICTOR_AI_ROO_SIGNING_SECRET" ] || [ "$ROO_API_KEY" = "$VICTOR_AI_ROO_SIGNING_SECRET" ]; then
+            if [ "$SIM_PATIENT_API_KEY" = "$SIM_PATIENT_SAFETY_SALT" ] || [ "$SIM_PATIENT_API_KEY" = "$ROO_API_KEY" ] || [ "$SIM_PATIENT_SAFETY_SALT" = "$ROO_API_KEY" ]; then
               echo "Roo service credentials must be distinct" >&2
               exit 1
             fi
@@ -223,14 +214,6 @@ jobs:
               false|FALSE|False|0|no|NO|No|off|OFF|Off|"") MEETING_ROOM_BOOKING_ENABLED=false ;;
               *)
                 echo "MEETING_ROOM_BOOKING_ENABLED must be true or false" >&2
-                exit 1
-                ;;
-            esac
-            case "$OFFICE_MANAGER_ACTIONS_ENABLED" in
-              true|TRUE|True|1|yes|YES|Yes|on|ON|On) OFFICE_MANAGER_ACTIONS_ENABLED=true ;;
-              false|FALSE|False|0|no|NO|No|off|OFF|Off|"") OFFICE_MANAGER_ACTIONS_ENABLED=false ;;
-              *)
-                echo "OFFICE_MANAGER_ACTIONS_ENABLED must be true or false" >&2
                 exit 1
                 ;;
             esac
@@ -384,17 +367,16 @@ jobs:
             }
             upsert_env "ROO_ENVIRONMENT" "production"
             upsert_env "ROO_RELEASE_SHA" "$RELEASE_SHA"
+            # Retired features no longer consume these keys. Preserve the shared
+            # receipt/booking databases; removing configuration is not data deletion.
+            python3 -m roo.retired_feature_config .env
             upsert_env "SIM_PATIENT_API_KEY" "$SIM_PATIENT_API_KEY"
             upsert_env "SIM_PATIENT_SAFETY_SALT" "$SIM_PATIENT_SAFETY_SALT"
             upsert_env "ROO_API_KEY" "$ROO_API_KEY"
-            upsert_env "VICTOR_AI_ROO_SIGNING_SECRET" "$VICTOR_AI_ROO_SIGNING_SECRET"
-            upsert_env "VICTOR_AI_SKILL_ENABLED" "true"
-            upsert_env "VICTOR_AI_SLACK_CHANNEL_NAME" "exp-victor-ai"
             upsert_env "ROO_POINTS_TOPUP_ENABLED" "true"
             upsert_env "ROO_POINTS_TOPUP_BUTTONS_ENABLED" "true"
             upsert_env "ROO_POINTS_STRIPE_CHECKOUT_HOSTS" "checkout.stripe.com"
             upsert_env "MEETING_ROOM_BOOKING_ENABLED" "$MEETING_ROOM_BOOKING_ENABLED"
-            upsert_env "OFFICE_MANAGER_ACTIONS_ENABLED" "$OFFICE_MANAGER_ACTIONS_ENABLED"
             upsert_env "FOUNDER_TOOLS_LINK_ORIGINS" "https://mlai.au,https://chat.mlai.au"
             upsert_env "FOUNDER_ACCOUNT_LINK_ENABLED" "$FOUNDER_ACCOUNT_LINK_ENABLED"
             upsert_env "COWORKING_REPORT_SLACK_TEAM_ID" "$COWORKING_REPORT_SLACK_TEAM_ID"
@@ -409,8 +391,6 @@ jobs:
             # Build first, then run or validate the explicitly approved schema
             # migration before any new application process can report ready.
             docker compose build roo
-            echo "Preflighting the Office Manager backend contract before cutover..."
-            docker compose run --rm --no-deps roo python -c 'import asyncio; from roo.clients.mlai_backend import MLAIBackendClient; from roo.config import get_settings; from roo.main import _validate_office_manager_backend_contract; settings = get_settings(); payload = asyncio.run(MLAIBackendClient().get_office_manager_preflight()); _validate_office_manager_backend_contract(payload, timezone_name=settings.TIMEZONE)'
 
             if [ "$COWORKING_INTENTS_V3_MIGRATION_APPROVED" = "true" ]; then
               # Stop every process that can write the shared SQLite volume
@@ -459,11 +439,6 @@ jobs:
             if [ "$MEETING_ROOM_BOOKING_ENABLED" = "true" ]; then
               echo "Verifying the Meeting Room skill is enabled on Public Roo..."
               docker compose exec -T roo python -c 'from roo.config import get_settings; settings = get_settings(); assert settings.ROO_SURFACE == "public"; assert settings.MEETING_ROOM_BOOKING_ENABLED is True; assert "meeting-room-booking" in settings.enabled_skill_names'
-            fi
-
-            if [ "$OFFICE_MANAGER_ACTIONS_ENABLED" = "true" ]; then
-              echo "Verifying Office Manager actions are enabled on Public Roo..."
-              docker compose exec -T roo python -c 'from roo.config import PRODUCTION_MUTATION_BACKEND_AUTHORITIES, backend_authority, get_settings; settings = get_settings(); assert settings.ROO_SURFACE == "public"; assert settings.OFFICE_MANAGER_ACTIONS_ENABLED is True; assert backend_authority(str(settings.MLAI_BACKEND_URL or "")) in PRODUCTION_MUTATION_BACKEND_AUTHORITIES; assert settings.ROO_API_KEY'
             fi
 
             # The cross-workspace Slack bridge is a separate Compose project.

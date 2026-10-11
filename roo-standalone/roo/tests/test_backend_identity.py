@@ -17,7 +17,6 @@ from roo.backend_identity import (
     BackendIdentityError,
     build_org_memory_identity_headers,
     build_roo_gateway_identity_headers,
-    build_victor_ai_identity_headers,
     get_backend_actor_context,
     use_backend_actor_context,
 )
@@ -165,81 +164,6 @@ async def test_gateway_eligibility_uses_one_matching_request_id(monkeypatch):
     assert captured["json"] == {}
     assert assertion["request_id"] == captured["headers"]["X-Request-ID"]
     assert assertion["surface"] == "roo_gateway"
-
-
-def test_victor_assertion_binds_verified_actor_context_with_hmac():
-    secret = "victor-signing-secret-" + ("s" * 32)
-    headers = build_victor_ai_identity_headers(
-        secret,
-        context=_actor_context(),
-        request_id="roo-victor-request",
-        timestamp=1_700_000_000,
-        nonce="fixed_nonce_123456789012345",
-    )
-    payload = {
-        "acting_slack_user_id": "UADMIN123",
-        "event_id": "Ev01TEST",
-        "nonce": "fixed_nonce_123456789012345",
-        "request_id": "roo-victor-request",
-        "slack_channel_id": "GADMIN123",
-        "slack_team_id": "TMLAI123",
-        "slack_thread_ts": "1700000000.123",
-        "surface": "public_roo",
-        "timestamp": 1_700_000_000,
-        "v": 1,
-    }
-    canonical = json.dumps(
-        payload,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=True,
-    ).encode("ascii")
-    expected = hmac.new(secret.encode(), canonical, hashlib.sha256).hexdigest()
-
-    assert headers["X-Victor-Roo-Signature"] == f"v1={expected}"
-    assert headers["X-Roo-Surface"] == "public_roo"
-    assert headers["X-Slack-Team-ID"] == "TMLAI123"
-    assert headers["X-Acting-Slack-User-ID"] == "UADMIN123"
-    assert headers["X-Slack-Channel-ID"] == "GADMIN123"
-    assert headers["X-Slack-Event-ID"] == "Ev01TEST"
-
-
-@pytest.mark.asyncio
-async def test_victor_client_uses_only_scoped_signed_identity(monkeypatch):
-    captured = {}
-
-    class FakeAsyncClient:
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, tb):
-            return False
-
-        async def request(self, method, url, **kwargs):
-            captured.update({"method": method, "url": url, **kwargs})
-            request = httpx.Request(method, url)
-            return httpx.Response(
-                200,
-                request=request,
-                json={"complete_count": 4, "lead_count": 1},
-            )
-
-    monkeypatch.setattr("roo.clients.mlai_backend.httpx.AsyncClient", FakeAsyncClient)
-    client = MLAIBackendClient(
-        base_url="https://backend.test",
-        api_key="ordinary-roo-key",
-        victor_ai_signing_secret="v" * 48,
-        surface="public",
-        actor_context=_actor_context(),
-    )
-
-    result = await client.get_victor_application_summary()
-
-    assert result == {"complete_count": 4, "lead_count": 1}
-    assert captured["url"].endswith("/api/v1/victor-ai/roo/applications/summary/")
-    assert "X-API-Key" not in captured["headers"]
-    assert captured["headers"]["X-Victor-Roo-Signature"].startswith("v1=")
-    assert captured["headers"]["X-Request-ID"].startswith("roo-")
 
 
 @pytest.mark.asyncio

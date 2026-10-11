@@ -415,7 +415,6 @@ def test_deploy_workflow_requires_and_secretly_upserts_security_values():
     assert "security-checks:" in workflow
     assert "needs: security-checks" in workflow
     assert "roo/tests/test_ai_security.py" in workflow
-    assert "roo/tests/test_victor_ai_applications.py" in workflow
     assert "bridge/tests" in workflow
     assert workflow.count("roo/tests/test_agent_routing.py") == 1
     assert workflow.count("roo/tests/test_routing_eval_gate.py") == 1
@@ -429,14 +428,13 @@ def test_deploy_workflow_requires_and_secretly_upserts_security_values():
     assert "secrets.SIM_PATIENT_API_KEY" in workflow
     assert "secrets.SIM_PATIENT_SAFETY_SALT" in workflow
     assert "secrets.ROO_API_KEY" in workflow
-    assert "secrets.VICTOR_AI_ROO_SIGNING_SECRET" in workflow
     assert "envs: SIM_PATIENT_API_KEY,SIM_PATIENT_SAFETY_SALT" in workflow
     forwarded_values = {
         "SIM_PATIENT_API_KEY", "SIM_PATIENT_SAFETY_SALT", "ROO_API_KEY",
-        "VICTOR_AI_ROO_SIGNING_SECRET", "ROO_PUBLIC_HOST", "ROO_PRIVATE_BASE_URL",
+        "ROO_PUBLIC_HOST", "ROO_PRIVATE_BASE_URL",
         "COWORKING_REPORT_SLACK_TEAM_ID", "COWORKING_REPORT_SLACK_CHANNEL_ID",
         "MEETING_ROOM_BOOKING_ENABLED",
-        "OFFICE_MANAGER_ACTIONS_ENABLED", "LINEAR_CHANNEL_ISSUE_WRITES_ENABLED",
+        "LINEAR_CHANNEL_ISSUE_WRITES_ENABLED",
         "FOUNDER_ACCOUNT_LINK_ENABLED", "COWORKING_INTENTS_V3_MIGRATION_APPROVED",
     }
     assert any(
@@ -447,12 +445,6 @@ def test_deploy_workflow_requires_and_secretly_upserts_security_values():
     assert 'upsert_env "SIM_PATIENT_API_KEY" "$SIM_PATIENT_API_KEY"' in workflow
     assert 'upsert_env "SIM_PATIENT_SAFETY_SALT" "$SIM_PATIENT_SAFETY_SALT"' in workflow
     assert 'upsert_env "ROO_API_KEY" "$ROO_API_KEY"' in workflow
-    assert (
-        'upsert_env "VICTOR_AI_ROO_SIGNING_SECRET" '
-        '"$VICTOR_AI_ROO_SIGNING_SECRET"'
-    ) in workflow
-    assert 'upsert_env "VICTOR_AI_SKILL_ENABLED" "true"' in workflow
-    assert 'upsert_env "VICTOR_AI_SLACK_CHANNEL_NAME" "exp-victor-ai"' in workflow
     assert (
         "MEETING_ROOM_BOOKING_ENABLED: "
         "${{ vars.MEETING_ROOM_BOOKING_ENABLED || 'false' }}"
@@ -475,21 +467,12 @@ def test_deploy_workflow_requires_and_secretly_upserts_security_values():
     ) in workflow
     assert 'assert "meeting-room-booking" in settings.enabled_skill_names' in workflow
     assert 'if [ "${#ROO_API_KEY}" -lt 32 ]' in workflow
-    assert 'if [ "${#VICTOR_AI_ROO_SIGNING_SECRET}" -lt 32 ]' in workflow
     deploy_start = workflow.index("docker compose up -d --no-build")
     assert workflow.index('upsert_env "ROO_API_KEY"') < deploy_start
-    assert workflow.index('upsert_env "VICTOR_AI_SKILL_ENABLED"') < deploy_start
     assert workflow.index(
         'upsert_env "MEETING_ROOM_BOOKING_ENABLED"'
     ) < deploy_start
-    preflight = (
-        "MLAIBackendClient().get_office_manager_preflight()"
-    )
     assert "docker compose build roo" in workflow
-    assert preflight in workflow
-    assert "_validate_office_manager_backend_contract" in workflow
-    assert workflow.index("docker compose build roo") < workflow.index(preflight)
-    assert workflow.index(preflight) < deploy_start
     assert "rollback_release()" in workflow
     assert "trap rollback_release EXIT" in workflow
     assert 'git checkout --detach "$previous_release_sha"' in workflow
@@ -517,7 +500,6 @@ def test_deploy_workflow_requires_and_secretly_upserts_security_values():
     assert 'echo "$SIM_PATIENT_API_KEY"' not in workflow
     assert 'echo "$SIM_PATIENT_SAFETY_SALT"' not in workflow
     assert 'echo "$ROO_API_KEY"' not in workflow
-    assert 'echo "$VICTOR_AI_ROO_SIGNING_SECRET"' not in workflow
     assert "http://127.0.0.1/healthz/ready" in workflow
     assert "migrate_coworking_booking_intents_v3.py" in workflow
     assert "COWORKING_INTENTS_V3_MIGRATION_APPROVED" in workflow

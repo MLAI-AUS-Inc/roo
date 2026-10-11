@@ -34,19 +34,10 @@ def test_catalog_stays_within_token_budget():
                 not in {
                     "admin-actions",
                     "admin-brain",
-                    "victor-ai-applications",
                     "studio-client-balance",
                 }
             ],
             "general",
-        ),
-        "victor-channel": (
-            [
-                skill
-                for skill in skills
-                if skill.name not in {"admin-actions", "admin-brain", "studio-client-balance"}
-            ],
-            "exp-victor-ai",
         ),
         "admin": (
             [
@@ -60,7 +51,7 @@ def test_catalog_stays_within_token_budget():
     # Finance is independently opt-in. Keep the prior surface budgets intact
     # and bound the added tool separately rather than grow every catalog.
     finance = [skill for skill in skills if skill.name == "studio-client-balance"]
-    for surface in ("public", "victor-channel"):
+    for surface in ("public",):
         base, channel = surface_catalogs[surface]
         surface_catalogs[surface + "-finance"] = (base + finance, channel)
     for surface, (surface_skills, channel_name) in surface_catalogs.items():
@@ -69,9 +60,7 @@ def test_catalog_stays_within_token_budget():
             channel_name=channel_name,
         )
         approx_tokens = len(json.dumps(tools)) / 4
-        # The all-features Victor channel includes the opt-in Studio client
-        # report tool (~325 tokens). The ordinary public/admin cap stays fixed.
-        budget = 6400 if surface.startswith("victor-channel") else 6000
+        budget = 6000
         if surface.endswith("-finance"):
             budget += 300
         assert approx_tokens < budget, (

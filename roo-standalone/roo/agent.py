@@ -390,14 +390,7 @@ class RooAgent:
                 None,
             ):
                 return self._implicit_action_blocked("respond_in_chat", None)
-            if any(skill.name == "victor-ai-applications" for skill in self.skills):
-                response = await self._general_response(
-                    clean_text,
-                    thread_history,
-                    channel_id=channel_id,
-                )
-            else:
-                response = await self._general_response(clean_text, thread_history)
+            response = await self._general_response(clean_text, thread_history)
             return {
                 "message": response,
                 "skill_used": None,
@@ -510,33 +503,8 @@ class RooAgent:
         channel_id: Optional[str],
         channel_name: Optional[str] = None,
     ) -> List[Skill]:
-        """Expose Victor application data only in its configured named channel."""
-
-        if not any(skill.name == "victor-ai-applications" for skill in self.skills):
-            return list(self.skills)
-        settings = get_settings()
-        resolved_channel_name = channel_name or self._safe_channel_name(channel_id)
-        victor_allowed = settings.is_victor_ai_context_allowed(
-            channel_name=resolved_channel_name,
-        )
-        if not victor_allowed and not resolved_channel_name and channel_id:
-            try:
-                from .slack_client import get_channel_id
-
-                victor_allowed = (
-                    get_channel_id(settings.victor_ai_slack_channel_name) == channel_id
-                )
-            except Exception as exc:
-                print(
-                    "⚠️ Victor AI channel lookup failed "
-                    f"destination_type={slack_destination_type(channel_id)} "
-                    f"error_type={exc.__class__.__name__}"
-                )
-        return [
-            skill
-            for skill in self.skills
-            if skill.name != "victor-ai-applications" or victor_allowed
-        ]
+        """Return the runtime's configured skills for Slack routing."""
+        return list(self.skills)
 
     def _routing_skills_for_slack_context(
         self,

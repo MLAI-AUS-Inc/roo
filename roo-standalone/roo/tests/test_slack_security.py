@@ -76,8 +76,47 @@ def test_recursive_log_sanitizer_redacts_keys_values_and_workspace_ids():
 @pytest.fixture(autouse=True)
 def clear_receipt_store_cache():
     get_slack_receipt_store.cache_clear()
+    slack_client_module.get_slack_app_identity.cache_clear()
     yield
     get_slack_receipt_store.cache_clear()
+    slack_client_module.get_slack_app_identity.cache_clear()
+
+
+def test_slack_app_identity_is_complete_and_cached(monkeypatch):
+    calls = []
+
+    class FakeSlackClient:
+        def auth_test(self):
+            calls.append(True)
+            return {
+                "ok": True,
+                "team_id": "TMLAI",
+                "bot_id": "BPUBLICROO",
+                "user_id": "UPUBLICROO",
+            }
+
+    monkeypatch.setattr(slack_client_module, "get_slack_client", lambda: FakeSlackClient())
+    first = slack_client_module.get_slack_app_identity()
+    second = slack_client_module.get_slack_app_identity()
+    assert first == second == {
+        "team_id": "TMLAI", "bot_id": "BPUBLICROO", "user_id": "UPUBLICROO",
+    }
+    assert calls == [True]
+
+
+def test_slack_app_identity_rejects_unsuccessful_response(monkeypatch):
+    class FakeSlackClient:
+        def auth_test(self):
+            return {
+                "ok": False,
+                "team_id": "TMLAI",
+                "bot_id": "BPUBLICROO",
+                "user_id": "UPUBLICROO",
+            }
+
+    monkeypatch.setattr(slack_client_module, "get_slack_client", lambda: FakeSlackClient())
+    with pytest.raises(slack_client_module.SlackIdentityLookupError, match="did not succeed"):
+        slack_client_module.get_slack_app_identity()
     main_module.app.dependency_overrides.clear()
 
 

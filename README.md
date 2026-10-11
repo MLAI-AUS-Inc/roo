@@ -288,8 +288,11 @@ runtime owner.
 For the local, channel-bound Linear issue reader workflow, see
 [`roo-standalone/docs/linear-channel-issues.md`](roo-standalone/docs/linear-channel-issues.md).
 
-For the backend-first Office Manager action rollout and rollback procedure, see
-[`roo-standalone/docs/office-manager.md`](roo-standalone/docs/office-manager.md).
+Office Manager volunteering and Victor applicant reporting were retired on
+12 October 2026. Coworking and meeting-room bookings remain supported.
+The former [Office Manager runbook](roo-standalone/docs/office-manager.md)
+and [Victor reporting runbook](roo-standalone/docs/victor-ai-applications.md)
+now record retirement and historical-data behavior.
 
 ## Scheduled jobs
 
