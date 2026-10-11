@@ -101,6 +101,18 @@ class Settings(BaseSettings):
     STUDIO_REPORTS_SLACK_TEAM_ID: str = ""
     STUDIO_REPORTS_QUEUE_DIR: str = "/app/studio-reports/queue"
 
+    # Signed Slack events are admitted durably by the separate agent backend.
+    # This credential can ingest wake-up hints only, never claim tasks or act.
+    PROACTIVE_EVENTS_ENABLED: bool = False
+    PROACTIVE_EVENT_BACKEND_ORIGIN: str = ""
+    PROACTIVE_EVENT_API_KEY: Optional[str] = None
+    PROACTIVE_EVENT_TEAM_ID: str = ""
+    PROACTIVE_EVENT_CHANNEL_IDS: str = ""
+    PROACTIVE_EVENT_ALLOW_PRIVATE_HTTP: bool = False
+    PROACTIVE_TASKS_ENABLED: bool = False
+    PROACTIVE_TASK_API_KEY: Optional[str] = None
+    PROACTIVE_TASK_BOT_USER_ID: str = ""
+
     # Context-aware channel replies. Disabled by default and restricted to an
     # explicit channel allowlist before any untagged message can be considered.
     ROO_CONTEXTUAL_RESPONSES_ENABLED: bool = False

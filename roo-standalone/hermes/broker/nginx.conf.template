@@ -1,0 +1,56 @@
+worker_processes 1;
+pid /tmp/nginx.pid;
+error_log /dev/stderr warn;
+events { worker_connections 128; }
+http {
+    access_log off;
+    server_tokens off;
+    client_body_temp_path /tmp/body;
+    proxy_temp_path /tmp/proxy;
+    client_max_body_size 12m;
+    client_header_timeout 10s;
+    client_body_timeout 30s;
+    send_timeout 60s;
+    resolver 127.0.0.11 valid=30s ipv6=off;
+    limit_conn_zone $binary_remote_addr zone=per_task:1m;
+    server {
+        listen 8090;
+        server_name _;
+        limit_conn per_task 8;
+        set $approved_backend ${ROO_HERMES_BACKEND_HOST};
+        proxy_ssl_server_name on;
+        proxy_ssl_name ${ROO_HERMES_BACKEND_HOST};
+        proxy_ssl_verify on;
+        proxy_ssl_verify_depth 4;
+        proxy_ssl_trusted_certificate /etc/ssl/cert.pem;
+        proxy_ssl_protocols TLSv1.2 TLSv1.3;
+        proxy_connect_timeout 10s;
+        proxy_read_timeout 120s;
+        proxy_send_timeout 30s;
+        proxy_buffering off;
+        proxy_pass_request_headers off;
+        proxy_set_header Host ${ROO_HERMES_BACKEND_HOST};
+        proxy_set_header Authorization $http_authorization;
+        proxy_set_header Content-Type application/json;
+        proxy_set_header Accept "application/json, text/event-stream";
+        proxy_set_header MCP-Protocol-Version $http_mcp_protocol_version;
+        proxy_set_header MCP-Session-Id $http_mcp_session_id;
+        proxy_hide_header Set-Cookie;
+        proxy_hide_header X-Powered-By;
+        proxy_intercept_errors on;
+        error_page 301 302 303 307 308 = @reject_redirect;
+        location @reject_redirect { return 502; }
+        location = /healthz { return 200 'ready\n'; }
+        location = /api/v1/agent-runtime/mcp/ {
+            if ($args != "") { return 400; }
+            limit_except POST { deny all; }
+            proxy_pass https://$approved_backend/api/v1/agent-runtime/mcp/;
+        }
+        location = /api/v1/agent-runtime/model/v1/chat/completions {
+            if ($args != "") { return 400; }
+            limit_except POST { deny all; }
+            proxy_pass https://$approved_backend/api/v1/agent-runtime/model/v1/chat/completions;
+        }
+        location / { return 404; }
+    }
+}

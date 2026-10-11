@@ -1,0 +1,37 @@
+[Unit]
+Description=Roo isolated Hermes task controller
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+RequiresMountsFor=/var/lib/roo-hermes
+
+[Service]
+Type=simple
+User=10000
+Group=10000
+SupplementaryGroups=docker
+WorkingDirectory=/opt/roo/roo-standalone
+EnvironmentFile=/etc/roo-hermes/worker.env
+Environment=PYTHONNOUSERSITE=1 PYTHONUNBUFFERED=1
+ExecStartPre=/opt/roo/roo-standalone/.venv/bin/python -m roo.proactive.worker --check
+ExecStart=/opt/roo/roo-standalone/.venv/bin/python -m roo.proactive.worker
+# A completion-unknown receipt must stop execution until explicit reconciliation.
+Restart=no
+KillSignal=SIGTERM
+TimeoutStopSec=60
+UMask=0077
+ProtectSystem=full
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+# sudo invokes the fixed root-owned quota helper; NoNewPrivileges=yes would
+# prevent that transition. Docker group membership already grants host power.
+NoNewPrivileges=false
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=roo-hermes-controller
+
+[Install]
+WantedBy=multi-user.target

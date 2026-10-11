@@ -1,0 +1,49 @@
+# Optional controlled browser service. Do not use until the controller's browser
+# lease/handoff integration and the Linux smoke checks are enabled and verified.
+# Launch one distinct Compose project/profile_id per authority, never a shared
+# signed-in browser for different users. Defaults to bounded ephemeral cookies.
+name: roo-browser-${ROO_BROWSER_PROFILE_ID:?Set one unique profile ID}
+services:
+  browser:
+    profiles: [operator-browser]
+    image: ${ROO_BROWSER_IMAGE:?Set the reviewed browser image digest}
+    environment:
+      ROO_BROWSER_AUTHORITY_ID: ${ROO_BROWSER_AUTHORITY_ID:?Bind one authority}
+      ROO_BROWSER_PROFILE_ID: ${ROO_BROWSER_PROFILE_ID:?Bind one profile}
+    user: "10000:10000"
+    read_only: true
+    cap_drop: [ALL]
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    security_opt: ["no-new-privileges:true"]
+    restart: "no"
+    mem_limit: 2g
+    memswap_limit: 2g
+    cpus: 2
+    pids_limit: 256
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=256m,mode=1777
+      - /profile:rw,nosuid,nodev,noexec,size=512m,uid=10000,gid=10000,mode=0700
+    volumes:
+      - type: bind
+        source: ${ROO_BROWSER_LEASE_DIRECTORY:?Controller-owned lease directory}
+        target: /run/roo-browser
+        read_only: true
+      - type: bind
+        source: ${ROO_BROWSER_AUTH_DIRECTORY:?Operator TLS certificate and htpasswd directory}
+        target: /run/roo-browser-auth
+        read_only: true
+    networks:
+      web:
+        aliases: ["hermes-browser-${ROO_BROWSER_PROFILE_ID}"]
+networks:
+  web:
+    external: true
+    name: roo-hermes-web
+# Deliberately no ports. An authorised host operator uses an SSH tunnel to the
+# container's private address:8443, then TLS+HTTP Basic auth on /vnc.html.
+# 9222/5900/6080/8081 are loopback-only inside this container. Agent port9223
+# exposes only leased CDP websockets and closes them on hold/expiry/revocation.

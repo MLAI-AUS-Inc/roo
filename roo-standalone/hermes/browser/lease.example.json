@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "authority_id": "provision-one-authority",
+  "profile_id": "provision-one-profile",
+  "attempt_id": "provision-one-attempt",
+  "mode": "disabled",
+  "expires_at": 0,
+  "token": ""
+}

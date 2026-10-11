@@ -1,0 +1,10 @@
+# Review/load through the host's firewall manager. Never flush the ruleset.
+# Dedicated stable bridge names are set by the infrastructure Compose file.
+# This prevents sandbox containers reaching host services through either bridge
+# gateway, including services bound to other host interface addresses.
+table inet roo_hermes_host {
+    chain protect_host {
+        type filter hook input priority -10; policy accept;
+        iifname { "br-roo-hermes", "br-roo-web" } counter drop
+    }
+}
