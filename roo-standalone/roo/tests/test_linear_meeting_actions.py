@@ -2046,6 +2046,342 @@ async def test_linear_direct_issue_command_reports_ambiguous_assignee(monkeypatc
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("target", ["inaccessible_project", "unmatched_team"])
+async def test_linear_direct_command_preserves_team_selection_failures(monkeypatch, target):
+    executor = SkillExecutor()
+    created_inputs = []
+    team = {"id": "team-mlai", "key": "MLA", "name": "MLAI"}
+    project = {
+        "id": "project-widget",
+        "name": "Widget",
+        "slackChannelId": "C1",
+        "teams": {"nodes": [{"id": "team-studio", "key": "STU", "name": "Studio"}]},
+    }
+
+    class FakeClient:
+        async def list_teams(self):
+            return [team]
+
+        async def list_users(self):
+            return []
+
+        async def list_active_projects(self):
+            return [project] if target == "inaccessible_project" else []
+
+        async def list_issue_labels(self):
+            return []
+
+        async def list_recent_open_issues(self):
+            return []
+
+        async def create_issue(self, **kwargs):
+            created_inputs.append(kwargs)
+            return {"identifier": "MLA-1", "title": kwargs["title"]}
+
+    class FakeSkill:
+        def get_client_class(self, name):
+            return FakeClient
+
+    async def fake_inference(**kwargs):
+        return SimpleNamespace(value=LinearDirectIssueBatch(issues=[
+            LinearCandidate(title="Fix login flow", description="Fix login flow", confidence=0.96)
+        ]))
+
+    monkeypatch.setattr(executor_module, "run_linear_structured_inference", fake_inference)
+    monkeypatch.setattr(executor_module, "get_settings", lambda: SimpleNamespace(
+        OPENAI_API_KEY=None,
+        LINEAR_DEFAULT_TEAM=None,
+        LINEAR_MEETING_AUTO_CREATE_MIN_CONFIDENCE=0.85,
+        LINEAR_MEETING_UNCERTAIN_MIN_CONFIDENCE=0.65,
+    ))
+
+    result = await executor._execute_linear_meeting_actions(
+        skill=FakeSkill(),
+        text="create a task in linear to fix the login flow",
+        params={"team_hint": "STU"} if target == "unmatched_team" else {},
+        user_id="U1",
+        channel_id="C1",
+        thread_ts="1.1",
+        thread_history=[],
+    )
+
+    assert created_inputs == []
+    assert result["data"]["created_count"] == 0
+    assert result["data"]["review_count"] == 0
+    assert result["data"]["skipped_count"] == 1
+    if target == "inaccessible_project":
+        assert "API key cannot access" in result["message"]
+    else:
+        assert "Linear team unclear" in result["message"]
+
+
+def test_linear_direct_issue_request_accepts_prd_command():
+    executor = SkillExecutor()
+
+    assert executor._is_linear_direct_issue_request(
+        "create a PRD for the following task and add to linear/plane",
+        {},
+    )
+    assert executor._is_linear_direct_issue_request(
+        "create a PRD and add it to linear",
+        {},
+    )
+    assert not executor._is_linear_direct_issue_request(
+        "add these meeting notes to linear",
+        {},
+    )
+
+
+@pytest.mark.asyncio
+async def test_linear_direct_prd_command_creates_without_assignee_or_project(monkeypatch):
+    executor = SkillExecutor()
+    created_inputs = []
+
+    async def fake_inference(*, messages, response_format, **kwargs):
+        assert response_format is LinearDirectIssueBatch
+        return SimpleNamespace(
+            value=LinearDirectIssueBatch(
+                issues=[
+                    LinearCandidate(
+                        title="Create PRD for Roo committee agenda-request skill and add it to Linear/Plane",
+                        description="Write the PRD for a committee-admin agenda request skill.",
+                        owner_hint="Dr Sam",
+                        project_hint="Committee",
+                        evidence="create a PRD",
+                        source_label="Slack command",
+                        confidence=0.96,
+                    )
+                ]
+            )
+        )
+
+    team = {"id": "team-1", "key": "MLA", "name": "MLAI"}
+
+    class FakeClient:
+        async def list_teams(self):
+            return [team]
+
+        async def list_users(self):
+            return [{"id": "user-1", "name": "Dr Sam", "displayName": "Dr Sam", "email": "sam@example.com"}]
+
+        async def list_active_projects(self):
+            return [{
+                "id": "project-1",
+                "name": "Venture Studio",
+                "slugId": "venture-studio",
+                "teams": {"nodes": [team]},
+            }]
+
+        async def list_issue_labels(self):
+            return []
+
+        async def list_recent_open_issues(self):
+            return []
+
+        async def create_issue(self, **kwargs):
+            created_inputs.append(kwargs)
+            return {
+                "identifier": "MLA-124",
+                "title": kwargs["title"],
+                "url": "https://linear.test/MLA-124",
+            }
+
+    class FakeSkill:
+        def get_client_class(self, name):
+            assert name == "LinearMeetingActionsClient"
+            return FakeClient
+
+    monkeypatch.setattr(executor_module, "run_linear_structured_inference", fake_inference)
+    monkeypatch.setattr(
+        executor_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            OPENAI_API_KEY=None,
+            LINEAR_DEFAULT_TEAM=None,
+            LINEAR_MEETING_AUTO_CREATE_MIN_CONFIDENCE=0.85,
+            LINEAR_MEETING_UNCERTAIN_MIN_CONFIDENCE=0.65,
+        ),
+    )
+
+    result = await executor._execute_linear_meeting_actions(
+        skill=FakeSkill(),
+        text=(
+            "create a PRD for the following task and add to linear/plane: "
+            "Add a Roo skill so a committee admin can request an agenda item"
+        ),
+        params={},
+        user_id="U1",
+        channel_id="C1",
+        thread_ts="1.1",
+        thread_history=[],
+    )
+
+    assert result["data"]["created_count"] == 1
+    assert result["data"]["skipped_count"] == 0
+    assert "Assignee unclear" not in result["message"]
+    assert created_inputs[0]["title"] == (
+        "Create PRD for Roo committee agenda-request skill and add it to Linear/Plane"
+    )
+    assert created_inputs[0]["assignee_id"] is None
+    assert created_inputs[0]["project_id"] is None
+    assert created_inputs[0]["team_id"] == "team-1"
+    assert "Unassigned" in result["message"]
+    assert "No project" in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_linear_direct_prd_command_uses_configured_default_team(monkeypatch):
+    executor = SkillExecutor()
+    created_inputs = []
+
+    async def fake_inference(*, messages, response_format, **kwargs):
+        return SimpleNamespace(
+            value=LinearDirectIssueBatch(
+                issues=[
+                    LinearCandidate(
+                        title="Create PRD for the committee agenda skill",
+                        description="Write the PRD.",
+                        confidence=0.96,
+                    )
+                ]
+            )
+        )
+
+    teams = [
+        {"id": "team-1", "key": "MLA", "name": "MLAI"},
+        {"id": "team-2", "key": "MKT", "name": "Marketing"},
+    ]
+
+    class FakeClient:
+        async def list_teams(self):
+            return teams
+
+        async def list_users(self):
+            return []
+
+        async def list_active_projects(self):
+            return []
+
+        async def list_issue_labels(self):
+            return []
+
+        async def list_recent_open_issues(self):
+            return []
+
+        async def create_issue(self, **kwargs):
+            created_inputs.append(kwargs)
+            return {"identifier": "MLA-125", "title": kwargs["title"], "url": "https://linear.test/MLA-125"}
+
+    class FakeSkill:
+        def get_client_class(self, name):
+            return FakeClient
+
+    monkeypatch.setattr(executor_module, "run_linear_structured_inference", fake_inference)
+    monkeypatch.setattr(
+        executor_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            OPENAI_API_KEY=None,
+            LINEAR_DEFAULT_TEAM="MLA",
+            LINEAR_MEETING_AUTO_CREATE_MIN_CONFIDENCE=0.85,
+            LINEAR_MEETING_UNCERTAIN_MIN_CONFIDENCE=0.65,
+        ),
+    )
+
+    result = await executor._execute_linear_meeting_actions(
+        skill=FakeSkill(),
+        text="create a PRD for the committee agenda skill and add it to linear",
+        params={},
+        user_id="U1",
+        channel_id="C1",
+        thread_ts="1.1",
+        thread_history=[],
+    )
+
+    assert result["data"]["created_count"] == 1
+    assert created_inputs[0]["team_id"] == "team-1"
+    assert created_inputs[0]["assignee_id"] is None
+    assert created_inputs[0]["project_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_linear_direct_prd_command_asks_for_team_when_several_exist(monkeypatch):
+    executor = SkillExecutor()
+
+    async def fake_inference(*, messages, response_format, **kwargs):
+        return SimpleNamespace(
+            value=LinearDirectIssueBatch(
+                issues=[
+                    LinearCandidate(
+                        title="Create PRD for the committee agenda skill",
+                        description="Write the PRD.",
+                        owner_hint="Someone",
+                        confidence=0.96,
+                    )
+                ]
+            )
+        )
+
+    teams = [
+        {"id": "team-1", "key": "MLA", "name": "MLAI"},
+        {"id": "team-2", "key": "MKT", "name": "Marketing"},
+    ]
+
+    class FakeClient:
+        async def list_teams(self):
+            return teams
+
+        async def list_users(self):
+            return []
+
+        async def list_active_projects(self):
+            return []
+
+        async def list_issue_labels(self):
+            return []
+
+        async def list_recent_open_issues(self):
+            return []
+
+        async def create_issue(self, **kwargs):
+            raise AssertionError("unscoped direct command must not guess a team")
+
+    class FakeSkill:
+        def get_client_class(self, name):
+            return FakeClient
+
+    monkeypatch.setattr(executor_module, "run_linear_structured_inference", fake_inference)
+    monkeypatch.setattr(
+        executor_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            OPENAI_API_KEY=None,
+            LINEAR_DEFAULT_TEAM=None,
+            LINEAR_MEETING_AUTO_CREATE_MIN_CONFIDENCE=0.85,
+            LINEAR_MEETING_UNCERTAIN_MIN_CONFIDENCE=0.65,
+        ),
+    )
+
+    result = await executor._execute_linear_meeting_actions(
+        skill=FakeSkill(),
+        text="create a PRD for the committee agenda skill and add it to linear",
+        params={},
+        user_id="U1",
+        channel_id="C1",
+        thread_ts="1.1",
+        thread_history=[],
+    )
+
+    assert result["data"]["created_count"] == 0
+    assert result["data"]["skipped_count"] == 1
+    assert "Assignee unclear" not in result["message"]
+    assert "Linear team unclear" in result["message"]
+    assert "MLA" in result["message"]
+    assert "MKT" in result["message"]
+    assert "assignee: Unassigned" in result["message"]
+
+
+@pytest.mark.asyncio
 async def test_linear_meeting_executor_creates_project_update_when_requested(monkeypatch):
     executor = SkillExecutor()
     created_updates = []

@@ -126,7 +126,9 @@ This skill turns pasted Slack meeting transcripts, summaries, supported Slack fi
 
 - Do not create an issue without a matched Linear team.
 - Do not use a project team that is missing from Roo's accessible-team catalogue, and do not fall back to an unrelated default team when a project already declares its team.
-- Do not auto-create an issue without a high-confidence assignee, project, accessible project team, complete extraction pass, and valid effort label when sizing is required.
+- An explicit direct command that does not name an assignee or project is still a create request. Leave the issue unassigned and without a project, and place it on `LINEAR_DEFAULT_TEAM` or the only accessible team. Do not skip it as assignee or project unclear. If several teams remain and no default is configured, ask for the team and create nothing.
+- A named assignee or project that is ambiguous or unmatched still fails closed.
+- Do not auto-create a meeting-note or contextual item without a high-confidence assignee, project, accessible project team, complete extraction pass, and valid effort label when sizing is required. Omitted assignee and project on a direct command are intentional, not low-confidence guesses.
 - A contextual command can auto-create only when its source contains an explicit assignment/commitment and the assignee, project, team, and due date are unambiguous.
 - Do not auto-create contextual discussion-thread issues; always request Slack approval first. Explicit bulk create commands over attached notes may auto-create only candidates whose source records an explicit commitment.
 - Honor an explicit fallback such as "if you can't find the right person or are unsure, assign them to Dr Sam" for otherwise unresolved action-item owners.
