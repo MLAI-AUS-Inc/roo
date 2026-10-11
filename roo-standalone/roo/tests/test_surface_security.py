@@ -44,6 +44,57 @@ def test_public_surface_preserves_reviewed_public_skills_and_has_no_private_skil
     )
 
 
+def test_retired_victor_allowlist_cannot_load_a_runtime_skill(monkeypatch):
+    from roo import agent as agent_module
+
+    configured = settings(ROO_ENABLED_SKILLS="victor-ai-applications")
+    monkeypatch.setattr(agent_module, "get_settings", lambda: configured)
+    with pytest.raises(ValueError, match="missing or invalid skills"):
+        agent_module.RooAgent()
+
+
+@pytest.mark.parametrize("backend_url", [
+    "https://unreviewed.test",
+    "https://api.mlai.au/api/v1",
+    "https://user:credential@api.mlai.au",
+])
+def test_retirement_preserves_production_booking_origin_validation(backend_url):
+    with pytest.raises(ValidationError, match="MLAI_BACKEND_URL"):
+        settings(
+            ROO_ENVIRONMENT="production",
+            MEETING_ROOM_BOOKING_ENABLED=True,
+            MLAI_BACKEND_URL=backend_url,
+            ROO_API_KEY="synthetic-roo-key",
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("duplicate", [False, True])
+async def test_historical_office_button_is_acknowledged_without_work(monkeypatch, duplicate):
+    from types import SimpleNamespace
+
+    def unexpected_work(*args, **kwargs):
+        raise AssertionError("A retired button must not start work or contact Slack")
+
+    monkeypatch.setattr(main_module, "start_slack_action", unexpected_work)
+    monkeypatch.setattr(main_module, "post_message", unexpected_work)
+    monkeypatch.setattr(main_module, "get_agent", unexpected_work)
+    request = SimpleNamespace(state=SimpleNamespace(
+        roo_settings=settings(), slack_duplicate=duplicate,
+    ))
+    response = await main_module._handle_slack_action_payload(request, {
+        "type": "block_actions",
+        "team": {"id": "TSYNTHETIC"},
+        "channel": {"id": "C0BRM181EDV"},
+        "user": {"id": "UMEMBER"},
+        "message": {"ts": "1800000000.000001"},
+        "actions": [{"action_id": "office_manager_volunteer_today",
+                     "value": '{"date":"2026-08-03","generation":1}'}],
+    })
+    assert response.status_code == 200
+    assert json.loads(response.body) == {}
+
+
 @pytest.mark.parametrize("retention_days", [0, 366])
 def test_coworking_intent_retention_is_bounded(retention_days):
     with pytest.raises(
@@ -113,47 +164,6 @@ def test_linear_channel_issue_writes_fail_closed_without_public_backend_credenti
             LINEAR_CHANNEL_ISSUE_WRITES_ENABLED=True,
             MLAI_BACKEND_URL="https://backend.test",
             ROO_API_KEY="roo-key",
-        )
-
-
-def test_victor_ai_skill_is_disabled_by_default_and_uses_channel_name_only():
-    configured = settings()
-    assert "victor-ai-applications" not in configured.enabled_skill_names
-
-    configured = settings(
-        VICTOR_AI_SKILL_ENABLED=True,
-        MLAI_BACKEND_URL="https://backend.test",
-        VICTOR_AI_ROO_SIGNING_SECRET="s" * 48,
-    )
-    assert "victor-ai-applications" in configured.enabled_skill_names
-    assert configured.is_victor_ai_context_allowed(
-        channel_name="exp-victor-ai",
-    )
-    assert not configured.is_victor_ai_context_allowed(
-        channel_name="general",
-    )
-
-
-def test_victor_ai_skill_fails_closed_for_disabled_or_invalid_configuration():
-    with pytest.raises(ValidationError, match="cannot be enabled"):
-        settings(ROO_ENABLED_SKILLS="victor-ai-applications")
-
-    with pytest.raises(ValidationError, match="SLACK_CHANNEL_NAME is invalid"):
-        settings(
-            VICTOR_AI_SKILL_ENABLED=True,
-            MLAI_BACKEND_URL="https://backend.test",
-            VICTOR_AI_ROO_SIGNING_SECRET="s" * 48,
-            VICTOR_AI_SLACK_CHANNEL_NAME="not a slack channel",
-        )
-
-    with pytest.raises(ValidationError, match="only on Public Roo"):
-        settings(
-            ROO_SURFACE="admin",
-            ROO_ALLOWED_CHANNEL_IDS="GADMIN123",
-            ROO_ENABLED_SKILLS="victor-ai-applications",
-            VICTOR_AI_SKILL_ENABLED=True,
-            MLAI_BACKEND_URL="https://backend.test",
-            VICTOR_AI_ROO_SIGNING_SECRET="s" * 48,
         )
 
 

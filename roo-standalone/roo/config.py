@@ -162,13 +162,6 @@ class Settings(BaseSettings):
     ROO_ADMIN_DISPATCH_RECEIPT_TTL_SECONDS: int = 10 * 60
     ROO_ADMIN_DISPATCH_RECEIPTS_DB_PATH: str = "data/admin_dispatch_receipts.db"
 
-    # Read-only Victor AI application reports. Access is based on the resolved
-    # Slack channel name, so channel or user ID allowlists are not required.
-    VICTOR_AI_SKILL_ENABLED: bool = False
-    VICTOR_AI_ROO_SIGNING_SECRET: Optional[str] = None
-    VICTOR_AI_SLACK_CHANNEL_NAME: str = "exp-victor-ai"
-    VICTOR_AI_BACKEND_TIMEOUT_SECONDS: float = 20.0
-
     # GitHub OAuth
     GITHUB_CLIENT_ID: Optional[str] = None
     GITHUB_CLIENT_SECRET: Optional[str] = None
@@ -211,7 +204,6 @@ class Settings(BaseSettings):
     LINEAR_CONTEXTUAL_AUTO_CREATE_ENABLED: bool = True
     COWORKING_INTENTS_DB_PATH: str = "data/coworking_booking_intents.db"
     COWORKING_RETRY_POLL_SECONDS: float = 30.0
-    OFFICE_MANAGER_ACTIONS_ENABLED: bool = False
     COWORKING_INTENT_RETENTION_DAYS: int = 30
     FOUNDER_ACCOUNT_LINK_ENABLED: bool = False
     ROO_POINTS_TOPUP_ENABLED: bool = False
@@ -284,17 +276,19 @@ class Settings(BaseSettings):
 
     @property
     def has_explicit_skill_allowlist(self) -> bool:
-        return bool(self._split_configured_values(self.ROO_ENABLED_SKILLS))
+        return self.ROO_ENABLED_SKILLS.strip() == "[]" or bool(
+            self._split_configured_values(self.ROO_ENABLED_SKILLS)
+        )
 
     @property
     def enabled_skill_names(self) -> frozenset[str]:
+        if self.ROO_ENABLED_SKILLS.strip() == "[]":
+            return frozenset()
         configured = self._split_configured_values(self.ROO_ENABLED_SKILLS)
         if configured:
             return configured
         if self.ROO_SURFACE == "public":
             enabled = set(self.PUBLIC_DEFAULT_SKILLS)
-            if self.VICTOR_AI_SKILL_ENABLED:
-                enabled.add("victor-ai-applications")
             if self.MEETING_ROOM_BOOKING_ENABLED:
                 enabled.add("meeting-room-booking")
             if self.STUDIO_REPORTS_ENABLED:
@@ -336,17 +330,6 @@ class Settings(BaseSettings):
     def founder_tools_link_origins(self) -> frozenset[str]:
         return self._split_configured_values(self.FOUNDER_TOOLS_LINK_ORIGINS)
 
-    @property
-    def victor_ai_slack_channel_name(self) -> str:
-        return str(self.VICTOR_AI_SLACK_CHANNEL_NAME or "").strip().lstrip("#").lower()
-
-    def is_victor_ai_context_allowed(self, *, channel_name: Optional[str]) -> bool:
-        resolved_name = str(channel_name or "").strip().lstrip("#").lower()
-        return bool(
-            self.VICTOR_AI_SKILL_ENABLED
-            and resolved_name
-            and resolved_name == self.victor_ai_slack_channel_name
-        )
 
     def is_slack_context_allowed(
         self,
@@ -362,14 +345,13 @@ class Settings(BaseSettings):
         return bool(channel_id and channel_id in self.allowed_channel_ids)
 
     @property
-    def authenticated_backend_preflight_required(self) -> bool:
-        """Whether this runtime must verify Roo's strict backend contract."""
+    def authenticated_backend_required(self) -> bool:
+        """Whether Public Roo requires a strict backend credential and origin."""
         return bool(
             self.ROO_SURFACE == "public"
             and (
                 self.is_production
                 or self.MEETING_ROOM_BOOKING_ENABLED
-                or self.OFFICE_MANAGER_ACTIONS_ENABLED
             )
         )
 
@@ -486,28 +468,6 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "Founder Tools origins must use HTTPS on the default port"
                 )
-        if self.VICTOR_AI_SKILL_ENABLED:
-            if self.ROO_SURFACE != "public":
-                raise ValueError(
-                    "Victor AI application access is available only on Public Roo"
-                )
-            if not str(self.MLAI_BACKEND_URL or "").strip():
-                raise ValueError(
-                    "MLAI_BACKEND_URL is required when VICTOR_AI_SKILL_ENABLED is true"
-                )
-            if len(str(self.VICTOR_AI_ROO_SIGNING_SECRET or "")) < 32:
-                raise ValueError(
-                    "VICTOR_AI_ROO_SIGNING_SECRET must contain at least 32 characters"
-                )
-            if not re.fullmatch(
-                r"[a-z0-9][a-z0-9_-]{0,79}",
-                self.victor_ai_slack_channel_name,
-            ):
-                raise ValueError("VICTOR_AI_SLACK_CHANNEL_NAME is invalid")
-            if not 1 <= self.VICTOR_AI_BACKEND_TIMEOUT_SECONDS <= 60:
-                raise ValueError(
-                    "VICTOR_AI_BACKEND_TIMEOUT_SECONDS must be between 1 and 60"
-                )
         if self.LINEAR_CHANNEL_ISSUE_WRITES_ENABLED:
             if self.ROO_SURFACE != "public":
                 raise ValueError("Linear channel issue writes are available only on Public Roo")
@@ -578,14 +538,6 @@ class Settings(BaseSettings):
                 + ", ".join(sorted(invalid_skill_names))
             )
         if (
-            "victor-ai-applications" in enabled_skills
-            and not self.VICTOR_AI_SKILL_ENABLED
-        ):
-            raise ValueError(
-                "victor-ai-applications cannot be enabled unless "
-                "VICTOR_AI_SKILL_ENABLED is true"
-            )
-        if (
             "meeting-room-booking" in enabled_skills
             and not self.MEETING_ROOM_BOOKING_ENABLED
         ):
@@ -618,18 +570,16 @@ class Settings(BaseSettings):
                     "ROO_API_KEY is required when "
                     "MEETING_ROOM_BOOKING_ENABLED is true"
                 )
-        if (
-            self.authenticated_backend_preflight_required
-        ):
+        if self.authenticated_backend_required:
             if not str(self.MLAI_BACKEND_URL or "").strip():
                 raise ValueError(
                     "MLAI_BACKEND_URL is required for Public Roo's authenticated "
-                    "backend preflight"
+                    "backend identity"
                 )
             if not str(self.ROO_API_KEY or "").strip():
                 raise ValueError(
                     "ROO_API_KEY is required for Public Roo's authenticated "
-                    "backend preflight"
+                    "backend identity"
                 )
             mutation_backend_authority = backend_authority(
                 str(self.MLAI_BACKEND_URL or "")
@@ -648,27 +598,6 @@ class Settings(BaseSettings):
                     "MLAI_BACKEND_URL must target the reviewed MLAI production "
                     "backend authority when Public Roo authenticates to the backend"
                 )
-        if self.OFFICE_MANAGER_ACTIONS_ENABLED:
-            if self.ROO_SURFACE != "public":
-                raise ValueError(
-                    "Office Manager actions are available only on Public Roo"
-                )
-            if not str(self.MLAI_BACKEND_URL or "").strip():
-                raise ValueError(
-                    "MLAI_BACKEND_URL is required when "
-                    "OFFICE_MANAGER_ACTIONS_ENABLED is true"
-                )
-            if not str(self.ROO_API_KEY or "").strip():
-                raise ValueError(
-                    "ROO_API_KEY is required when "
-                    "OFFICE_MANAGER_ACTIONS_ENABLED is true"
-                )
-            if self.TIMEZONE != "Australia/Melbourne":
-                raise ValueError(
-                    "TIMEZONE must be Australia/Melbourne when "
-                    "OFFICE_MANAGER_ACTIONS_ENABLED is true"
-                )
-
         if self.ROO_SURFACE == "public":
             if (
                 self.ORG_BRAIN_ENABLED

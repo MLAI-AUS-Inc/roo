@@ -9,6 +9,61 @@ import pytest
 import yaml
 
 from roo.deployment_checks import check_public_release, PUBLIC_PROBE
+from roo.retired_feature_config import retire_feature_config
+
+
+@pytest.mark.parametrize("value, expected", [
+    ('"victor-ai-applications, mlai-points,content-factory"', "mlai-points,content-factory"),
+    ("victor-ai-applications", "[]"),
+    ("victor-ai-applications,unknown-skill", "unknown-skill"),
+    ("mlai-points,content-factory", "mlai-points,content-factory"),
+    ("[]", "[]"),
+    ("", ""),
+])
+def test_retired_feature_env_cleanup_preserves_skill_scope(tmp_path, value, expected):
+    path = tmp_path / ".env"
+    path.write_text(
+        "# keep this comment\n"
+        "UNRELATED_CONFIG=synthetic-value\n"
+        "VICTOR_AI_ROO_SIGNING_SECRET=synthetic-retired-secret\n"
+        "OFFICE_MANAGER_ACTIONS_ENABLED=true\n"
+        f"ROO_ENABLED_SKILLS={value}\n"
+    )
+    retire_feature_config(path)
+    assert path.read_text() == (
+        "# keep this comment\n"
+        "UNRELATED_CONFIG=synthetic-value\n"
+        f"ROO_ENABLED_SKILLS={expected}\n"
+    )
+    retire_feature_config(path)
+    assert f"ROO_ENABLED_SKILLS={expected}\n" in path.read_text()
+    assert path.stat().st_mode & 0o777 == 0o600
+
+
+def test_retired_only_allowlist_loads_no_skills_and_unknown_names_still_fail(tmp_path, monkeypatch):
+    from roo.config import Settings
+    from roo import agent as agent_module
+
+    path = tmp_path / ".env"
+    path.write_text("ROO_ENABLED_SKILLS=victor-ai-applications\n")
+    retire_feature_config(path)
+    configured = Settings(
+        _env_file=path, SLACK_BOT_TOKEN="test", SLACK_SIGNING_SECRET="test",
+        OPENAI_API_KEY="test", FOUNDER_TOOLS_LINK_ORIGINS="https://mlai.au",
+    )
+    assert configured.has_explicit_skill_allowlist
+    assert configured.enabled_skill_names == frozenset()
+    monkeypatch.setattr(agent_module, "get_settings", lambda: configured)
+    assert agent_module.RooAgent().skills == []
+
+    path.write_text("ROO_ENABLED_SKILLS=victor-ai-applications,unknown-skill\n")
+    retire_feature_config(path)
+    configured = Settings(
+        _env_file=path, SLACK_BOT_TOKEN="test", SLACK_SIGNING_SECRET="test",
+        OPENAI_API_KEY="test", FOUNDER_TOOLS_LINK_ORIGINS="https://mlai.au",
+    )
+    with pytest.raises(ValueError, match="unknown-skill"):
+        agent_module.RooAgent()
 
 
 @pytest.mark.parametrize('migrated', [False, True])

@@ -21,11 +21,9 @@ from ..backend_identity import (
     BackendIdentityError,
     build_org_memory_identity_headers,
     build_roo_gateway_identity_headers,
-    build_victor_ai_identity_headers,
     get_backend_actor_context,
 )
 from ..config import get_settings
-from ..office_manager_actions import canonical_office_manager_generation
 
 CONTENT_FACTORY_REQUEST_SOURCE = "roo_slackbot"
 FULL_POINTS_ADMIN_ROLES = {"admin", "committee", "portfolio_lead"}
@@ -256,8 +254,6 @@ class MLAIBackendClient:
         api_key: Optional[str] = None,
         internal_api_key: Optional[str] = None,
         service_principal_key: Optional[str] = None,
-        victor_ai_signing_secret: Optional[str] = None,
-        victor_ai_actor_context: Optional[dict] = None,
         surface: Optional[str] = None,
         actor_context: Optional[BackendActorContext] = None,
     ):
@@ -266,7 +262,6 @@ class MLAIBackendClient:
             api_key is None
             and internal_api_key is None
             and service_principal_key is None
-            and victor_ai_signing_secret is None
         ):
             settings = get_settings()
 
@@ -286,10 +281,6 @@ class MLAIBackendClient:
         self.service_principal_key = service_principal_key or (
             getattr(settings, "ORG_BRAIN_API_KEY", None) if settings else None
         )
-        self.victor_ai_signing_secret = victor_ai_signing_secret or (
-            getattr(settings, "VICTOR_AI_ROO_SIGNING_SECRET", None) if settings else None
-        )
-        self.victor_ai_actor_context = dict(victor_ai_actor_context or {})
         self.surface = surface or (
             getattr(settings, "ROO_SURFACE", "public") if settings else "public"
         )
@@ -491,7 +482,6 @@ class MLAIBackendClient:
         circuit_breaker: bool = False,
         use_admin_headers: bool = False,
         use_org_memory_identity: bool = False,
-        use_victor_ai_identity: bool = False,
         redact_logs: bool = False,
     ) -> httpx.Response:
         if not self.base_url:
@@ -502,14 +492,8 @@ class MLAIBackendClient:
             await self._guard_circuit_breaker(normalized_endpoint)
 
         request_id = request_id or self._new_request_id()
-        if use_org_memory_identity and use_victor_ai_identity:
-            raise BackendIdentityError(
-                "A backend request cannot use two actor assertion types"
-            )
         if use_org_memory_identity:
             resolved_headers = self.org_memory_headers(request_id)
-        elif use_victor_ai_identity:
-            resolved_headers = self.victor_ai_headers(request_id)
         else:
             resolved_headers = dict(self.admin_headers if use_admin_headers else self.headers)
         if headers:
@@ -651,55 +635,6 @@ class MLAIBackendClient:
             request_id=request_id,
         )
 
-    def victor_ai_headers(self, request_id: str) -> dict:
-        """Build a fresh signed Slack actor assertion for one Victor read."""
-
-        secret = str(self.victor_ai_signing_secret or "")
-        if len(secret) < 32:
-            raise ValueError("VICTOR_AI_ROO_SIGNING_SECRET is not configured")
-
-        context = self.actor_context
-        if context is None and self.victor_ai_actor_context:
-            context = BackendActorContext(
-                slack_team_id=str(
-                    self.victor_ai_actor_context.get("slack_team_id") or ""
-                ).strip(),
-                acting_slack_user_id=str(
-                    self.victor_ai_actor_context.get(
-                        "acting_slack_user_id"
-                    )
-                    or ""
-                ).strip(),
-                slack_channel_id=str(
-                    self.victor_ai_actor_context.get("slack_channel_id") or ""
-                ).strip(),
-                slack_thread_ts=str(
-                    self.victor_ai_actor_context.get("slack_thread_ts") or ""
-                ).strip(),
-                event_id=str(
-                    self.victor_ai_actor_context.get("event_id") or ""
-                ).strip(),
-            )
-        if context is None:
-            raise ValueError("Verified Slack context is unavailable for this Victor request")
-        return build_victor_ai_identity_headers(
-            secret,
-            context=context,
-            request_id=request_id,
-        )
-
-    def _victor_ai_endpoint(self, suffix: str) -> str:
-        """Support backend base URLs with or without an /api/v1 suffix."""
-
-        raw_suffix = str(suffix or "")
-        suffix = raw_suffix.strip("/")
-        base_path = urlparse(self.base_url).path.rstrip("/")
-        prefix = "" if base_path.endswith("/api/v1") else "/api/v1"
-        root = f"{prefix}/victor-ai/roo/applications/"
-        if not suffix:
-            return root
-        trailing_slash = "/" if raw_suffix.endswith("/") else ""
-        return f"{root}{suffix}{trailing_slash}"
 
     def _org_memory_endpoint(self, suffix: str) -> str:
         """Support backend base URLs with or without an /api/v1 suffix."""
@@ -727,102 +662,6 @@ class MLAIBackendClient:
         prefix = "" if base_path.endswith("/api/v1") else "/api/v1"
         return f"{prefix}/integrations/linear/channel-issues/{suffix}"
 
-    @staticmethod
-    def _victor_ai_params(filters: Optional[dict] = None, **pagination: Any) -> dict:
-        allowed = {
-            "stage",
-            "role",
-            "startup_stage",
-            "industry_sector",
-            "created_after",
-            "created_before",
-            "q",
-        }
-        params = {
-            key: value
-            for key, value in (filters or {}).items()
-            if key in allowed and value not in (None, "")
-        }
-        params.update(
-            {
-                key: value
-                for key, value in pagination.items()
-                if value not in (None, "")
-            }
-        )
-        return params
-
-    async def get_victor_application_summary(
-        self,
-        *,
-        filters: Optional[dict] = None,
-        timeout: float = 20.0,
-    ) -> dict:
-        response = await self._request(
-            "GET",
-            self._victor_ai_endpoint("summary/"),
-            params=self._victor_ai_params(filters),
-            timeout=timeout,
-            circuit_breaker=True,
-            use_victor_ai_identity=True,
-        )
-        self._raise_for_status_or_backend_unavailable(response)
-        return response.json()
-
-    async def list_victor_applications(
-        self,
-        *,
-        filters: Optional[dict] = None,
-        limit: int = 10,
-        offset: int = 0,
-        timeout: float = 20.0,
-    ) -> dict:
-        response = await self._request(
-            "GET",
-            self._victor_ai_endpoint(""),
-            params=self._victor_ai_params(filters, limit=limit, offset=offset),
-            timeout=timeout,
-            circuit_breaker=True,
-            use_victor_ai_identity=True,
-        )
-        self._raise_for_status_or_backend_unavailable(response)
-        return response.json()
-
-    async def get_victor_application(
-        self,
-        application_id: int,
-        *,
-        timeout: float = 20.0,
-    ) -> dict:
-        response = await self._request(
-            "GET",
-            self._victor_ai_endpoint(f"{int(application_id)}/"),
-            timeout=timeout,
-            circuit_breaker=True,
-            use_victor_ai_identity=True,
-        )
-        self._raise_for_status_or_backend_unavailable(response)
-        return response.json()
-
-    async def export_victor_applications_csv(
-        self,
-        *,
-        filters: Optional[dict] = None,
-        timeout: float = 20.0,
-    ) -> tuple[str, str]:
-        response = await self._request(
-            "GET",
-            self._victor_ai_endpoint("export.csv"),
-            params=self._victor_ai_params(filters),
-            timeout=timeout,
-            circuit_breaker=True,
-            use_victor_ai_identity=True,
-        )
-        self._raise_for_status_or_backend_unavailable(response)
-        disposition = str(response.headers.get("Content-Disposition") or "")
-        match = re.search(r'filename="?([^";]+)', disposition, flags=re.IGNORECASE)
-        filename = match.group(1).strip() if match else "victor-ai-applications.csv"
-        return response.text, filename
 
     async def get_org_memory_actor_context(self) -> dict:
         """Validate the scoped service identity without retrieving memory data."""
@@ -2738,71 +2577,7 @@ class MLAIBackendClient:
             )
         return payload
 
-    async def claim_office_manager_day(
-        self,
-        slack_user_id: str,
-        booking_date: str,
-        attempt_id: str = "",
-        generation: int = 1,
-        *,
-        slack_channel_id: str,
-    ) -> dict:
-        """Claim today's Office Manager role using verified Slack actor/channel."""
-        from ..office_manager_policy import is_office_manager_channel_allowed
 
-        if not is_office_manager_channel_allowed(slack_channel_id):
-            raise ValueError("office_manager_channel_not_allowed")
-        if not self.roo_api_key:
-            raise BackendIdentityError(
-                "ROO_API_KEY is required for Office Manager claims"
-            )
-        attempt_id = str(attempt_id or "").strip()
-        try:
-            parsed_attempt_id = UUID(attempt_id)
-        except (AttributeError, TypeError, ValueError) as exc:
-            raise ValueError("attempt_id must be a canonical UUID") from exc
-        if str(parsed_attempt_id) != attempt_id:
-            raise ValueError("attempt_id must be a canonical UUID")
-        generation = canonical_office_manager_generation(generation)
-        response = await self._request(
-            "POST",
-            f"{self._points_base}/coworking/office-manager/claim/",
-            json={
-                "slack_user_id": self._clean_slack_id(slack_user_id),
-                "slack_channel_id": slack_channel_id,
-                "date": str(booking_date or "").strip(),
-                "attempt_id": attempt_id,
-                "generation": generation,
-            },
-            timeout=15.0,
-            transport_retries=1,
-            retry_backoff_seconds=0.5,
-            circuit_breaker=True,
-            redact_logs=True,
-        )
-        response.raise_for_status()
-        return response.json()
-
-    async def get_office_manager_preflight(self) -> dict:
-        """Prove the exact Office Manager route accepts Roo's strict identity."""
-        if not self.roo_api_key:
-            raise BackendIdentityError(
-                "ROO_API_KEY is required for Office Manager preflight"
-            )
-        response = await self._request(
-            "GET",
-            f"{self._points_base}/coworking/office-manager/preflight/",
-            timeout=5.0,
-            transport_retries=1,
-            retry_backoff_seconds=0.25,
-            circuit_breaker=False,
-            redact_logs=True,
-        )
-        response.raise_for_status()
-        payload = response.json()
-        if not isinstance(payload, dict):
-            raise ValueError("Office Manager preflight returned an invalid payload")
-        return payload
     
     async def get_github_auth_url(self, slack_user_id: str, domain: Optional[str] = None) -> dict:
         """Get the GitHub OAuth URL for a user from the backend."""
