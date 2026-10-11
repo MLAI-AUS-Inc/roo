@@ -97,6 +97,7 @@ class Settings(BaseSettings):
     # Client reporting queues contain request metadata only; source credentials
     # and owner/project mappings live in the separate Studio report worker.
     STUDIO_REPORTS_ENABLED: bool = False
+    STUDIO_CLIENT_BALANCE_ENABLED: bool = False
     STUDIO_REPORTS_SLACK_TEAM_ID: str = ""
     STUDIO_REPORTS_QUEUE_DIR: str = "/app/studio-reports/queue"
 
@@ -136,6 +137,10 @@ class Settings(BaseSettings):
     RECONCILIATION_AGENT_TIMEOUT_SECONDS: float = 30.0
     LINEAR_DEFAULT_TEAM: Optional[str] = None
     LINEAR_CHANNEL_ISSUE_WRITES_ENABLED: bool = False
+
+    # Additional report-only access in one exact public Roo Slack context.
+    COWORKING_REPORT_SLACK_TEAM_ID: str = ""
+    COWORKING_REPORT_SLACK_CHANNEL_ID: str = ""
 
     # Public/Admin trust boundary. Admin starts with no skills and no private
     # memory access until an explicit allowlist and scoped credential exist.
@@ -294,6 +299,8 @@ class Settings(BaseSettings):
                 enabled.add("meeting-room-booking")
             if self.STUDIO_REPORTS_ENABLED:
                 enabled.add("studio-hours")
+            if self.STUDIO_CLIENT_BALANCE_ENABLED:
+                enabled.add("studio-client-balance")
             return frozenset(enabled)
         return frozenset()
 
@@ -586,6 +593,16 @@ class Settings(BaseSettings):
                 "meeting-room-booking cannot be enabled unless "
                 "MEETING_ROOM_BOOKING_ENABLED is true"
             )
+        if (
+            "studio-client-balance" in enabled_skills
+            and not self.STUDIO_CLIENT_BALANCE_ENABLED
+        ):
+            raise ValueError(
+                "studio-client-balance cannot be enabled unless "
+                "STUDIO_CLIENT_BALANCE_ENABLED is true"
+            )
+        if self.STUDIO_CLIENT_BALANCE_ENABLED and self.ROO_SURFACE != "public":
+            raise ValueError("Studio client balance reports are available only on Public Roo")
         if self.MEETING_ROOM_BOOKING_ENABLED:
             if self.ROO_SURFACE != "public":
                 raise ValueError(

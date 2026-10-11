@@ -69,10 +69,14 @@ class StudioReportAPI(StudioSourceAPI):
 
 
 class StudioReportService(TimesheetService):
-    def __init__(self, config, api, clients, backfill_path=None):
+    def __init__(self, config, api, clients, backfill_path=None, *, balance_path=None,
+                 balance_enabled=False, balance_max_age_days=7):
         super().__init__(config, api)
         self.clients = clients
         self.backfill_path = backfill_path
+        self.balance_path = balance_path
+        self.balance_enabled = balance_enabled
+        self.balance_max_age_days = balance_max_age_days
 
     def request_authorized(self, request):
         # Unknown clients receive a private, generic setup message. No source read.
@@ -93,24 +97,56 @@ class StudioReportService(TimesheetService):
     def report_for_request(self, request):
         if not self.request_authorized(request):
             raise TimesheetError('not_authorized')
+        kind = request.get('report_kind', 'hours')
+        if kind == 'client_balance':
+            return self.balance_for_request(request)
+        if kind != 'hours':
+            raise TimesheetError('invalid_report_kind')
         actor = request['actor']
         now = timestamp(request['requested_at'])
         selector, start, _ = resolve_period(request['selector'], now)
         scope = self.scope_fingerprint(actor, selector)
-        client, groups, _ = select_client(self.clients, actor, selector)
-        backfill = load_backfill(self.backfill_path, self.config)
+        client, groups, targets = select_client(self.clients, actor, selector)
+        reviewed, finance_owners, snapshot = [], [], None
+        if self.balance_enabled and self.balance_path:
+            from .studio_client_balance_source import load_balance_snapshot, validate_snapshot_age
+            from .studio_recorded_hours import build_recorded_report
+            snapshot = load_balance_snapshot(self.balance_path, self.config, self.clients)
+            owners = targets or {key: self.clients[key] for key in
+                                  [actor, *self.clients[actor].get('report_client_ids', [])]}
+            for owner, owner_client in owners.items():
+                data = snapshot['clients'].get(owner)
+                if (data is not None and data.get('hours_reporting')
+                        and set(owner_client['project_ids']) <= set(client['project_ids'])):
+                    validate_snapshot_age(data, now, max_age_days=self.balance_max_age_days)
+                    finance_owners.append(owner)
+        covered = {key for owner in finance_owners for key in self.clients[owner]['project_ids']}
+        legacy_projects = set(client['project_ids']) - covered
+        backfill = load_backfill(self.backfill_path, self.config) if legacy_projects else None
         if start is None:
+            beginnings = [snapshot['clients'][owner]['coverage']['start'][:7] for owner in finance_owners]
+            if legacy_projects or not beginnings:
+                beginnings.append(history_beginning(backfill, list(legacy_projects or client['project_ids'])))
             selector, start, _ = resolve_period(selector, now,
-                beginning=history_beginning(backfill, client['project_ids']))
+                beginning=min(beginnings))
         # The collection window must include project moves since the requested
         # month, even for months older than the payroll worker's initial cutoff.
         source = SimpleNamespace(team=self.config.team, organization=self.config.organization,
-                                 projects={key: self.config.projects[key] for key in client['project_ids']},
+                                 projects={key: self.config.projects[key] for key in legacy_projects},
                                  beginning=start, directory=self.config.directory)
         self.api.verify_recipient(actor, self.config.team)
-        self.api.verify(source)
-        dataset = self.api.collect(source, now, {})
+        dataset = []
+        if legacy_projects:
+            self.api.verify(source)
+            dataset = self.api.collect(source, now, {})
         report = build_client_report(self.config, client, selector, dataset, now, backfill)
+        if finance_owners:
+            from .studio_recorded_hours import overlay_recorded_reports
+            reviewed = [build_recorded_report(self.config, self.clients[owner], selector,
+                        snapshot['clients'][owner], now) for owner in finance_owners]
+            report = overlay_recorded_reports(report, reviewed)
+            report.update(finance_digest=fingerprint(snapshot), finance_owners=finance_owners,
+                          canonical_only=not legacy_projects)
         if groups:
             report['client_groups'] = groups
         report.update(actor=actor, scope=scope, backfill_digest=fingerprint(backfill))
@@ -136,12 +172,62 @@ class StudioReportService(TimesheetService):
         report['parts'] = parts
         return report
 
+    def balance_for_request(self, request):
+        from .studio_client_balance import artifacts as balance_artifacts
+        from .studio_client_balance import build_balance_report, render_chart as balance_chart, summary as balance_summary
+        from .studio_client_balance_source import load_balance_snapshot, select_balance_dataset
+
+        if not self.balance_enabled:
+            raise TimesheetError('client_balance_not_configured')
+        actor, selector = request['actor'], request['selector']
+        # Resolve access before touching finance records. The Public runtime
+        # only queues identity and selection; this file is in the private volume.
+        scope = self.scope_fingerprint(actor, selector)
+        snapshot = load_balance_snapshot(self.balance_path, self.config, self.clients)
+        client, dataset, owner = select_balance_dataset(snapshot, self.config, self.clients,
+            actor, selector, request['requested_at'], max_age_days=self.balance_max_age_days)
+        self.api.verify_recipient(actor, self.config.team)
+        report = build_balance_report(client, selector, dataset, request['requested_at'])
+        report.update(actor=actor, scope=scope, finance_owner=owner,
+                      finance_digest=fingerprint(snapshot))
+        parts = [{'kind': 'message', 'content': chunk, 'status': 'pending'}
+                 for chunk in split_messages(balance_summary(report))]
+        # A failed chart must not be silently represented as a completed chart report.
+        parts.append({'kind': 'file', 'filename': 'studio-client-balance.png',
+                      'content': base64.b64encode(balance_chart(report)).decode('ascii'), 'status': 'pending'})
+        parts.extend({'kind': 'file', 'filename': name, 'content': content, 'status': 'pending'}
+                     for name, content in balance_artifacts(report).items())
+        report['parts'] = parts
+        return report
+
     def deliver_request(self, report, request, key, now):
         if not self.request_authorized(request) or report.get('actor') != request['actor']:
             raise TimesheetError('not_authorized')
         if report.get('scope') != self.scope_fingerprint(request['actor'], request['selector']):
             raise TimesheetError('client_access_changed')
-        if report.get('backfill_digest', fingerprint(None)) != fingerprint(load_backfill(self.backfill_path, self.config)):
+        if request.get('report_kind', 'hours') == 'client_balance':
+            from .studio_client_balance_source import load_balance_snapshot, select_balance_dataset
+            if not self.balance_enabled or report.get('kind') != 'client_balance':
+                raise TimesheetError('client_balance_not_configured')
+            snapshot = load_balance_snapshot(self.balance_path, self.config, self.clients)
+            _, _, owner = select_balance_dataset(snapshot, self.config, self.clients, request['actor'],
+                request['selector'], now, max_age_days=self.balance_max_age_days)
+            if owner != report.get('finance_owner') or fingerprint(snapshot) != report.get('finance_digest'):
+                raise TimesheetError('client_balance_source_changed')
+            return self.deliver_parts(report['parts'], request['actor'], key, now)
+        if request.get('report_kind', 'hours') != 'hours':
+            raise TimesheetError('invalid_report_kind')
+        if report.get('finance_owners'):
+            from .studio_client_balance_source import load_balance_snapshot, validate_snapshot_age
+            if not self.balance_enabled:
+                raise TimesheetError('client_balance_not_configured')
+            snapshot = load_balance_snapshot(self.balance_path, self.config, self.clients)
+            if fingerprint(snapshot) != report.get('finance_digest'):
+                raise TimesheetError('client_balance_source_changed')
+            for owner in report['finance_owners']:
+                validate_snapshot_age(snapshot['clients'][owner], now, max_age_days=self.balance_max_age_days)
+        if (not report.get('canonical_only') and
+                report.get('backfill_digest', fingerprint(None)) != fingerprint(load_backfill(self.backfill_path, self.config))):
             raise TimesheetError('invoice_backfill_changed')
         return self.deliver_parts(report['parts'], request['actor'], key, now)
 
@@ -161,8 +247,21 @@ class StudioReportService(TimesheetService):
 
     def failure_notice(self, request):
         error = request.get('error')
+        if request.get('report_kind') == 'client_balance':
+            if error in {'client_balance_not_configured', 'client_balance_access_unavailable',
+                         'client_access_not_configured', 'report_client_unavailable', 'invalid_report_client'}:
+                return True, 'Your client hours and purchased-hours report access is not available. Please ask the Studio team to check the client finance setup.'
+            if error == 'client_balance_single_client_required':
+                return True, 'Please request the hours and purchased-hours chart for one client, such as “Mark Ghiasy”.'
+            if error in {'client_balance_source_changed', 'client_access_changed'}:
+                return True, 'Your client finance records or access changed while the report was being prepared. Please request a new chart.'
+            if error == 'client_balance_source_stale':
+                return True, 'The reviewed client finance records need refreshing before I can produce a current chart. Please ask the Studio team to refresh the reconciliation snapshot.'
+            return False, 'I couldn’t finish your client hours and purchased-hours report. Missing financial data has not been counted as zero; the Studio team can check the report source.'
         if error == 'all_time_coverage_not_configured':
             return True, 'The beginning of your project history has not been configured. Please request a specific month or date range.'
+        if error in {'client_balance_source_changed', 'client_balance_source_stale'}:
+            return True, 'The reviewed work-hours source changed or needs refreshing. Please request a new report after the reconciliation snapshot is refreshed.'
         if error in {'report_client_unavailable', 'invalid_report_client'}:
             return True, ('I couldn’t match that client to your report access. Please use their full configured '
                           'name, or ask the Studio team to check your client reporting access.')
@@ -188,6 +287,7 @@ def main(argv=None):
     parser.add_argument('--months', type=int, default=1)
     parser.add_argument('--client', help='Configured client name/alias, or all; never changes the requester')
     parser.add_argument('--detailed', action='store_true')
+    parser.add_argument('--balance', action='store_true', help='Preview the private client hours and purchased-hours report')
     parser.add_argument('--output-dir', default='./studio-report-preview')
     parser.add_argument('--part', type=int)
     recovery = parser.add_mutually_exclusive_group()
@@ -206,7 +306,10 @@ def main(argv=None):
         with httpx.Client(timeout=30, follow_redirects=False) as client:
             api = StudioReportAPI(client, linear_key=env.get('TIMESHEET_LINEAR_READ_API_KEY'),
                                   slack_token=env.get('TIMESHEET_SLACK_BOT_TOKEN'))
-            service = StudioReportService(config, api, clients, env.get('STUDIO_REPORTS_BACKFILL_FILE'))
+            service = StudioReportService(config, api, clients, env.get('STUDIO_REPORTS_BACKFILL_FILE'),
+                balance_path=env.get('STUDIO_CLIENT_BALANCE_FILE'),
+                balance_enabled=flag(env, 'STUDIO_CLIENT_BALANCE_WORKER_ENABLED'),
+                balance_max_age_days=int(env.get('STUDIO_CLIENT_BALANCE_MAX_AGE_DAYS', '7')))
             if args.recover:
                 if args.part is None or not (args.confirmed_absent or args.delivered_reference):
                     raise TimesheetError('delivery_confirmation_required')
@@ -227,6 +330,7 @@ def main(argv=None):
                 return 0
             if args.preview:
                 report = service.report_for_request({'actor': args.actor, 'team': config.team,
+                    **({'report_kind': 'client_balance'} if args.balance else {}),
                     'selector': {'month': args.preview, 'months': args.months, 'action': 'detailed' if args.detailed else 'summary',
                                  **({'client': args.client} if args.client else {})},
                     'requested_at': datetime.now(timezone.utc).isoformat()})

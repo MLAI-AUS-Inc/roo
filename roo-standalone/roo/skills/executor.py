@@ -237,6 +237,9 @@ class SkillExecutor:
             # LLM parameter-extraction call was removed in Phase 4 of the
             # routing redesign — handlers parse remaining details from the text.
             params = dict(param_overrides or {})
+            if skill.name == "studio-client-balance":
+                params = {key: value for key, value in params.items()
+                          if key in {"action", "month", "months", "client"}}
             if params:
                 print(f"   Routed params: {params}")
             
@@ -291,12 +294,17 @@ class SkillExecutor:
                     slack_team_id=kwargs.get("slack_team_id"),
                     request_message_ts=kwargs.get("current_message_ts"),
                 )
-            elif skill.name == "studio-hours":
+            elif skill.name in {"studio-hours", "studio-client-balance"}:
                 from ..studio_report_commands import enqueue as enqueue_studio_report
 
+                # The handler fixes the report capability. Model parameters
+                # may select a period/client, never another report kind.
+                report_options = ({'report_kind': 'client_balance'}
+                                  if skill.name == "studio-client-balance" else {})
                 message = await asyncio.to_thread(
                     enqueue_studio_report, get_settings(), get_backend_actor_context(), params,
                     user_id=user_id, channel_id=channel_id, thread_ts=thread_ts,
+                    **report_options,
                 )
                 result = message
             elif skill.name == "mlai-data-query":
@@ -13154,6 +13162,24 @@ Chunk {index} source: {label}
     def _can_generate_coworking_report_details(self, admin_details: Optional[dict]) -> bool:
         return self._points_admin_role(admin_details) in COWORKING_REPORT_ROLES
 
+    def _can_generate_coworking_report_in_channel(self, user_id: str, channel_id: str) -> bool:
+        """Use only verified Slack scope, never parameters inferred from text."""
+        settings = get_settings()
+        actor = get_backend_actor_context()
+        team = str(getattr(settings, "COWORKING_REPORT_SLACK_TEAM_ID", "") or "").strip()
+        channel = str(getattr(settings, "COWORKING_REPORT_SLACK_CHANNEL_ID", "") or "").strip()
+        return bool(
+            getattr(settings, "ROO_SURFACE", "public") == "public"
+            and re.fullmatch(r"T[A-Z0-9]+", team)
+            and re.fullmatch(r"[CG][A-Z0-9]+", channel)
+            and re.fullmatch(r"[UW][A-Z0-9]+", user_id)
+            and actor
+            and actor.event_id
+            and actor.acting_slack_user_id == user_id
+            and actor.slack_team_id == team
+            and actor.slack_channel_id == channel_id == channel
+        )
+
     def _full_points_admin_denial(self, admin_details: Optional[dict], action_label: str) -> str:
         if self._points_admin_role(admin_details) == "partner":
             return (
@@ -15861,9 +15887,10 @@ Chunk {index} source: {label}
             return f"Submitted! 📬 Task {display_id} is now pending approval.\n\nA reviewer will take a look soon. Legend! 🦘"
         
         elif action == "coworking_report":
-            admin_details = await client.get_admin_details(user_id)
-            if not self._can_generate_coworking_report_details(admin_details):
-                return self._coworking_report_points_admin_denial()
+            if not self._can_generate_coworking_report_in_channel(user_id, channel_id):
+                admin_details = await client.get_admin_details(user_id)
+                if not self._can_generate_coworking_report_details(admin_details):
+                    return self._coworking_report_points_admin_denial()
 
             llm_intent = await self._extract_coworking_report_intent_with_llm(text, params)
             start_date, end_date, error = self._resolve_coworking_report_range_from_intent(text, params, llm_intent)

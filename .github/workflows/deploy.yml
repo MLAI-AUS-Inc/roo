@@ -117,7 +117,11 @@ jobs:
             roo/tests/test_studio_reports.py \
             roo/tests/test_studio_report_clients.py \
             roo/tests/test_studio_report_source.py \
-            roo/tests/test_studio_report_routing.py -q
+            roo/tests/test_studio_report_routing.py \
+            roo/tests/test_studio_client_balance.py \
+            roo/tests/test_studio_client_balance_source.py \
+            roo/tests/test_studio_client_balance_routing.py \
+            roo/tests/test_studio_client_balance_installer.py -q
 
       - name: Validate production Compose configuration
         working-directory: roo-standalone
@@ -188,12 +192,14 @@ jobs:
           OFFICE_MANAGER_ACTIONS_ENABLED: ${{ vars.OFFICE_MANAGER_ACTIONS_ENABLED || 'false' }}
           LINEAR_CHANNEL_ISSUE_WRITES_ENABLED: ${{ vars.LINEAR_CHANNEL_ISSUE_WRITES_ENABLED || 'false' }}
           FOUNDER_ACCOUNT_LINK_ENABLED: ${{ vars.FOUNDER_ACCOUNT_LINK_ENABLED || 'false' }}
+          COWORKING_REPORT_SLACK_TEAM_ID: ${{ vars.COWORKING_REPORT_SLACK_TEAM_ID }}
+          COWORKING_REPORT_SLACK_CHANNEL_ID: ${{ vars.COWORKING_REPORT_SLACK_CHANNEL_ID }}
           COWORKING_INTENTS_V3_MIGRATION_APPROVED: ${{ vars.COWORKING_INTENTS_V3_MIGRATION_APPROVED || 'false' }}
         with:
           host: ${{ secrets.DO_HOST }}
           username: ${{ secrets.DO_USERNAME }}
           key: ${{ secrets.DO_SSH_KEY }}
-          envs: SIM_PATIENT_API_KEY,SIM_PATIENT_SAFETY_SALT,ROO_API_KEY,VICTOR_AI_ROO_SIGNING_SECRET,ROO_PUBLIC_HOST,ROO_PRIVATE_BASE_URL,MEETING_ROOM_BOOKING_ENABLED,OFFICE_MANAGER_ACTIONS_ENABLED,LINEAR_CHANNEL_ISSUE_WRITES_ENABLED,FOUNDER_ACCOUNT_LINK_ENABLED,COWORKING_INTENTS_V3_MIGRATION_APPROVED,RELEASE_SHA
+          envs: SIM_PATIENT_API_KEY,SIM_PATIENT_SAFETY_SALT,ROO_API_KEY,VICTOR_AI_ROO_SIGNING_SECRET,ROO_PUBLIC_HOST,ROO_PRIVATE_BASE_URL,MEETING_ROOM_BOOKING_ENABLED,OFFICE_MANAGER_ACTIONS_ENABLED,LINEAR_CHANNEL_ISSUE_WRITES_ENABLED,FOUNDER_ACCOUNT_LINK_ENABLED,COWORKING_REPORT_SLACK_TEAM_ID,COWORKING_REPORT_SLACK_CHANNEL_ID,COWORKING_INTENTS_V3_MIGRATION_APPROVED,RELEASE_SHA
           script: |
             # Stop if any command fails
             set -eu
@@ -243,6 +249,10 @@ jobs:
               false|FALSE|False|0|no|NO|No|off|OFF|Off|'') COWORKING_INTENTS_V3_MIGRATION_APPROVED=false ;;
               *) echo "COWORKING_INTENTS_V3_MIGRATION_APPROVED must be boolean" >&2; exit 1 ;;
             esac
+            if [ -n "$COWORKING_REPORT_SLACK_TEAM_ID" ] || [ -n "$COWORKING_REPORT_SLACK_CHANNEL_ID" ]; then
+              printf '%s' "$COWORKING_REPORT_SLACK_TEAM_ID" | grep -Eq '^T[A-Z0-9]+$'
+              printf '%s' "$COWORKING_REPORT_SLACK_CHANNEL_ID" | grep -Eq '^[CG][A-Z0-9]+$'
+            fi
             
             # Define deployment directory
             DEPLOY_DIR="/root/roo"
@@ -387,6 +397,8 @@ jobs:
             upsert_env "OFFICE_MANAGER_ACTIONS_ENABLED" "$OFFICE_MANAGER_ACTIONS_ENABLED"
             upsert_env "FOUNDER_TOOLS_LINK_ORIGINS" "https://mlai.au,https://chat.mlai.au"
             upsert_env "FOUNDER_ACCOUNT_LINK_ENABLED" "$FOUNDER_ACCOUNT_LINK_ENABLED"
+            upsert_env "COWORKING_REPORT_SLACK_TEAM_ID" "$COWORKING_REPORT_SLACK_TEAM_ID"
+            upsert_env "COWORKING_REPORT_SLACK_CHANNEL_ID" "$COWORKING_REPORT_SLACK_CHANNEL_ID"
             implicit_actions="respond_in_chat,mlai-points:balance,mlai-points:topup_points"
             if [ "$FOUNDER_ACCOUNT_LINK_ENABLED" = "true" ]; then
               implicit_actions="$implicit_actions,mlai-points:link_founder_account"
