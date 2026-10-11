@@ -13023,11 +13023,6 @@ Chunk {index} source: {label}
         scored.sort(key=lambda row: row[0], reverse=True)
         return scored
 
-    def _rate_card_name_ratio(self, query: str, item: dict) -> float:
-        """Name similarity used only to order equal smart-award scores."""
-        name = item.get("name", "") or ""
-        return SequenceMatcher(None, str(query or "").lower(), name.lower()).ratio()
-
     def _is_explicit_rate_card_request(self, text: str) -> bool:
         """True when the user asked to see the catalog itself."""
         normalized = " ".join(str(text or "").lower().split())
@@ -13131,20 +13126,26 @@ Chunk {index} source: {label}
         )
 
     def _format_points_estimate(self, description: str, card: list) -> str:
-        ranked = [
-            (score, self._rate_card_name_ratio(description, item), item)
+        # Use the smart-award threshold rather than price unrelated work from
+        # whichever name happens to have the highest weak text similarity.
+        closest = [
+            item
             for score, item in self._score_rate_card_rows(description, card)
-        ]
-        ranked.sort(key=lambda row: (row[0], row[1]), reverse=True)
-        closest = ranked[:3]
-        best = closest[0][2]
+            if score > 40
+        ][:3]
+        if not closest:
+            return (
+                "I couldn't find a close rate-card match for that work. "
+                "Describe it more specifically or name a comparable activity."
+            )
+        best = closest[0]
         points = best.get("points", 0)
         lines = [
             f"I'd recommend **{points} points** for this.",
             "",
             "Closest matches:",
         ]
-        for _, _, item in closest:
+        for item in closest:
             lines.append(
                 f"• **{item.get('name', 'Unknown')}** ({item.get('points', 0)} pts) - "
                 f"{item.get('description', '')}"

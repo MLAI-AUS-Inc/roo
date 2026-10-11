@@ -30,8 +30,10 @@ retry, 0.25-second retry backoff, and circuit breaker are unchanged.
 - A failed or invalid read shows
   `I couldn't load the rate card just now. Please try again in a moment.`
 - `estimate_points` scores the described work with the same rate-card scorer
-  used for smart awards. The reply is a recommended point value, the two or
-  three closest rows (name, points, description), and one sentence of why.
+  used for smart awards, including its score-above-40 threshold. The reply is
+  a recommended point value, up to three matching rows (name, points,
+  description), and one sentence of why. If no row clears that threshold,
+  Roo asks for more detail or a comparable activity without recommending points.
   A missing description asks what the work is. An empty card or a failed read
   stays one line and never pastes the catalog.
 - If routing selects `view_rate_card` for an estimate request that names the

@@ -1,6 +1,5 @@
 """Rate-card display and smart-award behavior using external-boundary doubles."""
 
-from pathlib import Path
 from types import MethodType, SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -8,7 +7,6 @@ import pytest
 
 from roo.clients import mlai_backend as backend_module
 from roo.skills import executor as executor_module
-from roo.skills.loader import load_skill_from_directory
 
 
 RATE_CARD_ROW = {
@@ -37,6 +35,10 @@ RATE_CARD_CATALOG = [
 FAILURE_MESSAGE = "I couldn't load the rate card just now. Please try again in a moment."
 CATALOG_HEADER = "📋 **Standard Point Rates:**"
 ASK_FOR_WORK = "What work should I estimate Roo points for?"
+NO_CLOSE_MATCH = (
+    "I couldn't find a close rate-card match for that work. "
+    "Describe it more specifically or name a comparable activity."
+)
 
 
 @pytest.fixture
@@ -164,29 +166,6 @@ async def test_textual_amount_after_numeric_slack_id_is_used(points_context, poi
     )
 
 
-def test_points_skill_routes_estimates_away_from_the_catalog():
-    skill = load_skill_from_directory(
-        Path(__file__).resolve().parents[2] / "skills" / "mlai_points"
-    )
-    examples = {
-        (row.get("text"), row.get("action"))
-        for row in skill.routing.get("examples", [])
-    }
-    negatives = {
-        (row.get("text"), row.get("instead"))
-        for row in skill.routing.get("negative_examples", [])
-    }
-    estimate = next(action for action in skill.actions if action["name"] == "estimate_points")
-
-    assert ("estimate how many roo points for adding MFA after signup", "estimate_points") in examples
-    assert ("how many points is this task worth", "estimate_points") in examples
-    assert ("show the rate card", "view_rate_card") in examples
-    assert ("show the standard point rates", "view_rate_card") in examples
-    assert ("all the ways to earn", "view_rate_card") in examples
-    assert ("estimate points for new work", "estimate_points") in negatives
-    assert "task_description" in estimate["params"]
-
-
 def _assert_newsletter_recommendation(result: str):
     assert "I'd recommend **5 points** for this." in result
     assert "• **Newsletter** (5 pts) - Write a newsletter" in result
@@ -194,7 +173,7 @@ def _assert_newsletter_recommendation(result: str):
     assert CATALOG_HEADER not in result
     assert "Grant full application" not in result
     assert "Workshop assistant" not in result
-    assert result.count("• **") == 3
+    assert result.count("• **") == 1
 
 
 @pytest.mark.asyncio
@@ -265,12 +244,41 @@ async def test_view_rate_card_quoted_task_does_not_dump_the_catalog(points_conte
         'authenticator app and/or add a passkey."'
     )
     result = await points_context.execute("view_rate_card", text=text)
-    assert "I'd recommend **" in result
-    assert "Closest matches:" in result
+    assert result == NO_CLOSE_MATCH
     assert CATALOG_HEADER not in result
-    assert result.count("• **") <= 3
-    shown = [row["name"] for row in RATE_CARD_CATALOG if row["name"] in result]
-    assert len(shown) <= 3
+    assert "\n" not in result
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["estimate_points", "view_rate_card"])
+@pytest.mark.parametrize("description", [
+    "Implement phone 2FA, authenticator apps and passkeys after signup",
+    "Coordinate venue catering",
+])
+async def test_estimates_do_not_price_zero_or_weak_matches(points_context, action, description):
+    points_context.client.get_rate_card.return_value = RATE_CARD_CATALOG + [{
+        "name": "Event organizer", "points": 20,
+        "description": "Coordinate venue catering for the community meetup.",
+    }]
+    result = await points_context.execute(
+        action, text=f"estimate how many roo points for {description}",
+        task_description=description,
+    )
+    assert result == NO_CLOSE_MATCH
+    points_context.client.get_rate_card.assert_awaited_once()
+    points_context.client.award_points.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_estimates_show_at_most_three_close_matches(points_context):
+    points_context.client.get_rate_card.return_value = [
+        {"name": f"Newsletter {suffix}", "points": 5, "description": "Write a newsletter"}
+        for suffix in ("prep", "review", "writing", "publishing")
+    ] + [{"name": "Door shift", "points": 12, "description": "Registration at the door"}]
+    result = await points_context.execute("estimate_points", task_description="Newsletter")
+    assert "I'd recommend **5 points**" in result
+    assert result.count("• **") == 3
+    assert "Door shift" not in result
 
 
 @pytest.mark.asyncio

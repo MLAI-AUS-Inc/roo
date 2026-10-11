@@ -103,3 +103,19 @@ def test_eval_case_actions_exist_in_skill_manifests():
                 f"{case.expect_skill} (has {action_names})"
             )
     assert not failures, "dataset/manifest drift:\n" + "\n".join(failures)
+
+
+def test_points_skill_routes_estimates_away_from_the_catalog():
+    skill = next(skill for skill in _skills() if skill.name == "mlai-points")
+    examples = {
+        (row.get("text"), row.get("action"))
+        for row in skill.routing.get("examples", [])
+    }
+    estimate = next(action for action in skill.actions if action["name"] == "estimate_points")
+
+    assert ("estimate how many roo points for adding MFA after signup", "estimate_points") in examples
+    assert ("how many points is this task worth", "estimate_points") in examples
+    assert ("show the rate card", "view_rate_card") in examples
+    assert ("show the standard point rates", "view_rate_card") in examples
+    assert ("all the ways to earn", "view_rate_card") in examples
+    assert "task_description" in estimate["params"]

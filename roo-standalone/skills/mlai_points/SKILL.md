@@ -1,6 +1,6 @@
 ---
 name: mlai-points
-description: Manage MLAI points system - check balance, book coworking, claim tasks, redeem rewards
+description: Roo points, tasks, rewards and coworking
 routing:
   use_when: >
     Roo points, rewards, tasks, coworking, and points admin.
@@ -27,18 +27,17 @@ routing:
     - {text: "add a task to linear to fix the login bug", instead: linear-meeting-actions}
     - {text: "book club is meeting thursday, can you remind the channel?", instead: respond_in_chat}
     - {text: "how many people came to our last event?", instead: luma-events}
-    - {text: "estimate points for new work", instead: estimate_points}
 actions:
   - name: link_founder_account
     description: Link the user's Slack and Founder Tools accounts.
   - name: balance
-    description: Show the points balance.
+    description: Privately show the user's points balance.
   - name: flex_points
-    description: Share a lifetime-earned total.
+    description: Share the user's own lifetime-earned total in-thread.
   - name: delete_flex
     description: Privately delete the user's flex.
   - name: history
-    description: Show recent points transactions.
+    description: Privately show the user's recent points transactions.
     params:
       days: {type: integer, description: "How many days back (default 7)."}
       limit: {type: integer, description: "Max entries (default 10)."}
@@ -117,7 +116,7 @@ actions:
   - name: view_rate_card
     description: List the rate card.
   - name: estimate_points
-    description: Recommend points for new work.
+    description: Estimate matched work; ask if no close rate.
     params:
       task_description: {type: string, description: "Work to price."}
   - name: topup_points
