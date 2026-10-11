@@ -3284,6 +3284,9 @@ Keep the response concise but informative."""
                             params.get("project_hint") or candidate.get("project_hint") or ""
                         ).strip()
                     ),
+                    team_requested=bool(
+                        str(params.get("team_hint") or candidate.get("team_hint") or "").strip()
+                    ),
                 )
             duplicate = self._find_linear_meeting_duplicate(
                 candidate,
@@ -3359,6 +3362,7 @@ Keep the response concise but informative."""
                 elif (
                     use_direct_issue_path
                     and not team_match.get("team")
+                    and not project_match.get("project")
                     and float(owner_match.get("confidence") or 0.0) >= uncertain_threshold
                     and float(project_match.get("confidence") or 0.0) >= uncertain_threshold
                 ):
@@ -6382,6 +6386,7 @@ Chunk {index} source: {label}
         teams: list[dict[str, Any]],
         owner_requested: bool,
         project_requested: bool,
+        team_requested: bool,
     ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
         """Allow an explicit Linear command to omit the assignee and project.
 
@@ -6401,7 +6406,9 @@ Chunk {index} source: {label}
                 "confidence": 1.0,
                 "reason": "No project requested",
             }
-        if not project_requested:
+        # A project inferred from Slack context still owns its team boundary.
+        # A failed explicit team hint must not become an unrelated fallback.
+        if not project_requested and not project_match.get("project") and not team_requested:
             if (
                 team_match.get("team")
                 and team_match.get("reason") == "Using configured default team"

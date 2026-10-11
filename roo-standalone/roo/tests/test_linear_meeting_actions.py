@@ -2045,6 +2045,76 @@ async def test_linear_direct_issue_command_reports_ambiguous_assignee(monkeypatc
     assert "project: Venture Studio; assignee: Unresolved" in result["message"]
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target", ["inaccessible_project", "unmatched_team"])
+async def test_linear_direct_command_preserves_team_selection_failures(monkeypatch, target):
+    executor = SkillExecutor()
+    created_inputs = []
+    team = {"id": "team-mlai", "key": "MLA", "name": "MLAI"}
+    project = {
+        "id": "project-widget",
+        "name": "Widget",
+        "slackChannelId": "C1",
+        "teams": {"nodes": [{"id": "team-studio", "key": "STU", "name": "Studio"}]},
+    }
+
+    class FakeClient:
+        async def list_teams(self):
+            return [team]
+
+        async def list_users(self):
+            return []
+
+        async def list_active_projects(self):
+            return [project] if target == "inaccessible_project" else []
+
+        async def list_issue_labels(self):
+            return []
+
+        async def list_recent_open_issues(self):
+            return []
+
+        async def create_issue(self, **kwargs):
+            created_inputs.append(kwargs)
+            return {"identifier": "MLA-1", "title": kwargs["title"]}
+
+    class FakeSkill:
+        def get_client_class(self, name):
+            return FakeClient
+
+    async def fake_inference(**kwargs):
+        return SimpleNamespace(value=LinearDirectIssueBatch(issues=[
+            LinearCandidate(title="Fix login flow", description="Fix login flow", confidence=0.96)
+        ]))
+
+    monkeypatch.setattr(executor_module, "run_linear_structured_inference", fake_inference)
+    monkeypatch.setattr(executor_module, "get_settings", lambda: SimpleNamespace(
+        OPENAI_API_KEY=None,
+        LINEAR_DEFAULT_TEAM=None,
+        LINEAR_MEETING_AUTO_CREATE_MIN_CONFIDENCE=0.85,
+        LINEAR_MEETING_UNCERTAIN_MIN_CONFIDENCE=0.65,
+    ))
+
+    result = await executor._execute_linear_meeting_actions(
+        skill=FakeSkill(),
+        text="create a task in linear to fix the login flow",
+        params={"team_hint": "STU"} if target == "unmatched_team" else {},
+        user_id="U1",
+        channel_id="C1",
+        thread_ts="1.1",
+        thread_history=[],
+    )
+
+    assert created_inputs == []
+    assert result["data"]["created_count"] == 0
+    assert result["data"]["review_count"] == 0
+    assert result["data"]["skipped_count"] == 1
+    if target == "inaccessible_project":
+        assert "API key cannot access" in result["message"]
+    else:
+        assert "Linear team unclear" in result["message"]
+
+
 def test_linear_direct_issue_request_accepts_prd_command():
     executor = SkillExecutor()
 
