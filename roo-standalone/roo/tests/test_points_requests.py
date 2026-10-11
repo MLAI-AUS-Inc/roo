@@ -3151,6 +3151,118 @@ async def run_chart_report(**overrides):
     return await SkillExecutor()._handle_points_action(**kwargs)
 
 
+def shared_report_settings(monkeypatch, **overrides):
+    settings = {
+        "ROO_SURFACE": "public", "ROUTER_MODEL": "test-model",
+        "COWORKING_REPORT_SLACK_TEAM_ID": "TSHARED",
+        "COWORKING_REPORT_SLACK_CHANNEL_ID": "CSHARED",
+    }
+    settings.update(overrides)
+    monkeypatch.setattr(executor_module, "get_settings", lambda: SimpleNamespace(**settings))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("include_chart", [False, True])
+async def test_coworking_report_ordinary_member_in_shared_chat(monkeypatch, coworking_chart_uploads, include_chart):
+    from roo.backend_identity import BackendActorContext, use_backend_actor_context
+
+    shared_report_settings(monkeypatch)
+    client = FakeCoworkingReportClient()
+    with use_backend_actor_context(BackendActorContext("TSHARED", "USTAFF", "CSHARED", "111.222", "event-report")):
+        result = await run_chart_report(
+            client=client, user_id="USTAFF", channel_id="CSHARED",
+            text="coworking report last 3 months", params={"include_chart": include_chart},
+        )
+    assert "Source: Active coworking bookings" in result
+    assert client.calls == [("USTAFF", "2026-06-17", "2026-09-16")]
+    assert bool(coworking_chart_uploads) is include_chart
+    if include_chart:
+        assert coworking_chart_uploads[0]["channel"] == "CSHARED"
+
+
+@pytest.mark.asyncio
+async def test_coworking_report_shared_chat_comparison_fetches_both_periods(monkeypatch):
+    from roo.backend_identity import BackendActorContext, use_backend_actor_context
+
+    shared_report_settings(monkeypatch)
+    client = FakeCoworkingReportClient()
+    with use_backend_actor_context(BackendActorContext("TSHARED", "USTAFF", "CSHARED", "111.222", "event-report")):
+        result = await run_chart_report(
+            client=client, user_id="USTAFF", channel_id="CSHARED",
+            text="coworking report from 2026-01-08 to 2026-01-14 compared with the previous period",
+            params={"start_date": "2026-01-08", "end_date": "2026-01-14"},
+        )
+    assert "Source: Active coworking bookings" in result
+    assert client.calls == [("USTAFF", "2026-01-08", "2026-01-14"), ("USTAFF", "2026-01-01", "2026-01-07")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("team,actor,channel,event,reply_channel", [
+    ("TOTHER", "USTAFF", "CSHARED", "event-report", "CSHARED"),
+    ("TSHARED", "UOTHER", "CSHARED", "event-report", "CSHARED"),
+    ("TSHARED", "USTAFF", "COTHER", "event-report", "COTHER"),
+    ("TSHARED", "USTAFF", "DSHARED", "event-report", "DSHARED"),
+    ("TSHARED", "USTAFF", "CSHARED", "", "CSHARED"),
+    ("TSHARED", "USTAFF", "CSHARED", "event-report", "COTHER"),
+])
+async def test_coworking_report_shared_chat_rejects_mismatched_context(monkeypatch, team, actor, channel, event, reply_channel):
+    from roo.backend_identity import BackendActorContext, use_backend_actor_context
+
+    shared_report_settings(monkeypatch)
+    client = FakeCoworkingReportClient()
+    with use_backend_actor_context(BackendActorContext(team, actor, channel, "111.222", event)):
+        result = await run_chart_report(client=client, user_id="USTAFF", channel_id=reply_channel)
+    assert "need to be a Points Admin" in result
+    assert client.calls == []
+
+
+@pytest.mark.asyncio
+async def test_coworking_report_params_cannot_invent_shared_chat_context(monkeypatch):
+    shared_report_settings(monkeypatch)
+    client = FakeCoworkingReportClient()
+    result = await run_chart_report(
+        client=client, user_id="USTAFF", channel_id="CSHARED",
+        params={"slack_team_id": "TSHARED", "slack_channel_id": "CSHARED", "event_id": "pretend-event"},
+    )
+    assert "need to be a Points Admin" in result
+    assert client.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("settings", [
+    {"COWORKING_REPORT_SLACK_TEAM_ID": ""},
+    {"COWORKING_REPORT_SLACK_TEAM_ID": "TSHARED,TOTHER"},
+    {"COWORKING_REPORT_SLACK_CHANNEL_ID": ""},
+    {"COWORKING_REPORT_SLACK_CHANNEL_ID": "CSHARED,COTHER"},
+    {"ROO_SURFACE": "admin"},
+])
+async def test_coworking_report_shared_chat_disabled_without_public_configuration(monkeypatch, settings):
+    from roo.backend_identity import BackendActorContext, use_backend_actor_context
+
+    shared_report_settings(monkeypatch, **settings)
+    client = FakeCoworkingReportClient()
+    with use_backend_actor_context(BackendActorContext("TSHARED", "USTAFF", "CSHARED", "111.222", "event-report")):
+        result = await run_chart_report(client=client, user_id="USTAFF", channel_id="CSHARED")
+    assert "need to be a Points Admin" in result
+    assert client.calls == []
+
+
+@pytest.mark.asyncio
+async def test_coworking_report_shared_chat_does_not_grant_task_management(monkeypatch):
+    from roo.backend_identity import BackendActorContext, use_backend_actor_context
+
+    shared_report_settings(monkeypatch)
+    client = FakeCoworkingReportClient()
+    with use_backend_actor_context(BackendActorContext("TSHARED", "USTAFF", "CSHARED", "111.222", "event-report")):
+        result = await SkillExecutor()._handle_points_action(
+            client=client, action="create_task", params={"title": "Test task", "points": 5},
+            text="create task", user_id="USTAFF", channel_id="CSHARED", thread_ts="111.222",
+            skill=SimpleNamespace(name="mlai-points"),
+        )
+    assert "need to be a full Points Admin to create tasks" in result
+    assert client.calls == []
+
+
 @pytest.mark.asyncio
 async def test_coworking_daily_chart_uses_report_dates_and_same_thread(monkeypatch, coworking_chart_uploads):
     monkeypatch.setattr("roo.utils.get_current_date", lambda: date(2026, 9, 16))

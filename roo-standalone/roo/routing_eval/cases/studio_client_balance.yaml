@@ -1,0 +1,33 @@
+- id: studio-client-balance-named-chart
+  text: "Show Mark Ghiasy's used hours minus purchased hours as a burn down chart"
+  expect: {skill: studio-client-balance, action: summary, params_subset: {client: "Mark Ghiasy"}}
+  tags: [studio-client-balance, client-scope]
+- id: studio-client-balance-project-to-date
+  text: "Show my project-to-date hours used minus purchased-hour credits"
+  expect: {skill: studio-client-balance, action: summary, params_subset: {month: all}}
+  tags: [studio-client-balance]
+- id: studio-client-balance-last-three-months
+  text: "Chart Mark Ghiasy's used hours and paid-hour credits for the last three months"
+  expect: {skill: studio-client-balance, action: summary, params_subset: {client: "Mark Ghiasy", month: recent, months: 3}}
+  tags: [studio-client-balance, client-scope]
+- id: studio-client-balance-full-months
+  text: "Show my used-hours and purchased-hours balance for the last three full months"
+  expect: {skill: studio-client-balance, action: summary, params_subset: {month: last_complete, months: 3}}
+  tags: [studio-client-balance]
+- id: studio-client-balance-detail-followup
+  text: "Give me the detailed hours and payment credits behind that balance chart"
+  thread: {last_skill: studio-client-balance}
+  expect: {skill: studio-client-balance, action: detailed}
+  tags: [studio-client-balance, follow-up]
+- id: studio-client-balance-hours-trap
+  text: "How many Studio hours have Mark's projects used this month?"
+  expect: {skill: studio-hours, action: summary}
+  tags: [studio-client-balance, trap]
+- id: studio-client-balance-reconcile-trap
+  text: "Prepare every outstanding Xero bank transaction for reconciliation"
+  expect: {skill: reconciliation-report, action: start_statement_reconciliation}
+  tags: [studio-client-balance, trap]
+- id: studio-client-balance-points-trap
+  text: "What's my Roo Points balance?"
+  expect: {skill: mlai-points, action: balance}
+  tags: [studio-client-balance, trap]

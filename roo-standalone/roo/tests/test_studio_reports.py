@@ -742,15 +742,16 @@ def test_charts_preserve_exact_period_and_monthly_reconciliation(setup, monkeypa
     assert calls['project_colors'] == [stacks['Master App'][3], stacks['Cybertest'][3]]
 
 
-def test_reviewed_cutoff_preserves_later_live_work_with_separate_basis(setup):
+def test_delayed_ticket_completion_never_adds_estimates_to_invoice_first_totals(setup):
     value = validate_backfill(invoice_first_manifest(setup), setup.config)
     later = timestamp('2026-10-10T04:00:00Z')
     data = [ticket(2, completed='2026-10-01T04:00:00Z')]
     result = build_client_report(setup.config, setup.clients['UMARK'], {'month':'all'}, data, later, value)
-    assert sum(r['units'] for r in result['rows']) == 1383
-    assert result['monthly'][-1]['units'] == 100
+    assert sum(r['units'] for r in result['rows']) == 1283
+    assert result['monthly'][-1]['units'] == 0
     assert result['basis'] == 'reviewed_invoices_and_completed_ticket_sizes'
-    assert '1h from completed-ticket estimates' in summary(result)
+    assert '1h from completed-ticket estimates' not in summary(result)
+    assert any('may_overlap_or_need_recorded_hours' in row['reason'] for row in result['exceptions'])
 
 
 def test_estimated_month_counts_once_and_preserves_source_dates_and_disclosure(setup, monkeypatch):

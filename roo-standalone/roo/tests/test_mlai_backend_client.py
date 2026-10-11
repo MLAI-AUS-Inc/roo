@@ -395,6 +395,59 @@ async def test_get_coworking_report_uses_canonical_endpoint(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_coworking_report_forwards_verified_slack_scope_with_roo_credential(monkeypatch):
+    from roo.backend_identity import BackendActorContext
+
+    captured = []
+
+    async def handler(method, url, **kwargs):
+        captured.append(kwargs)
+        return httpx.Response(200, request=httpx.Request(method, url), json={"totals": {"booked_user_days": 3}})
+
+    monkeypatch.setattr(backend_module.httpx, "AsyncClient", lambda **kwargs: FakeAsyncClient(handler))
+    client = MLAIBackendClient(
+        base_url="https://backend.test", api_key="roo-test-key", internal_api_key="different-admin-test-key",
+        actor_context=BackendActorContext("TSHARED", "USTAFF", "CSHARED", "111.222", "event-report"),
+    )
+    for start, end in [("2026-01-08", "2026-01-14"), ("2026-01-01", "2026-01-07")]:
+        result = await client.get_coworking_report("USTAFF", start, end)
+        assert result == {"totals": {"booked_user_days": 3}}
+    assert len(captured) == 2
+    for request in captured:
+        assert request["headers"]["X-API-Key"] == "roo-test-key"
+        assert request["params"]["slack_user_id"] == "USTAFF"
+        assert request["params"].get("slack_team_id") == "TSHARED"
+        assert request["params"].get("slack_channel_id") == "CSHARED"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("team,actor,channel,event,surface", [
+    ("TSHARED", "UOTHER", "CSHARED", "event-report", "public"),
+    ("", "USTAFF", "CSHARED", "event-report", "public"),
+    ("TSHARED", "USTAFF", "", "event-report", "public"),
+    ("TSHARED", "USTAFF", "DSHARED", "event-report", "public"),
+    ("TSHARED", "USTAFF", "CSHARED", "", "public"),
+    ("TSHARED", "USTAFF", "CSHARED", "event-report", "admin"),
+])
+async def test_coworking_report_does_not_forward_invalid_or_other_actor_context(monkeypatch, team, actor, channel, event, surface):
+    from roo.backend_identity import BackendActorContext
+
+    captured = {}
+
+    async def fake_request(method, endpoint, **kwargs):
+        captured.update(kwargs)
+        return httpx.Response(200, request=httpx.Request(method, "https://backend.test" + endpoint), json={"totals": {}})
+
+    client = MLAIBackendClient(
+        base_url="https://backend.test", api_key="roo-test-key", surface=surface,
+        actor_context=BackendActorContext(team, actor, channel, "111.222", event),
+    )
+    monkeypatch.setattr(client, "_request", fake_request)
+    await client.get_coworking_report("USTAFF", "2026-01-01", "2026-01-31")
+    assert captured["params"] == {"slack_user_id": "USTAFF", "start_date": "2026-01-01", "end_date": "2026-01-31"}
+
+
+@pytest.mark.asyncio
 async def test_book_coworking_many_uses_canonical_endpoint_and_deduped_payload(monkeypatch):
     captured = {}
 

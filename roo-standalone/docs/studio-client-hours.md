@@ -195,9 +195,9 @@ integer hundredths for reports, preserving quantities such as 12.83h; payroll's
 quarter-hour ledger is unchanged. Add `coverage: {start: YYYY-MM-DD, through:
 YYYY-MM-DD}`, `invoice_first_projects: [verified project IDs]`, and optional
 `qualifications: [{project_id, reference, reason}]`. Coverage describes the reviewed
-reporting interval, not invented work dates. Ticket estimates through the reviewed
-coverage cutoff for these projects are excluded to avoid overlap; unmatched completed tickets remain in
-the exceptions CSV for review. Other projects retain their existing source rules.
+reporting interval, not invented work dates. Ticket estimates for these projects are excluded at every completion date to
+avoid overlap: work already invoiced can be marked complete much later. Unmatched
+completed tickets remain in the exceptions CSV for review. Other projects retain their existing source rules.
 
 Sources default to `kind: invoice`; additional reviewed time claims use
 `kind: recorded_time` and `reference` instead of `invoice`, with their own source
@@ -233,11 +233,28 @@ invoice discrepancies only when explicitly accepted in the reconciliation.
 Preserve those qualifications in client-safe text; do not call these quantities
 independently verified clock time. Exclude void/superseded invoices, duplicate
 payments and work belonging to other projects. Additional time needs distinct
-reviewed evidence, not a ticket-size estimate. Later completed work retains live
-ticket estimates, explicitly labelled separately from invoice/recorded hours.
-Review and refresh the private manifest and coverage cutoff to reconcile later
-invoices/logs. This policy does not expand access or change
+reviewed evidence, not a ticket-size estimate. Later completed tickets do not add estimates to an invoice-first project.
+Review and refresh the private manifest to include later invoices or distinct logs. This policy does not expand access or change
 accounting records. Back up both code and the versioned manifest for rollback.
+
+### One reviewed source across charts
+
+A reviewed client-balance dataset can opt into ordinary project/month reports
+with `hours_reporting: true`. Every work row then requires a verified `builder_id`;
+optional `qualifications` use the same client-safe project/reference/reason format.
+The worker replaces the covered projects' legacy rows with this dataset rather
+than adding a second copy. Project, monthly and paid-credit views preserve the same
+integer millionths of an hour, receipt history and reviewed cutoff. Other permitted
+projects retain their existing source rules and access grants.
+
+Monthly projection uses the same work-window allocation as the balance chart.
+Cross-month and estimated work periods are marked; daily shapes are illustrative,
+not timer evidence. These reports show invoice/recorded hour-units, with no inferred
+monthly allowance or billable entitlement. Ticket sizes and outgoing contractor
+payments never add work quantities to covered projects. The snapshot's seven-day
+freshness limit and digest are checked on request and again before delivery; an
+updated or stale source invalidates a queued older report. Original finance rows,
+provenance paths and contractor money are not copied into ordinary hours exports.
 
 ### Worker setup
 
