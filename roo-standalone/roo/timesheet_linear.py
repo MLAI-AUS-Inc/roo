@@ -37,6 +37,10 @@ def next_page(connection, seen):
 
 
 class TimesheetAPI(ReminderAPI):
+    def collect_for_report(self, config, end, deferred, *, draft, period_start, required_from, allocated):
+        """Coverage-aware readers override this; legacy readers keep their contract."""
+        return self.collect(config, end, deferred)
+
     def verify(self, config):
         if self.slack('auth.test').get('team_id') != config.team:
             raise TimesheetError('workspace_mismatch')

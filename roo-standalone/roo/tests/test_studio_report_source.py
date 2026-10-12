@@ -191,3 +191,115 @@ def test_slow_failure_backs_off_from_failure_and_honors_source_cooldown(setup, m
     request = json.loads(path.read_text())
     assert request['retry_at'] == NOW.timestamp() + expected_delay
     assert not (setup.config.directory / 'requests' / path.name).exists()
+
+
+def gated_source(config, handler, *, key='synthetic'):
+    api = StudioSourceAPI(httpx.Client(transport=httpx.MockTransport(handler)),
+                          linear_key=key, slack_token='synthetic')
+    api.slack = lambda *args, **kwargs: {'team_id': config.team}
+    return api
+
+
+@pytest.mark.parametrize('status', [200, 400, 429])
+def test_preflight_rate_limit_persists_for_other_instances(setup, monkeypatch, status):
+    clock = [NOW.timestamp()]
+    monkeypatch.setattr('roo.studio_report_source.time.time', lambda: clock[0])
+    calls = []
+    def limited(request):
+        calls.append(request)
+        return httpx.Response(status, json={'errors': [{'message': 'PRIVATE-BODY',
+            'extensions': {'code': 'RATELIMITED'}}]}, headers={
+                'Retry-After': '120', 'x-ratelimit-requests-remaining': '0',
+                'x-ratelimit-requests-reset': str((NOW.timestamp() + 3600) * 1000)})
+    api = gated_source(setup.config, limited)
+    with pytest.raises(SourceRetryError) as first:
+        api.verify(setup.config)
+    assert first.value.retry_at == NOW.timestamp() + 3600
+    restarted = gated_source(setup.config, limited)
+    with pytest.raises(SourceRetryError) as second:
+        restarted.verify(setup.config)
+    assert second.value.retry_at == NOW.timestamp() + 3600
+    assert len(calls) == 1
+    saved = list((setup.config.directory / 'linear-cooldowns').glob('*.json'))
+    assert len(saved) == 1 and 'PRIVATE-BODY' not in saved[0].read_text()
+    assert 'synthetic' not in saved[0].read_text()
+    clock[0] += 3601
+    with pytest.raises(SourceRetryError):
+        restarted.verify(setup.config)
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize('bad', ['broken-json', {'retry_at': 'tomorrow'}, {'retry_at': float('nan')},
+                              {'retry_at': True}, []])
+def test_cooldown_lock_and_invalid_state_fail_without_http(setup, monkeypatch, bad):
+    calls = []
+    api = gated_source(setup.config, lambda r: calls.append(r) or httpx.Response(200, json={'data': {}}))
+    api._bind_source(setup.config)
+    store, key = api._cooldowns, api._source_namespace
+    with store.locked(key) as acquired:
+        assert acquired
+        with pytest.raises(SourceRetryError, match='linear_source_busy'):
+            api.linear('query { organization { id } }')
+    (store.directory / (key + '.json')).write_text(bad if isinstance(bad, str) else json.dumps(bad))
+    with pytest.raises(SourceRetryError, match='linear_cooldown_unavailable'):
+        api.linear('query { organization { id } }')
+    assert calls == []
+
+
+def test_failed_cooldown_write_keeps_in_memory_deadline(setup, monkeypatch):
+    monkeypatch.setattr('roo.studio_report_source.time.time', lambda: NOW.timestamp())
+    calls = []
+    api = gated_source(setup.config, lambda r: calls.append(r) or httpx.Response(429,
+        json={}, headers={'Retry-After': '900'}))
+    api._bind_source(setup.config)
+    monkeypatch.setattr(api._cooldowns, 'write', Mock(side_effect=OSError('disk full')))
+    for _ in range(2):
+        with pytest.raises(SourceRetryError) as error:
+            api.linear('query { organization { id } }')
+        assert error.value.retry_at == NOW.timestamp() + 900
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize('change', ['credential', 'organization', 'team'])
+def test_cooldown_namespace_isolated(setup, monkeypatch, change):
+    monkeypatch.setattr('roo.studio_report_source.time.time', lambda: NOW.timestamp())
+    api = gated_source(setup.config, lambda _: httpx.Response(429, json={}, headers={'Retry-After': '900'}))
+    api._bind_source(setup.config)
+    with pytest.raises(SourceRetryError):
+        api.linear('query { organization { id } }')
+    config = replace(setup.config, **{change: 'other'}) if change != 'credential' else setup.config
+    fresh = gated_source(config, lambda _: httpx.Response(200, json={'data': {'ok': True}}),
+                         key='other' if change == 'credential' else 'synthetic')
+    fresh._bind_source(config)
+    assert fresh.linear('query { organization { id } }') == {'ok': True}
+
+
+@pytest.mark.parametrize('limit', ['requests', 'seconds'])
+def test_attempt_budget_retains_completed_batches(setup, monkeypatch, limit):
+    clock = [NOW.timestamp()]
+    elapsed = [0]
+    monkeypatch.setattr('roo.studio_report_source.time.time', lambda: clock[0])
+    monkeypatch.setattr('roo.studio_report_source.time.monotonic', lambda: elapsed[0])
+    calls = []
+    api = gated_source(setup.config, lambda r: calls.append(r) or httpx.Response(200, json={'data': {'ok': True}}))
+    api._bind_source(setup.config)
+    with api._cache.locked('saved'):
+        api._cache.write('saved', {'completed': 'batch'})
+    with api.source_attempt(max_requests=2, max_seconds=45):
+        assert api.linear('query { organization { id } }') == {'ok': True}
+        if limit == 'requests':
+            api.linear('query { organization { id } }')
+        else:
+            elapsed[0] = 46
+        with pytest.raises(SourceRetryError, match='linear_source_budget') as error:
+            api.linear('query { organization { id } }')
+        assert error.value.retry_at == clock[0] + 60
+    assert len(calls) == (2 if limit == 'requests' else 1)
+    fresh = gated_source(setup.config, lambda _: pytest.fail('another actor must wait'))
+    fresh._bind_source(setup.config)
+    with pytest.raises(SourceRetryError):
+        fresh.linear('query { organization { id } }')
+    assert fresh._cache.read('saved') == {'completed': 'batch'}
+    clock[0] += 61
+    with api.source_attempt(max_requests=2):
+        assert api.linear('query { organization { id } }') == {'ok': True}
