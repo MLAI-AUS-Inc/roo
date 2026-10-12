@@ -320,6 +320,20 @@ The report shows the total for the week and each project/builder breakdown,
 including zero-hour projects. It does not infer a weekly allowance from the
 monthly contract. New client projects still require a verified mapping update.
 
+Every Friday report includes two private PNG charts: project hours for the
+configured weekly window and project hours for the current month to date.
+Month-to-date starts at Melbourne midnight on the first day of the cutoff's
+month and ends at the same Friday cutoff as the weekly chart. Work in the
+previous month remains in a crossing weekly window, but is excluded from the
+month-to-date view. Project colours match across both charts, and both include
+all mapped projects. The text includes the matching period totals.
+
+Both views use the same source read and reviewed snapshot. The month-to-date
+companion uses the weekly view's exact date containment rules: unsupported
+monthly estimates or cross-boundary work remain unresolved without daily
+proration. Ordinary calendar-month reports retain their existing allocation
+policy. Exceptions for the month-to-date view have their own CSV attachment.
+
 Configure only `.env.studio-reports`, using verified Slack IDs rather than a
 guessed name or recipient. The `actor` receives the DM and must already have
 access to the selected client. For a staff recipient, configure their
@@ -375,8 +389,9 @@ the same source and freshness gate as their monthly hours reports. They never
 fall back to ticket estimates for those projects. Reviewed records must be
 refreshed at least weekly through the operator reconciliation handoff; this
 scheduler does not synchronise Xero or invent source review timestamps.
-If a fresh snapshot does not cover the requested week, the DM says that weekly
-hours are unavailable and omits an apparent zero-hours chart. Stale sources
+If a fresh snapshot does not cover either period, its chart explicitly says that
+reviewed hours are unavailable, with the source coverage date. It never displays
+an apparent zero-hours total for missing coverage. Stale sources
 produce a private setup notice. Estimated invoice dates and aggregate work
 windows cannot establish a weekly split, and remain unresolved.
 
@@ -384,8 +399,10 @@ windows cannot establish a weekly split, and remain unresolved.
 
 Snapshots and rendered parts persist before sending. Confirmed messages/files
 are not resent; rate limits retry after the indicated delay. A timeout after an
-attempted send remains uncertain and requires operator review. Missing chart
-rendering does not suppress text totals. Attachment upload failures retain the
+attempted send remains uncertain and requires operator review. On-demand reports
+can deliver text totals if chart rendering is unavailable. Friday reports require
+both charts to render before any report parts are delivered; safe render failures
+remain queued for retry. Attachment upload failures retain the
 already-delivered text and follow the same delivery recovery rules.
 
 Inspect private worker `deliveries/*.json` receipts, confirm the outcome in

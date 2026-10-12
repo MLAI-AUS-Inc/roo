@@ -159,6 +159,21 @@ def test_default_freshness_gate_is_unchanged():
         validate_snapshot_age(dataset, timestamp('2026-10-24T17:00:00+11:00'))
 
 
+def test_month_to_date_contains_earlier_month_work_once_and_excludes_estimated_or_cutoff_dates():
+    dataset = data(work(key='earlier', first='2026-10-03', last='2026-10-07', units=8_000_001),
+                   work(key='current', units=1_000_001),
+                   work(key='friday', first='2026-10-16', last='2026-10-16', units=4_000_000),
+                   work(key='month-boundary', first='2026-09-30', last='2026-10-01', units=5_000_000),
+                   work(key='estimated', first='2026-10-04', last='2026-10-05', date_basis='estimated_work_period'))
+    month = report(dataset, {'period': 'month_to_date', 'end': NOW.isoformat()})
+    assert month['selector']['start'] == '2026-10-01T00:00:00+10:00'
+    assert {row['issue_id'] for row in month['rows']} == {'earlier', 'current'}
+    assert month['monthly'][0]['units'] == 9_000_002
+    assert month['unit_scale'] == 1_000_000 and month['estimated_month_units'] == 0
+    assert month['monthly'][0]['unresolved'] == 3
+    assert all('month-to-date' in item['reason'] for item in month['exceptions'])
+
+
 def _finance_weekly_request(setup, monkeypatch, read_at, *, as_of='2026-10-17T12:00:00+11:00'):
     """Real validated snapshot and private issuance; only external I/O is mocked."""
     import roo.studio_report_worker as worker

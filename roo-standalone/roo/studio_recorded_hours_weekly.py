@@ -1,4 +1,4 @@
-"""Exact weekly views of canonical reviewed work; no daily proration."""
+"""Exact weekly and month-to-date views of reviewed work; no daily proration."""
 from datetime import date, datetime, time, timedelta
 
 from .studio_client_balance import HOUR_UNITS
@@ -19,14 +19,16 @@ def build_weekly_recorded_report(config, client, selector, dataset, now):
     Financial records and raw evidence never enter this ordinary hours view.
     """
     resolved, start, end = resolve_period(selector, now)
-    if resolved.get('period') != 'weekly':
+    if resolved.get('period') not in {'weekly', 'month_to_date'}:
         raise TimesheetError('invalid_report_week')
+    period_name = 'weekly' if resolved['period'] == 'weekly' else 'month-to-date'
     as_of = timestamp(dataset['as_of']).astimezone(TZ)
     current = timestamp(now).astimezone(TZ)
     coverage_start, coverage_end = _window(dataset['coverage']['start'], dataset['coverage']['through'])
     supported_end = min(coverage_end, as_of, current)
-    has_coverage = max(start, coverage_start) < min(end, supported_end)
-    coverage_partial = start < coverage_start or end > supported_end or not has_coverage
+    empty = start == end
+    has_coverage = empty or max(start, coverage_start) < min(end, supported_end)
+    coverage_partial = not empty and (start < coverage_start or end > supported_end or not has_coverage)
     projects = {key: config.projects[key] for key in client['project_ids']}
     monthly = [{'month': month_offset(resolved['month'], i).strftime('%Y-%m'),
                 'units': 0, 'unresolved': 0, 'allowance_units': None}
@@ -34,7 +36,7 @@ def build_weekly_recorded_report(config, client, selector, dataset, now):
     by_month = {row['month']: row for row in monthly}
     invoices = {row['id']: row for row in dataset['contractor_invoices']}
     rows, exceptions, seen = [], [], set()
-    for work in dataset['hours']:
+    for work in ([] if empty else dataset['hours']):
         project = work['project_id']
         if project not in projects:
             raise TimesheetError('client_balance_scope_mismatch')
@@ -48,13 +50,13 @@ def build_weekly_recorded_report(config, client, selector, dataset, now):
         reference = invoice['number'] if invoice else work['id']
         reason = None
         if work['date_basis'] != 'work_dates':
-            reason = ('Excluded from this weekly subtotal; source work dates are estimated or use an invoice date. '
-                      'These dates cannot establish weekly hours; quantities are not prorated.')
+            reason = (f'Excluded from this {period_name} subtotal; source work dates are estimated or use an invoice date. '
+                      f'These dates cannot establish {period_name} hours; quantities are not prorated.')
         elif first < start or through > end:
-            reason = ('Excluded from this weekly subtotal; the full source work period extends outside the weekly '
+            reason = (f'Excluded from this {period_name} subtotal; the full source work period extends outside the reporting '
                       'cutoff or lacks sufficient time precision. Quantities are not prorated.')
         elif first < coverage_start or through > supported_end:
-            reason = ('Excluded from this weekly subtotal; the full source work period is not supported by the '
+            reason = (f'Excluded from this {period_name} subtotal; the full source work period is not supported by the '
                       'reviewed coverage and source timestamp. Unavailable hours are not counted as zero.')
         if reason:
             for month in by_month:
@@ -86,7 +88,7 @@ def build_weekly_recorded_report(config, client, selector, dataset, now):
         limitations.append('Requested activity outside reviewed coverage is unavailable; it is not counted as zero. '
                            'Source review: ' + dataset['as_of'] + '; coverage through ' + coverage_through + '.')
     if exceptions:
-        limitations.append('Work without fully supported weekly dates is excluded; aggregate quantities are not prorated.')
+        limitations.append(f'Work without fully supported {period_name} dates is excluded; aggregate quantities are not prorated.')
     return {'selector': resolved, 'client': client['name'], 'projects': projects,
             'monthly': monthly, 'rows': rows, 'exceptions': exceptions,
             'generated_at': current.isoformat(), 'complete': False,
