@@ -65,21 +65,29 @@ def test_rollout_excludes_earlier_invoices(config):
     assert validate_period(config, '2026-10-23').date().isoformat() == '2026-10-23'
 
 
-def test_pdf_fields_survive_save_reopen_and_financials_are_static(config):
+@pytest.mark.parametrize('generated_at,issue_date', [
+    ('2026-10-22T14:30:00+00:00', '23 October 2026'),
+    ('2027-04-08T14:30:00+00:00', '09 April 2027'),
+])
+def test_pdf_fields_survive_save_reopen_and_financials_are_static(config, generated_at, issue_date):
     from roo.studio_invoices import build_invoice, render_pdf
     invoice = build_invoice(config, report_for(config, draft=True), USER, '2026-10-23')
+    invoice['generated_at'] = generated_at
     pdf = render_pdf(invoice)
     reader = PdfReader(io.BytesIO(pdf))
     fields = reader.get_fields()
     expected = {'business_name', 'contact_name', 'email', 'address', 'abn', 'bsb',
-                'account_name', 'account_number', 'invoice_number', 'invoice_date', 'due_date', 'payment_notes'}
+                'account_name', 'account_number', 'invoice_number', 'invoice_date'}
     assert set(fields) == expected
-    assert all(field.get('/V', '') == '' for field in fields.values())
+    assert fields['invoice_date']['/V'] == issue_date
+    assert all(field.get('/V', '') == '' for name, field in fields.items() if name != 'invoice_date')
     text = '\n'.join(page.extract_text() for page in reader.pages)
     assert 'Invoice' in text and 'DRAFT' in text and 'MLAI' in text
     assert 'Bill to: MLAI | ABN: 94 807 394 137' in text
     assert 'Send your completed final invoice to treasurer@mlai.au.' in text
     assert 'Your ABN' in text
+    assert 'Issue date' in text
+    assert 'Due date' not in text and 'Payment notes' not in text
     assert '$65.00' in text and 'GST' not in text and 'Tax Invoice' not in text
     writer = PdfWriter()
     writer.clone_document_from_reader(reader)
@@ -90,6 +98,7 @@ def test_pdf_fields_survive_save_reopen_and_financials_are_static(config):
     writer.write(output)
     reopened = PdfReader(io.BytesIO(output.getvalue()))
     assert {name: reopened.get_fields()[name]['/V'] for name in values} == values
+    assert reopened.get_fields()['invoice_date']['/V'] == issue_date
     widgets = [a.get_object() for page in reopened.pages for a in page.get('/Annots', [])
                if a.get_object().get('/Subtype') == '/Widget']
     assert {w['/T'] for w in widgets} == expected
@@ -108,4 +117,4 @@ def test_long_work_rows_are_not_truncated_and_form_is_present_only_once(config):
     assert len(reader.pages) > 1
     assert text.count('end-of-description') == 50
     assert '$3,250.00' in text
-    assert len(reader.get_fields()) == 12
+    assert len(reader.get_fields()) == 10

@@ -8,6 +8,7 @@ from decimal import Decimal
 import io
 from pathlib import Path
 from xml.sax.saxutils import escape
+from zoneinfo import ZoneInfo
 
 from .timesheets import TimesheetError, fingerprint, flag, timestamp
 
@@ -103,6 +104,7 @@ def render_pdf(invoice):
     styles['Normal'].leading = 12
     ink = colors.HexColor('#17324d')
     tint = colors.HexColor('#eef4f8')
+    issue_date = timestamp(invoice['generated_at']).astimezone(ZoneInfo('Australia/Melbourne')).strftime('%d %B %Y')
 
     def header(canvas, doc):
         canvas.setFillColor(ink)
@@ -120,15 +122,15 @@ def render_pdf(invoice):
                       ('email', 'Email / phone'), ('address', 'Business address'),
                       ('abn', 'Your ABN'), ('invoice_number', 'Your invoice number'),
                       ('bsb', 'BSB'), ('account_number', 'Account number'),
-                      ('account_name', 'Account name'), ('invoice_date', 'Invoice date'),
-                      ('due_date', 'Due date'), ('payment_notes', 'Payment notes')]
+                      ('account_name', 'Account name'), ('invoice_date', 'Issue date')]
             for i, (name, label) in enumerate(fields):
                 x = 42 + (i % 2) * 265
                 y = height - 174 - (i // 2) * 43
                 canvas.setFont('Helvetica', 8)
                 canvas.drawString(x, y + 25, label)
                 canvas.acroForm.textfield(name=name, tooltip=label, x=x, y=y,
-                    width=245, height=21, value='', fontName='Helvetica', fontSize=10,
+                    width=245, height=21, value=issue_date if name == 'invoice_date' else '',
+                    fontName='Helvetica', fontSize=10,
                     borderWidth=.5, borderColor=colors.HexColor('#93afc4'),
                     fillColor=tint, textColor=ink, forceBorder=True, maxlen=200)
         canvas.setFont('Helvetica', 8)
@@ -157,7 +159,7 @@ def render_pdf(invoice):
             if invoice['draft'] else 'This final supersedes any draft for this fortnight. Adjustments appear in a later fortnight.')
     if not invoice['complete']:
         note += ' Some source work needs review and is excluded from these amounts.'
-    story = [Spacer(1, 283), table, Spacer(1, 16), KeepTogether([
+    story = [Spacer(1, 240), table, Spacer(1, 16), KeepTogether([
         Paragraph(f"<b>Total: {money(invoice['total_cents'])} AUD</b> ({hours(invoice['units'])} hours)", styles['Normal']),
         Spacer(1, 10), paragraph(note), Spacer(1, 10),
         Paragraph('Send your completed final invoice to '

@@ -16,9 +16,12 @@ Sam-only. Invoice commands never grant access to another member.
 
 The rate is $65/hour, with no additional GST. The PDF title is Invoice and
 does not infer GST registration. Work amounts are static PDF content. Builder
-business/contact/address, ABN, BSB, account details, invoice number, invoice
-date, due date and payment notes are blank AcroForm text fields. Complete and
-save these locally before issuing the invoice; never send personal fields to
+business/contact/address, ABN, BSB, account details and invoice number are blank
+AcroForm text fields. Issue date is automatically filled from the saved
+generation timestamp in Melbourne time and remains editable. Due date and
+payment notes are omitted. Saved finals keep their original issue date when
+retrieved. Complete and save personal fields locally before issuing the invoice;
+never send personal fields to
 Roo or upload completed forms. The fixed internal reference remains separate
 from the builder's editable invoice number. The fixed bill-to details identify
 MLAI with ABN **94 807 394 137**. The builder's **Your ABN** field remains blank
