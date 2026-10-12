@@ -1,5 +1,6 @@
 """Resumable, version-checked Linear reads in the private Studio worker."""
 from copy import deepcopy
+from contextlib import contextmanager
 from email.utils import parsedate_to_datetime
 import json
 import math
@@ -56,7 +57,94 @@ def batch_query(ids, *, versions=False):
 
 
 class StudioSourceAPI(ReportAPI):
+    def _bind_source(self, config):
+        # Bind before verification, which itself consumes the provider quota.
+        namespace = fingerprint({'version': 1, 'team': config.team,
+                                 'organization': config.organization, 'credential': self.linear_key})
+        if getattr(self, '_source_namespace', None) != namespace:
+            self._source_namespace = namespace
+            self._cache = ReceiptStore(config.directory / 'linear-evidence' / namespace)
+            self._cooldowns = ReceiptStore(config.directory / 'linear-cooldowns')
+        if not hasattr(self, '_memory_waits'):
+            self._memory_waits = {}
+
+    def verify(self, config):
+        self._bind_source(config)
+        return super().verify(config)
+
+    @contextmanager
+    def source_attempt(self, *, max_requests=200, max_seconds=45):
+        if getattr(self, '_attempt', None) is not None:
+            yield  # Nested collection shares the outer attempt's budget.
+            return
+        self._attempt = {'started': time.monotonic(), 'calls': 0,
+                         'max_requests': max_requests, 'max_seconds': max_seconds}
+        try:
+            yield
+        finally:
+            self._attempt = None
+
+    def _wait_state(self):
+        key = self._source_namespace
+        try:
+            value = self._cooldowns.read(key)
+            if value is not None:
+                deadline = value.get('retry_at') if isinstance(value, dict) else None
+                if (type(deadline) not in (int, float) or not math.isfinite(deadline)
+                        or deadline < 0 or value.get('code') not in {
+                            'linear_rate_limited', 'linear_source_budget', 'linear_source_unstable'}):
+                    raise ValueError('invalid cooldown')
+        except (OSError, ValueError, TypeError):
+            raise SourceRetryError('linear_cooldown_unavailable', time.time() + 60) from None
+        memory = self._memory_waits.get(key)
+        if memory and (value is None or memory['retry_at'] > value['retry_at']):
+            value = memory
+        return value
+
+    def _save_wait(self, code, deadline, previous=None):
+        if previous and previous['retry_at'] > deadline:
+            code, deadline = previous['code'], previous['retry_at']
+        value = {'code': code, 'retry_at': deadline}
+        self._memory_waits[self._source_namespace] = value
+        try:
+            self._cooldowns.write(self._source_namespace, value)
+        except OSError:
+            pass  # This process must still honor a reset if disk writes fail.
+        return SourceRetryError(code, deadline)
+
+    def defer_source(self, code='linear_source_unstable'):
+        """Share a local wait after unstable coverage without losing progress."""
+        with self._cooldowns.locked(self._source_namespace) as acquired:
+            if not acquired:
+                raise SourceRetryError('linear_source_busy', time.time() + 60)
+            raise self._save_wait(code, time.time() + 60, self._wait_state())
+
     def linear(self, query, variables=None):
+        if not hasattr(self, '_cooldowns'):
+            return self._linear_request(query, variables)
+        try:
+            with self._cooldowns.locked(self._source_namespace) as acquired:
+                if not acquired:
+                    raise SourceRetryError('linear_source_busy', time.time() + 60)
+                state = self._wait_state()
+                if state and state['retry_at'] > time.time():
+                    raise SourceRetryError(state['code'], state['retry_at'])
+                attempt = getattr(self, '_attempt', None)
+                if attempt:
+                    if (attempt['calls'] >= attempt['max_requests']
+                            or time.monotonic() - attempt['started'] >= attempt['max_seconds']):
+                        raise self._save_wait('linear_source_budget', time.time() + 60, state)
+                    attempt['calls'] += 1
+                try:
+                    return self._linear_request(query, variables)
+                except SourceRetryError as exc:
+                    if str(exc) == 'linear_rate_limited':
+                        raise self._save_wait(str(exc), exc.retry_at, state) from None
+                    raise
+        except OSError:
+            raise SourceRetryError('linear_cooldown_unavailable', time.time() + 60) from None
+
+    def _linear_request(self, query, variables=None):
         try:
             response = self.client.post('https://api.linear.app/graphql',
                 headers={'Authorization': self.linear_key}, json={'query': query, 'variables': variables or {}})
@@ -80,9 +168,7 @@ class StudioSourceAPI(ReportAPI):
     def collect(self, config, end, deferred):
         # Credentials and organization partition evidence. The cache is never
         # mounted in Public Roo; fresh candidate reads still gate every report.
-        namespace = fingerprint({'version': 1, 'team': config.team,
-                                 'organization': config.organization, 'credential': self.linear_key})
-        self._cache = ReceiptStore(config.directory / 'linear-evidence' / namespace)
+        self._bind_source(config)
         started = time.monotonic()
         self._stats = {'candidates': 0, 'cached': 0, 'batches': 0, 'complete': False}
         try:
