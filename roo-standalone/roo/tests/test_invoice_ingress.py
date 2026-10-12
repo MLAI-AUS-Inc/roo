@@ -1,10 +1,12 @@
 """Signed HTTP handoff and opt-in catalog behavior without live providers."""
+import asyncio
 import json
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 from urllib.parse import urlencode
 
 import pytest
+import httpx
 from fastapi.testclient import TestClient
 
 from roo import main as runtime
@@ -37,47 +39,93 @@ def event(**updates):
         'user': 'UBUILDER', 'ts': '123.456', **updates})
 
 
+async def post_with_ack(body):
+    """Keep the request loop alive and drain acknowledgements before assertions."""
+    tasks = []
+    real_create_task = asyncio.create_task
+
+    def track_task(coro, *args, **kwargs):
+        task = real_create_task(coro, *args, **kwargs)
+        tasks.append(task)
+        return task
+
+    with patch.object(runtime.asyncio, 'create_task', track_task):
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=runtime.app),
+                                   base_url='http://test') as client:
+            response = await client.post('/slack/events', content=body, headers=headers(body))
+        await asyncio.wait_for(asyncio.gather(*tasks), timeout=5)
+        return response
+
+
+@pytest.mark.asyncio
+async def test_ack_assertion_waits_for_background_transport(app, monkeypatch):
+    entered, release = asyncio.Event(), asyncio.Event()
+    real_to_thread = asyncio.to_thread
+
+    async def delayed_transport(function, *args, **kwargs):
+        if function is not runtime.post_message:
+            return await real_to_thread(function, *args, **kwargs)
+        entered.set()
+        await release.wait()
+        return function(*args, **kwargs)
+
+    monkeypatch.setattr(runtime.asyncio, 'to_thread', delayed_transport)
+    body = json.dumps(event(channel='G123')).encode()
+    request = asyncio.create_task(post_with_ack(body))
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    release.set()
+    response = await request
+    assert response.status_code == 200
+    runtime.post_message.assert_called_once_with(channel='G123',
+        text='Your invoice request is queued. Roo will verify your builder mapping and DM the result to you.',
+        thread_ts='123.456')
+
+
 @pytest.mark.parametrize('channel,thread,expected', [
     ('C123', None, '123.456'), ('C123', '100.000001', '100.000001'),
     ('G123', None, '123.456'),
 ])
-def test_invoice_queue_ack_is_public_in_originating_thread(app, channel, thread, expected):
+@pytest.mark.asyncio
+async def test_invoice_queue_ack_is_public_in_originating_thread(app, channel, thread, expected):
     client, settings, root = app
     body = json.dumps(event(channel=channel, thread_ts=thread)).encode()
-    assert client.post('/slack/events', content=body, headers=headers(body)).status_code == 200
+    assert (await post_with_ack(body)).status_code == 200
     runtime.post_message.assert_called_once_with(channel=channel,
         text='Your invoice request is queued. Roo will verify your builder mapping and DM the result to you.',
         thread_ts=expected)
     runtime.post_ephemeral.assert_not_called()
 
 
-def test_invoice_queue_ack_deduplicates_signed_event_types(app):
+@pytest.mark.asyncio
+async def test_invoice_queue_ack_deduplicates_signed_event_types(app):
     client, settings, root = app
     for kind in ('app_mention', 'message', 'app_mention'):
         body = json.dumps(event(type=kind)).encode()
-        assert client.post('/slack/events', content=body, headers=headers(body)).status_code == 200
+        assert (await post_with_ack(body)).status_code == 200
     assert runtime.post_message.call_count == 1
     runtime.post_ephemeral.assert_not_called()
 
 
-def test_invoice_dm_ack_stays_private_and_timesheet_ack_stays_ephemeral(app):
+@pytest.mark.asyncio
+async def test_invoice_dm_ack_stays_private_and_timesheet_ack_stays_ephemeral(app):
     client, settings, root = app
     body = json.dumps(event(type='message', channel_type='im', channel='D123', text='invoice')).encode()
-    assert client.post('/slack/events', content=body, headers=headers(body)).status_code == 200
+    assert (await post_with_ack(body)).status_code == 200
     assert runtime.post_message.call_args.kwargs['channel'] == 'D123'
     assert 'thread_ts' not in runtime.post_message.call_args.kwargs
     runtime.post_message.reset_mock()
     body = json.dumps(event(text='<@UBOT> timesheet', user='USAM', ts='123.457')).encode()
-    assert client.post('/slack/events', content=body, headers=headers(body)).status_code == 200
+    assert (await post_with_ack(body)).status_code == 200
     runtime.post_ephemeral.assert_called_once()
     runtime.post_message.assert_not_called()
 
 
-def test_failed_public_ack_keeps_invoice_queued(app):
+@pytest.mark.asyncio
+async def test_failed_public_ack_keeps_invoice_queued(app):
     client, settings, root = app
     runtime.post_message.side_effect = RuntimeError('Slack unavailable')
     body = json.dumps(event()).encode()
-    assert client.post('/slack/events', content=body, headers=headers(body)).status_code == 200
+    assert (await post_with_ack(body)).status_code == 200
     assert json.loads(next((root / 'queue').glob('*.json')).read_text())['status'] == 'pending'
 
 
