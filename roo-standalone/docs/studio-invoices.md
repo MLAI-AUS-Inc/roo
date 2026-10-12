@@ -20,8 +20,10 @@ business/contact/address, ABN, BSB, account details, invoice number, invoice
 date, due date and payment notes are blank AcroForm text fields. Complete and
 save these locally before issuing the invoice; never send personal fields to
 Roo or upload completed forms. The fixed internal reference remains separate
-from the builder's editable invoice number. Recipient is MLAI; no legal entity
-details or recipient ABN are invented.
+from the builder's editable invoice number. The fixed bill-to details identify
+MLAI with ABN **94 807 394 137**. The builder's **Your ABN** field remains blank
+and editable. Send the completed final invoice to **treasurer@mlai.au**, as
+shown in the PDF's submission instructions.
 
 ## Commands and cadence
 

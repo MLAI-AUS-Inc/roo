@@ -77,6 +77,9 @@ def test_pdf_fields_survive_save_reopen_and_financials_are_static(config):
     assert all(field.get('/V', '') == '' for field in fields.values())
     text = '\n'.join(page.extract_text() for page in reader.pages)
     assert 'Invoice' in text and 'DRAFT' in text and 'MLAI' in text
+    assert 'Bill to: MLAI | ABN: 94 807 394 137' in text
+    assert 'Send your completed final invoice to treasurer@mlai.au.' in text
+    assert 'Your ABN' in text
     assert '$65.00' in text and 'GST' not in text and 'Tax Invoice' not in text
     writer = PdfWriter()
     writer.clone_document_from_reader(reader)

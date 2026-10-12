@@ -111,14 +111,14 @@ def render_pdf(invoice):
         canvas.setFont('Helvetica-Bold', 11)
         canvas.drawRightString(width - 42, height - 52, 'DRAFT' if invoice['draft'] else 'FINAL')
         canvas.setFont('Helvetica', 9)
-        canvas.drawString(42, height - 75, 'Bill to: MLAI')
+        canvas.drawString(42, height - 75, 'Bill to: MLAI | ABN: 94 807 394 137')
         canvas.drawString(42, height - 91, f"Payment fortnight ending {invoice['period']} | AUD | {money(invoice['rate_cents'])}/hour")
         canvas.drawString(42, height - 107, 'Internal reference: ' + invoice['reference'])
         canvas.drawString(42, height - 123, 'Complete the blue fields locally, then save a copy for issuing.')
         if doc.page == 1:
             fields = [('business_name', 'Business / supplier name'), ('contact_name', 'Contact name'),
                       ('email', 'Email / phone'), ('address', 'Business address'),
-                      ('abn', 'ABN'), ('invoice_number', 'Your invoice number'),
+                      ('abn', 'Your ABN'), ('invoice_number', 'Your invoice number'),
                       ('bsb', 'BSB'), ('account_number', 'Account number'),
                       ('account_name', 'Account name'), ('invoice_date', 'Invoice date'),
                       ('due_date', 'Due date'), ('payment_notes', 'Payment notes')]
@@ -159,7 +159,10 @@ def render_pdf(invoice):
         note += ' Some source work needs review and is excluded from these amounts.'
     story = [Spacer(1, 283), table, Spacer(1, 16), KeepTogether([
         Paragraph(f"<b>Total: {money(invoice['total_cents'])} AUD</b> ({hours(invoice['units'])} hours)", styles['Normal']),
-        Spacer(1, 10), paragraph(note)])]
+        Spacer(1, 10), paragraph(note), Spacer(1, 10),
+        Paragraph('Send your completed final invoice to '
+                  '<link href="mailto:treasurer@mlai.au" color="#17324d">treasurer@mlai.au</link>.',
+                  styles['Normal'])])]
     SimpleDocTemplate(output, pagesize=A4, leftMargin=42, rightMargin=42,
                       topMargin=143, bottomMargin=48, title='Invoice', author='Roo Studio').build(
                           story, onFirstPage=header, onLaterPages=continuation)
