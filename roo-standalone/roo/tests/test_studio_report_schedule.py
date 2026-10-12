@@ -8,7 +8,9 @@ from unittest.mock import Mock
 import pytest
 
 from roo.payment_reminders import ReceiptStore
+from roo.backend_identity import BackendActorContext
 from roo.studio_report_clients import select_client
+from roo.studio_report_commands import enqueue as enqueue_monthly
 from roo.studio_report_schedule import (TZ, _request_key, enqueue_weekly, latest_due,
                                         scheduled_request_authorized, weekly_configuration,
                                         weekly_selector)
@@ -31,7 +33,8 @@ def setup(tmp_path):
     config = SimpleNamespace(team='T123', directory=tmp_path / 'private',
                              projects={'p1': 'App', 'p2': 'Website', 'p3': 'Other'})
     service = SimpleNamespace(config=config, clients=clients,
-                              queue=ReceiptStore(tmp_path / 'queue'), api=Mock())
+                              queue=ReceiptStore(tmp_path / 'queue'),
+                              weekly_queue=ReceiptStore(config.directory / 'weekly-queue'), api=Mock())
 
     def scope(actor, selector):
         client = clients[actor]
@@ -53,7 +56,7 @@ def queued(setup, now='2026-10-09T06:00:00Z', **changes):
     schedules = configured(setup, **changes)
     events = enqueue_weekly(setup.service, schedules, timestamp(now))
     key = events[0]['request']
-    return schedules, key, setup.service.queue.read(key)
+    return schedules, key, setup.service.weekly_queue.read(key)
 
 
 def test_disabled_ignores_unconfigured_or_invalid_schedules():
@@ -161,15 +164,15 @@ def test_late_tick_freezes_cutoff_and_repeated_ticks_issue_once(setup):
     assert request['actor'] == 'USTAFF' and request['status'] == 'pending'
     assert scheduled_request_authorized(request, schedules, service=setup.service)
     assert enqueue_weekly(setup.service, schedules, timestamp('2026-10-15T02:00:00Z')) == []
-    assert len(list(setup.service.queue.directory.glob('*.json'))) == 1
+    assert len(list(setup.service.weekly_queue.directory.glob('*.json'))) == 1
     setup.service.api.assert_not_called()
     assert not setup.service.api.method_calls
     request.update(status='done')
-    setup.service.queue.write(key, request)
+    setup.service.weekly_queue.write(key, request)
     assert enqueue_weekly(setup.service, schedules, timestamp('2026-10-15T05:00:00Z')) == []
     next_events = enqueue_weekly(setup.service, schedules, timestamp('2026-10-16T06:00:00Z'))
     assert next_events[0]['request'] != key
-    assert len(list(setup.service.queue.directory.glob('*.json'))) == 2
+    assert len(list(setup.service.weekly_queue.directory.glob('*.json'))) == 2
 
 
 def test_no_provenance_without_private_receipt(setup):
@@ -181,21 +184,21 @@ def test_no_provenance_without_private_receipt(setup):
     assert enqueue_weekly(setup.service, schedules, timestamp('2026-10-09T07:00:00Z'))[0]['reason'] == 'weekly_request_changed'
 
 
-def test_private_issuance_precedes_public_queue_and_recovers_queue_crash(setup, monkeypatch):
+def test_private_issuance_precedes_private_queue_and_recovers_queue_crash(setup, monkeypatch):
     schedules = configured(setup)
-    write = setup.service.queue.write
+    write = setup.service.weekly_queue.write
 
     def crash(key, request):
         assert (setup.service.config.directory / 'weekly-schedules' / (key + '.json')).exists()
         raise RuntimeError('simulated queue write crash')
 
-    monkeypatch.setattr(setup.service.queue, 'write', crash)
+    monkeypatch.setattr(setup.service.weekly_queue, 'write', crash)
     failed = enqueue_weekly(setup.service, schedules, timestamp('2026-10-09T06:00:00Z'))
     assert failed == [{'schedule': 'mark-weekly', 'status': 'error', 'reason': 'RuntimeError'}]
-    monkeypatch.setattr(setup.service.queue, 'write', write)
+    monkeypatch.setattr(setup.service.weekly_queue, 'write', write)
     events = enqueue_weekly(setup.service, schedules, timestamp('2026-10-12T02:00:00Z'))
     assert len(events) == 1 and events[0]['status'] == 'queued'
-    assert scheduled_request_authorized(setup.service.queue.read(events[0]['request']), schedules,
+    assert scheduled_request_authorized(setup.service.weekly_queue.read(events[0]['request']), schedules,
                                         service=setup.service)
 
 
@@ -227,7 +230,7 @@ def test_current_grants_and_source_scope_checked_again(setup, mutation):
 
 @pytest.mark.parametrize('mutation', ['team', 'actor', 'recipient', 'channel', 'thread', 'selector',
                                      'timestamp', 'metadata', 'fingerprint', 'scope', 'cutoff'])
-def test_shared_queue_schedule_claims_cannot_change_authority(setup, mutation):
+def test_queue_schedule_claims_cannot_change_authority(setup, mutation):
     schedules, key, request = queued(setup)
     changed = deepcopy(request)
     if mutation == 'team': changed['team'] = 'TOTHER'
@@ -242,9 +245,9 @@ def test_shared_queue_schedule_claims_cannot_change_authority(setup, mutation):
     elif mutation == 'scope': changed['scheduled']['scope'] = 'forged'
     else: changed['scheduled']['due_at'] = '2026-10-09T17:00:01+11:00'
     assert not scheduled_request_authorized(changed, schedules, service=setup.service)
-    setup.service.queue.write(key, changed)
+    setup.service.weekly_queue.write(key, changed)
     assert enqueue_weekly(setup.service, schedules, timestamp('2026-10-12T02:00:00Z'))[0]['reason'] == 'weekly_request_changed'
-    assert setup.service.queue.read(key) == changed
+    assert setup.service.weekly_queue.read(key) == changed
 
 
 def test_copying_known_schedule_metadata_cannot_forge_another_friday(setup):
@@ -268,12 +271,12 @@ def test_existing_private_receipt_never_rewritten_for_changed_schedule(setup):
     schedules, key, request = queued(setup)
     private = setup.service.config.directory / 'weekly-schedules' / (key + '.json')
     prior = private.read_bytes()
-    (setup.service.queue.directory / (key + '.json')).unlink()
+    (setup.service.weekly_queue.directory / (key + '.json')).unlink()
     changed = configured(setup, window='last_7_days')
     results = enqueue_weekly(setup.service, changed, timestamp('2026-10-09T06:00:00Z'))
     assert results[0]['reason'] == 'weekly_request_changed'
     assert private.read_bytes() == prior
-    assert setup.service.queue.read(key) is None
+    assert setup.service.weekly_queue.read(key) is None
     assert not scheduled_request_authorized(request, changed, service=setup.service)
 
 
@@ -331,7 +334,7 @@ def test_service_revoked_schedule_blocks_queue_and_snapshot_before_delivery(repo
     service, api = report_setup.service, report_setup.api
     now = timestamp('2026-10-09T06:00:00Z')
     event = enqueue_weekly(service, schedules, now)[0]
-    request = service.queue.read(event['request'])
+    request = service.weekly_queue.read(event['request'])
     if snapshot:
         report = service.report_for_request(request)
         with service.requests.locked(event['request']) as acquired:
@@ -340,7 +343,7 @@ def test_service_revoked_schedule_blocks_queue_and_snapshot_before_delivery(repo
         api.reset_mock()
     service.schedules = []
     assert service.commands(now) == []
-    assert service.queue.read(event['request'])['status'] == 'denied'
+    assert service.weekly_queue.read(event['request'])['status'] == 'denied'
     assert not api.method_calls
     with pytest.raises(TimesheetError, match='not_authorized'):
         service.report_for_request(request)
@@ -356,7 +359,7 @@ def test_copying_issued_request_to_another_queue_filename_does_not_redeliver(rep
     service, api = report_setup.service, report_setup.api
     now = timestamp('2026-10-09T06:00:00Z')
     event = enqueue_weekly(service, schedules, now)[0]
-    original = service.queue.read(event['request'])
+    original = service.weekly_queue.read(event['request'])
     assert service.commands(now)[0]['status'] == 'sent'
     copied_key = 'b' * 64
     assert copied_key != event['request']
@@ -389,7 +392,8 @@ def test_failed_schedule_does_not_block_other_schedules_or_monthly_commands(repo
             'selector': {'month': '2026-10', 'months': 1, 'action': 'summary'},
             'channel': '', 'thread_ts': '', 'requested_at': now.isoformat(), 'status': 'pending'})
     if damaged == 'queue':
-        (service.queue.directory / (first_key + '.json')).write_text('damaged sensitive content')
+        service.weekly_queue.directory.mkdir(parents=True, exist_ok=True)
+        (service.weekly_queue.directory / (first_key + '.json')).write_text('damaged sensitive content')
     elif damaged == 'issuance':
         directory = service.config.directory / 'weekly-schedules'
         directory.mkdir(parents=True)
@@ -403,14 +407,14 @@ def test_failed_schedule_does_not_block_other_schedules_or_monthly_commands(repo
                 {'id': 'other-friday', 'actor': 'USTAFF', 'client': 'Other', 'starts_on': '2026-10-09'}])},
             report_setup.clients)[0]
     else:
-        original_read = service.queue.read
+        original_read = service.weekly_queue.read
 
         def unavailable(key):
             if key == first_key:
                 raise OSError('sensitive filesystem details')
             return original_read(key)
 
-        monkeypatch.setattr(service.queue, 'read', unavailable)
+        monkeypatch.setattr(service.weekly_queue, 'read', unavailable)
     events = enqueue_weekly(service, schedules, now)
     assert events[0]['schedule'] == 'mark-friday' and events[0]['status'] == 'error'
     assert 'sensitive' not in json.dumps(events)
@@ -420,4 +424,65 @@ def test_failed_schedule_does_not_block_other_schedules_or_monthly_commands(repo
     assert {'request': events[1]['request'], 'status': 'sent'} in results
     assert report_setup.api.collect.call_count == 2
     assert service.queue.read(monthly_key)['status'] == 'done'
-    assert service.queue.read(events[1]['request'])['status'] == 'done'
+    assert service.weekly_queue.read(events[1]['request'])['status'] == 'done'
+
+
+def test_mark_and_sam_weekly_requests_stay_private_and_preserve_monthly_followup(report_setup):
+    service = report_setup.service
+    report_setup.clients['USAM'] = {'name': 'Sam', 'project_ids': [P1, P2],
+                                   'report_client_ids': ['UMARK']}
+    schedules = weekly_configuration({'STUDIO_REPORTS_WEEKLY_ENABLED': 'true',
+        'STUDIO_REPORTS_WEEKLY_SCHEDULES_JSON': json.dumps([
+            {'id': 'mark-friday', 'actor': 'UMARK', 'client': 'Mark', 'starts_on': '2026-10-09'},
+            {'id': 'sam-mark-friday', 'actor': 'USAM', 'client': 'Mark', 'starts_on': '2026-10-09'}])},
+        report_setup.clients)
+    service.schedules = schedules
+    monthly_key = fingerprint({'offline': 'monthly-before-friday'})
+    with service.queue.locked(monthly_key) as acquired:
+        assert acquired
+        service.queue.write(monthly_key, {'team': 'T123', 'actor': 'UMARK',
+            'selector': {'month': '2026-09', 'months': 1, 'action': 'summary', 'client': 'Mark'},
+            'channel': 'C123', 'thread_ts': '1.0', 'requested_at': '2026-09-22T04:00:00+00:00',
+            'status': 'pending'})
+    now = timestamp('2026-10-12T02:00:00Z')
+    events = enqueue_weekly(service, schedules, now)
+    assert len(events) == 2 and all(event['status'] == 'queued' for event in events)
+    private_requests = [service.weekly_queue.read(event['request']) for event in events]
+    assert {request['actor'] for request in private_requests} == {'UMARK', 'USAM'}
+    assert all(request['selector']['period'] == 'weekly' for request in private_requests)
+    assert {path.stem for path in service.queue.directory.glob('*.json')} == {monthly_key}
+    assert not {event['request'] for event in events} & {
+        path.stem for path in service.queue.directory.glob('*.json')}
+    context = BackendActorContext('T123', 'UMARK', 'C123', '1.0', 'monthly-details-after-friday')
+    response = enqueue_monthly(report_setup.settings, context,
+        {'month': 'previous', 'action': 'detailed'}, user_id='UMARK', channel_id='C123',
+        thread_ts='1.0', now=now)
+    assert 'preparing' in response
+    followups = [service.queue.read(path.stem) for path in service.queue.directory.glob('*.json')
+                 if path.stem != monthly_key]
+    assert len(followups) == 1
+    assert followups[0]['selector']['month'] == '2026-09'
+    assert followups[0]['selector']['months'] == 1
+    assert followups[0]['selector']['action'] == 'detailed'
+    assert 'period' not in followups[0]['selector']
+    assert not report_setup.api.method_calls
+
+
+def test_copied_canonical_request_in_shared_queue_reuses_private_delivery_receipt(report_setup, monkeypatch):
+    monkeypatch.setattr('roo.studio_report_worker.render_chart', lambda *_: b'offline chart')
+    schedules = real_schedules(report_setup)
+    service, api = report_setup.service, report_setup.api
+    now = timestamp('2026-10-09T06:00:00Z')
+    event = enqueue_weekly(service, schedules, now)[0]
+    original = service.weekly_queue.read(event['request'])
+    assert service.commands(now) == [{'request': event['request'], 'status': 'sent'}]
+    source_calls, posts, uploads = api.collect.call_count, api.post_message.call_count, api.upload_csv.call_count
+    with service.queue.locked(event['request']) as acquired:
+        assert acquired
+        service.queue.write(event['request'], original)
+    assert service.commands(now) == [{'request': event['request'], 'status': 'sent'}]
+    assert api.collect.call_count == source_calls
+    assert api.post_message.call_count == posts and api.upload_csv.call_count == uploads
+    api.open_dm.assert_called_once_with('USTAFF')
+    assert service.queue.read(event['request'])['status'] == 'done'
+    assert service.weekly_queue.read(event['request'])['status'] == 'done'

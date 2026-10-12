@@ -23,6 +23,7 @@ from .studio_report_source import StudioSourceAPI
 from .studio_report_backfill import history_beginning, load_backfill
 from .studio_report_clients import select_client, validate_client_reporting
 from .studio_report_schedule import enqueue_weekly, scheduled_request_authorized, weekly_configuration
+from .payment_reminders import ReceiptStore
 from .timesheets import TimesheetConfig, TimesheetError, fingerprint, flag, timestamp
 
 
@@ -79,6 +80,7 @@ class StudioReportService(TimesheetService):
         self.balance_enabled = balance_enabled
         self.balance_max_age_days = balance_max_age_days
         self.schedules = schedules or []
+        self.weekly_queue = ReceiptStore(config.directory / 'weekly-queue')
 
     def request_authorized(self, request):
         # Unknown clients receive a private, generic setup message. No source read.
@@ -97,6 +99,11 @@ class StudioReportService(TimesheetService):
             return (isinstance(request['scheduled'], dict)
                     and request['scheduled'].get('request_key') == key)
         return True
+
+    def commands(self, now):
+        results = super().commands(now)
+        results.extend(super().commands(now, queue=self.weekly_queue))
+        return results
 
     def scope_fingerprint(self, actor, selector=None):
         if actor not in self.clients:

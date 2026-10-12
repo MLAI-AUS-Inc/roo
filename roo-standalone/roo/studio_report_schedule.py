@@ -1,7 +1,7 @@
 """Private, opt-in Friday client reports using the durable command delivery path.
 
-The shared command queue is not trusted to invent scheduled requests. Every
-scheduled request must also match an issuance receipt in the private data volume.
+Weekly requests remain in the private data volume so Public Roo cannot mistake
+them for monthly command context. Each also requires a private issuance receipt.
 """
 from datetime import date, datetime, time, timedelta
 import json
@@ -152,10 +152,10 @@ def _enqueue_one(service, schedule, schedules, now):
         return None
     key, request = _canonical_request(service, schedule, due)
     event = {'schedule': schedule['id'], 'request': key}
-    with service.queue.locked(key) as acquired:
+    with service.weekly_queue.locked(key) as acquired:
         if not acquired:
             return {**event, 'status': 'busy'}
-        existing = service.queue.read(key)
+        existing = service.weekly_queue.read(key)
         if existing is not None:
             if not scheduled_request_authorized(existing, schedules, service=service):
                 return {**event, 'status': 'error', 'reason': 'weekly_request_changed'}
@@ -169,9 +169,9 @@ def _enqueue_one(service, schedule, schedules, now):
             if prior is not None and prior != expected:
                 return {**event, 'status': 'error', 'reason': 'weekly_request_changed'}
             if prior is None:
-                # Private provenance must exist before the public entry.
+                # Private provenance must exist before the queued entry.
                 store.write(key, expected)
-            service.queue.write(key, {**request, 'status': 'pending'})
+            service.weekly_queue.write(key, {**request, 'status': 'pending'})
         return {**event, 'status': 'queued', 'due_at': due.isoformat()}
 
 

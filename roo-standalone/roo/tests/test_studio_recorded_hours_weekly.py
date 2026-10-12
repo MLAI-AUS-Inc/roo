@@ -195,8 +195,8 @@ def _finance_weekly_request(setup, monkeypatch, read_at, *, as_of='2026-10-17T12
              'time': '17:00', 'window': 'workweek', 'starts_on': '2026-10-16'}])}, setup.clients)
     setup.service.schedules = schedules
     assert enqueue_weekly(setup.service, schedules, NOW)[0]['status'] == 'queued'
-    path = next(setup.config.queue.glob('*.json'))
-    return setup.service.queue.read(path.stem)
+    path = next(setup.service.weekly_queue.directory.glob('*.json'))
+    return setup.service.weekly_queue.read(path.stem)
 
 
 def test_weekly_catchup_accepts_later_review_and_keeps_friday_cutoff(finance_setup, monkeypatch):

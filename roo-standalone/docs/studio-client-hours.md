@@ -358,8 +358,8 @@ Cross-boundary and undated quantities are excluded and flagged as partial,
 without prorating or treating a monthly allocation estimate as a daily split.
 Invoice replacements and invoice-first coverage still prevent duplicate work.
 
-The worker records schedule issuance in its private data volume before writing
-the shared request queue. Forged schedule metadata, revoked client access,
+The worker records schedule issuance and weekly requests in its private data
+volume. Weekly requests are kept out of Public Roo's on-demand request history. Forged schedule metadata, revoked client access,
 changed schedules and disabled schedules cannot deliver saved weekly reports.
 To activate, first verify the recipient, client grants, first date and cutoff,
 then restart only the report worker with the updated environment. Its existing
