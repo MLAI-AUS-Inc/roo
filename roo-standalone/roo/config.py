@@ -93,6 +93,8 @@ class Settings(BaseSettings):
     TIMESHEET_RECIPIENT_SLACK_ID: str = ""
     TIMESHEET_FIRST_CUTOFF: str = "2026-09-11"
     TIMESHEET_QUEUE_DIR: str = "/app/timesheets/queue"
+    STUDIO_INVOICE_COMMANDS_ENABLED: bool = False
+    STUDIO_INVOICE_QUEUE_DIR: str = "/app/timesheets/invoice-queue"
 
     # Client reporting queues contain request metadata only; source credentials
     # and owner/project mappings live in the separate Studio report worker.
@@ -293,6 +295,8 @@ class Settings(BaseSettings):
                 enabled.add("meeting-room-booking")
             if self.STUDIO_REPORTS_ENABLED:
                 enabled.add("studio-hours")
+            if self.STUDIO_INVOICE_COMMANDS_ENABLED:
+                enabled.add("studio-invoices")
             if self.STUDIO_CLIENT_BALANCE_ENABLED:
                 enabled.add("studio-client-balance")
             return frozenset(enabled)

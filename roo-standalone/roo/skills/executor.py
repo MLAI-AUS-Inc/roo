@@ -291,6 +291,9 @@ class SkillExecutor:
                     slack_team_id=kwargs.get("slack_team_id"),
                     request_message_ts=kwargs.get("current_message_ts"),
                 )
+            elif skill.name == "studio-invoices":
+                from ..invoice_commands import HELP
+                result = HELP  # Exact signed ingress owns generation; model params grant no authority.
             elif skill.name in {"studio-hours", "studio-client-balance"}:
                 from ..studio_report_commands import enqueue as enqueue_studio_report
 

@@ -31,6 +31,13 @@ class TimesheetError(ValueError):
     """Fixed reason code, safe to log without provider text."""
 
 
+class DeliveryExpired(TimesheetError):
+    """A guarded outbound operation has definitely not started before expiry."""
+
+    def __init__(self):
+        super().__init__('draft_expired')
+
+
 class SourceRetryError(TimesheetError):
     """A source-wide failure with an absolute earliest retry time."""
 
