@@ -307,8 +307,78 @@ docker compose -f docker-compose.studio-reports.yml up -d --build
 Public Roo and worker must share the same queue directory. The Compose profiles
 mount `./data/studio-report-queue`; only the worker mounts report data. Required
 Slack scopes are `chat:write`, `im:write`, `users:read`, and `files:write`.
-The worker polls every ten seconds. No recurring client reports are scheduled.
+The worker polls every ten seconds. Recurring reports are opt-in in the private
+worker; on-demand reports do not enable a schedule.
 Disable `STUDIO_REPORTS_ENABLED` and stop the separate worker to roll back.
+
+### Weekly Friday reports
+
+
+The same private worker can automatically DM a report each Friday for one
+configured client, including every project in that client's verified mapping.
+The report shows the total for the week and each project/builder breakdown,
+including zero-hour projects. It does not infer a weekly allowance from the
+monthly contract. New client projects still require a verified mapping update.
+
+Configure only `.env.studio-reports`, using verified Slack IDs rather than a
+guessed name or recipient. The `actor` receives the DM and must already have
+access to the selected client. For a staff recipient, configure their
+`report_client_ids` and full project grant as described above. To send directly
+to the client, use that owner's verified Slack ID as both actor and client.
+There is no channel destination or recipient override.
+
+```dotenv
+STUDIO_REPORTS_WEEKLY_ENABLED=true
+STUDIO_REPORTS_WEEKLY_SCHEDULES_JSON=[{"id":"example-client-friday","actor":"UEXAMPLESTAFF","client":"UEXAMPLECLIENT","time":"17:00","window":"last_7_days","action":"summary","starts_on":"2026-10-16"}]
+```
+
+`time` uses Australia/Melbourne and follows daylight saving. `last_7_days` covers
+the previous Friday at the configured time through this Friday at that time;
+the end is excluded, so work at the cutoff belongs to the next report. This is
+the continuous option for including evening and weekend work. `workweek`
+covers Monday midnight through the Friday send time and excludes work after
+that time and on weekends. Defaults are Friday 17:00, `workweek`, and `summary`.
+Use `action: detailed` to include the full counted-work CSV and messages.
+
+Set `starts_on` to the intended first reporting date to prevent first startup
+from sending the preceding Friday's report. After a restart, the worker queues
+the most recent elapsed Friday, without generating a backlog of missed weeks.
+Queued reports retain their original Friday cutoff even when source retries
+or delivery are delayed. Keep each schedule `id` stable: existing requests and
+delivery receipts prevent repeat sends. Changing the same schedule's cutoff
+does not resend an already-issued Friday; changing its ID represents a new
+schedule and can create another delivery. There are no database migrations.
+
+Weekly hours retain the monthly report's source basis and first-completion
+ownership rules. They are not a complete clock-time log. A dated invoice or
+reviewed time quantity counts only if its entire inclusive work-date window
+fits the weekly cutoff. For example, a Friday work date alone cannot establish
+how much happened before a Friday 17:00 send; that row stays unresolved.
+Cross-boundary and undated quantities are excluded and flagged as partial,
+without prorating or treating a monthly allocation estimate as a daily split.
+Invoice replacements and invoice-first coverage still prevent duplicate work.
+
+The worker records schedule issuance in its private data volume before writing
+the shared request queue. Forged schedule metadata, revoked client access,
+changed schedules and disabled schedules cannot deliver saved weekly reports.
+To activate, first verify the recipient, client grants, first date and cutoff,
+then restart only the report worker with the updated environment. Its existing
+`--once` command processes due schedules and queued requests and can send Slack
+messages; it is not a preview. Disabling `STUDIO_REPORTS_WEEKLY_ENABLED` and
+restarting stops new weekly reports and denies pending scheduled deliveries.
+Monthly on-demand reporting continues to use its existing configuration.
+To roll back all client reporting, disable `STUDIO_REPORTS_ENABLED` and stop
+the separate worker.
+
+When a client uses the canonical reviewed finance snapshot, weekly reports use
+the same source and freshness gate as their monthly hours reports. They never
+fall back to ticket estimates for those projects. Reviewed records must be
+refreshed at least weekly through the operator reconciliation handoff; this
+scheduler does not synchronise Xero or invent source review timestamps.
+If a fresh snapshot does not cover the requested week, the DM says that weekly
+hours are unavailable and omits an apparent zero-hours chart. Stale sources
+produce a private setup notice. Estimated invoice dates and aggregate work
+windows cannot establish a weekly split, and remain unresolved.
 
 ## Delivery recovery
 

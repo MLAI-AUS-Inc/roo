@@ -205,6 +205,9 @@ class TimesheetService:
     def request_authorized(self, request):
         return request.get('team') == self.config.team and request.get('actor') == self.config.recipient
 
+    def request_key_authorized(self, request, key):
+        return True
+
     def report_for_request(self, request):
         return self.report(request['selector'], timestamp(request['requested_at']))
 
@@ -238,7 +241,7 @@ class TimesheetService:
                 request = self.queue.read(key)
                 if request.get('status') in {'done', 'denied', 'rejected'}:
                     continue
-                if not self.request_authorized(request):
+                if not self.request_key_authorized(request, key) or not self.request_authorized(request):
                     request['status'] = 'denied'
                     self.queue.write(key, request)
                     continue

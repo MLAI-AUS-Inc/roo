@@ -48,6 +48,7 @@ def enqueue(settings, context, params, *, user_id, channel_id, thread_ts, now=No
                 candidate = store.read(path.stem)
                 if (candidate and candidate.get('actor') == user_id
                         and candidate.get('team') == context.slack_team_id
+                        and candidate.get('selector', {}).get('period') != 'weekly'
                         and candidate.get('report_kind', 'hours') == report_kind
                         and candidate.get('status') not in {'denied', 'rejected', 'error'}):
                     previous.append(candidate)
