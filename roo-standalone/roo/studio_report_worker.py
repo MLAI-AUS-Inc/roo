@@ -154,17 +154,25 @@ class StudioReportService(TimesheetService):
                 beginnings.append(history_beginning(backfill, list(legacy_projects or client['project_ids'])))
             selector, start, _ = resolve_period(selector, now,
                 beginning=min(beginnings))
+        month_selector, month_start = None, None
+        if selector.get('period') == 'weekly':
+            month_selector, month_start, _ = resolve_period({
+                'period': 'month_to_date', 'end': selector['end'], 'action': 'summary',
+                **({'client': selector['client']} if selector.get('client') else {})}, now)
         # The collection window must include project moves since the requested
         # month, even for months older than the payroll worker's initial cutoff.
         source = SimpleNamespace(team=self.config.team, organization=self.config.organization,
                                  projects={key: self.config.projects[key] for key in legacy_projects},
-                                 beginning=start, directory=self.config.directory)
+                                 beginning=min(start, month_start) if month_start else start,
+                                 directory=self.config.directory)
         self.api.verify_recipient(actor, self.config.team)
         dataset = []
         if legacy_projects:
             self.api.verify(source)
             dataset = self.api.collect(source, now, {})
         report = build_client_report(self.config, client, selector, dataset, now, backfill)
+        month_report = (build_client_report(self.config, client, month_selector, dataset, now, backfill)
+                        if month_selector else None)
         if finance_owners:
             from .studio_recorded_hours import overlay_recorded_reports
             reviewed = [build_recorded_report(self.config, self.clients[owner], selector,
@@ -172,14 +180,29 @@ class StudioReportService(TimesheetService):
             report = overlay_recorded_reports(report, reviewed)
             report.update(finance_digest=fingerprint(snapshot), finance_owners=finance_owners,
                           canonical_only=not legacy_projects)
+            if month_report is not None:
+                month_reviewed = [build_recorded_report(self.config, self.clients[owner], month_selector,
+                                  snapshot['clients'][owner], now) for owner in finance_owners]
+                month_report = overlay_recorded_reports(month_report, month_reviewed)
         if groups:
             report['client_groups'] = groups
         report.update(actor=actor, scope=scope, backfill_digest=fingerprint(backfill))
+        if month_report is not None:
+            report['month_to_date'] = month_report
         # Freeze rendered parts too. A delivery retry uses the same content hash
         # even when font versions or optional chart availability change.
         parts = [{'kind': 'message', 'content': chunk, 'status': 'pending'} for chunk in split_messages(summary(report))]
         try:
-            if report.get('weekly_has_coverage') is not False:
+            if month_report is not None:
+                for period_report, filename in [(report, 'studio-hours-week.png'),
+                                                (month_report, 'studio-hours-month-to-date.png')]:
+                    if period_report is month_report:
+                        parts.extend({'kind': 'message', 'content': chunk, 'status': 'pending'}
+                                     for chunk in split_messages(summary(month_report)))
+                    parts.append({'kind': 'file', 'filename': filename,
+                                  'content': base64.b64encode(render_chart(period_report)).decode('ascii'),
+                                  'status': 'pending'})
+            else:
                 chart = render_chart(report)
                 parts.append({'kind': 'file', 'filename': 'studio-hours.png',
                               'content': base64.b64encode(chart).decode('ascii'), 'status': 'pending'})
@@ -189,12 +212,17 @@ class StudioReportService(TimesheetService):
                 if groups:
                     parts.append({'kind': 'file', 'filename': 'studio-hours-clients.png',
                                   'content': base64.b64encode(render_chart(report, breakdown='clients')).decode('ascii'), 'status': 'pending'})
-        except Exception:
+        except Exception as exc:
+            if month_report is not None:
+                raise TimesheetError('scheduled_report_chart_unavailable') from exc
             parts.append({'kind': 'message', 'content': 'The chart is unavailable this time; the full totals are above.', 'status': 'pending'})
         if selector['action'] == 'detailed':
             parts.extend({'kind': 'message', 'content': chunk, 'status': 'pending'} for chunk in detail_messages(report))
         parts.extend({'kind': 'file', 'filename': name, 'content': content, 'status': 'pending'}
                      for name, content in artifacts(report).items())
+        if month_report is not None:
+            parts.extend({'kind': 'file', 'filename': name.replace('studio-hours-', 'studio-hours-month-to-date-', 1),
+                          'content': content, 'status': 'pending'} for name, content in artifacts(month_report).items())
         report['parts'] = parts
         return report
 

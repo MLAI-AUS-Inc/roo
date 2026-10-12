@@ -1,4 +1,4 @@
-"""Weekly usage includes reviewed quantities only with contained work dates."""
+"""Bounded usage includes reviewed quantities only with contained work dates."""
 from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
@@ -20,6 +20,7 @@ def apply_weekly_backfill(report, backfill, config, now):
     start = timestamp(report['selector']['start']).astimezone(TZ)
     end = timestamp(report['selector']['end']).astimezone(TZ)
     as_of = timestamp(now).astimezone(TZ)
+    period_name = 'month-to-date' if report['selector'].get('period') == 'month_to_date' else 'weekly'
     by_month = {month['month']: month for month in report['monthly']}
     report['unallocated_units'] = 0
     report['estimated_month_units'] = 0
@@ -37,7 +38,7 @@ def apply_weekly_backfill(report, backfill, config, now):
             report['exceptions'].append({'month': month, 'project': report['projects'][project],
                                          'identifier': reference, 'reason': reason})
 
-    for entry in backfill['entries']:
+    for entry in ([] if start == end else backfill['entries']):
         project = entry['project_id']
         if project not in report['projects']:
             continue
@@ -63,13 +64,13 @@ def apply_weekly_backfill(report, backfill, config, now):
         relevant = overlapping_months(window['start'], window['through'])
         if undated:
             exception(project, reference, relevant,
-                      'Excluded from this weekly subtotal; source work dates are unconfirmed. '
-                      'A monthly allocation cannot establish weekly hours.')
+                      f'Excluded from this {period_name} subtotal; source work dates are unconfirmed. '
+                      f'A monthly allocation cannot establish {period_name} hours.')
             continue
         if first < start or through > end:
             exception(project, reference, relevant,
-                      'Excluded from this weekly subtotal; the source work period extends outside '
-                      'the weekly cutoff or lacks sufficient time precision. Hours are not prorated.')
+                      f'Excluded from this {period_name} subtotal; the source work period extends outside '
+                      'the reporting cutoff or lacks sufficient time precision. Hours are not prorated.')
             continue
         # Group a fully contained aggregate under its actual final work month.
         # The original dates are preserved; estimated month assignments do not
@@ -88,7 +89,7 @@ def apply_weekly_backfill(report, backfill, config, now):
 
     # Pending evidence only identifies a month. Every touched week in that
     # month remains qualified until supported dates establish a narrower scope.
-    for pending in backfill['pending']:
+    for pending in ([] if start == end else backfill['pending']):
         project = pending['project_id']
         if project in report['projects']:
             exception(project, pending['reference'], [month for month in pending['months'] if month in by_month],
