@@ -415,3 +415,99 @@ def test_invoice_channel_confirmation_provider_uses_thread_and_no_unfurls():
         assert api.post_invoice_ack('G123', 'Sent privately.', thread_ts='123.456') == '123.789'
     assert seen == [{'channel': 'G123', 'text': 'Sent privately.', 'thread_ts': '123.456',
                      'unfurl_links': False, 'unfurl_media': False}]
+
+
+def test_nineteen_builders_share_one_captured_report(config):
+    builders = {f'00000000-0000-0000-0000-{i:012d}': {'name':f'Builder {i}', 'slack_user_id':f'UBUILDER{i}'}
+                for i in range(1,20)}
+    config = replace(config, builders=builders)
+    api = OfflineAPI()
+    sizes = ['Extra Small (XS)', 'Small (S)', 'Medium (M)', 'Large (L)', 'Extra Large (XL)']
+    api.dataset = [item(ticket(i, size=sizes[(i-1)%5], assignee={'id':key},
+                              completedAt='2026-10-20T01:00:00Z', updatedAt='2026-10-20T01:00:00Z'))
+                   for i,key in enumerate(builders,1)]
+    s = service(config, api=api)
+    for i,b in enumerate(builders.values()): queue(s, actor=b['slack_user_id'], source=f'19-{i}')
+    results = s.commands(THURSDAY)
+    assert len(results) == 19 and all(r['status']=='sent' for r in results)
+    assert api.reads == 1
+    amounts = [1625,6500,13000,19500,32500]*3 + [1625,6500,13000,19500]
+    for i,(key,builder) in enumerate(builders.items()):
+        # Inspect the real saved private projection rather than recomputing it.
+        docs = [s.drafts.read(p.stem) for p in s.drafts.directory.glob('*.json')]
+        doc = next(d for d in docs if d['builder_id']==key)['invoice']
+        assert doc['total_cents'] == amounts[i]
+        assert [r['issue_id'] for r in doc['rows']] == [f'issue-{i+1}']
+    queue(s, actor='UBUILDER1', source='later', now=THURSDAY+timedelta(minutes=2))
+    assert s.commands(THURSDAY+timedelta(minutes=2))[0]['status']=='sent'
+    assert api.reads == 2
+    api.inactive.add('UBUILDER2')
+    queue(s, actor='UBUILDER2', source='inactive')
+    assert s.commands(THURSDAY+timedelta(minutes=4))[0]['reason']=='recipient_unavailable'
+
+
+def test_report_batch_invalidates_on_correction_and_returns_private_copies(config):
+    api = OfflineAPI()
+    s = service(config, api=api)
+    with s.timesheets.report_batch():
+        a = s.timesheets.report('current', THURSDAY)
+        a['rows'].clear()
+        assert len(s.timesheets.report('current', THURSDAY)['rows']) == 2
+        assert api.reads == 1
+        original = s.timesheets.report('2026-10-23', FRIDAY)
+        s.timesheets.correction(dict(id='memo-fix', period='2026-10-23', issue_id='issue-1', builder_id=USER,
+                                    units=1, reason='Reviewed'), FRIDAY)
+        later = FRIDAY+timedelta(days=13)
+        result = s.timesheets.report('current', later)
+        assert sum(r['units'] for r in result['rows']) == 1
+        reads = api.reads
+        s.timesheets.config = replace(config, builders={**config.builders, USER:{'name':'Changed','slack_user_id':'UBUILDER'}})
+        s.timesheets.report('current', later)
+        assert api.reads == reads+1
+    assert s.timesheets.report('2026-10-23', later) == original
+
+
+@pytest.mark.parametrize('reason', ['invoice_source_not_prepared','linear_rate_limited','linear_source_budget','linear_source_unstable'])
+def test_waiting_notice_is_private_pinned_and_once(config, reason):
+    from roo.timesheets import SourceRetryError
+    class WaitingAPI(OfflineAPI):
+        def collect(self,*args):
+            self.reads += 1
+            if reason == 'invoice_source_not_prepared': raise TimesheetError(reason)
+            raise SourceRetryError(reason, self.deadline)
+    api = WaitingAPI()
+    api.deadline = THURSDAY.timestamp()+3600
+    s = service(config, api=api)
+    key = queue(s, thread_ts='123.456')
+    assert s.commands(THURSDAY)[0]['reason']==reason
+    assert len(api.messages)==1 and api.messages[0][0]=='DUBUILDER'
+    text = api.messages[0][1]
+    assert 'request is saved' in text
+    assert 'zero' not in text
+    if reason in {'linear_source_budget','linear_source_unstable'}:
+        assert 'checking the source' in text
+    if reason=='linear_rate_limited':
+        assert '18:00' in text and 'AEDT' in text and 'earliest retry' in text
+    receipt = s.notices.read(key)
+    assert receipt['text']==text
+    api.deadline += 7200
+    resumed = service(config, api=api)
+    resumed.commands(THURSDAY+timedelta(hours=2))
+    assert len(api.messages)==1 and resumed.notices.read(key)==receipt
+    assert not api.files and not api.acknowledgements
+    assert not list(s.drafts.directory.glob('*.json'))
+    assert not s.timesheets.ledger.load()['allocated']
+
+
+def test_ambiguous_wait_notice_is_never_resent(config):
+    class WaitingAPI(OfflineAPI):
+        def collect(self,*args): raise TimesheetError('invoice_source_not_prepared')
+        def post_message(self, channel, content):
+            self.messages.append((channel,content))
+            raise TimeoutError()
+    api = WaitingAPI()
+    s = service(config, api=api)
+    queue(s)
+    s.commands(THURSDAY)
+    service(config, api=api).commands(THURSDAY+timedelta(minutes=2))
+    assert len(api.messages)==1 and not api.files

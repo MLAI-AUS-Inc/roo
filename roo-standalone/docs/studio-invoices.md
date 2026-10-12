@@ -77,6 +77,90 @@ Incomplete evidence is identified as excluded work needing review; provider
 failures are never interpreted as zero. A final explanation also supersedes a
 prior positive draft if the sealed payable amount is now zero or negative.
 
+## Scoped source preparation and recovery
+
+The private worker uses an indexed invoice reader. The primary query applies
+the approved project IDs, their verified Linear team IDs and the requested
+payment period in Linear itself. Names and prefixes never expand the payable
+project list. Preflight resolves every project's teams, including pagination;
+an unverified relation blocks generation. `TIMESHEET_SLACK_TEAM_ID` remains a
+Slack workspace ID, not a Linear team ID.
+
+Prepare historical coverage explicitly before activating this reader:
+
+```bash
+python -m roo.timesheet_worker --env-file .env.timesheets --preflight
+python -m roo.timesheet_worker --env-file .env.timesheets --prepare-source
+```
+
+Preparation reads from the existing 28 August noon source beginning and saves
+evidence. It creates no report, allocation, invoice or Slack delivery. Until
+preparation completes, member requests stay queued and receive a private
+waiting notice. Repeat preparation after its reported cooldown to resume saved
+pages and evidence batches. It is a one-time historical pass, with a new pass
+required after changes to source credentials/organization, team/project scope,
+first cutoff, timezone, rubric or reader version.
+
+Normal reads refresh scoped period candidates, retained unfinished/deferred
+work and lightweight changes since the last successful refresh, with a
+five-minute overlap. A compact project-history check for new/changed outsiders
+protects work moved out of Studio, including moves across teams. Unchanged
+unrelated workspace issues cause no history reads. Relevant histories are
+batched and reused after fresh candidate checks; label names are refreshed
+even when the issue timestamp did not change. Full histories retain the first
+completion so reopened old work cannot be paid again. Missing prior periods
+are still simulated chronologically for drafts and persisted only for finals.
+Finals require stable closing discovery before sealing. The API provides no
+global transactional snapshot, and never-observed hard-deleted tasks remain an
+upstream visibility limit. Loss of access to known required work blocks coverage.
+
+One captured command/schedule batch builds one all-builder report, then applies
+each member's ownership checks and private projection. Later requests refresh
+changes; no draft is reused indefinitely. Saved finals and saved request
+artifacts can be delivered during source outages without a Linear read.
+
+Private storage, relative to `TIMESHEET_DATA_DIR`:
+
+- `linear-invoice-index/<scope fingerprint>/manifest.json`: complete coverage
+  and refresh-start watermark; `progress.json`: resumable work, never a report.
+- `linear-invoice-index/<scope fingerprint>/full-pages/`: version-bound history
+  page receipts for interrupted long-history reads.
+- `linear-evidence/<credential/organization/workspace fingerprint>/`: verified
+  full issue/history evidence and digests.
+- `linear-cooldowns/<fingerprint>.json`: shared provider/local retry deadline.
+- `invoices/notices/`: original private wait reason, text and deadline, pinned
+  before delivery. Confirmed/ambiguous notices are never resent automatically.
+
+HTTP 429 and GraphQL `RATELIMITED` at HTTP 200/400 honor the provider's reset,
+including millisecond request/complexity headers. Corrupt cooldowns fail closed.
+Each source attempt permits at most 200 HTTP calls and 45 seconds before the
+next request (one in-flight request can reach the existing HTTP timeout).
+Exhaustion saves progress and shares a wait of at least 60 seconds; another
+builder cannot immediately start another scan. Provider waits show the earliest
+retry in Melbourne time, not a completion ETA. Source delays never create empty
+invoices or success acknowledgements. The separate client-report deployment
+has its own volume and may still consume the same provider quota.
+
+Aggregate `invoice_linear_read` logs expose candidate/page/hydration counts,
+compact move checks, evidence cache hits/batches and elapsed time; no issue
+bodies or credentials. Measure preparation, cold period, unchanged refresh,
+one changed issue and a 19-builder batch separately. Under one minute for a
+typical healthy prepared request is a target pending live measurement.
+
+For example, on 12 October `invoice` previews work after 9 October noon for
+the 23 October payment fortnight; `latest` remains a saved closed-period
+selector, with member invoices restricted to rollout dates.
+
+The private worker must be updated separately from Public Roo. After separate
+production authorization: build the new private worker image, run that image's
+read-only scope preflight and preparation against the existing private volume,
+then activate it as the long-running reader. The already enabled invoice flags
+need no changes. A public GitHub deployment alone does not rebuild this worker.
+Keep all ledger, queues, saved artifacts and delivery receipts intact; never
+delete them to force a retry. Live MLAI team/project relations and timing must
+be verified before activation; the browser account available during this change
+did not have access to the MLAI workspace.
+
 ## Reviewed deployment configuration
 
 The feature defaults off. Deployment is a separate reviewed action. Public Roo

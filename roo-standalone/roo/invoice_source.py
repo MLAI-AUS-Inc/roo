@@ -344,8 +344,10 @@ class InvoiceSourceAPI(StudioSourceAPI):
                                 'evidence':value, 'digest':fingerprint(value)})
             except SourceRetryError: raise
             except TimesheetError as exc:
-                if str(exc) == 'issue_unavailable':
+                if str(exc) in {'issue_unavailable','invalid_linear_cursor','incomplete_linear_page'}:
                     raise TimesheetError('invoice_source_coverage') from None
+                if str(exc) == 'issue_changed_during_read':
+                    self.defer_source()
                 value = {'issue':normalized(original), 'history':[], 'error':str(exc)}
             progress['items'][key] = value
             progress['evidence_done'].append(key)

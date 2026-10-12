@@ -5,6 +5,18 @@ to Sam. This is separate from the existing builder payment reminder. It does not
 execute payments or change tickets. Client project reporting uses a separate
 [monthly hours worker](studio-client-hours.md).
 
+The private Linear timesheet/invoice worker now requires explicit source
+preparation before generating new reports. Run `--preflight`, then
+`--prepare-source` with the dedicated worker environment and persistent volume.
+Preparation saves historical evidence only; it does not seal allocations or
+send messages. Ordinary commands never start this historical preparation.
+The [invoice source guide](studio-invoices.md#scoped-source-preparation-and-recovery)
+documents verified project/team scope, recent-change reconciliation, durable
+progress and cooldowns, aggregate performance counters and the separate private
+worker rollout. Sam's access and chronological allocation/correction rules are
+unchanged. Saved snapshots, exports, status and delivery recovery need no new
+Linear read; the Plane adapter remains preview-only.
+
 ## Commands
 
 | Request | Result |

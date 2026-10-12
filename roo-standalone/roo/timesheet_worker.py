@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager, nullcontext
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 import json
@@ -109,6 +110,32 @@ class TimesheetService:
         self.deliveries = ReceiptStore(config.directory / 'deliveries')
         self.requests = ReceiptStore(config.directory / 'requests')
         self.queue = ReceiptStore(config.queue)
+        self._batch_reports = None
+
+    @contextmanager
+    def report_batch(self):
+        """Only a captured synchronous worker batch may reuse a source report."""
+        if self._batch_reports is not None:
+            yield
+            return
+        self._batch_reports = {}
+        try:
+            yield
+        finally:
+            self._batch_reports = None
+
+    def _report_key(self, selector, now, preview, data):
+        c = self.config
+        return fingerprint({'selector':selector, 'now':now.isoformat(), 'preview':preview,
+                            'config':{'team':c.team, 'organization':c.organization, 'recipient':c.recipient,
+                                      'projects':c.projects, 'builders':c.builders, 'first':c.first.isoformat(),
+                                      'timezone':str(c.tz), 'source':c.source},
+                            'source':{'reader':type(self.api).__name__,
+                                      'credential':fingerprint(getattr(self.api, 'linear_key', None))
+                                          if isinstance(getattr(self.api, 'linear_key', None), (str,type(None))) else None,
+                                      'scope':getattr(self.api, '_scope_config', None)
+                                          if isinstance(getattr(self.api, '_scope_config', None), (str,type(None))) else None},
+                            'ledger':data})
 
     def report(self, selector, now, *, preview=False):
         config = self.config
@@ -137,10 +164,32 @@ class TimesheetService:
                 if config.source == 'plane':
                     raise TimesheetError('plane_preview_requires_unfinalized_period')
                 return deepcopy(data['periods'][period])
-            self.api.verify(config)
-            dataset = self.api.collect(config, end, data['deferred'])
             cutoff = config.cutoff(config.first)
             last = config.latest(now) if draft else end
+            memo = self._report_key(selector, now, preview, data)
+            if self._batch_reports is not None and memo in self._batch_reports:
+                return deepcopy(self._batch_reports[memo])
+            period_start = max(config.beginning, config.latest(end) if draft else end-timedelta(days=14))
+            required_from = period_start
+            missing = cutoff
+            while missing <= last:
+                if missing.date().isoformat() not in data['periods']:
+                    required_from = min(required_from, missing-timedelta(days=14))
+                    break
+                missing += timedelta(days=14)
+            # Resolve declared adapter methods, not dynamically manufactured
+            # attributes (legacy test doubles and old adapters retain collect).
+            collect = getattr(type(self.api), 'collect_for_report', None)
+            attempt = getattr(type(self.api), 'source_attempt', None)
+            with self.api.source_attempt() if attempt else nullcontext():
+                self.api.verify(config)
+                if collect:
+                    dataset = self.api.collect_for_report(config, end, data['deferred'], draft=draft,
+                        period_start=period_start, required_from=required_from, allocated=set(data['allocated']))
+                else:
+                    dataset = self.api.collect(config, end, data['deferred'])
+            # Verification may bind a newly resolved source namespace.
+            memo = self._report_key(selector, now, preview, data)
             while cutoff <= last:
                 key = cutoff.date().isoformat()
                 if key not in data['periods']:
@@ -152,8 +201,12 @@ class TimesheetService:
                         self.ledger.save(data)
                 cutoff += timedelta(days=14)
             if draft:
-                return build_report(config, end, dataset, data, draft=True, generated_at=now)
-            return deepcopy(data['periods'][period])
+                result = build_report(config, end, dataset, data, draft=True, generated_at=now)
+            else:
+                result = deepcopy(data['periods'][period])
+            if self._batch_reports is not None:
+                self._batch_reports[memo] = deepcopy(result)
+            return result
 
     def deliver(self, report, recipient, delivery_key, now):
         if self.config.source == 'plane' or report.get('source') == 'plane':
@@ -388,6 +441,7 @@ def main(argv=None):
     group = parser.add_mutually_exclusive_group()
     group.add_argument('--once', action='store_true')
     group.add_argument('--preflight', action='store_true')
+    group.add_argument('--prepare-source', action='store_true', help='Prepare private Linear source coverage; no reports or delivery')
     group.add_argument('--status', action='store_true', help='Inspect local period and delivery status without network calls')
     group.add_argument('--preview', metavar='latest|current|YYYY-MM-DD')
     group.add_argument('--export', metavar='YYYY-MM-DD', help='Regenerate an existing immutable snapshot only')
@@ -417,7 +471,8 @@ def main(argv=None):
                     slack_api = ReportAPI(client, linear_key='unused-plane-source', slack_token=env.get('TIMESHEET_SLACK_BOT_TOKEN'))
                     api = PlaneAPI(client, PlaneOptions.from_env(env), slack_api)
                 else:
-                    api = ReportAPI(client, linear_key=env.get('TIMESHEET_LINEAR_READ_API_KEY'), slack_token=env.get('TIMESHEET_SLACK_BOT_TOKEN'))
+                    from .invoice_source import InvoiceSourceAPI
+                    api = InvoiceSourceAPI(client, linear_key=env.get('TIMESHEET_LINEAR_READ_API_KEY'), slack_token=env.get('TIMESHEET_SLACK_BOT_TOKEN'))
             service = TimesheetService(config, api)
             from .studio_invoices import InvoiceConfig
             from .invoice_worker import InvoiceService
@@ -443,6 +498,14 @@ def main(argv=None):
                         if (data.get('user') or {}).get('id') != linear_id:
                             raise TimesheetError('builder_unavailable')
                 print(json.dumps({'status': 'verified', 'projects': len(config.projects), 'builders': len(config.builders)}))
+                return 0
+            if args.prepare_source:
+                if config.source != 'linear':
+                    raise TimesheetError('linear_source_required')
+                with api.source_attempt():
+                    api.verify(config)
+                    prepared = api.prepare(config, datetime.now(timezone.utc))
+                print(json.dumps(prepared))
                 return 0
             if args.preview:
                 report = service.report(args.preview, datetime.now(timezone.utc), preview=True)

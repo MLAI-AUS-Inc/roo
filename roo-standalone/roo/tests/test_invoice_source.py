@@ -75,9 +75,10 @@ class Provider:
             data = {'project': {'id': project, 'teams': self.connection([{'id': t} for t in teams], variables.get('after'))}}
         elif 'TimesheetProject' in query:
             data = {'project': {'id': variables['id']}}
-        elif 'InvoicePeriodIssues' in query or 'InvoiceChangedIssues' in query:
-            assert 'includeArchived:true' in query
-            values = [self.light(x['issue']) for x in self.dataset.values() if matches(x['issue'], variables['filter'])]
+        elif 'InvoicePeriodIssues' in query or 'InvoiceChangedIssues' in query or 'TimesheetIssues' in query:
+            assert 'includeArchived:true' in query or 'includeArchived: true' in query
+            project = self.full if 'TimesheetIssues' in query else self.light
+            values = [project(x['issue']) for x in self.dataset.values() if matches(x['issue'], variables['filter'])]
             data = {'issues': self.connection(sorted(values, key=lambda x: x['id']), variables.get('after'))}
         elif 'InvoiceMoveHistory' in query:
             value = self.dataset.get(variables['id'])
@@ -432,3 +433,296 @@ def test_source_identity_changes_require_new_preparation(config, monkeypatch, ch
     elif change == 'projects': config = replace(config, projects={PROJECT:config.projects[PROJECT]})
     fresh.verify(config)
     with pytest.raises(TimesheetError, match='invoice_source_not_prepared'): collect(fresh, config)
+
+
+class SlackBoundary:
+    """Minimal external Slack protocol, with real recipient and upload checks."""
+    def __init__(self, provider):
+        self.provider = provider
+        self.messages, self.files, self.acks = [], [], []
+        self.inactive = set()
+
+    def handle(self, request):
+        if request.url.host == 'api.linear.app': return self.provider.handle(request)
+        assert request.url.host in {'slack.com','files.slack.com'}
+        if request.url.host == 'files.slack.com':
+            self.files.append(request.content)
+            return httpx.Response(200)
+        method = request.url.path.rsplit('/',1)[-1]
+        data = json.loads(request.content) if request.method=='POST' else dict(request.url.params)
+        body = {'ok':True}
+        if method=='auth.test': body['team_id'] = self.provider.config.team
+        elif method=='users.info':
+            body['user'] = {'id':data['user'],'team_id':self.provider.config.team,
+                            'deleted':data['user'] in self.inactive,'is_bot':False,'is_app_user':False}
+        elif method=='conversations.open': body['channel'] = {'id':'D'+data['users']}
+        elif method=='chat.postMessage':
+            (self.acks if data.get('thread_ts') else self.messages).append(data)
+            body.update(channel=data['channel'], ts='123.456')
+        elif method=='files.getUploadURLExternal':
+            body.update(upload_url='https://files.slack.com/upload/synthetic',file_id='F123')
+        elif method=='files.completeUploadExternal': body['files'] = [{'id':'F123'}]
+        else: pytest.fail('Unexpected Slack method ' + method)
+        return httpx.Response(200,json=body)
+
+    def api(self):
+        from roo.invoice_source import InvoiceSourceAPI
+        return InvoiceSourceAPI(httpx.Client(transport=httpx.MockTransport(self.handle)),
+                                linear_key='synthetic',slack_token='synthetic')
+
+
+def worker_env(config):
+    return {'TIMESHEETS_ENABLED':'true', 'TIMESHEET_SLACK_TEAM_ID':config.team,
+            'TIMESHEET_LINEAR_ORGANIZATION_ID':config.organization, 'TIMESHEET_RECIPIENT_SLACK_ID':config.recipient,
+            'TIMESHEET_PROJECTS_JSON':json.dumps(config.projects),
+            'TIMESHEET_BUILDERS_JSON':json.dumps([{'linear_user_id':k,**v} for k,v in config.builders.items()]),
+            'TIMESHEET_DATA_DIR':str(config.directory), 'TIMESHEET_QUEUE_DIR':str(config.queue),
+            'TIMESHEET_LINEAR_READ_API_KEY':'synthetic', 'TIMESHEET_SLACK_BOT_TOKEN':'synthetic',
+            'STUDIO_INVOICES_ENABLED':'true', 'STUDIO_INVOICES_SCHEDULE_ENABLED':'false',
+            'STUDIO_INVOICE_QUEUE_DIR':str(config.directory.parent/'invoice-queue')}
+
+
+def test_cli_uses_scoped_reader_and_explicit_preparation(config, monkeypatch, capsys):
+    from datetime import datetime
+    from roo.timesheet_worker import main, TimesheetService
+    from roo.invoice_worker import InvoiceService
+    from roo.studio_invoices import InvoiceConfig
+    from roo.tests.test_invoice_worker import queue
+    provider = Provider(config, [current(1),current(2,assignee={'id':OTHER})])
+    boundary = SlackBoundary(provider)
+    client_class = httpx.Client
+    monkeypatch.setattr('roo.timesheet_worker.httpx.Client', lambda **kw: client_class(transport=httpx.MockTransport(boundary.handle),**kw))
+    class Clock(datetime):
+        @classmethod
+        def now(cls,*args,**kwargs): return NOW
+    monkeypatch.setattr('roo.timesheet_worker.datetime',Clock)
+    for k,v in worker_env(config).items(): monkeypatch.setenv(k,v)
+    assert main(['--prepare-source']) == 0
+    assert 'prepared' in capsys.readouterr().out
+    assert not boundary.files and not boundary.messages
+    assert not (config.directory/'ledger.json').exists()
+    assert not list((config.directory/'invoices').glob('**/*.json'))
+    s = InvoiceService(TimesheetService(config, None), InvoiceConfig(True,False,config.directory.parent/'invoice-queue'))
+    queue(s, now=NOW, thread_ts='123.456')
+    provider.calls.clear()
+    assert main(['--once']) == 0
+    assert provider.count('InvoicePeriodIssues') > 0
+    assert provider.count('TimesheetIssues') == 0
+    assert len(boundary.files)==1 and len(boundary.messages)==1 and len(boundary.acks)==1
+    assert boundary.messages[0]['channel']=='DUBUILDER'
+    from pypdf import PdfReader
+    import io
+    text = '\n'.join(p.extract_text() for p in PdfReader(io.BytesIO(boundary.files[0])).pages)
+    assert 'STU-1' in text and 'STU-2' not in text
+    assert not (config.directory/'ledger.json').exists()
+
+
+def test_fresh_interpreter_disabled_worker_has_no_import_cycle(tmp_path):
+    import os
+    import subprocess
+    import sys
+    env = {**os.environ,'TIMESHEETS_ENABLED':'false','STUDIO_INVOICES_ENABLED':'false'}
+    result = subprocess.run([sys.executable,'-m','roo.timesheet_worker','--once'],env=env,capture_output=True,text=True)
+    assert result.returncode==0 and json.loads(result.stdout)=={'status':'disabled'}
+
+
+def test_cooldown_blocks_all_builders_without_zero_artifacts(config, monkeypatch):
+    from roo.timesheet_worker import TimesheetService
+    from roo.invoice_worker import InvoiceService
+    from roo.studio_invoices import InvoiceConfig
+    from roo.tests.test_invoice_worker import queue
+    clock = [NOW.timestamp()]
+    monkeypatch.setattr('roo.studio_report_source.time.time',lambda:clock[0])
+    provider = Provider(config, [current(),current(2,assignee={'id':OTHER})])
+    boundary = SlackBoundary(provider)
+    api = boundary.api()
+    api.verify(config)
+    api.prepare(config,NOW)
+    s = InvoiceService(TimesheetService(config,api),InvoiceConfig(True,True,config.directory.parent/'invoice-queue'))
+    provider.fail_at = len(provider.calls)+1
+    queue(s,actor='UBUILDER',now=NOW,source='a')
+    queue(s,actor='UOTHER',now=NOW,source='b')
+    results = s.commands(NOW)
+    assert len(results)==2 and all(r['reason']=='linear_rate_limited' for r in results)
+    count = len(provider.calls)
+    resumed = InvoiceService(TimesheetService(config,boundary.api()),s.options)
+    resumed.scheduled(NOW)
+    assert len(provider.calls)==count
+    assert not boundary.files and not boundary.acks
+    assert not s.timesheets.ledger.load()['allocated']
+    assert not list(s.drafts.directory.glob('*.json'))
+    provider.fail_at=None
+    clock[0] += 121
+    results = resumed.commands(NOW+timedelta(seconds=121))
+    assert all(r['status']=='sent' for r in results)
+    assert len(boundary.files)==2
+
+
+def test_empty_ledger_draft_replays_earlier_periods_without_writes(config):
+    from roo.timesheet_worker import TimesheetService
+    from roo.tests.test_invoice_worker import service, THURSDAY, FRIDAY
+    reopened = current(1)
+    reopened['history'] = [
+        {'id':'old','createdAt':'2026-09-10T01:00:00Z','fromStateId':'todo','toStateId':'done',
+         'fromState':{'id':'todo','type':'unstarted'},'toState':{'id':'done','type':'completed'}},
+        {'id':'reopen','createdAt':'2026-10-10T01:00:00Z','fromStateId':'done','toStateId':'todo',
+         'fromState':{'id':'done','type':'completed'},'toState':{'id':'todo','type':'unstarted'}},
+        {'id':'again','createdAt':'2026-10-20T01:00:00Z','fromStateId':'todo','toStateId':'done',
+         'fromState':{'id':'todo','type':'unstarted'},'toState':{'id':'done','type':'completed'}}]
+    provider=Provider(config,[reopened,item(ticket(2)),current(3),current(4,labels=[])])
+    boundary=SlackBoundary(provider)
+    api=boundary.api()
+    api.verify(config)
+    api.prepare(config,NOW)
+    s=service(config,api=api)
+    draft=s.artifact('UBUILDER','current',THURSDAY)
+    assert [r['issue_id'] for r in draft['invoice']['rows']]==['issue-3']
+    assert draft['invoice']['total_cents']==6500 and not draft['complete']
+    assert not s.timesheets.ledger.load()['allocated']
+    final=s.artifact('UBUILDER','2026-10-23',FRIDAY)
+    ledger=s.timesheets.ledger.load()
+    assert ledger['allocated']=={'issue-1':'2026-09-11','issue-2':'2026-09-11','issue-3':'2026-10-23'}
+    assert 'issue-4' in ledger['deferred']
+    provider.calls.clear()
+    assert service(config,api=boundary.api()).artifact('UBUILDER','2026-10-23',FRIDAY)==final
+    assert provider.calls==[]
+
+
+def test_nineteen_member_scoped_results_match_exhaustive_mixed_history_reader(config):
+    from roo.timesheet_worker import TimesheetService
+    from roo.tests.test_invoice_worker import service
+    from roo.studio_invoices import build_invoice
+    builders={f'00000000-0000-0000-0000-{i:012d}':{'name':f'Builder {i}','slack_user_id':f'UBUILDER{i}'} for i in range(1,20)}
+    config=replace(config,builders=builders)
+    dataset=[current(i,assignee={'id':key},size=['Extra Small (XS)','Small (S)','Medium (M)','Large (L)','Extra Large (XL)'][(i-1)%5])
+             for i,key in enumerate(builders,1)]
+    dataset += [item(ticket(50)),current(51,labels=[]),current(52,project={'id':'operations'})]
+    # Owner/size/project at cutoff differ from their current values.
+    moved=current(53,project={'id':'outside'},assignee={'id':OTHER},size='Extra Large (XL)')
+    moved['issue'].update(updatedAt='2026-10-22T07:00:00Z',team={'id':TEAM2})
+    moved['history']=[{'id':'move','createdAt':'2026-10-22T07:00:00Z',
+        'fromProjectId':PROJECT,'toProjectId':'outside','fromProject':{'id':PROJECT},'toProject':{'id':'outside'},
+        'fromAssigneeId':USER,'toAssigneeId':OTHER,'fromAssignee':{'id':USER},'toAssignee':{'id':OTHER},
+        'addedLabelIds':['size'],'removedLabelIds':['old'],'removedLabels':[{'id':'old','name':'Large (L)'}]}]
+    dataset.append(moved)
+    provider=Provider(config,dataset)
+    boundary=SlackBoundary(provider)
+    api=boundary.api()
+    api.verify(config)
+    api.prepare(config,NOW)
+    legacy=TimesheetAPI(httpx.Client(transport=httpx.MockTransport(boundary.handle)),linear_key='synthetic',slack_token='synthetic')
+    old=TimesheetService(replace(config,directory=config.directory.parent/'legacy'),legacy)
+    expected=old.report('current',NOW)
+    provider.calls.clear()
+    s=service(config,api=api)
+    results=s.scheduled(NOW)
+    assert len(results)==19 and all(r['status']=='sent' for r in results)
+    assert provider.count('InvoicePeriodIssues')==2
+    assert provider.count('StudioEvidenceBatch')==0
+    assert len(boundary.files)==19
+    docs=[s.drafts.read(p.stem) for p in s.drafts.directory.glob('*.json')]
+    for key in builders:
+        actual=next(d for d in docs if d['builder_id']==key)['invoice']
+        previous=build_invoice(config,expected,key,'2026-10-23')
+        assert actual['rows']==previous['rows']
+        assert actual['total_cents']==previous['total_cents']
+    assert not s.timesheets.ledger.load()['allocated']
+
+
+def test_saved_artifact_delivery_works_during_source_cooldown(config):
+    from roo.tests.test_invoice_worker import service, queue
+    provider=Provider(config,[current()])
+    boundary=SlackBoundary(provider)
+    api=boundary.api()
+    api.verify(config)
+    api.prepare(config,NOW)
+    s=service(config,api=api)
+    key=queue(s,now=NOW,thread_ts='123.456')
+    artifact=s.command_artifact(s.queue.read(key),key,NOW)
+    provider.fail_at=len(provider.calls)+1
+    with pytest.raises(SourceRetryError): api.verify(config)
+    count=len(provider.calls)
+    resumed=service(config,api=boundary.api())
+    assert resumed.commands(NOW)[0]['status']=='sent'
+    assert len(provider.calls)==count and len(boundary.files)==1 and len(boundary.acks)==1
+    assert resumed.command_artifact(resumed.queue.read(key),key,NOW)==artifact
+
+
+def test_cli_preflight_and_preparation_share_request_budget(config, monkeypatch):
+    from roo.timesheet_worker import main
+    from datetime import datetime
+    provider=Provider(config,[current(i) for i in range(240)],page_size=2)
+    boundary=SlackBoundary(provider)
+    client_class=httpx.Client
+    monkeypatch.setattr('roo.timesheet_worker.httpx.Client',lambda **kw:client_class(transport=httpx.MockTransport(boundary.handle),**kw))
+    class Clock(datetime):
+        @classmethod
+        def now(cls,*args,**kwargs): return NOW
+    monkeypatch.setattr('roo.timesheet_worker.datetime',Clock)
+    for k,v in worker_env(config).items(): monkeypatch.setenv(k,v)
+    assert main(['--prepare-source'])==1
+    assert len(provider.calls)<=200
+    assert not boundary.messages and not boundary.files
+    assert not list((config.directory/'linear-invoice-index').glob('*/manifest.json'))
+
+
+def test_cutoff_dst_and_recovery_preserve_artifacts(config):
+    from roo.tests.test_invoice_worker import service, queue
+    from roo.timesheet_worker import TimesheetService
+    provider=Provider(config,[item(ticket(10,completedAt='2026-09-24T01:00:00Z',updatedAt='2026-09-24T01:00:00Z')),
+                              item(ticket(11,completedAt='2026-10-07T01:00:00Z',updatedAt='2026-10-07T01:00:00Z')),current()])
+    boundary=SlackBoundary(provider)
+    api=boundary.api()
+    api.verify(config)
+    api.prepare(config,NOW)
+    engine=TimesheetService(config,api)
+    september=engine.report('2026-09-25',NOW)
+    october=engine.report('2026-10-09',NOW)
+    assert september['end']=='2026-09-25T12:00:00+10:00'
+    assert october['end']=='2026-10-09T12:00:00+11:00'
+    assert [r['issue_id'] for r in september['rows']]==['issue-10']
+    assert [r['issue_id'] for r in october['rows']]==['issue-11']
+    s=service(config,api=api)
+    key=queue(s,now=NOW,thread_ts='123.456')
+    artifact=s.command_artifact(s.queue.read(key),key,NOW)
+    assert artifact['invoice']['total_cents']==6500
+    assert s.deliver(artifact,'UBUILDER','command-'+key+'-draft',NOW)=='sent'
+    # Crash before the queue's delivered checkpoint, then source exhaustion.
+    provider.fail_at=len(provider.calls)+1
+    with pytest.raises(SourceRetryError): api.verify(config)
+    count=len(provider.calls)
+    resumed=service(config,api=boundary.api())
+    assert resumed.commands(NOW)[0]['status']=='sent'
+    assert resumed.commands(NOW)==[]
+    assert len(provider.calls)==count and len(boundary.files)==1 and len(boundary.messages)==1 and len(boundary.acks)==1
+    assert resumed.command_artifact(resumed.queue.read(key),key,NOW)==artifact
+
+
+def test_invalid_required_history_pagination_blocks_source_coverage(config):
+    value=current()
+    value['history']=[{'id':f'h{i}','createdAt':'2026-09-20T01:00:00Z'} for i in range(6)]
+    provider=Provider(config,[value],page_size=2)
+    api=provider.api()
+    api.verify(config)
+    provider.repeated_cursor=True
+    with pytest.raises(TimesheetError,match='invoice_source_coverage'): api.prepare(config,NOW)
+    assert not list((config.directory/'linear-invoice-index').glob('*/manifest.json'))
+
+
+def test_unstable_required_history_retries_instead_of_sealing_partial_report(config):
+    value=current()
+    value['history']=[{'id':f'h{i}','createdAt':'2026-09-20T01:00:00Z'} for i in range(4)]
+    provider=Provider(config,[value],page_size=2)
+    original=provider.handle
+    def handle(request):
+        response=original(request)
+        if 'TimesheetHistory' in json.loads(request.content)['query']:
+            data=response.json()
+            data['data']['issue']['updatedAt']='2026-10-22T06:01:00Z'
+            return httpx.Response(200,json=data)
+        return response
+    provider.handle=handle
+    api=provider.api()
+    api.verify(config)
+    with pytest.raises(SourceRetryError,match='linear_source_unstable'): api.prepare(config,NOW)
+    assert not list((config.directory/'linear-invoice-index').glob('*/manifest.json'))

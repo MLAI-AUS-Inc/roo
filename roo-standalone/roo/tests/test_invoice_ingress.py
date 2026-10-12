@@ -204,7 +204,7 @@ def test_existing_worker_once_processes_invoice_queue_without_timesheet_schedule
     s = service(config, scheduled=False)
     queue(s, selector='2026-10-23')
     monkeypatch.setattr(timesheet_worker.TimesheetConfig, 'from_env', lambda env: config)
-    monkeypatch.setattr(timesheet_worker, 'ReportAPI', lambda *a, **kw: s.api)
+    monkeypatch.setattr('roo.invoice_source.InvoiceSourceAPI', lambda *a, **kw: s.api)
     monkeypatch.setenv('STUDIO_INVOICES_ENABLED', 'true')
     monkeypatch.setenv('STUDIO_INVOICES_SCHEDULE_ENABLED', 'false')
     monkeypatch.setenv('STUDIO_INVOICE_QUEUE_DIR', str(s.queue.directory))

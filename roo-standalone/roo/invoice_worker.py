@@ -20,6 +20,7 @@ class InvoiceService:
         self.finals = ReceiptStore(root / 'finals')
         self.drafts = ReceiptStore(root / 'drafts')
         self.selections = ReceiptStore(root / 'requests')
+        self.notices = ReceiptStore(root / 'notices')
         self.queue = ReceiptStore(options.queue)
         self.deliveries = timesheets.deliveries  # existing status/recovery CLI
 
@@ -165,6 +166,34 @@ class InvoiceService:
             self.api.upload_csv)
 
     def commands(self, now):
+        with self.timesheets.report_batch():
+            return self._commands(now)
+
+    def waiting_notice(self, request, key, notice, deadline):
+        """Pin original notice content so changing retry reasons cannot resend it."""
+        with self.notices.locked(key) as acquired:
+            if not acquired:
+                raise TimesheetError('invoice_busy')
+            existing = self.notices.read(key)
+            if existing is not None:
+                return existing['text']
+            legacy = self.deliveries.read('invoice-notice-' + key)
+            if legacy:
+                notice = legacy['parts'][0]['content']
+            else:
+                code = request['error']
+                if code == 'invoice_source_not_prepared':
+                    notice = 'Your invoice request is saved. Studio’s invoice source is being prepared; it will resume once ready.'
+                elif code == 'linear_rate_limited' and deadline:
+                    local = timestamp(deadline).astimezone(self.config.tz).strftime('%d %B %Y %H:%M %Z')
+                    notice = ('Your invoice request is saved. Linear is busy. The earliest retry is '
+                              + local + '; it will resume when the source is available.')
+                elif code in {'linear_source_budget','linear_source_unstable'}:
+                    notice = 'Your invoice request is saved. Roo is still checking the source and will resume once ready.'
+            self.notices.write(key, {'reason':request['error'], 'text':notice, 'deadline':deadline})
+            return notice
+
+    def _commands(self, now):
         if not self.options.enabled or not self.queue.directory.exists():
             return []
         results = []
@@ -233,6 +262,12 @@ class InvoiceService:
                             if request.get('delivered'):
                                 raise TimesheetError('confirmation_only_retry')
                             self.owner(actor)
+                            deadline = getattr(exc, 'retry_at', None)
+                            # timestamp accepts dates/strings, not Unix seconds.
+                            if deadline is not None:
+                                from datetime import datetime, timezone
+                                deadline = datetime.fromtimestamp(deadline, timezone.utc).isoformat()
+                            notice = self.waiting_notice(request, key, notice, deadline)
                             outcome = self.timesheets._deliver_transport(
                                 [{'kind': 'message', 'content': notice, 'status': 'pending'}], actor,
                                 'invoice-notice-' + key, now, self.api.open_dm,
@@ -247,6 +282,10 @@ class InvoiceService:
         return results
 
     def scheduled(self, now):
+        with self.timesheets.report_batch():
+            return self._scheduled(now)
+
+    def _scheduled(self, now):
         if not self.options.enabled or not self.options.scheduled:
             return []
         now = timestamp(now)
