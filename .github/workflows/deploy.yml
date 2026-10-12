@@ -122,6 +122,7 @@ jobs:
             roo/tests/test_studio_report_routing.py \
             roo/tests/test_studio_report_schedule.py \
             roo/tests/test_studio_report_weeks.py \
+            roo/tests/test_studio_report_charts.py \
             roo/tests/test_studio_report_weekly_backfill.py \
             roo/tests/test_studio_recorded_hours_weekly.py \
             roo/tests/test_studio_client_balance.py \

@@ -11,7 +11,7 @@ from .timesheets import timestamp
 
 
 def build_recorded_report(config, client, selector, dataset, now):
-    if selector.get('period') == 'weekly':
+    if selector.get('period') in {'weekly', 'month_to_date'}:
         from .studio_recorded_hours_weekly import build_weekly_recorded_report
         return build_weekly_recorded_report(config, client, selector, dataset, now)
     balance = build_balance_report(client, selector, dataset, now)
@@ -111,7 +111,9 @@ def overlay_recorded_reports(report, reviewed):
                   partial=any(item['partial'] for item in reviewed),
                   limitations=list(dict.fromkeys(note for item in reviewed for note in item['limitations'])),
                   pending_work_count=sum(item['pending_work_count'] for item in reviewed))
-    if report['selector'].get('period') == 'weekly':
-        report['weekly_has_coverage'] = all(item.get('weekly_has_coverage', True) for item in reviewed)
+    if report['selector'].get('period') in {'weekly', 'month_to_date'}:
+        report['period_has_coverage'] = all(item.get('period_has_coverage', True) for item in reviewed)
+        if report['selector']['period'] == 'weekly':
+            report['weekly_has_coverage'] = report['period_has_coverage']
     report['rows'].sort(key=lambda row: (row['month'], row['project'], row['completed_at'], row['identifier']))
     return report
