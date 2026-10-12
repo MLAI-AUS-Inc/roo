@@ -1,7 +1,7 @@
 """Signed HTTP handoff and opt-in catalog behavior without live providers."""
 import json
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 from urllib.parse import urlencode
 
 import pytest
@@ -24,7 +24,8 @@ def app(tmp_path, monkeypatch):
         TIMESHEET_SLACK_BOT_USER_ID='UBOT', TIMESHEET_RECIPIENT_SLACK_ID='USAM',
         TIMESHEET_QUEUE_DIR=str(tmp_path / 'sam-queue'))
     runtime.app.dependency_overrides[get_settings] = lambda: settings
-    monkeypatch.setattr(runtime, '_timesheet_ack', AsyncMock())
+    monkeypatch.setattr(runtime, 'post_message', Mock())
+    monkeypatch.setattr(runtime, 'post_ephemeral', Mock())
     monkeypatch.setattr(runtime, '_handle_app_mention_with_room_choice', AsyncMock(side_effect=AssertionError('LLM path')))
     yield TestClient(runtime.app), settings, tmp_path
     runtime.app.dependency_overrides.clear()
@@ -34,6 +35,71 @@ def event(**updates):
     return dict(type='event_callback', team_id='T123', event_id='Ev1', event={
         'type': 'app_mention', 'text': '<@UBOT> invoice', 'channel': 'C123',
         'user': 'UBUILDER', 'ts': '123.456', **updates})
+
+
+@pytest.mark.parametrize('channel,thread,expected', [
+    ('C123', None, '123.456'), ('C123', '100.000001', '100.000001'),
+    ('G123', None, '123.456'),
+])
+def test_invoice_queue_ack_is_public_in_originating_thread(app, channel, thread, expected):
+    client, settings, root = app
+    body = json.dumps(event(channel=channel, thread_ts=thread)).encode()
+    assert client.post('/slack/events', content=body, headers=headers(body)).status_code == 200
+    runtime.post_message.assert_called_once_with(channel=channel,
+        text='Your invoice request is queued. Roo will verify your builder mapping and DM the result to you.',
+        thread_ts=expected)
+    runtime.post_ephemeral.assert_not_called()
+
+
+def test_invoice_queue_ack_deduplicates_signed_event_types(app):
+    client, settings, root = app
+    for kind in ('app_mention', 'message', 'app_mention'):
+        body = json.dumps(event(type=kind)).encode()
+        assert client.post('/slack/events', content=body, headers=headers(body)).status_code == 200
+    assert runtime.post_message.call_count == 1
+    runtime.post_ephemeral.assert_not_called()
+
+
+def test_invoice_dm_ack_stays_private_and_timesheet_ack_stays_ephemeral(app):
+    client, settings, root = app
+    body = json.dumps(event(type='message', channel_type='im', channel='D123', text='invoice')).encode()
+    assert client.post('/slack/events', content=body, headers=headers(body)).status_code == 200
+    assert runtime.post_message.call_args.kwargs['channel'] == 'D123'
+    assert 'thread_ts' not in runtime.post_message.call_args.kwargs
+    runtime.post_message.reset_mock()
+    body = json.dumps(event(text='<@UBOT> timesheet', user='USAM', ts='123.457')).encode()
+    assert client.post('/slack/events', content=body, headers=headers(body)).status_code == 200
+    runtime.post_ephemeral.assert_called_once()
+    runtime.post_message.assert_not_called()
+
+
+def test_failed_public_ack_keeps_invoice_queued(app):
+    client, settings, root = app
+    runtime.post_message.side_effect = RuntimeError('Slack unavailable')
+    body = json.dumps(event()).encode()
+    assert client.post('/slack/events', content=body, headers=headers(body)).status_code == 200
+    assert json.loads(next((root / 'queue').glob('*.json')).read_text())['status'] == 'pending'
+
+
+def test_invoice_slash_ack_remains_ephemeral_without_public_post(app):
+    client, settings, root = app
+    body = urlencode(dict(command='/roo', text='invoice', team_id='T123', user_id='UBUILDER',
+        channel_id='C123', trigger_id='slash-public-check')).encode()
+    response = client.post('/slack/commands', content=body,
+        headers=headers(body, 'application/x-www-form-urlencoded'))
+    assert response.status_code == 200 and response.json()['response_type'] == 'ephemeral'
+    runtime.post_message.assert_not_called()
+    runtime.post_ephemeral.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('channel,thread,stamp', [
+    ('C123', 'invalid', '123.456'), ('C123', None, None), ('INVALID', None, '123.456'),
+])
+async def test_invoice_ack_never_posts_unthreaded_or_invalid_channel(app, channel, thread, stamp):
+    await runtime._invoice_ack({'channel': channel, 'thread_ts': thread, 'ts': stamp}, 'Fixed acknowledgement')
+    runtime.post_message.assert_not_called()
+    runtime.post_ephemeral.assert_not_called()
 
 
 def test_signed_mention_dm_and_slash_queue_metadata_only(app):
@@ -60,6 +126,8 @@ def test_invalid_signature_never_queues_invoice(app):
     h['X-Slack-Signature'] = 'v0=' + '0' * 64
     assert client.post('/slack/events', content=body, headers=h).status_code == 403
     assert not (root / 'queue').exists()
+    runtime.post_message.assert_not_called()
+    runtime.post_ephemeral.assert_not_called()
 
 
 def test_invoice_disk_failure_releases_signed_lease_and_retry_deduplicates(app, monkeypatch):
@@ -68,6 +136,7 @@ def test_invoice_disk_failure_releases_signed_lease_and_retry_deduplicates(app, 
     original = ReceiptStore.write
     monkeypatch.setattr(ReceiptStore, 'write', lambda *a: (_ for _ in ()).throw(OSError('disk full')))
     assert client.post('/slack/events', content=body, headers=headers(body)).status_code == 503
+    runtime.post_message.assert_not_called()
     monkeypatch.setattr(ReceiptStore, 'write', original)
     for kind in ('app_mention', 'message', 'app_mention'):
         body = json.dumps(event(type=kind)).encode()
@@ -82,10 +151,12 @@ def test_invoice_is_disabled_on_admin_and_respects_deployment_context_gate(app, 
     assert client.post('/slack/events', content=body, headers=headers(body)).status_code == 200
     assert not (root / 'queue').exists()
     settings.ROO_SURFACE = 'public'
+    runtime.post_message.reset_mock()
     monkeypatch.setattr(runtime, '_is_slack_context_allowed', lambda *a, **kw: False)
     body = json.dumps(event(ts='123.999')).encode()
     assert client.post('/slack/events', content=body, headers=headers(body)).status_code == 200
     assert not (root / 'queue').exists()
+    runtime.post_message.assert_not_called()
 
 
 def test_exact_parser_rejects_targets_and_rollout_periods(tmp_path):
