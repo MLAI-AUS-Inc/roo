@@ -11,6 +11,9 @@ from .timesheets import timestamp
 
 
 def build_recorded_report(config, client, selector, dataset, now):
+    if selector.get('period') == 'weekly':
+        from .studio_recorded_hours_weekly import build_weekly_recorded_report
+        return build_weekly_recorded_report(config, client, selector, dataset, now)
     balance = build_balance_report(client, selector, dataset, now)
     resolved = balance['selector']
     monthly = [{'month': month_offset(resolved['month'], i).strftime('%Y-%m'),
@@ -80,6 +83,7 @@ def overlay_recorded_reports(report, reviewed):
                                 if row['project_id'] not in covered]
     for item in reviewed:
         report['rows'].extend(item['rows'])
+        report['exceptions'].extend(item.get('exceptions', []))
         report['qualifications'].extend(item['qualifications'])
     report['unit_scale'] = HOUR_UNITS
     by_month = {row['month']: row for row in report['monthly']}
@@ -107,5 +111,7 @@ def overlay_recorded_reports(report, reviewed):
                   partial=any(item['partial'] for item in reviewed),
                   limitations=list(dict.fromkeys(note for item in reviewed for note in item['limitations'])),
                   pending_work_count=sum(item['pending_work_count'] for item in reviewed))
+    if report['selector'].get('period') == 'weekly':
+        report['weekly_has_coverage'] = all(item.get('weekly_has_coverage', True) for item in reviewed)
     report['rows'].sort(key=lambda row: (row['month'], row['project'], row['completed_at'], row['identifier']))
     return report

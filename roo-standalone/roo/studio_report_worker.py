@@ -1,4 +1,4 @@
-"""On-demand client reports, isolated from Public Roo and the payroll ledger."""
+"""Private on-demand and weekly client reports, isolated from the payroll ledger."""
 from __future__ import annotations
 
 import argparse
@@ -22,6 +22,8 @@ from .timesheet_worker import TimesheetService
 from .studio_report_source import StudioSourceAPI
 from .studio_report_backfill import history_beginning, load_backfill
 from .studio_report_clients import select_client, validate_client_reporting
+from .studio_report_schedule import enqueue_weekly, scheduled_request_authorized, weekly_configuration
+from .payment_reminders import ReceiptStore
 from .timesheets import TimesheetConfig, TimesheetError, fingerprint, flag, timestamp
 
 
@@ -70,18 +72,38 @@ class StudioReportAPI(StudioSourceAPI):
 
 class StudioReportService(TimesheetService):
     def __init__(self, config, api, clients, backfill_path=None, *, balance_path=None,
-                 balance_enabled=False, balance_max_age_days=7):
+                 balance_enabled=False, balance_max_age_days=7, schedules=None):
         super().__init__(config, api)
         self.clients = clients
         self.backfill_path = backfill_path
         self.balance_path = balance_path
         self.balance_enabled = balance_enabled
         self.balance_max_age_days = balance_max_age_days
+        self.schedules = schedules or []
+        self.weekly_queue = ReceiptStore(config.directory / 'weekly-queue')
 
     def request_authorized(self, request):
         # Unknown clients receive a private, generic setup message. No source read.
-        return (request.get('team') == self.config.team
-                and re.fullmatch(r'[UW][A-Z0-9]+', str(request.get('actor', ''))) is not None)
+        verified = (request.get('team') == self.config.team
+                    and re.fullmatch(r'[UW][A-Z0-9]+', str(request.get('actor', ''))) is not None)
+        if not verified:
+            return False
+        if not isinstance(request.get('selector'), dict):
+            return False
+        if request.get('scheduled') is not None or request['selector'].get('period') == 'weekly':
+            return scheduled_request_authorized(request, self.schedules, service=self)
+        return True
+
+    def request_key_authorized(self, request, key):
+        if 'scheduled' in request:
+            return (isinstance(request['scheduled'], dict)
+                    and request['scheduled'].get('request_key') == key)
+        return True
+
+    def commands(self, now):
+        results = super().commands(now)
+        results.extend(super().commands(now, queue=self.weekly_queue))
+        return results
 
     def scope_fingerprint(self, actor, selector=None):
         if actor not in self.clients:
@@ -105,6 +127,9 @@ class StudioReportService(TimesheetService):
         actor = request['actor']
         now = timestamp(request['requested_at'])
         selector, start, _ = resolve_period(request['selector'], now)
+        # A delayed Friday report can use a later reviewed snapshot. Freshness
+        # is checked at the trusted read time; report bounds remain frozen.
+        freshness_at = datetime.now(timezone.utc) if selector.get('period') == 'weekly' else now
         scope = self.scope_fingerprint(actor, selector)
         client, groups, targets = select_client(self.clients, actor, selector)
         reviewed, finance_owners, snapshot = [], [], None
@@ -118,7 +143,7 @@ class StudioReportService(TimesheetService):
                 data = snapshot['clients'].get(owner)
                 if (data is not None and data.get('hours_reporting')
                         and set(owner_client['project_ids']) <= set(client['project_ids'])):
-                    validate_snapshot_age(data, now, max_age_days=self.balance_max_age_days)
+                    validate_snapshot_age(data, freshness_at, max_age_days=self.balance_max_age_days)
                     finance_owners.append(owner)
         covered = {key for owner in finance_owners for key in self.clients[owner]['project_ids']}
         legacy_projects = set(client['project_ids']) - covered
@@ -154,15 +179,16 @@ class StudioReportService(TimesheetService):
         # even when font versions or optional chart availability change.
         parts = [{'kind': 'message', 'content': chunk, 'status': 'pending'} for chunk in split_messages(summary(report))]
         try:
-            chart = render_chart(report)
-            parts.append({'kind': 'file', 'filename': 'studio-hours.png',
-                          'content': base64.b64encode(chart).decode('ascii'), 'status': 'pending'})
-            if selector.get('client') and len(report['monthly']) > 1:
-                parts.append({'kind': 'file', 'filename': 'studio-hours-projects.png',
-                              'content': base64.b64encode(render_chart(report, breakdown='projects')).decode('ascii'), 'status': 'pending'})
-            if groups:
-                parts.append({'kind': 'file', 'filename': 'studio-hours-clients.png',
-                              'content': base64.b64encode(render_chart(report, breakdown='clients')).decode('ascii'), 'status': 'pending'})
+            if report.get('weekly_has_coverage') is not False:
+                chart = render_chart(report)
+                parts.append({'kind': 'file', 'filename': 'studio-hours.png',
+                              'content': base64.b64encode(chart).decode('ascii'), 'status': 'pending'})
+                if selector.get('client') and len(report['monthly']) > 1 and selector.get('period') != 'weekly':
+                    parts.append({'kind': 'file', 'filename': 'studio-hours-projects.png',
+                                  'content': base64.b64encode(render_chart(report, breakdown='projects')).decode('ascii'), 'status': 'pending'})
+                if groups:
+                    parts.append({'kind': 'file', 'filename': 'studio-hours-clients.png',
+                                  'content': base64.b64encode(render_chart(report, breakdown='clients')).decode('ascii'), 'status': 'pending'})
         except Exception:
             parts.append({'kind': 'message', 'content': 'The chart is unavailable this time; the full totals are above.', 'status': 'pending'})
         if selector['action'] == 'detailed':
@@ -303,13 +329,15 @@ def main(argv=None):
             print(json.dumps({'status': 'disabled'}))
             return 0
         config, clients = configuration(env)
+        schedules = weekly_configuration(env, clients)
         with httpx.Client(timeout=30, follow_redirects=False) as client:
             api = StudioReportAPI(client, linear_key=env.get('TIMESHEET_LINEAR_READ_API_KEY'),
                                   slack_token=env.get('TIMESHEET_SLACK_BOT_TOKEN'))
             service = StudioReportService(config, api, clients, env.get('STUDIO_REPORTS_BACKFILL_FILE'),
                 balance_path=env.get('STUDIO_CLIENT_BALANCE_FILE'),
                 balance_enabled=flag(env, 'STUDIO_CLIENT_BALANCE_WORKER_ENABLED'),
-                balance_max_age_days=int(env.get('STUDIO_CLIENT_BALANCE_MAX_AGE_DAYS', '7')))
+                balance_max_age_days=int(env.get('STUDIO_CLIENT_BALANCE_MAX_AGE_DAYS', '7')),
+                schedules=schedules)
             if args.recover:
                 if args.part is None or not (args.confirmed_absent or args.delivered_reference):
                     raise TimesheetError('delivery_confirmation_required')
@@ -349,11 +377,13 @@ def main(argv=None):
             for signum in (signal.SIGTERM, signal.SIGINT):
                 signal.signal(signum, lambda *_: stop.set())
             while not stop.is_set():
-                results = service.commands(datetime.now(timezone.utc))
+                now = datetime.now(timezone.utc)
+                results = enqueue_weekly(service, schedules, now)
+                results.extend(service.commands(now))
                 if results or args.once:
                     print(json.dumps({'results': results}), flush=True)
                 if args.once:
-                    return int(any(item['status'] not in {'sent', 'done'} for item in results))
+                    return int(any(item['status'] not in {'sent', 'done', 'queued'} for item in results))
                 stop.wait(10)
     except Exception as exc:
         print(json.dumps({'status': 'error', 'reason': str(exc) if isinstance(exc, TimesheetError) else type(exc).__name__}))

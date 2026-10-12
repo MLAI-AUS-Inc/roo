@@ -205,6 +205,9 @@ class TimesheetService:
     def request_authorized(self, request):
         return request.get('team') == self.config.team and request.get('actor') == self.config.recipient
 
+    def request_key_authorized(self, request, key):
+        return True
+
     def report_for_request(self, request):
         return self.report(request['selector'], timestamp(request['requested_at']))
 
@@ -218,29 +221,30 @@ class TimesheetService:
                       'for the saved report, or send a new `timesheet current` request for a fresh draft.')
         return terminal, notice
 
-    def commands(self, now):
+    def commands(self, now, *, queue=None):
+        store = self.queue if queue is None else queue
         results = []
-        started = time.monotonic()
-        if not self.config.queue.exists():
+        if not store.directory.exists():
             return results
-        for path in sorted(self.config.queue.glob('*.json')):
+        started = time.monotonic()
+        for path in sorted(store.directory.glob('*.json')):
             key = path.stem
             # A damaged request must not stop all other requests or the schedule.
             try:
-                if not re.fullmatch(r'[a-f0-9]{64}', key) or not isinstance(self.queue.read(key), dict):
+                if not re.fullmatch(r'[a-f0-9]{64}', key) or not isinstance(store.read(key), dict):
                     raise TimesheetError('invalid_request')
             except Exception:
                 results.append({'status': 'error', 'reason': 'invalid_request'})
                 continue
-            with self.queue.locked(key) as acquired:
+            with store.locked(key) as acquired:
                 if not acquired:
                     continue
-                request = self.queue.read(key)
+                request = store.read(key)
                 if request.get('status') in {'done', 'denied', 'rejected'}:
                     continue
-                if not self.request_authorized(request):
+                if not self.request_key_authorized(request, key) or not self.request_authorized(request):
                     request['status'] = 'denied'
-                    self.queue.write(key, request)
+                    store.write(key, request)
                     continue
                 if timestamp(now).timestamp() < request.get('retry_at', 0):
                     continue
@@ -277,7 +281,7 @@ class TimesheetService:
                         # The notice has its own durable receipt and must never
                         # overwrite a report's delivery or allocation state.
                         pass
-                self.queue.write(key, request)
+                store.write(key, request)
         return results
 
     def scheduled(self, now):
