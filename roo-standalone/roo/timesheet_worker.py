@@ -17,18 +17,22 @@ import httpx
 
 from .payment_reminders import DeliveryRejected, ReceiptStore
 from .timesheet_linear import TimesheetAPI
-from .timesheets import (Ledger, TimesheetConfig, TimesheetError, artifacts, build_report,
+from .timesheets import (DeliveryExpired, Ledger, TimesheetConfig, TimesheetError, artifacts, build_report,
                          fingerprint, summary, timestamp)
 
 
 class ReportAPI(TimesheetAPI):
-    def upload_csv(self, channel, filename, content):
+    def upload_csv(self, channel, filename, content, *, before_send=None):
         if not re.fullmatch(r'D[A-Z0-9]+', channel):
             raise TimesheetError('private_destination_required')
-        return self._upload_csv(channel, filename, content)
+        return self._upload_csv(channel, filename, content, before_send=before_send)
 
-    def _upload_csv(self, channel, filename, content, *, thread_ts=None):
+    def _upload_csv(self, channel, filename, content, *, thread_ts=None, before_send=None):
+        def check_deadline():
+            if before_send is not None and not before_send():
+                raise DeliveryExpired()
         data = content if isinstance(content, bytes) else content.encode('utf-8')
+        check_deadline()
         response = self.client.get('https://slack.com/api/files.getUploadURLExternal',
             headers={'Authorization': 'Bearer ' + self.slack_token},
             params={'filename': filename, 'length': len(data)})
@@ -45,8 +49,10 @@ class ReportAPI(TimesheetAPI):
                 or not re.fullmatch(r'F[A-Z0-9]+', body.get('file_id', ''))):
             raise TimesheetError('invalid_upload_destination')
         # The URL itself grants upload access. Do not forward Slack's bearer token.
+        check_deadline()
         uploaded = self.client.post(url, content=data, headers={'Content-Type': 'application/octet-stream'})
         uploaded.raise_for_status()
+        check_deadline()
         result = self.slack('files.completeUploadExternal', {
             'files': [{'id': body['file_id'], 'title': filename}], 'channel_id': channel,
             **({'thread_ts': thread_ts} if thread_ts else {}),
@@ -157,7 +163,7 @@ class TimesheetService:
         return self._deliver_transport(parts, recipient, delivery_key, now, private_channel,
                                        self.api.post_message, self.api.upload_csv)
 
-    def _deliver_transport(self, parts, recipient, delivery_key, now, destination, post, upload):
+    def _deliver_transport(self, parts, recipient, delivery_key, now, destination, post, upload, *, before_send=None):
         """Durable transport checkpoints, after the caller validates its audience."""
         with self.deliveries.locked(delivery_key) as acquired:
             if not acquired:
@@ -173,6 +179,16 @@ class TimesheetService:
                 return 'needs_review'
             if all(p['status'] == 'sent' for p in delivery['parts']):
                 return 'sent'
+            if any(p['status'] == 'expired' for p in delivery['parts']):
+                return 'expired'
+            def expire_unsent():
+                for pending in delivery['parts']:
+                    if pending['status'] in {'pending', 'sending'}:
+                        pending['status'] = 'expired'
+                self.deliveries.write(delivery_key, delivery)
+                return 'expired'
+            if before_send is not None and not before_send():
+                return expire_unsent()
             channel = destination(recipient)
             for part in delivery['parts']:
                 if part['status'] == 'sent':
@@ -182,11 +198,17 @@ class TimesheetService:
                 part['status'] = 'sending'
                 part['attempted_at'] = timestamp(now).isoformat()
                 self.deliveries.write(delivery_key, delivery)
+                if before_send is not None and not before_send():
+                    return expire_unsent()
                 try:
                     if part['kind'] == 'message':
                         ref = post(channel, part['content'])
                     else:
                         ref = upload(channel, part['filename'], part['content'])
+                except DeliveryExpired:
+                    # The provider guard guarantees no recipient-visible send
+                    # started. Existing sent/ambiguous parts are never reset.
+                    return expire_unsent()
                 except DeliveryRejected as exc:
                     part['status'] = 'pending' if exc.retry_after is not None else 'failed'
                     if exc.retry_after is not None:

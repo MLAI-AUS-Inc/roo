@@ -50,6 +50,11 @@ but no pre-rollout invoice is generated or delivered. Saved PDFs retain exact
 bytes, fixed rate, source rows and source-report hash. Repeated commands retrieve
 the same final; a new request may deliver that same artifact again privately.
 Late draft requests return the final for their original period after cutoff.
+The selected final period is pinned privately before transport starts, including
+`latest`, so crossing a later cutoff during retry or recovery does not switch
+invoices. Draft expiry is rechecked before each delivery operation, including
+the external upload protocol's final file-sharing step. Sent and ambiguous
+parts are preserved; unsent expired parts are marked expired.
 
 No positive payable amount produces a private explanation, not an empty PDF.
 Incomplete evidence is identified as excluded work needing review; provider
@@ -111,6 +116,11 @@ reviewed quarter-hour adjustment referencing the original row. It appears in
 the next payable fortnight; neither the original sealed report nor invoice is
 rewritten. Negative adjustments reduce the total; a nonpositive net amount
 receives an explanation and remains in the allocation ledger for review.
+The existing engine consumes a negative adjustment in one fortnight. It does
+not automatically carry a negative net balance into another later fortnight;
+Sam must reconcile a nonpositive outcome before later payment, using reviewed
+adjustments as appropriate. This feature does not introduce a payment/debt
+ledger or redefine that existing financial policy.
 
 Invoice receipts use `invoice-...` keys in the **existing** deliveries directory.
 `python -m roo.timesheet_worker --env-file .env.timesheets --status` lists them.

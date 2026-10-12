@@ -19,6 +19,7 @@ class InvoiceService:
         root = self.config.directory / 'invoices'
         self.finals = ReceiptStore(root / 'finals')
         self.drafts = ReceiptStore(root / 'drafts')
+        self.selections = ReceiptStore(root / 'requests')
         self.queue = ReceiptStore(options.queue)
         self.deliveries = timesheets.deliveries  # existing status/recovery CLI
 
@@ -83,10 +84,11 @@ class InvoiceService:
             raise TimesheetError('invoice_owner_changed')
 
     def deliver(self, artifact, actor, key, now):
+        started = time.monotonic()
+        clock = lambda: timestamp(now) + timedelta(seconds=time.monotonic() - started)
         self.check_owner(artifact, actor, self.owner(actor))
         period = artifact['period']
-        if artifact['draft'] and timestamp(now) >= validate_period(self.config, period):
-            return 'expired'
+        before_send = (lambda: clock() < validate_period(self.config, period)) if artifact['draft'] else None
         doc = artifact['invoice']
         label = 'draft' if artifact['draft'] else 'final'
         if doc:
@@ -113,7 +115,30 @@ class InvoiceService:
             return channel
         return self.timesheets._deliver_transport(parts, actor, 'invoice-' + key, now,
             destination, self.api.post_message,
-            lambda channel, name, content: self.api.upload_csv(channel, name, base64.b64decode(content, validate=True)))
+            lambda channel, name, content: self.api.upload_csv(channel, name, base64.b64decode(content, validate=True),
+                                                               before_send=before_send), before_send=before_send)
+
+    def command_artifact(self, request, key, now):
+        """Pin the chosen period privately before any transport can start."""
+        actor = request['actor']
+        with self.selections.locked(key) as acquired:
+            if not acquired:
+                raise TimesheetError('invoice_busy')
+            selection = self.selections.read(key)
+            if selection:
+                self.check_owner(selection, actor, self.owner(actor))
+                selector = selection['period']
+            else:
+                selector = request['selector']
+                if selector == 'current':
+                    selector = current_period(self.config, timestamp(request['requested_at'])).date().isoformat()
+                elif selector != 'latest':
+                    validate_period(self.config, selector)
+            artifact = self.artifact(actor, selector, now, draft_key='command-' + key)
+            if selection is None:
+                self.selections.write(key, {k: artifact[k] for k in
+                    ('team', 'organization', 'builder_id', 'slack_user_id', 'period')})
+            return artifact
 
     def authorized_request(self, request, key):
         identity = {k: request.get(k) for k in ('team', 'actor', 'channel', 'source')}
@@ -149,17 +174,15 @@ class InvoiceService:
                         continue
                     actor = request['actor']
                     try:
-                        selector = request['selector']
-                        if selector == 'current':
-                            # A delayed command belongs to its original fortnight.
-                            selector = current_period(self.config, timestamp(request['requested_at'])).date().isoformat()
-                        elif selector != 'latest':
-                            validate_period(self.config, selector)
-                        artifact = self.artifact(actor, selector, now, draft_key='command-' + key)
+                        artifact = self.command_artifact(request, key, now)
                         send_at = timestamp(now) + timedelta(seconds=time.monotonic() - started)
                         if artifact['draft'] and send_at >= validate_period(self.config, artifact['period']):
                             artifact = self.artifact(actor, artifact['period'], send_at)
                         status = self.deliver(artifact, actor, 'command-' + key + ('-draft' if artifact['draft'] else '-final'), send_at)
+                        if status == 'expired' and artifact['draft']:
+                            send_at = timestamp(now) + timedelta(seconds=time.monotonic() - started)
+                            artifact = self.artifact(actor, artifact['period'], send_at)
+                            status = self.deliver(artifact, actor, 'command-' + key + '-final', send_at)
                         request['status'] = 'done' if status == 'sent' else status
                         request.pop('error', None)
                         results.append({'request': key, 'status': status})

@@ -3,6 +3,7 @@ import base64
 from dataclasses import replace
 from datetime import timedelta
 import io
+import httpx
 
 import pytest
 from pypdf import PdfReader
@@ -42,7 +43,7 @@ class OfflineAPI:
         self.messages.append((channel, content))
         return '123.456'
 
-    def upload_csv(self, channel, filename, content):
+    def upload_csv(self, channel, filename, content, **kwargs):
         if self.fail_upload:
             raise self.fail_upload
         self.files.append((channel, filename, content))
@@ -148,6 +149,54 @@ def test_definite_upload_failure_retries_only_pending_part_and_exact_artifact(co
     s.api.dataset = []
     service(config, api=s.api).scheduled(FRIDAY + timedelta(seconds=61))
     assert len(s.api.messages) == 2 and len(s.api.files) == 2
+
+
+@pytest.mark.parametrize('failure', [DeliveryRejected('ratelimited', 60), TimeoutError('uncertain')])
+def test_latest_retry_after_next_cutoff_delivers_original_selected_final(config, failure):
+    s = service(config)
+    key = queue(s, selector='latest', now=FRIDAY)
+    s.api.fail_upload = failure
+    s.commands(FRIDAY)
+    s.api.fail_upload = None
+    s.api.dataset.append(item(ticket(3, 'Medium (M)', completedAt='2026-11-05T01:00:00Z',
+                                    updatedAt='2026-11-05T01:00:00Z')))
+    if isinstance(failure, TimeoutError):
+        for path in s.deliveries.directory.glob('invoice-command-*.json'):
+            with s.deliveries.locked(path.stem) as acquired:
+                assert acquired
+                receipt = s.deliveries.read(path.stem)
+                receipt['parts'][1]['status'] = 'pending'  # operator confirmed absent
+                s.deliveries.write(path.stem, receipt)
+    restarted = service(config, api=s.api)
+    result = restarted.commands(FRIDAY + timedelta(days=14))
+    assert result[0]['status'] == 'sent'
+    assert restarted.queue.read(key)['status'] == 'done'
+    assert len(s.api.files) == 1 and '2026-10-23' in s.api.files[0][1]
+    assert sum('Your final Invoice' in text for _, text in s.api.messages) == 1
+
+
+@pytest.mark.parametrize('delay_at,expected_draft_messages', [('verify', 0), ('open', 0), ('post', 1)])
+def test_deadline_checked_after_each_slow_delivery_operation(config, monkeypatch, delay_at, expected_draft_messages):
+    from roo import invoice_worker
+    s = service(config)
+    queue(s, now=FRIDAY - timedelta(seconds=1))
+    clock = [0.0]
+    monkeypatch.setattr(invoice_worker.time, 'monotonic', lambda: clock[0])
+    target = {'verify': 'verify_recipient', 'open': 'open_dm', 'post': 'post_message'}[delay_at]
+    original = getattr(s.api, target)
+    calls = [0]
+    def slow_once(*args, **kwargs):
+        result = original(*args, **kwargs)
+        calls[0] += 1
+        if calls[0] == (2 if delay_at == 'verify' else 1):
+            clock[0] = 2.0
+        return result
+    setattr(s.api, target, slow_once)
+    # No outgoing draft PDF may start after noon. A command continues with final.
+    s.commands(FRIDAY - timedelta(seconds=1))
+    assert not any('draft' in filename for _, filename, _ in s.api.files)
+    assert sum('Your draft Invoice' in text for _, text in s.api.messages) == expected_draft_messages
+    assert len(s.api.files) == 1 and 'final' in s.api.files[0][1]
     assert all(b'$' not in data[:10] for _, _, data in s.api.files)
     assert all(data.startswith(b'%PDF') for _, _, data in s.api.files)
 
@@ -253,3 +302,25 @@ def test_post_restart_operator_recovery_uses_existing_timesheet_receipts(config)
             s.deliveries.write(path.stem, receipt)
     service(config, api=s.api).scheduled(FRIDAY + timedelta(minutes=3))
     assert len(s.api.messages) == 2 and len(s.api.files) == 2
+
+
+@pytest.mark.parametrize('expire_after', ['url', 'upload'])
+def test_pdf_sharing_deadline_checked_inside_slack_upload_protocol(expire_after):
+    from roo.timesheet_worker import ReportAPI
+    expired = [False]
+    seen = []
+    def respond(request):
+        seen.append(str(request.url))
+        if request.url.path.endswith('files.getUploadURLExternal'):
+            expired[0] = expire_after == 'url'
+            return httpx.Response(200, json={'ok': True, 'upload_url': 'https://files.slack.com/upload/test', 'file_id': 'F123'})
+        if request.url.host == 'files.slack.com':
+            expired[0] = expire_after == 'upload'
+            return httpx.Response(200)
+        return httpx.Response(200, json={'ok': True, 'files': [{'id': 'F123'}]})
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        api = ReportAPI(client, linear_key='synthetic', slack_token='synthetic')
+        with pytest.raises(TimesheetError, match='draft_expired'):
+            api.upload_csv('D123', 'draft.pdf', b'%PDF-test', before_send=lambda: not expired[0])
+    assert not any('completeUploadExternal' in url for url in seen)
+    assert len(seen) == (1 if expire_after == 'url' else 2)
