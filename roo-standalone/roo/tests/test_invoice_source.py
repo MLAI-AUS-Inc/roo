@@ -726,3 +726,74 @@ def test_unstable_required_history_retries_instead_of_sealing_partial_report(con
     api.verify(config)
     with pytest.raises(SourceRetryError,match='linear_source_unstable'): api.prepare(config,NOW)
     assert not list((config.directory/'linear-invoice-index').glob('*/manifest.json'))
+
+
+@pytest.mark.parametrize('stage', ['after_discovery','complete'])
+def test_restart_requires_fresh_closing_discovery_before_publication(config, monkeypatch, stage):
+    clock=[NOW.timestamp()]
+    monkeypatch.setattr('roo.studio_report_source.time.time',lambda:clock[0])
+    provider=Provider(config,[current()])
+    api=provider.api()
+    api.verify(config)
+    api.prepare(config,NOW)
+    if stage=='after_discovery':
+        with pytest.raises(SourceRetryError,match='linear_source_budget'):
+            with api.source_attempt(max_requests=5): collect(api,config,draft=False)
+        clock[0]+=61
+    else:
+        original=api._index.write
+        def crash(key,value):
+            original(key,value)
+            if key=='progress' and value.get('stage')=='complete' and value.get('pass')==1:
+                raise OSError('simulated crash before publication')
+        monkeypatch.setattr(api._index,'write',crash)
+        with pytest.raises(OSError): collect(api,config,draft=False)
+    provider.dataset['issue-2']=current(2)
+    provider.calls.clear()
+    result=collect(provider.api(),config,draft=False)
+    assert {x['issue']['id'] for x in result}=={'issue-1','issue-2'}
+    assert provider.count('InvoicePeriodIssues')>0
+
+
+def test_resumed_refresh_reconciles_changed_cutoff_and_new_deferred_ids(config, monkeypatch):
+    clock=[NOW.timestamp()]
+    monkeypatch.setattr('roo.studio_report_source.time.time',lambda:clock[0])
+    provider=Provider(config,[current()])
+    api=provider.api()
+    api.verify(config)
+    api.prepare(config,NOW)
+    with pytest.raises(SourceRetryError):
+        with api.source_attempt(max_requests=5): collect(api,config,draft=False)
+    clock[0]+=61
+    new=current(2)
+    new['issue'].update(completedAt=(NOW+timedelta(hours=1)).isoformat(),updatedAt=(NOW+timedelta(hours=1)).isoformat())
+    provider.dataset['issue-2']=new
+    deferred=current(3,project={'id':'outside'})
+    deferred['issue'].update(team={'id':TEAM2},updatedAt='2026-08-01T00:00:00Z')
+    provider.dataset['issue-3']=deferred
+    result=collect(provider.api(),config,draft=False,end=NOW+timedelta(hours=2),deferred={'issue-3':{'reason':'missing_effort'}})
+    assert {x['issue']['id'] for x in result}=={'issue-1','issue-2','issue-3'}
+
+
+@pytest.mark.parametrize('mismatch', ['history_page','version_check'])
+def test_outsider_edit_invalidates_stale_discovery_and_recovers(config, monkeypatch, mismatch):
+    clock=[NOW.timestamp()]
+    monkeypatch.setattr('roo.studio_report_source.time.time',lambda:clock[0])
+    provider=Provider(config,[current(),current(2,project={'id':'outside'})])
+    api=provider.api()
+    api.verify(config)
+    changed=[False]
+    def edit(query,variables):
+        operation='InvoiceChangedIssues' if mismatch=='history_page' else 'InvoiceMoveHistory'
+        if operation in query and not changed[0]:
+            provider.dataset['issue-2']['issue']['updatedAt']=(NOW+timedelta(seconds=1)).isoformat()
+            changed[0]=True
+    provider.after_call=edit
+    with pytest.raises(SourceRetryError,match='linear_source_unstable'): api.prepare(config,NOW)
+    clock[0]+=61
+    provider.after_call=None
+    resumed=provider.api()
+    resumed.verify(config)
+    result=resumed.prepare(config,NOW)
+    assert result['status']=='prepared'
+    assert [x['issue']['id'] for x in collect(resumed,config)]==['issue-1']

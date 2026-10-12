@@ -152,6 +152,12 @@ class InvoiceSourceAPI(StudioSourceAPI):
                 progress = self._read('progress')
                 mode = 'prepare' if preparing else 'collect'
                 base = fingerprint(manifest)
+                # Finish checkpointed work rather than discard expensive pages,
+                # but a report must then close with a fresh pass in this attempt.
+                # Preparation produces only an index with its original watermark;
+                # the mandatory subsequent report refresh closes financial input.
+                resumed_report = bool(progress and progress.get('base') == base
+                                      and progress.get('mode') == mode and not preparing)
                 if not progress or progress.get('base') != base or progress.get('mode') != mode:
                     lower = config.beginning if not manifest else timestamp(manifest['watermark']) - timedelta(minutes=5)
                     # Preparation always covers the configured historical beginning.
@@ -176,7 +182,7 @@ class InvoiceSourceAPI(StudioSourceAPI):
                         self._evidence(progress, ids)
                         signature = fingerprint({'candidates':{key:fingerprint(value) for key,value in progress['candidates'].items()},
                                                  'ids':ids, 'outsiders':progress['outsiders']})
-                        if progress['previous'] == signature:
+                        if progress['previous'] == signature and not resumed_report:
                             # Required candidates were read again after the initial
                             # evidence pass; publication is limited to stable inputs.
                             manifest = {'version':VERSION, 'watermark':progress['started'],
@@ -188,6 +194,12 @@ class InvoiceSourceAPI(StudioSourceAPI):
                             if preparing:
                                 return {'status':'prepared', 'known_issues':len(manifest['known']), **self._stats}
                             return [deepcopy(progress['items'][key]) for key in ids]
+                        if resumed_report:
+                            resumed_report = False
+                            progress.update(previous=signature, **{'pass':0})
+                            self._new_pass(progress)
+                            self._write('progress', progress)
+                            continue
                         progress['pass'] += 1
                         if progress['pass'] >= 3:
                             progress.update(previous=None, **{'pass':0})
@@ -267,8 +279,7 @@ class InvoiceSourceAPI(StudioSourceAPI):
                 if not raw or raw.get('id') != key:
                     raise TimesheetError('invoice_source_coverage')
                 if raw.get('updatedAt') != value['updatedAt']:
-                    progress['moves'].pop(key)
-                    self._write('progress', progress)
+                    self._invalidate_discovery(progress, key)
                     self.defer_source()
                 connection = raw.get('history')
                 after = next_page(connection, seen)
@@ -287,11 +298,17 @@ class InvoiceSourceAPI(StudioSourceAPI):
         if not checked or checked.get('id') != key:
             raise TimesheetError('invoice_source_coverage')
         if checked.get('updatedAt') != value['updatedAt']:
-            progress['moves'].pop(key)
-            self._write('progress', progress)
+            self._invalidate_discovery(progress, key)
             self.defer_source()
         return any(h.get('fromProjectId') in config.projects or h.get('toProjectId') in config.projects
                    for h in state['events'].values())
+
+    def _invalidate_discovery(self, progress, key):
+        # A new history version cannot be compared forever with an old listing.
+        # Re-list on retry, retaining unrelated move pages and full evidence.
+        progress['moves'].pop(key, None)
+        progress.update(stage='primary', cursor=None, seen=[], previous=None)
+        self._write('progress', progress)
 
     def _hydrate(self, progress, ids):
         if progress['stage'] != 'hydrate': return

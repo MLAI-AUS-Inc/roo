@@ -1,6 +1,6 @@
 # Scoped Invoice Source Recovery Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
+> **Execution:** Native approved by the user and completed using superpowers:executing-plans. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Generate a Studio pay-cycle invoice from bounded discovery and reusable evidence, without repeating workspace scans or losing historical accounting correctness.
 
@@ -10,7 +10,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-10-12-invoice-source-recovery.md`; read both documents before execution.
 
-Execution: Native approved on 12 October 2026; implementation tasks verified below. One fresh gpt-6-astra final review follows task completion. Production activation remains separate.
+Execution: Native approved on 12 October 2026; all implementation tasks and the single fresh gpt-6-astra final review completed. Both Important review findings were fixed with regression tests. Production activation remains separate.
 
 ## Global Constraints
 
@@ -92,8 +92,21 @@ Run all commands from `roo-standalone` using `SLACK_BOT_TOKEN=test SLACK_SIGNING
 
 ## Handoff and later rollout
 
-The plan awaits approval. Present **Native** (current session implements using `superpowers:executing-plans`) and **Subagent-driven** (current session coordinates `superpowers:subagent-driven-development` with the user's explicit model routing). Recommend **Subagent-driven** because source completeness, durable refresh state and accounting integration have distinct failure modes worth separate review gates. Do not implement before the user's approval and choice.
-
-Supply the approved spec/plan, workspace, baseline and constraints to execution. At its existing final-review step, use one fresh `gpt-6-astra` whole-branch reviewer, then resolve findings and report verification. Do not duplicate that review.
+Implementation is committed on `codex/roo-invoice-scoped-source`, forked from the public acknowledgement branch at `9583026`. Merge, push/PR and production activation await separate user choices. The single fresh `gpt-6-astra` review covered `9583026..0727928`; its two Important findings were verified and fixed in one RED→GREEN pass, without a second review.
 
 Live Linear project/team structure was not independently verified while planning: connector reauthentication was required and the production key was quota limited. A separately authorized rollout must verify those IDs, prepare the private source baseline, then measure a healthy current-period request and the 19-member cohort before making a latency promise. A scoped read failure cannot silently fall back to workspace-wide per-invoice history. Production deployment, messages, credential changes and receipt resets require their own authorization.
+
+## Execution verification and decisions
+
+Final verification: 2,568 tests passed in 25.37 seconds. The focused invoice/source/accounting group passed 308 tests. Separately isolated invoice ingress passed 18 tests, timesheet ingress passed 11 tests, and security/deployment/mention checks passed 68 tests. Compilation and whitespace checks passed. All provider tests use synthetic credentials and local HTTP transports; no production services were changed.
+
+The final review found no Critical issues and two Important issues. Resumed source reads could publish a stale closing pass, and an outsider edited during compact-history checking could remain stuck against an old discovery version. Five new regressions failed before the fixes and passed afterward: the two restart publication cases, changed cutoff/new deferred IDs, and the two outsider edit recovery cases. Reports now require a fresh closing pass in the publication attempt, and changed outsider versions invalidate discovery so retries can reconcile them.
+
+Rulings, in execution order:
+
+- Include the new source suite in CI and retarget the ingress source factory to `InvoiceSourceAPI`, preserving entry-point coverage after composition changes. Cost if wrong: an integration regression could escape CI.
+- Allow source-only historical preparation to finish checkpointed passes across attempts with its original refresh-start watermark; every report still needs a fresh closing pass before publication. This retains expensive preparation progress without allocating or invoicing from the baseline alone. Cost if wrong: unusual upstream timestamps could leave discovery incomplete; oversized closing checks may need operator intervention instead of partial financial output.
+- Keep actual production scope, provider visibility and latency as unverified rollout gates. The authorized browser account (`hi@mlai.au`) showed “Create a workspace” rather than access to MLAI, and live activation was outside implementation scope. Cost if wrong: production acceptance or timing may differ from the synthetic provider.
+- Retain never-observed hard deletion and separate-volume quota consumers as documented API/infrastructure limits. Local code cannot safely reconstruct invisible work or coordinate a separate volume. Cost if wrong: unseen deleted work needs manual evidence review, and another quota consumer may extend waits.
+
+Deferred minor: preparation CLI errors report a reason but omit the cooldown deadline. Operators can inspect the documented private cooldown receipt; sanitized `retry_at` and Melbourne time rendering remain a later improvement.

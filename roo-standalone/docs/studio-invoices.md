@@ -110,7 +110,16 @@ batched and reused after fresh candidate checks; label names are refreshed
 even when the issue timestamp did not change. Full histories retain the first
 completion so reopened old work cannot be paid again. Missing prior periods
 are still simulated chronologically for drafts and persisted only for finals.
-Finals require stable closing discovery before sealing. The API provides no
+Resumed report reads finish saved work, then require a fresh closing pass in
+the current attempt before returning financial inputs. If that closing pass
+cannot finish within the budget, keep the request waiting and review the source
+workload; never increase limits or delete receipts simply to force a payment.
+Historical preparation can finish over multiple attempts and retains its
+original refresh-start watermark; it produces no financial snapshot, and the
+next report always performs the mandatory fresh refresh. A task changed during
+compact-history checking invalidates its stale discovery checkpoint so the
+next attempt rediscovers it. Finals require stable closing discovery before
+sealing. The API provides no
 global transactional snapshot, and never-observed hard-deleted tasks remain an
 upstream visibility limit. Loss of access to known required work blocks coverage.
 
