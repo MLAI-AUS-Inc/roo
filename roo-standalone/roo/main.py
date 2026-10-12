@@ -3022,6 +3022,7 @@ async def slack_events(
     ):
         try:
             queued = await asyncio.to_thread(enqueue_invoice_event, timesheet_settings, payload)
+            acknowledgement = _invoice_ack if queued.get("handled") else _timesheet_ack
             if not queued.get("handled"):
                 queued = await asyncio.to_thread(enqueue_timesheet_event, timesheet_settings, payload)
         except Exception:
@@ -3031,7 +3032,7 @@ async def slack_events(
             # The queue is the durable owner now; finish the generic event lease.
             await _complete_slack_event_receipt(request)
             if queued.get("new") and queued.get("text"):
-                asyncio.create_task(_timesheet_ack(timesheet_event, queued["text"]))
+                asyncio.create_task(acknowledgement(timesheet_event, queued["text"]))
             return JSONResponse(status_code=200, content={})
 
     if _is_duplicate_slack_request(request):
@@ -3284,6 +3285,21 @@ async def _timesheet_ack(event: dict, text: str):
             await asyncio.to_thread(post_ephemeral, channel=channel, user=event.get("user"), text=text)
     except Exception:
         # The durable request remains queued if its cosmetic acknowledgement fails.
+        pass
+
+
+async def _invoice_ack(event: dict, text: str):
+    """Show the fixed invoice acknowledgement in the requesting channel thread."""
+    try:
+        channel = str(event.get("channel") or "")
+        if re.fullmatch(r"D[A-Z0-9]+", channel):
+            await asyncio.to_thread(post_message, channel=channel, text=text)
+        elif re.fullmatch(r"[CG][A-Z0-9]+", channel):
+            thread_ts = str(event.get("thread_ts") or event.get("ts") or "")
+            if re.fullmatch(r"\d+\.\d+", thread_ts):
+                await asyncio.to_thread(post_message, channel=channel, text=text, thread_ts=thread_ts)
+    except Exception:
+        # Cosmetic acknowledgement failures cannot undo the durable request.
         pass
 
 

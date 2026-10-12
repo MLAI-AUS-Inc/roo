@@ -39,7 +39,9 @@ shown in the PDF's submission instructions.
   off-cadence dates and dates before **23 October 2026** are excluded.
 - `/roo invoice` and `/roo-dev invoice` use the same signed queue path.
 
-Channel mentions receive an initial queued acknowledgement. Once the private
+Channel mentions receive an initial queued acknowledgement visible to everyone
+in the originating channel thread. DM acknowledgements remain private, and slash
+command responses remain ephemeral. Once the private
 message and PDF are confirmed delivered, Roo replies in the originating thread:
 “I’ve sent your invoice privately. Check your DMs.” Amounts, work items and
 personal fields stay private. If no invoice is payable, the channel reply confirms
