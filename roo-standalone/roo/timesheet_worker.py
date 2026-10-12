@@ -380,6 +380,9 @@ def main(argv=None):
                 else:
                     api = ReportAPI(client, linear_key=env.get('TIMESHEET_LINEAR_READ_API_KEY'), slack_token=env.get('TIMESHEET_SLACK_BOT_TOKEN'))
             service = TimesheetService(config, api)
+            from .studio_invoices import InvoiceConfig
+            from .invoice_worker import InvoiceService
+            invoices = InvoiceService(service, InvoiceConfig.from_env(env, config))
             if args.status:
                 with service.ledger.locked('ledger') as acquired:
                     if not acquired:
@@ -456,6 +459,11 @@ def main(argv=None):
                 results.extend(service.scheduled(datetime.now(timezone.utc)))
             except Exception as exc:
                 results.append({'status': 'error', 'reason': str(exc) if isinstance(exc, TimesheetError) else type(exc).__name__})
+            for operation in (invoices.commands, invoices.scheduled):
+                try:
+                    results.extend(operation(datetime.now(timezone.utc)))
+                except Exception as exc:
+                    results.append({'status': 'error', 'reason': str(exc) if isinstance(exc, TimesheetError) else type(exc).__name__})
             if results or args.once:
                 print(json.dumps({'results': results}), flush=True)
             if args.once:

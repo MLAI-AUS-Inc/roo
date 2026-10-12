@@ -27,7 +27,8 @@ class InvoiceConfig:
         scheduled = flag(env, 'STUDIO_INVOICES_SCHEDULE_ENABLED')
         if enabled and (not timesheets.enabled or timesheets.source != 'linear'):
             raise TimesheetError('invoices_require_linear_timesheet_worker')
-        timesheets.cutoff(FIRST_INVOICE)
+        if enabled:
+            timesheets.cutoff(FIRST_INVOICE)
         return cls(enabled, scheduled, Path(env.get('STUDIO_INVOICE_QUEUE_DIR', '/app/timesheets/invoice-queue')))
 
 

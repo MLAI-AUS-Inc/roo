@@ -24,6 +24,7 @@ from fastapi.responses import JSONResponse
 
 from .config import get_settings, Settings, validate_runtime_security
 from .timesheet_commands import enqueue as enqueue_timesheet, enqueue_event as enqueue_timesheet_event
+from .invoice_commands import enqueue as enqueue_invoice, enqueue_event as enqueue_invoice_event
 from .agent import RooAgent, get_agent
 from .addressing import (
     candidate_reason_for_message,
@@ -3020,10 +3021,12 @@ async def slack_events(
         user_id=timesheet_event.get("user"), channel_type=timesheet_event.get("channel_type"),
     ):
         try:
-            queued = await asyncio.to_thread(enqueue_timesheet_event, timesheet_settings, payload)
+            queued = await asyncio.to_thread(enqueue_invoice_event, timesheet_settings, payload)
+            if not queued.get("handled"):
+                queued = await asyncio.to_thread(enqueue_timesheet_event, timesheet_settings, payload)
         except Exception:
             await _release_slack_event_receipt(request)
-            raise HTTPException(status_code=503, detail="Timesheet request could not be saved; retry")
+            raise HTTPException(status_code=503, detail="Private report request could not be saved; retry")
         if queued.get("handled"):
             # The queue is the durable owner now; finish the generic event lease.
             await _complete_slack_event_receipt(request)
@@ -3613,14 +3616,20 @@ async def slack_commands(
     ):
         try:
             queued = await asyncio.to_thread(
-                enqueue_timesheet, timesheet_settings,
+                enqueue_invoice, timesheet_settings,
                 team=form.get("team_id"), actor=form.get("user_id"), channel=form.get("channel_id"),
                 source_id=form.get("trigger_id"), text=form.get("text"), dm=True,
             )
+            if not queued.get("handled"):
+                queued = await asyncio.to_thread(
+                    enqueue_timesheet, timesheet_settings,
+                    team=form.get("team_id"), actor=form.get("user_id"), channel=form.get("channel_id"),
+                    source_id=form.get("trigger_id"), text=form.get("text"), dm=True,
+                )
         except Exception:
-            raise HTTPException(status_code=503, detail="Timesheet request could not be saved; retry")
+            raise HTTPException(status_code=503, detail="Private report request could not be saved; retry")
         if queued.get("handled"):
-            return {"response_type": "ephemeral", "text": queued.get("text", "This timesheet request is already queued.")}
+            return {"response_type": "ephemeral", "text": queued.get("text", "This private report request is already queued.")}
     if _is_duplicate_slack_request(request):
         print("↩️ Ignoring duplicate signed Slack command request")
         return {}

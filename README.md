@@ -37,6 +37,10 @@ Studio timesheet commands, local testing, cutoff rules and recovery are describe
 in [the timesheet guide](roo-standalone/docs/studio-timesheets.md). The feature is
 disabled by default and uses a separate report worker.
 
+Member invoices to MLAI, fillable PDF details, fortnightly draft/final delivery
+and recovery are described in [the invoice guide](roo-standalone/docs/studio-invoices.md).
+They extend the same private timesheet worker and are disabled by default.
+
 Client-owned monthly usage reports, opt-in Friday reports, project/builder
 breakdowns and detailed work exports are described in
 [the client hours guide](roo-standalone/docs/studio-client-hours.md).

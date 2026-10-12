@@ -10,10 +10,12 @@ services:
     environment:
       TIMESHEET_DATA_DIR: /app/timesheets/data
       TIMESHEET_QUEUE_DIR: /app/timesheets/queue
+      STUDIO_INVOICE_QUEUE_DIR: /app/timesheets/invoice-queue
     restart: unless-stopped
     volumes:
       - timesheet-data:/app/timesheets/data
       - ./data/timesheet-queue:/app/timesheets/queue
+      - ./data/invoice-queue:/app/timesheets/invoice-queue
 
 volumes:
   timesheet-data:
