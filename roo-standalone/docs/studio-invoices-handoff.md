@@ -1,8 +1,11 @@
 # Invoice implementation handoff - 12 October 2026
 
 Branch: `codex/roo-studio-invoices`, based on Roo main `b0bd2b5`.
-Runtime is opt-in and has not been deployed or enabled. No live Slack deliveries
-or Linear writes were performed. Follow [the operating guide](studio-invoices.md).
+Production runtime is opt-in and has not been deployed or enabled. A disposable
+local Roo Dev invoice test uses synthetic work and one verified tester; live test
+PDFs and a generic channel confirmation were delivered through that dev app.
+No production deliveries or Linear writes were performed. Follow
+[the operating guide](studio-invoices.md).
 
 Implemented the approved size/hour/$65 rate, signed own-invoice commands,
 private PDF generation, October 22/23 rollout, Melbourne fortnight schedule,
@@ -18,9 +21,46 @@ sealed finals, existing corrections and persistent artifact/delivery recovery.
   configurations passed `docker compose config --quiet`, using example values.
 - Actual PDF field tree, widgets, values and appearance streams survived
   save/reopen. Single-page and nine-page rendered samples were inspected.
-- Preview's UI automation could not finish opening the sample; Acrobat Reader
-  is not installed. **Actual desktop-reader save/reopen validation is pending
-  and remains a prerequisite before production rollout.**
+- Preview was subsequently verified using a downloaded Roo Dev PDF: sample
+  business name, ABN, BSB, account number and invoice number survived actual
+  filling, saving, closing and reopening. Canonical field values, widgets and
+  appearance streams were also checked. Acrobat Reader is not installed;
+  **Acrobat Reader save/reopen validation remains pending before production.**
+
+## Roo Dev follow-up verification
+
+The disposable test server imports the invoice and timesheet engines directly;
+it does not start Roo's general chat runtime or the backend, apply migrations,
+read live Linear data, or enable scheduled deliveries. Its source fixture has
+one Done item of each size: **11.25 hours, $731.25**. Personal fields stay blank.
+Roo Dev's app, bot, workspace, tester and channel identities were verified before
+delivery. Existing `/timesheet-dev/slack/events` callbacks reach the signed test
+ingress through the local tunnel.
+
+- A manually typed `@Roo Dev invoice` in `#roo-testing` reached the durable queue
+  and delivered the synthetic draft privately. The downloaded Slack file matched
+  the stored PDF exactly and retained all ten editable fields.
+- A signed dev test request generated the Friday final privately, with issue
+  date 23 October 2026. Its downloaded Slack bytes matched the saved artifact.
+- Restarting the live test server and replaying the completed request left every
+  delivery receipt unchanged and preserved exactly one final with identical bytes.
+- Channel commands now receive a generic threaded completion confirmation only
+  after private message/PDF delivery succeeds. No-work responses confirm a
+  private update instead. Initial queued notices remain ephemeral in production.
+- Confirmation failure, uncertainty, and a crash between the private delivery
+  receipt and queue checkpoint were reproduced and verified. Restarting after
+  Friday cutoff retries only the acknowledgement once private delivery is complete.
+- Follow-up targeted invoice and harness suites: **68 passed**. Isolated
+  timesheet/invoice integration suites: **163 passed**. Bare repository pytest:
+  **2,499 passed**, including 14 ignored local harness tests (2,485 tracked tests).
+- One fresh **gpt-6-astra** final review of this new confirmation delta in branch
+  context found no Critical, Important or Minor findings. It did not repeat the
+  earlier implementation review below.
+
+Local testing depends on the Mac, server and tunnel remaining available. DM
+command entry and slash callback configuration still require manual Slack checks;
+channel mentions and outgoing private delivery are verified. Production deployment
+and real mapped Linear data validation remain separate.
 
 One fresh **gpt-6-astra** whole-branch review examined the implementation.
 No critical findings. Two important findings were fixed in one regression pass:

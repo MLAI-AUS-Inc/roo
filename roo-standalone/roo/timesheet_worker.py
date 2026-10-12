@@ -16,12 +16,29 @@ from urllib.parse import urlsplit
 import httpx
 
 from .payment_reminders import DeliveryRejected, ReceiptStore
+from .payment_reminder_worker import DeliveryNotSent
 from .timesheet_linear import TimesheetAPI
 from .timesheets import (DeliveryExpired, Ledger, TimesheetConfig, TimesheetError, artifacts, build_report,
                          fingerprint, summary, timestamp)
 
 
 class ReportAPI(TimesheetAPI):
+    def post_invoice_ack(self, channel, text, *, thread_ts):
+        """Post only a generic confirmation to the originating channel thread."""
+        if (not re.fullmatch(r'[CG][A-Z0-9]+', str(channel))
+                or not re.fullmatch(r'\d+\.\d+', str(thread_ts))):
+            raise TimesheetError('invalid_confirmation_destination')
+        try:
+            result = self.slack('chat.postMessage', {
+                'channel': channel, 'text': text, 'thread_ts': thread_ts,
+                'unfurl_links': False, 'unfurl_media': False,
+            })
+        except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout) as exc:
+            raise DeliveryNotSent() from exc
+        if result.get('channel') != channel or not result.get('ts'):
+            raise TimesheetError('unconfirmed_invoice_ack')
+        return result['ts']
+
     def upload_csv(self, channel, filename, content, *, before_send=None):
         if not re.fullmatch(r'D[A-Z0-9]+', channel):
             raise TimesheetError('private_destination_required')

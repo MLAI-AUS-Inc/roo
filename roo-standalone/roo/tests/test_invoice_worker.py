@@ -23,6 +23,7 @@ class OfflineAPI:
                         item(ticket(2, assignee={'id': OTHER}, completedAt='2026-10-20T01:00:00Z', updatedAt='2026-10-20T01:00:00Z'))]
         self.messages, self.files, self.reads, self.inactive = [], [], 0, set()
         self.fail_upload = None
+        self.acknowledgements, self.fail_ack = [], None
 
     def verify(self, config):
         assert config.team == 'T123'
@@ -49,6 +50,12 @@ class OfflineAPI:
         self.files.append((channel, filename, content))
         return 'F123'
 
+    def post_invoice_ack(self, channel, text, *, thread_ts):
+        self.acknowledgements.append((channel, text, thread_ts))
+        if self.fail_ack:
+            raise self.fail_ack
+        return '123.789'
+
 
 def service(config, *, api=None, scheduled=True):
     from roo.invoice_worker import InvoiceService
@@ -60,7 +67,8 @@ def service(config, *, api=None, scheduled=True):
 
 def queue(service, *, actor='UBUILDER', selector='current', now=THURSDAY, source='123.456', **updates):
     request = dict(team='T123', actor=actor, channel='C123', source=source,
-                   selector=selector, requested_at=now.isoformat(), status='pending', **updates)
+                   selector=selector, requested_at=now.isoformat(), status='pending')
+    request.update(updates)
     key = fingerprint({k: request[k] for k in ('team', 'actor', 'channel', 'source')})
     with service.queue.locked(key) as ok:
         assert ok
@@ -324,3 +332,86 @@ def test_pdf_sharing_deadline_checked_inside_slack_upload_protocol(expire_after)
             api.upload_csv('D123', 'draft.pdf', b'%PDF-test', before_send=lambda: not expired[0])
     assert not any('completeUploadExternal' in url for url in seen)
     assert len(seen) == (1 if expire_after == 'url' else 2)
+
+
+def test_channel_confirmation_waits_for_pdf_and_retries_without_resending(config):
+    s = service(config)
+    key = queue(s, thread_ts='123.450')
+    s.api.fail_upload = DeliveryRejected('ratelimited', 60)
+    s.commands(THURSDAY)
+    assert s.api.acknowledgements == []
+    s.api.fail_upload = None
+    s.api.fail_ack = DeliveryRejected('ratelimited', 60)
+    s.commands(THURSDAY + timedelta(seconds=61))
+    assert len(s.api.files) == 1
+    assert s.api.acknowledgements == [('C123', '<@UBUILDER> I’ve sent your invoice privately. Check your DMs.', '123.450')]
+    assert s.queue.read(key)['status'] != 'done'
+    s.api.fail_ack = None
+    # Crossing Friday must only retry the public confirmation, preserving the delivered draft.
+    restarted = service(config, api=s.api)
+    restarted.commands(FRIDAY)
+    assert len(s.api.files) == 1 and 'draft' in s.api.files[0][1]
+    assert s.queue.read(key)['status'] == 'done'
+    assert len(s.api.acknowledgements) == 2
+    assert restarted.commands(FRIDAY) == []
+
+
+def test_no_work_confirms_private_explanation_without_claiming_invoice(config):
+    s = service(config)
+    s.api.dataset = []
+    queue(s, thread_ts='123.456')
+    s.commands(THURSDAY)
+    assert s.api.files == []
+    assert s.api.acknowledgements == [('C123', '<@UBUILDER> I’ve sent you a private update about your invoice request. Check your DMs.', '123.456')]
+
+
+def test_uncertain_channel_confirmation_needs_review_without_repeat(config):
+    s = service(config)
+    key = queue(s, thread_ts='123.456')
+    s.api.fail_ack = TimeoutError('unknown outcome')
+    s.commands(THURSDAY)
+    s.api.fail_ack = None
+    restarted = service(config, api=s.api)
+    assert restarted.commands(FRIDAY)[0]['status'] == 'needs_review'
+    assert len(s.api.files) == 1 and len(s.api.acknowledgements) == 1
+    assert s.queue.read(key)['status'] == 'needs_review'
+
+
+def test_crash_after_private_receipt_recovers_confirmation_without_new_final(config, monkeypatch):
+    s = service(config)
+    key = queue(s, thread_ts='123.456')
+    original = s.queue.write
+    def crash_before_checkpoint(key, request):
+        if request.get('delivered'):
+            raise OSError('process stopped before queue checkpoint')
+        return original(key, request)
+    monkeypatch.setattr(s.queue, 'write', crash_before_checkpoint)
+    s.commands(THURSDAY)
+    assert len(s.api.files) == 1 and s.api.acknowledgements == []
+    restarted = service(config, api=s.api)
+    restarted.commands(FRIDAY)
+    assert len(s.api.files) == 1 and 'draft' in s.api.files[0][1]
+    assert len(s.api.acknowledgements) == 1
+    assert restarted.queue.read(key)['status'] == 'done'
+
+
+@pytest.mark.parametrize('updates', [dict(channel='D123'), dict(thread_ts=None), dict(actor='USAM')])
+def test_dm_slash_and_unmapped_requests_never_publish_confirmation(config, updates):
+    s = service(config)
+    queue(s, **updates)
+    s.commands(THURSDAY)
+    assert s.api.acknowledgements == []
+
+
+def test_invoice_channel_confirmation_provider_uses_thread_and_no_unfurls():
+    from roo.timesheet_worker import ReportAPI
+    import json
+    seen = []
+    def respond(request):
+        seen.append(json.loads(request.content))
+        return httpx.Response(200, json={'ok': True, 'channel': 'G123', 'ts': '123.789'})
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        api = ReportAPI(client, linear_key='synthetic', slack_token='synthetic')
+        assert api.post_invoice_ack('G123', 'Sent privately.', thread_ts='123.456') == '123.789'
+    assert seen == [{'channel': 'G123', 'text': 'Sent privately.', 'thread_ts': '123.456',
+                     'unfurl_links': False, 'unfurl_media': False}]

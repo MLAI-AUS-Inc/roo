@@ -148,6 +148,22 @@ class InvoiceService:
             return False
         return any(b['slack_user_id'] == request.get('actor') for b in self.config.builders.values())
 
+    def acknowledge(self, request, key, now):
+        channel, thread = request['channel'], request.get('thread_ts')
+        if channel.startswith('D') or thread is None:
+            return 'sent'  # DMs and ephemeral slash commands need no channel reply.
+        if not re.fullmatch(r'\d+\.\d+', str(thread)):
+            raise TimesheetError('invalid_confirmation_destination')
+        actor = request['actor']
+        self.owner(actor)
+        text = (f'<@{actor}> I’ve sent your invoice privately. Check your DMs.' if request['has_invoice'] else
+                f'<@{actor}> I’ve sent you a private update about your invoice request. Check your DMs.')
+        return self.timesheets._deliver_transport(
+            [{'kind': 'message', 'content': {'text': text, 'channel': channel, 'thread_ts': thread}, 'status': 'pending'}], actor,
+            'invoice-ack-' + key, now, lambda _: channel,
+            lambda destination, content: self.api.post_invoice_ack(destination, content['text'], thread_ts=content['thread_ts']),
+            self.api.upload_csv)
+
     def commands(self, now):
         if not self.options.enabled or not self.queue.directory.exists():
             return []
@@ -174,15 +190,31 @@ class InvoiceService:
                         continue
                     actor = request['actor']
                     try:
-                        artifact = self.command_artifact(request, key, now)
-                        send_at = timestamp(now) + timedelta(seconds=time.monotonic() - started)
-                        if artifact['draft'] and send_at >= validate_period(self.config, artifact['period']):
-                            artifact = self.artifact(actor, artifact['period'], send_at)
-                        status = self.deliver(artifact, actor, 'command-' + key + ('-draft' if artifact['draft'] else '-final'), send_at)
-                        if status == 'expired' and artifact['draft']:
+                        if not request.get('delivered'):
+                            # The process can stop between the last Slack receipt and the queue checkpoint.
+                            for label in ('final', 'draft'):
+                                receipt = self.deliveries.read('invoice-command-' + key + '-' + label)
+                                if (receipt and receipt.get('recipient') == actor and receipt.get('parts')
+                                        and all(p['status'] == 'sent' for p in receipt['parts'])):
+                                    request.update(delivered=True, has_invoice=any(p['kind'] == 'file' for p in receipt['parts']))
+                                    self.queue.write(key, request)
+                                    break
+                        if not request.get('delivered'):
+                            artifact = self.command_artifact(request, key, now)
                             send_at = timestamp(now) + timedelta(seconds=time.monotonic() - started)
-                            artifact = self.artifact(actor, artifact['period'], send_at)
-                            status = self.deliver(artifact, actor, 'command-' + key + '-final', send_at)
+                            if artifact['draft'] and send_at >= validate_period(self.config, artifact['period']):
+                                artifact = self.artifact(actor, artifact['period'], send_at)
+                            status = self.deliver(artifact, actor, 'command-' + key + ('-draft' if artifact['draft'] else '-final'), send_at)
+                            if status == 'expired' and artifact['draft']:
+                                send_at = timestamp(now) + timedelta(seconds=time.monotonic() - started)
+                                artifact = self.artifact(actor, artifact['period'], send_at)
+                                status = self.deliver(artifact, actor, 'command-' + key + '-final', send_at)
+                            if status == 'sent':
+                                # Persist the private delivery before attempting its public confirmation.
+                                request.update(delivered=True, has_invoice=bool(artifact['invoice']))
+                                self.queue.write(key, request)
+                        if request.get('delivered'):
+                            status = self.acknowledge(request, key, timestamp(now) + timedelta(seconds=time.monotonic() - started))
                         request['status'] = 'done' if status == 'sent' else status
                         request.pop('error', None)
                         results.append({'request': key, 'status': status})
@@ -198,6 +230,8 @@ class InvoiceService:
                                   if terminal else 'Roo could not finish your invoice request yet. Source failures are never counted as zero. '
                                   'Safe failures will retry; an uncertain delivery requires operator review.')
                         try:
+                            if request.get('delivered'):
+                                raise TimesheetError('confirmation_only_retry')
                             self.owner(actor)
                             outcome = self.timesheets._deliver_transport(
                                 [{'kind': 'message', 'content': notice, 'status': 'pending'}], actor,

@@ -39,6 +39,15 @@ shown in the PDF's submission instructions.
   off-cadence dates and dates before **23 October 2026** are excluded.
 - `/roo invoice` and `/roo-dev invoice` use the same signed queue path.
 
+Channel mentions receive an initial queued acknowledgement. Once the private
+message and PDF are confirmed delivered, Roo replies in the originating thread:
+“I’ve sent your invoice privately. Check your DMs.” Amounts, work items and
+personal fields stay private. If no invoice is payable, the channel reply confirms
+a private update instead. DM requests and ephemeral slash commands do not add
+a public reply. Confirmation receipts survive restarts; a delayed confirmation
+does not generate or deliver another invoice. Uncertain confirmation outcomes
+use the existing operator review workflow.
+
 Drafts run every second Thursday **17:00 Australia/Melbourne**, starting
 **22 October 2026**. Finals run after the following Friday's **12:00** cutoff,
 starting **23 October**. The next draft is **5 November**, final **6 November**.
