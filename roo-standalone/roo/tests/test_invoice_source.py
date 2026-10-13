@@ -86,6 +86,14 @@ class Provider:
                 'updatedAt': value['issue']['updatedAt'],
                 'history': self.connection([{k: h[k] for k in ('id','createdAt','fromProjectId','toProjectId') if k in h}
                                            for h in value['history']], variables.get('after'))}}
+        elif 'InvoiceCandidateVersions' in query:
+            data = {f'i{i}': None if key not in self.dataset else {k: self.dataset[key]['issue'].get(k) for k in ('id','updatedAt','trashed')}
+                    for i, key in enumerate(variables.values())}
+        elif 'InvoiceLabels' in query:
+            labels = {}
+            for value in self.dataset.values():
+                labels.update({x['id']: x['name'] for x in value['issue']['labels']})
+            data = {'issueLabels': self.connection([{'id': k, 'name': v} for k, v in sorted(labels.items())], variables.get('after'))}
         elif 'StudioEvidenceVersions' in query or 'InvoiceIssueVersions' in query:
             data = {f'i{i}': None if key not in self.dataset else {k: self.dataset[key]['issue'][k] for k in ('id','updatedAt')}
                     for i, key in enumerate(variables.values())}
@@ -183,6 +191,8 @@ def test_ordinary_request_never_bootstraps_and_scope_changes_require_preparation
 def test_ten_thousand_unchanged_outsiders_need_no_history(config):
     old = [item(ticket(i, project={'id':'outside'}, updatedAt='2026-01-01T00:00:00Z')) for i in range(10000,20000)]
     provider = Provider(config, old + [current(i) for i in range(17)])
+    # A Linear label has one name everywhere; give issue-1 its own label to rename.
+    provider.dataset['issue-1']['issue']['labels'] = [{'id':'size-1', 'name':'Small (S)'}]
     api = provider.api()
     api.verify(config)
     api.prepare(config, NOW)
@@ -192,7 +202,8 @@ def test_ten_thousand_unchanged_outsiders_need_no_history(config):
     assert len(collect(api, config)) == 17
     assert provider.count('StudioEvidenceBatch') == 0
     assert provider.count('InvoiceMoveHistory') == 0
-    assert provider.count('InvoiceCandidates') > 0
+    assert provider.count('InvoiceCandidates') == 0
+    assert provider.count('InvoiceCandidateVersions') > 0
     provider.calls.clear()
     provider.dataset['issue-1']['issue']['labels'][0]['name'] = 'Large (L)'
     outsider = current(99, project={'id':'outside'})
@@ -280,7 +291,7 @@ def test_failed_refresh_does_not_publish_or_advance_watermark(config, monkeypatc
     api.prepare(config, NOW)
     path = next((config.directory / 'linear-invoice-index').glob('*/manifest.json'))
     before = path.read_bytes()
-    provider.dataset['issue-0']['issue']['title'] = 'changed'
+    provider.dataset['issue-0']['issue'].update(title='changed', updatedAt=NOW.isoformat())
     provider.fail_at = len(provider.calls) + 3
     with pytest.raises(SourceRetryError): collect(api, config)
     assert path.read_bytes() == before
@@ -321,7 +332,7 @@ def test_closing_discovery_finds_concurrent_payable_issue_before_sealing(config)
         if 'StudioEvidenceVersions' in query and not inserted[0]:
             provider.dataset['issue-2'] = current(2)
             inserted[0] = True
-    provider.dataset['issue-1']['issue']['title'] = 'force reread'
+    provider.dataset['issue-1']['issue'].update(title='force reread', updatedAt=NOW.isoformat())
     provider.after_call = changed
     result = collect(api, config, draft=False)
     assert {x['issue']['id'] for x in result} == {'issue-1','issue-2'}
@@ -335,8 +346,10 @@ def test_three_unstable_passes_never_publish(config):
     path = next((config.directory / 'linear-invoice-index').glob('*/manifest.json'))
     before = path.read_bytes()
     def changed(query, variables):
-        if 'InvoiceCandidates' in query:
-            provider.dataset['issue-1']['issue']['title'] += '!'
+        if 'InvoiceCandidates' in query or 'InvoiceCandidateVersions' in query:
+            issue = provider.dataset['issue-1']['issue']
+            issue['title'] += '!'
+            issue['updatedAt'] = (timestamp(issue['updatedAt']) + timedelta(seconds=1)).isoformat()
     provider.after_call = changed
     with pytest.raises(SourceRetryError, match='linear_source_unstable'):
         collect(api, config, draft=False)
@@ -824,3 +837,51 @@ def test_slow_provider_report_over_long_history_completes_instead_of_repeating(c
     before = len(provider.calls)
     assert len(attempt(lambda api: collect(api, config, draft=False))) == 378
     assert len(provider.calls) - before <= 60
+
+
+def test_unchanged_history_is_confirmed_cheaply_and_changes_still_rehydrate(config):
+    provider = Provider(config, [item(ticket(i)) for i in range(300)] + [current(1000)])
+    api = provider.api()
+    api.verify(config)
+    with api.source_attempt(max_requests=10**6):
+        api.prepare(config, NOW)
+    provider.calls.clear()
+    assert len(collect(provider.api(), config)) == 301
+    # Two stable passes: four 100-issue version reads each, no rehydration.
+    assert provider.count('InvoiceCandidates') == 0
+    assert provider.count('InvoiceCandidateVersions') == 2 * 4
+    assert provider.count('InvoiceLabels') == 2
+    assert len(provider.calls) <= 30  # includes 11 fixed scope-verification calls
+
+    provider.calls.clear()
+    provider.dataset['issue-7']['issue'].update(assignee={'id': 'someone-else'}, updatedAt=NOW.isoformat())
+    result = collect(provider.api(), config)
+    assert next(x for x in result if x['issue']['id'] == 'issue-7')['issue']['assignee'] == {'id': 'someone-else'}
+    hydrated = [v for q, v in provider.calls if 'InvoiceCandidates' in q]
+    assert hydrated and all(list(v.values()) == ['issue-7'] for v in hydrated)
+
+
+@pytest.mark.parametrize('change', ['trashed', 'deleted'])
+def test_removed_known_issue_blocks_instead_of_reusing_saved_candidate(config, change):
+    provider = Provider(config, [current(), current(2)])
+    api = provider.api()
+    api.verify(config)
+    api.prepare(config, NOW)
+    if change == 'trashed':
+        provider.dataset['issue-2']['issue']['trashed'] = True
+    else:
+        del provider.dataset['issue-2']
+    with pytest.raises(TimesheetError, match='invoice_source_coverage'):
+        collect(provider.api(), config)
+
+
+def test_corrupt_saved_candidate_is_rehydrated(config):
+    provider = Provider(config, [current(), current(2)])
+    api = provider.api()
+    api.verify(config)
+    api.prepare(config, NOW)
+    for path in (config.directory / 'linear-invoice-index').glob('*/candidates/*.json'):
+        path.write_text('{"candidate": {}, "digest": "bad"}')
+    provider.calls.clear()
+    assert len(collect(provider.api(), config)) == 2
+    assert provider.count('InvoiceCandidates') > 0
