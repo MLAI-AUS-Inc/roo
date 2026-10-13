@@ -12,9 +12,12 @@ from .timesheets import RUBRIC, SourceRetryError, TimesheetError, fingerprint, t
 
 VERSION = 1
 # Hydration reads issue fields and labels only, so it batches more than full
-# evidence. Every known issue is hydrated each pass; 25 stays far below
-# Linear's per-query complexity limit (labels(first:100) dominates).
+# evidence. Only new, changed or relabelled issues are hydrated; 25 stays far
+# below Linear's per-query complexity limit (labels(first:100) dominates).
 HYDRATE_BATCH_SIZE = 25
+# A saved candidate is reused only after a fresh read shows the same version
+# and current label names. Version reads are tiny, so they batch widely.
+VERSION_BATCH_SIZE = 100
 LIGHT_FIELDS = 'id createdAt updatedAt completedAt archivedAt trashed project { id } team { id }'
 PROJECT_TEAMS = '''query InvoiceProjectTeams($id:String!, $after:String) {
  project(id:$id) { id teams(first:100, after:$after) { nodes { id } pageInfo { hasNextPage endCursor } } }
@@ -37,6 +40,18 @@ def candidate_query(ids):
     args = ', '.join(f'${key}:String!' for key in variables)
     selections = ' '.join(f'i{i}: issue(id:$id{i}) {{ {FIELDS} }}' for i in range(len(ids)))
     return f'query InvoiceCandidates({args}) {{ {selections} }}', variables
+
+
+def version_query(ids):
+    variables = {f'id{i}': key for i, key in enumerate(ids)}
+    args = ', '.join(f'${key}:String!' for key in variables)
+    selections = ' '.join(f'i{i}: issue(id:$id{i}) {{ id updatedAt trashed }}' for i in range(len(ids)))
+    return f'query InvoiceCandidateVersions({args}) {{ {selections} }}', variables
+
+
+LABELS = '''query InvoiceLabels($after:String) {
+ issueLabels(first:100, after:$after, includeArchived:true) { nodes { id name } pageInfo { hasNextPage endCursor } }
+}'''
 
 
 def normalized(issue):
@@ -101,6 +116,7 @@ class InvoiceSourceAPI(StudioSourceAPI):
             self._scope_config = fingerprint(self._scope_input(config))
             self._index = ReceiptStore(config.directory / 'linear-invoice-index' / self._scope_config)
             self._pages = ReceiptStore(self._index.directory / 'full-pages')
+            self._candidates = ReceiptStore(self._index.directory / 'candidates')
             self._page_versions = {}
 
     def _scope_input(self, config):
@@ -145,7 +161,8 @@ class InvoiceSourceAPI(StudioSourceAPI):
         self._ensure_scope(config)
         started = time.monotonic()
         self._stats = {'candidates':0, 'cached':0, 'batches':0, 'primary':0, 'delta':0,
-                       'hydration_calls':0, 'move_pages':0, 'pages':0, 'complete':False}
+                       'hydration_calls':0, 'version_calls':0, 'label_pages':0, 'reused':0,
+                       'move_pages':0, 'pages':0, 'complete':False}
         try:
             with self._index.locked('generation') as acquired:
                 if not acquired:
@@ -314,9 +331,60 @@ class InvoiceSourceAPI(StudioSourceAPI):
         progress.update(stage='primary', cursor=None, seen=[], previous=None)
         self._write('progress', progress)
 
+    def _saved_candidate(self, key):
+        try:
+            value = self._candidates.read(fingerprint(key))
+        except (OSError, ValueError):
+            return None
+        if (not isinstance(value, dict) or not isinstance(value.get('candidate'), dict)
+                or value.get('digest') != fingerprint(value['candidate'])
+                or value['candidate'].get('id') != key):
+            return None  # Corrupt or foreign entries are simply read again.
+        return value['candidate']
+
+    def _label_names(self):
+        names, after, seen = {}, None, set()
+        while True:
+            connection = self.linear(LABELS, {'after': after}).get('issueLabels')
+            after = next_page(connection, seen)
+            for label in connection['nodes']:
+                if not isinstance(label, dict) or not label.get('id'):
+                    raise TimesheetError('invoice_source_coverage')
+                names[label['id']] = label.get('name')
+            self._stats['label_pages'] += 1
+            if after is None:
+                return names
+
+    def _reuse(self, progress, pending):
+        # Label renames do not change an issue's updatedAt, so a saved candidate
+        # also needs every label name to match the fresh workspace list.
+        saved = {key: value for key in pending if (value := self._saved_candidate(key))}
+        if not saved:
+            return
+        names = self._label_names()
+        keys = sorted(saved)
+        for start in range(0, len(keys), VERSION_BATCH_SIZE):
+            batch = keys[start:start+VERSION_BATCH_SIZE]
+            raw = self.linear(*version_query(batch))
+            self._stats['version_calls'] += 1
+            for i, key in enumerate(batch):
+                current = raw.get(f'i{i}')
+                if not current or current.get('id') != key or current.get('trashed'):
+                    raise TimesheetError('invoice_source_coverage')
+                candidate = saved[key]
+                if (current.get('updatedAt') == candidate.get('updatedAt')
+                        and all(names.get(label['id']) == label['name'] for label in candidate['labels']['nodes'])):
+                    self._page_versions[key] = candidate['updatedAt']
+                    progress['candidates'][key] = deepcopy(candidate)
+                    progress['hydrate_done'].append(key)
+                    self._stats['reused'] += 1
+            self._write('progress', progress)
+
     def _hydrate(self, progress, ids):
         if progress['stage'] != 'hydrate': return
         pending = [key for key in ids if key not in progress['hydrate_done']]
+        self._reuse(progress, pending)
+        pending = [key for key in pending if key not in progress['hydrate_done']]
         for start in range(0,len(pending),HYDRATE_BATCH_SIZE):
             batch = pending[start:start+HYDRATE_BATCH_SIZE]
             query, variables = candidate_query(batch)
@@ -342,6 +410,9 @@ class InvoiceSourceAPI(StudioSourceAPI):
                                        'pageInfo':{'hasNextPage':False,'endCursor':None}}
                 progress['candidates'][key] = issue
                 progress['hydrate_done'].append(key)
+                with self._candidates.locked(fingerprint(key)) as acquired:
+                    if acquired:
+                        self._candidates.write(fingerprint(key), {'candidate':issue, 'digest':fingerprint(issue)})
             self._write('progress', progress)
         progress['stage'] = 'evidence'
         self._write('progress', progress)

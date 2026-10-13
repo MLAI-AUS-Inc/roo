@@ -106,8 +106,13 @@ work and lightweight changes since the last successful refresh, with a
 five-minute overlap. A compact project-history check for new/changed outsiders
 protects work moved out of Studio, including moves across teams. Unchanged
 unrelated workspace issues cause no history reads. Relevant histories are
-batched and reused after fresh candidate checks; label names are refreshed
-even when the issue timestamp did not change. Full histories retain the first
+batched and reused after fresh candidate checks. Each known issue's full
+candidate is saved once; later passes reuse it only after a fresh batched read
+(100 issues per call) shows the same `updatedAt` and not trashed, and a fresh
+workspace label list shows every label name unchanged, because label renames do
+not change the issue timestamp. Anything else is hydrated in full again. A
+deleted, trashed or inaccessible known issue blocks coverage. Per-pass cost
+therefore grows by about one call per 100 known issues, not one per 25. Full histories retain the first
 completion so reopened old work cannot be paid again. Missing prior periods
 are still simulated chronologically for drafts and persisted only for finals.
 Resumed report reads finish saved work, then require a fresh closing pass in
@@ -134,6 +139,8 @@ Private storage, relative to `TIMESHEET_DATA_DIR`:
   and refresh-start watermark; `progress.json`: resumable work, never a report.
 - `linear-invoice-index/<scope fingerprint>/full-pages/`: version-bound history
   page receipts for interrupted long-history reads.
+- `linear-invoice-index/<scope fingerprint>/candidates/`: last hydrated
+  candidate per known issue with a digest; corrupt entries are read again.
 - `linear-evidence/<credential/organization/workspace fingerprint>/`: verified
   full issue/history evidence and digests.
 - `linear-cooldowns/<fingerprint>.json`: shared provider/local retry deadline.
@@ -151,6 +158,7 @@ invoices or success acknowledgements. The separate client-report deployment
 has its own volume and may still consume the same provider quota.
 
 Aggregate `invoice_linear_read` logs expose candidate/page/hydration counts,
+saved-candidate reuse with its version and label-list calls,
 compact move checks, evidence cache hits/batches and elapsed time; no issue
 bodies or credentials. Measure preparation, cold period, unchanged refresh,
 one changed issue and a 19-builder batch separately. Under one minute for a
