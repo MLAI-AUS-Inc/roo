@@ -797,3 +797,30 @@ def test_outsider_edit_invalidates_stale_discovery_and_recovers(config, monkeypa
     result=resumed.prepare(config,NOW)
     assert result['status']=='prepared'
     assert [x['issue']['id'] for x in collect(resumed,config)]==['issue-1']
+
+
+def test_slow_provider_report_over_long_history_completes_instead_of_repeating(config, monkeypatch):
+    # Production shape: 378 historical issues at ~0.7s per Linear call. Each
+    # attempt previously spent its whole time budget and restarted forever.
+    clock, elapsed = [NOW.timestamp()], [0.0]
+    monkeypatch.setattr('roo.studio_report_source.time.time', lambda: clock[0])
+    monkeypatch.setattr('roo.studio_report_source.time.monotonic', lambda: elapsed[0])
+    provider = Provider(config, [item(ticket(i)) for i in range(378)])
+
+    def attempt(work):
+        for _ in range(10):
+            api = provider.api()
+            try:
+                with api.source_attempt():
+                    api.verify(config)
+                    return work(api)
+            except SourceRetryError as error:
+                assert str(error) == 'linear_source_budget'
+                clock[0] += 61
+        pytest.fail('source attempts repeated without completing')
+
+    attempt(lambda api: api.prepare(config, NOW))
+    provider.after_call = lambda query, variables: elapsed.__setitem__(0, elapsed[0] + 0.7)
+    before = len(provider.calls)
+    assert len(attempt(lambda api: collect(api, config, draft=False))) == 378
+    assert len(provider.calls) - before <= 60
