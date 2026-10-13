@@ -6,11 +6,15 @@ import time
 import uuid
 
 from .payment_reminders import ReceiptStore
-from .studio_report_source import BATCH_SIZE, StudioSourceAPI, batch_query
+from .studio_report_source import StudioSourceAPI, batch_query
 from .timesheet_linear import FIELDS, HISTORY, ISSUE, LABEL_PAGE, next_page
 from .timesheets import RUBRIC, SourceRetryError, TimesheetError, fingerprint, timestamp
 
 VERSION = 1
+# Hydration reads issue fields and labels only, so it batches more than full
+# evidence. Every known issue is hydrated each pass; 25 stays far below
+# Linear's per-query complexity limit (labels(first:100) dominates).
+HYDRATE_BATCH_SIZE = 25
 LIGHT_FIELDS = 'id createdAt updatedAt completedAt archivedAt trashed project { id } team { id }'
 PROJECT_TEAMS = '''query InvoiceProjectTeams($id:String!, $after:String) {
  project(id:$id) { id teams(first:100, after:$after) { nodes { id } pageInfo { hasNextPage endCursor } } }
@@ -313,8 +317,8 @@ class InvoiceSourceAPI(StudioSourceAPI):
     def _hydrate(self, progress, ids):
         if progress['stage'] != 'hydrate': return
         pending = [key for key in ids if key not in progress['hydrate_done']]
-        for start in range(0,len(pending),BATCH_SIZE):
-            batch = pending[start:start+BATCH_SIZE]
+        for start in range(0,len(pending),HYDRATE_BATCH_SIZE):
+            batch = pending[start:start+HYDRATE_BATCH_SIZE]
             query, variables = candidate_query(batch)
             raw = self.linear(query, variables)
             self._stats['hydration_calls'] += 1

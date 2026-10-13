@@ -142,7 +142,7 @@ Private storage, relative to `TIMESHEET_DATA_DIR`:
 
 HTTP 429 and GraphQL `RATELIMITED` at HTTP 200/400 honor the provider's reset,
 including millisecond request/complexity headers. Corrupt cooldowns fail closed.
-Each source attempt permits at most 200 HTTP calls and 45 seconds before the
+Each source attempt permits at most 200 HTTP calls and 120 seconds before the
 next request (one in-flight request can reach the existing HTTP timeout).
 Exhaustion saves progress and shares a wait of at least 60 seconds; another
 builder cannot immediately start another scan. Provider waits show the earliest

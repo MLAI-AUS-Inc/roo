@@ -73,7 +73,10 @@ class StudioSourceAPI(ReportAPI):
         return super().verify(config)
 
     @contextmanager
-    def source_attempt(self, *, max_requests=200, max_seconds=45):
+    def source_attempt(self, *, max_requests=200, max_seconds=120):
+        # The request cap protects provider quota. The time cap must leave room
+        # for a full closing pass on a slow provider; otherwise every retry
+        # spends the same requests and never publishes.
         if getattr(self, '_attempt', None) is not None:
             yield  # Nested collection shares the outer attempt's budget.
             return
