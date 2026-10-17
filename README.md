@@ -281,6 +281,16 @@ The Compose files represent different runtime surfaces:
 Read the selected file and its referenced environment template before starting
 it. Compose startup may contact external services when credentials are present.
 
+## Isolated Hermes tasks
+
+The optional Hermes task controller runs separately from Public/Admin Roo. Its
+[packaging guide](roo-standalone/hermes/README.md) and
+[host operations guide](roo-standalone/hermes/OPERATIONS.md) cover the pinned ACP
+image, per-attempt container/filesystem quotas, backend broker, public-web egress
+and completion recovery. Feature flags default off. The optional authenticated
+browser sidecar remains a disabled building block pending controller handoff
+integration and Linux host validation; it is not a shared signed-in browser.
+
 ## Slack configuration
 
 Slack manifests live in `roo-standalone/slack-app-manifests`. Required scopes

@@ -1,0 +1,82 @@
+name: roo-hermes-infrastructure
+
+services:
+  hermes-broker:
+    build:
+      context: .
+      dockerfile: hermes/broker/Dockerfile
+    environment:
+      ROO_HERMES_BACKEND_HOST: ${ROO_HERMES_BACKEND_HOST:?Set the approved HTTPS backend DNS hostname}
+    user: "10000:10000"
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+    mem_limit: 128m
+    cpus: 0.5
+    pids_limit: 32
+    tmpfs: ["/tmp:rw,nosuid,nodev,noexec,size=32m,uid=10000,gid=10000,mode=0700"]
+    networks:
+      internal:
+        aliases: [hermes-broker]
+      public-web:
+        aliases: [hermes-broker]
+      outbound: {}
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8090/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  hermes-web-egress:
+    profiles: [public-web]
+    build:
+      context: .
+      dockerfile: hermes/egress/Dockerfile
+    environment:
+      ROO_HERMES_WEB_HOSTS: ${ROO_HERMES_WEB_HOSTS:-}
+    user: "10000:10000"
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+    mem_limit: 128m
+    cpus: 0.5
+    pids_limit: 32
+    tmpfs: ["/tmp:rw,nosuid,nodev,noexec,size=16m,uid=10000,gid=10000,mode=0700"]
+    networks:
+      public-web:
+        aliases: [hermes-web-egress]
+      outbound: {}
+
+networks:
+  internal:
+    name: roo-hermes-internal
+    internal: true
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.name: br-roo-hermes
+  outbound:
+    driver: bridge
+  public-web:
+    name: roo-hermes-web
+    internal: true
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.name: br-roo-web
+# No service publishes a host port. Tasks join ONLY internal. They never join
+# outbound. Only explicitly approved public-web tasks join roo-hermes-web;
+# ordinary tasks join roo-hermes-internal and cannot reach the web proxy.
+# Neither proxy receives backend worker/admin/provider secrets.
