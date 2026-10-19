@@ -74,6 +74,14 @@ def reset_store_cache():
 @pytest.mark.parametrize(
     ("reply", "expected"),
     (
+        ("Lovelace", "small-meeting-room"),
+        ("<@UROO> LOVELACE please", "small-meeting-room"),
+        ("Turing room please", "big-meeting-room"),
+        ("please the Turing meeting room", "big-meeting-room"),
+        ("Lovelace or Turing", None),
+        ("not Lovelace", None),
+        ("Turing but at 4pm", None),
+        ("Turington", None),
         ("big room", "big-meeting-room"),
         ("the large meeting room please", "big-meeting-room"),
         ("<@UROO> small room", "small-meeting-room"),
@@ -94,15 +102,15 @@ def test_public_room_choice_buttons_bind_state_without_private_details(tmp_path)
     prompt = public_room_choice_prompt(
         clarification,
         [
-            {"slug": "small-meeting-room", "name": "Small Meeting Room"},
-            {"slug": "big-meeting-room", "name": "Big Meeting Room"},
+            {"slug": "small-meeting-room", "name": "Lovelace"},
+            {"slug": "big-meeting-room", "name": "Turing"},
         ],
     )
 
     buttons = prompt["blocks"][1]["elements"]
     assert [button["text"]["text"] for button in buttons] == [
-        "Big Meeting Room",
-        "Small Meeting Room",
+        "Turing",
+        "Lovelace",
     ]
     assert [button["action_id"] for button in buttons] == [
         PUBLIC_ROOM_CHOICE_ACTION_IDS_BY_ROOM["big-meeting-room"],

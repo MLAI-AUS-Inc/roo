@@ -1,7 +1,7 @@
 # Meeting-room booking contract
 
-Default room selection and general availability show only **Big Meeting Room**
-and **Small Meeting Room**, in public threads and in DMs. This remains true even
+Default room selection and general availability show only **Turing**
+and **Lovelace**, in public threads and in DMs. This remains true even
 if a backend room-list response contains additional rooms. Model-generated room
 parameters do not count as an explicit request.
 
@@ -37,3 +37,12 @@ and deterministic routing gates. All use synthetic data and mocked external
 calls. The routing evaluation dataset includes explicit Conference Room booking,
 availability and cancellation requests; live model routing evaluations require
 separately authorized development credentials.
+
+## Room names
+
+Lovelace was formerly the Small Meeting Room; Turing was formerly the Big
+Meeting Room.
+Roo accepts both the new names and the old size-based aliases. The stable API
+slugs remain `small-meeting-room` (Lovelace) and `big-meeting-room` (Turing).
+
+Examples: `book Lovelace tomorrow at 2pm` and `is Turing free tomorrow?`.

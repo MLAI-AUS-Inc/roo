@@ -74,3 +74,27 @@
   text: "cancel my conference room booking tomorrow"
   expect: {skill: meeting-room-booking, action: cancel_meeting_room}
   tags: [meeting-room, conference-room]
+- id: meeting-room-lovelace-book_meeting_room
+  text: "book Lovelace tomorrow at 2pm"
+  expect: {skill: meeting-room-booking, action: book_meeting_room}
+  tags: [meeting-room, named-room]
+- id: meeting-room-lovelace-check_room_availability
+  text: "is Lovelace free tomorrow?"
+  expect: {skill: meeting-room-booking, action: check_room_availability}
+  tags: [meeting-room, named-room]
+- id: meeting-room-lovelace-cancel_meeting_room
+  text: "cancel my Lovelace booking tomorrow"
+  expect: {skill: meeting-room-booking, action: cancel_meeting_room}
+  tags: [meeting-room, named-room]
+- id: meeting-room-turing-book_meeting_room
+  text: "book Turing tomorrow at 2pm"
+  expect: {skill: meeting-room-booking, action: book_meeting_room}
+  tags: [meeting-room, named-room]
+- id: meeting-room-turing-check_room_availability
+  text: "is Turing free tomorrow?"
+  expect: {skill: meeting-room-booking, action: check_room_availability}
+  tags: [meeting-room, named-room]
+- id: meeting-room-turing-cancel_meeting_room
+  text: "cancel my Turing booking tomorrow"
+  expect: {skill: meeting-room-booking, action: cancel_meeting_room}
+  tags: [meeting-room, named-room]

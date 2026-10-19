@@ -109,6 +109,7 @@ from ..coworking_booking_intents import (
 from ..meeting_room_booking import (
     CONFERENCE_ROOM_SLUG,
     MELBOURNE_TZ,
+    ROOM_NAMES,
     MeetingRoomInputError,
     backend_error_message as meeting_room_backend_error_message,
     booking_preview,
@@ -750,11 +751,7 @@ class SkillExecutor:
                     else rooms
                 )
                 if not selected_rooms:
-                    requested_name = (
-                        "Small Meeting Room"
-                        if requested_room_slug == "small-meeting-room"
-                        else "Big Meeting Room"
-                    )
+                    requested_name = ROOM_NAMES.get(requested_room_slug, "Meeting Room")
                     raise MeetingRoomInputError(
                         "inactive_room",
                         f"The {requested_name} is not accepting bookings right now.",
@@ -890,11 +887,7 @@ class SkillExecutor:
                     None,
                 )
                 if selected_room is None:
-                    requested_name = (
-                        "Small Meeting Room"
-                        if requested_room_slug == "small-meeting-room"
-                        else "Big Meeting Room"
-                    )
+                    requested_name = ROOM_NAMES.get(requested_room_slug, "Meeting Room")
                     raise MeetingRoomInputError(
                         "inactive_room",
                         f"The {requested_name} is not accepting bookings right now.",
@@ -1061,11 +1054,7 @@ class SkillExecutor:
                 None,
             )
             if selected_room is None:
-                requested_name = (
-                    "Small Meeting Room"
-                    if requested_room_slug == "small-meeting-room"
-                    else "Big Meeting Room"
-                )
+                requested_name = ROOM_NAMES.get(requested_room_slug, "Meeting Room")
                 raise MeetingRoomInputError(
                     "inactive_room",
                     f"The {requested_name} is not accepting bookings right now.",

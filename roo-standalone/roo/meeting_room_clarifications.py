@@ -26,7 +26,7 @@ from .meeting_room_booking import (
 # Keep the original identifier as the durable/internal canonical ID and as a
 # backward-compatible callback for any one-button prompt posted by an older
 # release. Slack requires every interactive element in one message to have a
-# unique action_id, so newly rendered Big and Small buttons use distinct IDs.
+# unique action_id, so newly rendered Turing and Lovelace buttons use distinct IDs.
 PUBLIC_ROOM_CHOICE_ACTION_ID = "meeting_room_choose_room_public"
 PUBLIC_ROOM_CHOICE_ACTION_IDS_BY_ROOM = {
     "big-meeting-room": f"{PUBLIC_ROOM_CHOICE_ACTION_ID}_big",
@@ -53,7 +53,7 @@ def room_choice_from_reply(text: str) -> Optional[str]:
     normalized = " ".join(re.findall(r"[a-z]+", normalized))
     match = re.fullmatch(
         r"(?:please\s+)?(?:the\s+)?"
-        r"(?P<size>small|big|large)"
+        r"(?P<room>lovelace|turing|small|big|large)"
         r"(?:\s+(?:meeting\s+)?room|\s+one)?"
         r"(?:\s+please)?",
         normalized,
@@ -62,7 +62,7 @@ def room_choice_from_reply(text: str) -> Optional[str]:
         return None
     return (
         "small-meeting-room"
-        if match.group("size") == "small"
+        if match.group("room") in {"small", "lovelace"}
         else "big-meeting-room"
     )
 

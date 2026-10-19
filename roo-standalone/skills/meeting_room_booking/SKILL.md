@@ -3,13 +3,16 @@ name: meeting-room-booking
 description: Book rooms
 routing:
   use_when: >
-    Meeting Room requests, including explicit Conference Room requests.
+    Meeting Room requests, including Lovelace, Turing, and explicit Conference Room requests.
   avoid_when: >
     Coworking, events, Google/Outlook sync, attendees, or unauthorized bookings.
   examples:
     - {text: "room calendar tomorrow?", action: check_room_availability}
     - {text: "find a two-hour room slot tomorrow", action: check_room_availability}
     - {text: "book room tomorrow 2pm-4pm", action: book_meeting_room}
+    - {text: "book Lovelace tomorrow at 2pm", action: book_meeting_room}
+    - {text: "is Turing free tomorrow?", action: check_room_availability}
+    - {text: "cancel my Turing booking tomorrow", action: cancel_meeting_room}
     - {text: "book <@U123> room tomorrow 2h", action: book_meeting_room}
     - {text: "my room bookings", action: list_my_room_bookings}
     - {text: "cancel room tomorrow", action: cancel_meeting_room}
@@ -48,7 +51,8 @@ full-day booking flow in `mlai-points`.
 
 A generic booking such as `book`, `book me in`, or `book me in for 1pm today`
 means coworking. Do not select this skill or ask coworking-versus-room questions
-unless the member explicitly says `room` or `meeting room`.
+unless the member explicitly says `room`, `meeting room`, `Lovelace`, or `Turing`.
+Lovelace and Turing are explicit room references even without the word `room`.
 
 ## Rules
 
@@ -59,17 +63,19 @@ unless the member explicitly says `room` or `meeting room`.
   otherwise tomorrow. If it gives a vague or invalid date, ask for an explicit
   date. For an availability check with neither date nor time, use the next
   Melbourne calendar day; a booking with no time must ask for one.
-- The default choices are `Small Meeting Room` and `Big Meeting Room`. Treat
-  `large room` as the Big Meeting Room.
+- The default choices are `Lovelace` (formerly Small Meeting Room) and `Turing`
+  (formerly Big Meeting Room). Accept `small room` and `small meeting room` as
+  Lovelace, and `big room`, `big meeting room`, and `large room` as Turing.
+  Match names case-insensitively. Keep the API slugs `small-meeting-room` and
+  `big-meeting-room` unchanged.
 - The Conference Room is supported only when the member explicitly asks for the
   `conference room`. Never offer or suggest it in default choices or general
   availability responses. The backend decides eligibility. If it returns
   `room_unavailable`, say exactly `The Conference Room is unavailable.` privately;
   do not disclose eligibility criteria, points thresholds, or progress towards them.
 - Derive an explicit room only from the member's message, never from a model-only
-  parameter. If availability does not name a room, show only Small and Big.
-  If a booking does not name a room in a public channel, show Big and Small
-  Meeting Room buttons
+  parameter. If availability does not name a room, show only Lovelace and Turing.
+  If a booking does not name a room in a public channel, show Turing and Lovelace buttons
   in the same thread. Accept only that requester's first button click, then
   continue privately. In a DM, use private room-choice buttons.
 - Ask for a missing booking start time. Do not invent one.
@@ -94,7 +100,7 @@ unless the member explicitly says `room` or `meeting room`.
 - Non-admins cannot book for tagged users. Never use a model-provided Slack identity.
 - Never claim a slot is reserved before the member clicks Confirm booking.
 - Keep availability, bookings, balances, and cancellation details private.
-- Public room-choice prompts and buttons may name the Big and Small Meeting Rooms. Keep the
+- Public room-choice prompts and buttons may name Turing and Lovelace. Keep the
   resolved time, availability, points, preview, confirmation, and cancellation
   details private; after a room choice, post only a short public acknowledgement
   once the private DM succeeds.
@@ -102,6 +108,8 @@ unless the member explicitly says `room` or `meeting room`.
 
 ## Examples
 
+- `book Lovelace tomorrow at 2pm for an hour`
+- `is Turing free tomorrow?`
 - `book the meeting room tomorrow at 2pm for an hour`
 - `is either meeting room free tomorrow at 2pm?`
 - `book the small meeting room tomorrow at 2pm for an hour`

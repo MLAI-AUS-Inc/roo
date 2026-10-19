@@ -5,7 +5,7 @@ routing:
   use_when: >
     Roo points, rewards, tasks, coworking, and points admin.
   avoid_when: >
-    linear-meeting-actions, luma-events, meeting rooms, GitHub, and introductions.
+    linear-meeting-actions, luma-events, meeting rooms (including Lovelace and Turing), GitHub, and introductions.
   examples:
     - {text: "how do I earn points?", action: list_tasks}
     - {text: "what's my balance", action: balance}
@@ -153,7 +153,8 @@ This skill enables Roo to interact with the MLAI Points System via API, allowing
 Generic, resource-free booking language means coworking. `book`, `book me in`,
 and `book me in for 1pm today` must use `book_coworking`; ignore a supplied time
 because coworking is a full-day booking. Meeting-room booking requires the member
-to explicitly say `room` or `meeting room`.
+to explicitly say `room`, `meeting room`, `Lovelace`, or `Turing`. Route named-room
+requests to `meeting-room-booking`, even without the word `room`.
 
 ## Capabilities
 

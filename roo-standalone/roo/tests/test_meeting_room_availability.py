@@ -124,10 +124,12 @@ def test_invalid_snapshot_never_claims_free_day(rows):
 
 def test_readable_room_output_and_booking_instructions():
     message = format_day_availability([
-        {'room': {'name': 'Small Meeting Room'}, 'busy_intervals': []},
-        {'room': {'name': 'Big Meeting Room'}, 'busy_intervals': [
+        {'room': {'name': 'Lovelace'}, 'busy_intervals': []},
+        {'room': {'name': 'Turing'}, 'busy_intervals': [
             busy('2026-09-15T00:00:00+10:00', '2026-09-16T00:00:00+10:00')]},
     ], DAY, 4, now=NOW)
+    assert 'Lovelace' in message
+    assert 'Turing' in message
     assert 'Tuesday 15 September 2026' in message
     assert 'Available start times for a 2-hour meeting' in message
     assert '12:00 AM to 10:00 PM' in message
