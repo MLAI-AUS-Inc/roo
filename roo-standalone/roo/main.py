@@ -821,7 +821,7 @@ async def _handle_meeting_room_text_choice(
             await _post_meeting_room_public_reply(
                 channel_id=channel_id,
                 thread_ts=thread_ts,
-                text="Please use the Big or Small Meeting Room button above.",
+                text="Please use the Turing or Lovelace button above.",
             )
             return True
         return False

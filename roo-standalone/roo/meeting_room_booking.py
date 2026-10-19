@@ -30,8 +30,8 @@ MAX_BOOKING_HALF_HOURS = 4
 MIN_AVAILABILITY_HALF_HOURS = 1
 MAX_AVAILABILITY_HALF_HOURS = 48
 ROOM_CHOICES = (
-    ("small-meeting-room", "Small Meeting Room"),
-    ("big-meeting-room", "Big Meeting Room"),
+    ("small-meeting-room", "Lovelace"),
+    ("big-meeting-room", "Turing"),
 )
 ROOM_NAMES = dict(ROOM_CHOICES)
 CONFERENCE_ROOM_SLUG = "conference-room"
@@ -77,9 +77,9 @@ def room_slug_from_text(text: str) -> Optional[str]:
     # An explicit conference request must never fall back to default room choices.
     if re.search(r"\bconference\s+room\b", normalized):
         return CONFERENCE_ROOM_SLUG
-    small = bool(re.search(r"\bsmall(?:\s+meeting)?\s+room\b", normalized))
+    small = bool(re.search(r"\b(?:lovelace|small(?:\s+meeting)?\s+room)\b", normalized))
     big = bool(
-        re.search(r"\b(?:big|large)(?:\s+meeting)?\s+room\b", normalized)
+        re.search(r"\b(?:turing|(?:big|large)(?:\s+meeting)?\s+room)\b", normalized)
     )
     if small == big:
         return None

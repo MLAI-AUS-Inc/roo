@@ -82,8 +82,8 @@ def _room_choice_values(*, now=None):
     )
     prompt = room_selection_prompt(
         [
-            {"slug": "small-meeting-room", "name": "Small Meeting Room"},
-            {"slug": "big-meeting-room", "name": "Big Meeting Room"},
+            {"slug": "small-meeting-room", "name": "Lovelace"},
+            {"slug": "big-meeting-room", "name": "Turing"},
         ],
         owner_slack_user_id="UOWNER",
         starts_at=starts_at,
@@ -110,8 +110,8 @@ def _public_room_choice_values(database_path):
     prompt = public_room_choice_prompt(
         clarification,
         [
-            {"slug": "small-meeting-room", "name": "Small Meeting Room"},
-            {"slug": "big-meeting-room", "name": "Big Meeting Room"},
+            {"slug": "small-meeting-room", "name": "Lovelace"},
+            {"slug": "big-meeting-room", "name": "Turing"},
         ],
     )
     return clarification, [
@@ -143,7 +143,7 @@ def _admin_booking_response(action_value, *, created):
             "starts_at": payload["starts_at"],
             "ends_at": payload["ends_at"],
             "points_cost": 2,
-            "room": {"name": "Small Meeting Room"},
+            "room": {"name": "Lovelace"},
         },
     }
 
@@ -331,7 +331,7 @@ def test_room_choice_is_first_choice_wins_and_duplicate_safe(tmp_path):
 
     with pytest.raises(
         ValueError,
-        match=r"already chose the \*Small Meeting Room\*",
+        match=r"already chose the \*Lovelace\*",
     ):
         store.record_action(
             action_id=CHOOSE_ROOM_ACTION_ID,
@@ -465,7 +465,7 @@ async def test_competing_room_click_does_not_overwrite_first_choice(
         {
             "channel": "DOWNER",
             "text": (
-                "You already chose the *Small Meeting Room* for this request. "
+                "You already chose the *Lovelace* for this request. "
                 "Continue with that confirmation card, or start a new booking "
                 "request to choose a different room."
             ),
@@ -624,7 +624,7 @@ async def test_completed_room_choice_reclick_keeps_card_and_posts_feedback(
     assert store.mark_completed(
         action["id"],
         owner="worker",
-        outcome="Confirm your Small Meeting Room booking.",
+        outcome="Confirm your Lovelace booking.",
     )
     scheduled = []
     posted = []
@@ -663,7 +663,7 @@ async def test_completed_room_choice_reclick_keeps_card_and_posts_feedback(
 
     assert store.get(action["id"])["status"] == "completed"
     assert posted[0]["channel"] == "DOWNER"
-    assert "already chose the *Small Meeting Room*" in posted[0]["text"]
+    assert "already chose the *Lovelace*" in posted[0]["text"]
 
 
 @pytest.mark.asyncio
@@ -736,7 +736,7 @@ async def test_room_choice_rechecks_availability_and_uses_stable_booking_id(
             return {
                 "room": {
                     "slug": "small-meeting-room",
-                    "name": "Small Meeting Room",
+                    "name": "Lovelace",
                 },
                 "available": True,
                 "bookable": True,
@@ -806,7 +806,7 @@ async def test_room_choice_rejects_mismatched_backend_room(
             return {
                 "room": {
                     "slug": "big-meeting-room",
-                    "name": "Big Meeting Room",
+                    "name": "Turing",
                 },
                 "available": True,
                 "points_cost": 1,
@@ -1558,7 +1558,7 @@ def test_public_room_buttons_share_one_durable_first_choice_key(tmp_path):
             message_ts="112.000",
         )
     assert raised.value.code == "room_already_selected"
-    assert "Big Meeting Room" in raised.value.message
+    assert "Turing" in raised.value.message
 
 
 def test_public_button_retry_recovers_failed_outbox_handoff(tmp_path, monkeypatch):

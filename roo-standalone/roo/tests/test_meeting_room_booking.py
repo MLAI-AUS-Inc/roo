@@ -75,12 +75,12 @@ class FakeMeetingRoomClient:
             {
                 "id": "small-room-id",
                 "slug": "small-meeting-room",
-                "name": "Small Meeting Room",
+                "name": "Lovelace",
             },
             {
                 "id": "big-room-id",
                 "slug": "big-meeting-room",
-                "name": "Big Meeting Room",
+                "name": "Turing",
             },
         ]
 
@@ -102,9 +102,9 @@ class FakeMeetingRoomClient:
             bookable = None
         room_slug = kwargs["room_slug"]
         room_name = (
-            "Small Meeting Room"
+            "Lovelace"
             if room_slug == "small-meeting-room"
-            else "Big Meeting Room"
+            else "Turing"
         )
         return {
             "room": {"id": f"{room_slug}-id", "slug": room_slug, "name": room_name},
@@ -150,7 +150,7 @@ def _admin_booking_response(starts_at, *, created=True):
             "points_cost": 2,
             "room": {
                 "slug": "small-meeting-room",
-                "name": "Small Meeting Room",
+                "name": "Lovelace",
             },
         },
     }
@@ -291,6 +291,15 @@ def test_interval_parser_rejects_vague_dates_instead_of_defaulting(text):
 @pytest.mark.parametrize(
     ("text", "expected"),
     (
+        ("book Lovelace tomorrow at 2pm", "small-meeting-room"),
+        ("is LOVELACE free tomorrow?", "small-meeting-room"),
+        ("book Turing tomorrow at 2pm", "big-meeting-room"),
+        ("is turing free tomorrow?", "big-meeting-room"),
+        ("Lovelace or Turing", None),
+        ("Lovelace or the big meeting room", None),
+        ("Turing or the small meeting room", None),
+        ("Lovelace's room", "small-meeting-room"),
+        ("Lovelaces and Turington", None),
         ("book the small room tomorrow", "small-meeting-room"),
         ("book the small meeting room tomorrow", "small-meeting-room"),
         ("book the big room tomorrow", "big-meeting-room"),
@@ -687,14 +696,14 @@ def test_cancellation_result_names_selected_room():
             "points_cost": 1,
             "room": {
                 "slug": "big-meeting-room",
-                "name": "Big Meeting Room",
+                "name": "Turing",
             },
         },
     }
 
     message = room_module.format_cancellation_result(result)
 
-    assert "*Big Meeting Room* booking" in message
+    assert "*Turing* booking" in message
 
 
 def test_cross_room_conflict_error_is_clear_and_names_selected_room():
@@ -716,7 +725,7 @@ def test_cross_room_conflict_error_is_clear_and_names_selected_room():
     )
 
     assert "another meeting-room booking" in message
-    assert "Big Meeting Room" in message
+    assert "Turing" in message
     assert "No points were deducted" in message
 
 
@@ -759,8 +768,8 @@ async def test_public_unspecified_booking_asks_for_room_in_same_thread(
     assert "1:00" not in result["message"]
     buttons = result["blocks"][1]["elements"]
     assert [button["text"]["text"] for button in buttons] == [
-        "Big Meeting Room",
-        "Small Meeting Room",
+        "Turing",
+        "Lovelace",
     ]
     assert [button["action_id"] for button in buttons] == [
         PUBLIC_ROOM_CHOICE_ACTION_IDS_BY_ROOM["big-meeting-room"],
@@ -822,7 +831,7 @@ async def test_public_room_reply_sends_only_private_deterministic_preview(monkey
     assert result["message"] == "I've sent you a private reply about the Meeting Room."
     assert len(sent) == 1
     assert sent[0][0] == "UOWNER"
-    assert "Big Meeting Room" in sent[0][1]
+    assert "Turing" in sent[0][1]
     assert "2:00 PM to 3:00 PM" in sent[0][1]
     assert sent[0][2]["client_msg_id"] == "1409fd17-c84d-4774-af8a-7b847c16bd30"
     confirm = sent[0][2]["blocks"][1]["elements"][0]
@@ -918,7 +927,7 @@ def test_missing_channel_never_returns_private_meeting_room_details_inline():
     result = SkillExecutor()._deliver_meeting_room_response(
         user_id="UOWNER",
         channel_id=None,
-        message="Private booking details: 2pm in the Big Meeting Room",
+        message="Private booking details: 2pm in the Turing",
         action="check_room_availability",
     )
 
@@ -1023,7 +1032,7 @@ async def test_large_room_message_selects_big_room_over_model_parameter(monkeypa
         expected_action=BOOK_ACTION_ID,
     )
     assert parsed["room_slug"] == "big-meeting-room"
-    assert "Big Meeting Room" in result["message"]
+    assert "Turing" in result["message"]
 
 
 @pytest.mark.asyncio
@@ -1112,7 +1121,7 @@ async def test_booking_without_date_defaults_to_next_occurrence(monkeypatch):
     calls = FakeMeetingRoomClient.instances[0].calls
     starts_at = datetime.fromisoformat(calls[1][2]["starts_at"])
     assert starts_at == datetime(2026, 8, 11, 15, tzinfo=MELBOURNE)
-    assert "Big Meeting Room" in result["message"]
+    assert "Turing" in result["message"]
     assert result["blocks"][1]["elements"][0]["text"]["text"] == "Confirm booking"
 
 
@@ -1160,8 +1169,8 @@ async def test_bare_misspelled_tomorrow_clarification_checks_the_day(monkeypatch
     assert "What date should I check?" not in result["message"]
     assert "Available start times for a 1-hour meeting" in result["message"]
     assert "12:00 AM to 11:00 PM" in result["message"]
-    assert "Small Meeting Room" in result["message"]
-    assert "Big Meeting Room" in result["message"]
+    assert "Lovelace" in result["message"]
+    assert "Turing" in result["message"]
 
 
 @pytest.mark.asyncio
@@ -1566,7 +1575,7 @@ async def test_action_handler_uses_verified_admin_actor_and_notifies_target(
     assert "for <@UTARGET> is confirmed" in updates[0]["text"]
     assert expected_admin_text in updates[0]["text"]
     assert target_dms[0][0] == "UTARGET"
-    assert "<@UOWNER> booked the *Small Meeting Room* for you" in target_dms[0][1]
+    assert "<@UOWNER> booked the *Lovelace* for you" in target_dms[0][1]
     assert "Charged to your account:* 2 Roo Points" in target_dms[0][1]
     assert "show my meeting room bookings" in target_dms[0][1]
     assert "Remaining balance" not in target_dms[0][1]
@@ -1876,8 +1885,8 @@ def test_competing_room_click_feedback_is_not_repeated_for_slack_retry(
     )
     prompt = room_module.room_selection_prompt(
         [
-            {"slug": "small-meeting-room", "name": "Small Meeting Room"},
-            {"slug": "big-meeting-room", "name": "Big Meeting Room"},
+            {"slug": "small-meeting-room", "name": "Lovelace"},
+            {"slug": "big-meeting-room", "name": "Turing"},
         ],
         owner_slack_user_id="UOWNER",
         starts_at=starts_at,
@@ -1931,7 +1940,7 @@ def test_competing_room_click_feedback_is_not_repeated_for_slack_retry(
     assert len(scheduled) == 1
     asyncio.run(scheduled[0])
     assert len(posted) == 1
-    assert "already chose the *Small Meeting Room*" in posted[0]["text"]
+    assert "already chose the *Lovelace*" in posted[0]["text"]
 
 
 @pytest.mark.asyncio
@@ -2072,7 +2081,7 @@ async def test_default_choices_hide_conference_even_if_backend_lists_it(monkeypa
     )
     assert 'conference' not in json.dumps(result).lower()
     names = {button['text']['text'] for button in result['blocks'][1]['elements']}
-    assert names == {'Big Meeting Room', 'Small Meeting Room'}
+    assert names == {'Turing', 'Lovelace'}
 
 
 @pytest.mark.asyncio
@@ -2264,3 +2273,41 @@ async def test_exact_ninety_minute_check_is_not_offered_as_a_booking(monkeypatch
     assert 'exactly 1 or 2 hours' in result['message']
     assert 'costs' not in result['message']
     assert not result.get('blocks')
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name,slug", [("Lovelace", "small-meeting-room"), ("Turing", "big-meeting-room")])
+async def test_named_booking_without_room_word_previews_correct_resource(monkeypatch, name, slug):
+    _patch_executor(monkeypatch, _settings())
+    result = await SkillExecutor()._execute_meeting_room_booking(
+        text=f"book {name} tomorrow at 2pm", params={"action": "book_meeting_room"},
+        user_id="UOWNER", channel_id="DOWNER",
+    )
+    assert result["data"]["action"] == "book_meeting_room"
+    assert name in result["message"]
+    calls = FakeMeetingRoomClient.instances[-1].calls
+    assert [kwargs["room_slug"] for action, _, kwargs in calls if action == "availability"] == [slug]
+    button = result["blocks"][-1]["elements"][0]
+    assert parse_action_value(button["value"], expected_action=BOOK_ACTION_ID)["room_slug"] == slug
+
+
+@pytest.mark.parametrize("name", ["Lovelace", "Turing"])
+def test_named_rooms_stay_out_of_coworking_fast_path(name):
+    assert RooAgent._generic_coworking_booking_date_hint(f"book {name} tomorrow at 2pm") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["book_meeting_room", "check_room_availability"])
+@pytest.mark.parametrize("name", ["Lovelace", "Turing"])
+async def test_inactive_named_room_returns_private_error(monkeypatch, action, name):
+    class OtherRoomClient(FakeMeetingRoomClient):
+        async def list_meeting_rooms(self):
+            return [room for room in await super().list_meeting_rooms() if room["name"] != name]
+
+    _patch_executor(monkeypatch, _settings(), OtherRoomClient)
+    result = await SkillExecutor()._execute_meeting_room_booking(
+        text=f"{name} tomorrow at 2pm", params={"action": action},
+        user_id="UOWNER", channel_id="DOWNER",
+    )
+    assert result["message"] == f"The {name} is not accepting bookings right now."
+    assert result["data"]["delivery"] == "direct_message"
