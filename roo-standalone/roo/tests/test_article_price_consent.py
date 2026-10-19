@@ -411,7 +411,8 @@ async def test_delivered_card_content_is_verified_for_slack_and_chat(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_paid_source_replay_preserves_original_six_point_quote_without_replacement_key(monkeypatch):
+@pytest.mark.parametrize("effective_user", ["UFOUNDER", "UEFFECTIVE"])
+async def test_paid_source_replay_preserves_original_six_point_quote_without_replacement_key(monkeypatch, effective_user):
     # The trusted backend has verified this source's original six-point debit
     # and persisted original-paid-key, despite the current new-run price of 12.
     # Its source-only contract deliberately does not expose or replace the key.
@@ -420,18 +421,26 @@ async def test_paid_source_replay_preserves_original_six_point_quote_without_rep
         (200, {"status": "confirmed", "job_id": "original-paid-article"}),
         (200, {"status": "confirmed", "job_id": "original-paid-article"}),
     ])
-    card = await client.confirm_article_topic("legacy-paid-source", "UFOUNDER", option_index=0)
+    card = await client.confirm_article_topic(
+        "legacy-paid-source", effective_user, option_index=0,
+        requested_by_slack_user_id="UFOUNDER",
+    )
     bind(card)
+    if effective_user != "UFOUNDER":
+        with pytest.raises(ValueError, match="requesting user"):
+            pricing.get_confirmation(token(card), effective_user, **ORIGIN)
     confirmed = pricing.get_confirmation(token(card), "UFOUNDER", **ORIGIN)
     for _ in range(2):
         result = await client.submit_article_request(confirmed["endpoint"], confirmed["payload"])
         assert result["job_id"] == "original-paid-article"
     assert calls[0] == ("/api/v1/content/quote", {
-        "slack_user_id": "UFOUNDER", "source_run_id": "legacy-paid-source",
+        "slack_user_id": effective_user, "requested_by_slack_user_id": "UFOUNDER",
+        "source_run_id": "legacy-paid-source",
     })
     assert [call[0] for call in calls[1:]] == ["/api/v1/content/jobs/legacy-paid-source/confirm"] * 2
     assert all("client_request_id" not in payload for _, payload in calls)
     assert all(payload["source_run_id"] == "legacy-paid-source" for _, payload in calls)
+    assert all(payload["requested_by_slack_user_id"] == "UFOUNDER" for _, payload in calls)
     assert calls[1][1] == calls[2][1] == confirmed["payload"]
     assert calls[1][1]["expected_cost_points"] == 6
 
