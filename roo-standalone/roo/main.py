@@ -2002,9 +2002,13 @@ def _show_article_price_confirmation(result: dict, *, channel_id: str, message_t
     if not channel_id:
         raise ValueError("An article price confirmation needs a conversation.")
     if message_ts:
-        from .slack_client import get_slack_client
-        get_slack_client().chat_update(
+        from .slack_client import bind_article_price_message, get_slack_client
+        response = get_slack_client().chat_update(
             channel=channel_id, ts=message_ts, text=result["message"], blocks=result["blocks"],
+        )
+        bind_article_price_message(
+            response, blocks=result["blocks"], channel=channel_id,
+            thread_ts=thread_ts, message_ts=message_ts,
         )
     else:
         post_message(channel_id, result["message"], thread_ts=thread_ts, blocks=result["blocks"])
@@ -2017,22 +2021,30 @@ async def _handle_article_price_confirmation(payload: dict, user_id: str) -> JSO
     from .slack_client import get_slack_client
 
     token = str(payload["actions"][0].get("value") or "")
+    message = payload.get("message") or {}
+    origin = {
+        "workspace_id": (payload.get("team") or {}).get("id"),
+        "channel_id": (payload.get("channel") or {}).get("id"),
+        "message_ts": message.get("ts"),
+        "thread_ts": message.get("thread_ts") or message.get("ts"),
+    }
+    container = payload.get("container") or {}
+    if (
+        (container.get("channel_id") and container["channel_id"] != origin["channel_id"])
+        or (container.get("message_ts") and container["message_ts"] != origin["message_ts"])
+        or (container.get("thread_ts") and container["thread_ts"] != origin["thread_ts"])
+    ):
+        return _content_factory_action_denied_response("Reopen the original article price confirmation message.")
     try:
-        record = get_confirmation(token, user_id)
+        record = get_confirmation(token, user_id, **origin)
     except ValueError as exc:
         return _content_factory_action_denied_response(str(exc))
     confirmed = record["payload"]
-    channel = payload.get("channel", {}).get("id")
-    message = payload.get("message") or {}
-    message_ts = message.get("ts")
-    thread_ts = message.get("thread_ts") or message_ts
-    if not channel or not message_ts:
-        return _content_factory_action_denied_response("Reopen the article price confirmation in its conversation.")
-    if confirmed.get("slack_channel_id") and confirmed["slack_channel_id"] != channel:
-        return _content_factory_action_denied_response("Confirm this price in the original conversation.")
+    channel = record["origin"]["channel_id"]
+    message_ts = record["origin"]["message_ts"]
+    thread_ts = record["origin"]["thread_ts"]
     settings = get_settings()
     client = MLAIBackendClient(base_url=settings.MLAI_BACKEND_URL, api_key=settings.ROO_API_KEY or settings.MLAI_API_KEY)
-    confirmed.update(slack_channel_id=channel, slack_thread_ts=thread_ts, progress_message_ts=message_ts)
     try:
         result = await client.submit_article_request(record["endpoint"], confirmed)
         if result.get("status") == "awaiting_price_confirmation":
@@ -7459,7 +7471,7 @@ async def _handle_slack_action_payload(request: Request, payload: dict):
             if domain:
                 confirm_kwargs["domain"] = domain
             result = await client.confirm_article_topic(**confirm_kwargs)
-            if _show_article_price_confirmation(result, channel_id=action_context.msg_channel, message_ts=action_context.msg_ts, thread_ts=action_context.reply_thread_ts):
+            if _show_article_price_confirmation(result, channel_id=action_context.msg_channel, message_ts=action_context.msg_ts, thread_ts=(payload.get("message") or {}).get("thread_ts")):
                 return JSONResponse(status_code=200, content={})
             follow_up = _build_confirm_topic_follow_up(result)
             return _confirm_topic_json_response(
@@ -7554,7 +7566,7 @@ async def _handle_slack_action_payload(request: Request, payload: dict):
             if domain:
                 confirm_kwargs["domain"] = domain
             result = await client.confirm_article_topic(**confirm_kwargs)
-            if _show_article_price_confirmation(result, channel_id=action_context.msg_channel, message_ts=action_context.msg_ts, thread_ts=action_context.reply_thread_ts):
+            if _show_article_price_confirmation(result, channel_id=action_context.msg_channel, message_ts=action_context.msg_ts, thread_ts=(payload.get("message") or {}).get("thread_ts")):
                 return JSONResponse(status_code=200, content={})
             follow_up = _build_confirm_topic_follow_up(result)
             return _confirm_topic_json_response(
@@ -8018,7 +8030,7 @@ async def _handle_slack_action_payload(request: Request, payload: dict):
                     effective_slack_user_id,
                 ),
             )
-            if _show_article_price_confirmation(result, channel_id=msg_channel, message_ts=msg_ts, thread_ts=reply_thread_ts):
+            if _show_article_price_confirmation(result, channel_id=msg_channel, message_ts=msg_ts, thread_ts=(payload.get("message") or {}).get("thread_ts")):
                 return JSONResponse(status_code=200, content={})
             print(f"✅ Article generation triggered for {domain}: {result}")
             if result.get("job_id") or result.get("run_id"):
@@ -8182,7 +8194,7 @@ async def _handle_slack_action_payload(request: Request, payload: dict):
                     effective_slack_user_id,
                 ),
             )
-            if _show_article_price_confirmation(result, channel_id=msg_channel, message_ts=msg_ts, thread_ts=reply_thread_ts):
+            if _show_article_price_confirmation(result, channel_id=msg_channel, message_ts=msg_ts, thread_ts=(payload.get("message") or {}).get("thread_ts")):
                 return JSONResponse(status_code=200, content={})
             print(f"✅ Article discovery triggered for {domain}: {result}")
             if str(result.get("status") or "").strip().lower() == "awaiting_delivery_mode":
@@ -9069,7 +9081,7 @@ async def _handle_slack_action_payload(request: Request, payload: dict):
                 ),
             )
             print(f"✅ Topic confirmed for job {job_id}")
-            if _show_article_price_confirmation(result, channel_id=action_context.msg_channel, message_ts=action_context.msg_ts, thread_ts=action_context.reply_thread_ts):
+            if _show_article_price_confirmation(result, channel_id=action_context.msg_channel, message_ts=action_context.msg_ts, thread_ts=(payload.get("message") or {}).get("thread_ts")):
                 return JSONResponse(status_code=200, content={})
             follow_up = _build_confirm_topic_follow_up(result)
             _remember_content_thread_context(

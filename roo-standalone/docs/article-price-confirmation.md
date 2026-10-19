@@ -11,8 +11,12 @@ The endpoint must verify the actor and ownership and return an integer
 All article generation and topic-confirmation calls go through the client gate.
 Before dispatch, Roo shows the returned price and a `confirm_article_price`
 button. A bounded, process-local confirmation record retains the exact request,
-requester, and price. The button carries an opaque token; the acting user must
-match the recorded requester. The confirmed request submits the unchanged
+requester, and price. The button carries an opaque token. It remains unusable
+until successful Slack posting or updating binds it to that card's workspace,
+channel, thread, and message timestamp. The acting user and all four origin
+fields must match the saved record. A copied token cannot be rebound to a
+different message. Submission uses the saved destination; click payloads cannot
+change it. The confirmed request submits the unchanged
 integer as `expected_cost_points`. Topic-less research keeps its existing
 request contract; its later article confirmation goes through the article gate.
 

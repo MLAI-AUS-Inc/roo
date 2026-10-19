@@ -78,6 +78,38 @@ def get_bot_user_id() -> str:
     return _bot_user_id
 
 
+def bind_article_price_message(
+    response: SlackApiResponse,
+    *,
+    blocks: list,
+    channel: str,
+    thread_ts: Optional[str],
+    message_ts: Optional[str] = None,
+) -> None:
+    """Record a price card's verified Slack origin after posting or updating it."""
+    from .content_factory_pricing import bind_confirmation_card, confirmation_tokens
+
+    if not confirmation_tokens(blocks):
+        return
+    actual_channel = response.get("channel")
+    actual_ts = response.get("ts")
+    if (
+        response.get("ok") is not True
+        or actual_channel != channel
+        or not isinstance(actual_ts, str) or not actual_ts
+        or (message_ts is not None and actual_ts != message_ts)
+    ):
+        raise ValueError("Slack could not verify the article price confirmation's message.")
+    actual_thread = thread_ts or actual_ts
+    returned_message = response.get("message") or {}
+    if returned_message.get("thread_ts") and returned_message["thread_ts"] != actual_thread:
+        raise ValueError("Slack returned a different article confirmation thread.")
+    bind_confirmation_card(
+        blocks, workspace_id=get_slack_app_identity()["team_id"],
+        channel_id=actual_channel, thread_ts=actual_thread, message_ts=actual_ts,
+    )
+
+
 def post_message(
     channel: str,
     text: str,
@@ -108,6 +140,9 @@ def post_message(
             unfurl_links=False,
             unfurl_media=False,
             **kwargs
+        )
+        bind_article_price_message(
+            response, blocks=kwargs.get("blocks") or [], channel=channel, thread_ts=thread_ts,
         )
         
         if response.get("ok"):
