@@ -2005,9 +2005,10 @@ def _show_article_price_confirmation(result: dict, *, channel_id: str, message_t
         from .slack_client import bind_article_price_message, get_slack_client
         response = get_slack_client().chat_update(
             channel=channel_id, ts=message_ts, text=result["message"], blocks=result["blocks"],
+            parse="none", attachments=[],
         )
         bind_article_price_message(
-            response, blocks=result["blocks"], channel=channel_id,
+            response, text=result["message"], blocks=result["blocks"], channel=channel_id,
             thread_ts=thread_ts, message_ts=message_ts,
         )
     else:
@@ -2016,9 +2017,9 @@ def _show_article_price_confirmation(result: dict, *, channel_id: str, message_t
 
 
 async def _handle_article_price_confirmation(payload: dict, user_id: str) -> JSONResponse:
-    from .content_factory_pricing import get_confirmation, invalidate_confirmation
+    from .content_factory_pricing import get_confirmation, invalidate_confirmation, verify_confirmation_content
     from .clients.mlai_backend import MLAIBackendClient
-    from .slack_client import get_slack_client
+    from .slack_client import get_slack_client, read_article_price_message
 
     token = str(payload["actions"][0].get("value") or "")
     message = payload.get("message") or {}
@@ -2037,8 +2038,14 @@ async def _handle_article_price_confirmation(payload: dict, user_id: str) -> JSO
         return _content_factory_action_denied_response("Reopen the original article price confirmation message.")
     try:
         record = get_confirmation(token, user_id, **origin)
+        source_message = await asyncio.to_thread(read_article_price_message, record["origin"])
+        record = verify_confirmation_content(
+            token, user_id, clicked_message=message, source_message=source_message, **origin,
+        )
     except ValueError as exc:
         return _content_factory_action_denied_response(str(exc))
+    except Exception:
+        return _content_factory_action_denied_response("I couldn't verify the original article price card. Please try again.")
     confirmed = record["payload"]
     channel = record["origin"]["channel_id"]
     message_ts = record["origin"]["message_ts"]

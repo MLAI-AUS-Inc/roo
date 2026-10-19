@@ -18,7 +18,7 @@ ORIGIN = {
 
 
 def bind(card, **overrides):
-    pricing.bind_confirmation_card(card["blocks"], **{**ORIGIN, **overrides})
+    pricing.bind_confirmation_card(card["blocks"], text=card["message"], **{**ORIGIN, **overrides})
 
 
 @pytest.fixture(autouse=True)
@@ -70,18 +70,18 @@ async def test_new_article_quotes_requesting_founder_and_only_dispatches_exact_c
 
 
 @pytest.mark.asyncio
-async def test_legacy_source_only_confirmation_keeps_source_option_and_request_key(monkeypatch):
+async def test_legacy_source_only_confirmation_keeps_source_option_and_backend_key_resolution(monkeypatch):
     client, calls = setup_client(monkeypatch, [(200, {"costPoints": 6})])
     card = await client.confirm_article_topic("research-7", "UFOUNDER", option_index=2)
     assert calls[0] == ("/api/v1/content/quote", {
         "slack_user_id": "UFOUNDER", "source_run_id": "research-7",
-        "client_request_id": "content-factory-confirm-research-7",
     })
     bind(card)
     record = pricing.get_confirmation(token(card), "UFOUNDER", **ORIGIN)
     assert record["endpoint"] == "/api/v1/content/jobs/research-7/confirm"
     assert record["payload"]["option_index"] == 2
     assert record["payload"]["source_run_id"] == "research-7"
+    assert "client_request_id" not in record["payload"]
     assert record["payload"]["expected_cost_points"] == 6
 
 
@@ -148,15 +148,25 @@ async def test_slack_price_change_requires_another_click_and_keeps_request_key(m
     ])
     card = await client.trigger_article_generation("UFOUNDER", "example.com", topic="AI", client_request_id="fixed-id")
     monkeypatch.setattr(mlai_backend, "MLAIBackendClient", lambda **kwargs: client)
-    monkeypatch.setattr(slack_client, "get_slack_app_identity", lambda: {"team_id": "TMLAI"})
+    monkeypatch.setattr(slack_client, "get_slack_app_identity", lambda: {"team_id": "TMLAI", "user_id": "UROO"})
     monkeypatch.setattr(main, "get_settings", lambda: SimpleNamespace(MLAI_BACKEND_URL="https://backend.test", ROO_API_KEY="test"))
-    update = Mock(return_value={"ok": True, "channel": "C123", "ts": "111.222"})
-    monkeypatch.setattr(slack_client, "get_slack_client", lambda: SimpleNamespace(chat_update=update))
+    message = {"user": "UROO", "ts": "111.222", "text": card["message"], "blocks": deepcopy(card["blocks"])}
+
+    def update_message(**kwargs):
+        text = kwargs["text"]
+        if kwargs.get("parse") != "none":
+            text = text.replace("example.com", "<http://example.com|example.com>")
+        message.update(text=text, blocks=kwargs["blocks"])
+        return {"ok": True, "channel": "C123", "ts": "111.222"}
+
+    update = Mock(side_effect=update_message)
+    history = Mock(side_effect=lambda **kwargs: {"ok": True, "messages": [deepcopy(message)]})
+    monkeypatch.setattr(slack_client, "get_slack_client", lambda: SimpleNamespace(chat_update=update, conversations_history=history))
     monkeypatch.setattr(main, "_remember_content_thread_context", Mock())
     monkeypatch.setattr(main, "_maybe_schedule_content_factory_watchdog", Mock())
     bind(card)
     action_payload = {
-        "team": {"id": "TMLAI"}, "channel": {"id": "C123"}, "message": {"ts": "111.222"},
+        "team": {"id": "TMLAI"}, "channel": {"id": "C123"}, "message": deepcopy(message),
         "actions": [{"action_id": "confirm_article_price", "value": token(card)}],
     }
     result = await main._handle_article_price_confirmation(action_payload, "UOTHER")
@@ -167,9 +177,11 @@ async def test_slack_price_change_requires_another_click_and_keeps_request_key(m
     assert [call[0] for call in calls] == ["/api/v1/content/quote", "/api/v1/content/generate", "/api/v1/content/quote"]
     assert calls[1][1]["expected_cost_points"] == 6
     assert "12 Roo points" in update.call_args.kwargs["text"]
+    assert update.call_args.kwargs["attachments"] == []
     with pytest.raises(ValueError, match="expired"):
         pricing.get_confirmation(token(card), "UFOUNDER", **ORIGIN)
     action_payload["actions"][0]["value"] = update.call_args.kwargs["blocks"][1]["elements"][0]["value"]
+    action_payload["message"] = deepcopy(message)
     await main._handle_article_price_confirmation(action_payload, "UFOUNDER")
     assert calls[-1][1]["expected_cost_points"] == 12
     assert {call[1]["client_request_id"] for call in calls} == {"fixed-id"}
@@ -190,7 +202,7 @@ async def test_all_topic_buttons_display_quote_before_submission(monkeypatch, ac
 
     client, calls = setup_client(monkeypatch, [(200, {"costPoints": 12})])
     monkeypatch.setattr(mlai_backend, "MLAIBackendClient", lambda **kwargs: client)
-    monkeypatch.setattr(slack_client, "get_slack_app_identity", lambda: {"team_id": "TMLAI"})
+    monkeypatch.setattr(slack_client, "get_slack_app_identity", lambda: {"team_id": "TMLAI", "user_id": "UROO"})
     monkeypatch.setattr(main, "get_settings", lambda: SimpleNamespace(MLAI_BACKEND_URL="https://backend.test", ROO_API_KEY="test"))
     monkeypatch.setattr(main, "get_agent", lambda: SimpleNamespace(get_thread_context=lambda *args: {
         "requested_by_slack_user_id": "UFOUNDER", "effective_slack_user_id": "UFOUNDER",
@@ -280,10 +292,10 @@ def test_unverified_card_delivery_never_activates_token(monkeypatch, response):
     from roo import slack_client
 
     card = pricing.create_confirmation("/api/v1/content/generate", {"slack_user_id": "UFOUNDER"}, 6)
-    monkeypatch.setattr(slack_client, "get_slack_app_identity", lambda: {"team_id": "TMLAI"})
+    monkeypatch.setattr(slack_client, "get_slack_app_identity", lambda: {"team_id": "TMLAI", "user_id": "UROO"})
     with pytest.raises(ValueError):
         slack_client.bind_article_price_message(
-            response, blocks=card["blocks"], channel="C123", thread_ts=None, message_ts="111.222",
+            response, text=card["message"], blocks=card["blocks"], channel="C123", thread_ts=None, message_ts="111.222",
         )
     with pytest.raises(ValueError, match="original message"):
         pricing.get_confirmation(token(card), "UFOUNDER", **ORIGIN)
@@ -292,14 +304,16 @@ def test_unverified_card_delivery_never_activates_token(monkeypatch, response):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("transport", ["slack", "chat"])
 @pytest.mark.parametrize("thread_ts", [None, "111.000"])
-async def test_delivered_card_accepts_legitimate_slack_and_chat_at_fixed_origin(monkeypatch, transport, thread_ts):
+@pytest.mark.parametrize("change", [None, "price", "topic", "label", "fallback", "attachments", "slack_defaults"])
+async def test_delivered_card_content_is_verified_for_slack_and_chat(monkeypatch, transport, thread_ts, change):
     from roo import main, slack_client
     from roo.chat_actions import action_digest, handle_chat_action
+    from fastapi import HTTPException
 
     client, calls = setup_client(monkeypatch, [
-        (200, {"costPoints": 6}), (200, {"status": "confirmed", "job_id": "article-1"}),
+        (200, {"costPoints": 12}), (200, {"status": "confirmed", "job_id": "article-1"}),
     ])
-    card = await client.confirm_article_topic("job-7", "UFOUNDER", option_index=1)
+    card = await client.confirm_article_topic("job-7", "UFOUNDER", domain="example.com", option_index=1)
     with pytest.raises(ValueError, match="original message"):
         pricing.get_confirmation(token(card), "UFOUNDER", **ORIGIN)
     message = {"user": "UROO", "ts": "111.222", "text": card["message"], "blocks": card["blocks"]}
@@ -307,9 +321,17 @@ async def test_delivered_card_accepts_legitimate_slack_and_chat_at_fixed_origin(
         message["thread_ts"] = thread_ts
     slack = MagicMock()
     slack.auth_test.return_value = {"ok": True, "team_id": "TMLAI", "user_id": "UROO", "bot_id": "BROO"}
-    slack.chat_postMessage.return_value = {"ok": True, "channel": "C123", "ts": "111.222", "message": message}
-    slack.conversations_history.side_effect = lambda **kwargs: {"messages": [message]}
-    slack.conversations_replies.side_effect = lambda **kwargs: {"messages": [message]}
+    def post_message(**kwargs):
+        # Slack's default URL parsing would rewrite the retained fallback text.
+        text = kwargs["text"]
+        if kwargs.get("parse") != "none":
+            text = text.replace("example.com", "<http://example.com|example.com>")
+        message.update(text=text, blocks=kwargs["blocks"])
+        return {"ok": True, "channel": "C123", "ts": "111.222", "message": message}
+
+    slack.chat_postMessage.side_effect = post_message
+    slack.conversations_history.side_effect = lambda **kwargs: {"ok": True, "messages": [deepcopy(message)]}
+    slack.conversations_replies.side_effect = lambda **kwargs: {"ok": True, "messages": [deepcopy(message)]}
 
     def update_message(**kwargs):
         message.update(text=kwargs["text"], blocks=kwargs["blocks"])
@@ -317,13 +339,29 @@ async def test_delivered_card_accepts_legitimate_slack_and_chat_at_fixed_origin(
 
     slack.chat_update.side_effect = update_message
     monkeypatch.setattr(slack_client, "get_slack_client", lambda: slack)
-    monkeypatch.setattr(slack_client, "get_slack_app_identity", lambda: {"team_id": "TMLAI"})
+    monkeypatch.setattr(slack_client, "get_slack_app_identity", lambda: {"team_id": "TMLAI", "user_id": "UROO"})
     # This is the real shared posting boundary used by normal agent replies
     # and internal Chat mentions, with only Slack's transport mocked.
     slack_client.post_message("C123", card["message"], thread_ts=thread_ts, blocks=card["blocks"])
     origin = {**ORIGIN, "thread_ts": thread_ts or "111.222"}
     saved = pricing.get_confirmation(token(card), "UFOUNDER", **origin)
     assert saved["origin"] == origin
+    if change == "price":
+        message["text"] = message["text"].replace("12 Roo points", "6 Roo points")
+        message["blocks"][0]["text"]["text"] = message["blocks"][0]["text"]["text"].replace("12 Roo points", "6 Roo points")
+        message["blocks"][1]["elements"][0]["text"]["text"] = "Confirm 6 Roo points"
+    elif change == "topic":
+        message["blocks"][0]["text"]["text"] = "Generate a different article for another website?"
+    elif change == "label":
+        message["blocks"][1]["elements"][0]["text"]["text"] = "Confirm 6 Roo points"
+    elif change == "fallback":
+        message["text"] = message["text"].replace("12 Roo points", "6 Roo points")
+    elif change == "attachments":
+        message["attachments"] = [{"text": "This article now costs 6 Roo points."}]
+    elif change == "slack_defaults":
+        message["blocks"][0]["block_id"] = "slack-generated-id"
+        message["blocks"][0]["text"]["emoji"] = True
+    changed = change not in {None, "slack_defaults"}
     monkeypatch.setattr(mlai_backend, "MLAIBackendClient", lambda **kwargs: client)
     monkeypatch.setattr(main, "get_settings", lambda: SimpleNamespace(MLAI_BACKEND_URL="https://backend.test", ROO_API_KEY="test"))
     monkeypatch.setattr(main, "_remember_content_thread_context", Mock())
@@ -339,17 +377,160 @@ async def test_delivered_card_accepts_legitimate_slack_and_chat_at_fixed_origin(
             "channel": {"id": "C123"}, "message": message, "actions": [action],
             "container": {"channel_id": "C123", "message_ts": "111.222"},
         })
-        assert json.loads(result.body) == {}
+        if changed:
+            assert json.loads(result.body)["response_type"] == "ephemeral"
+        else:
+            assert json.loads(result.body) == {}
     else:
-        result = await handle_chat_action({
+        chat_payload = {
             **origin, "user_id": "UFOUNDER", "action_id": "confirm_article_price",
             "action_hash": action_digest(message, action), "perform": True, "value": "forged-token",
-        }, client=slack, dispatch=dispatch)
-        assert "confirmed price of 6 Roo points" in result["message"]["text"]
+        }
+        if changed:
+            # A fresh digest of the edited bot-owned source does not establish
+            # consent to the original stored price or request.
+            with pytest.raises(HTTPException) as error:
+                await handle_chat_action(chat_payload, client=slack, dispatch=dispatch)
+            assert error.value.status_code == 403
+        else:
+            result = await handle_chat_action(chat_payload, client=slack, dispatch=dispatch)
+            assert "confirmed price of 12 Roo points" in result["message"]["text"]
+    if changed:
+        assert len(calls) == 1
+        slack.chat_update.assert_not_called()
+        with pytest.raises(ValueError, match="expired"):
+            pricing.get_confirmation(token(card), "UFOUNDER", **origin)
+        return
     assert len(calls) == 2
     assert calls[-1][0] == "/api/v1/content/jobs/job-7/confirm"
     assert calls[-1][1] == saved["payload"]
-    assert calls[-1][1]["expected_cost_points"] == 6
-    assert calls[-1][1]["client_request_id"] == "content-factory-confirm-job-7"
+    assert calls[-1][1]["expected_cost_points"] == 12
+    assert "client_request_id" not in calls[-1][1]
     assert calls[-1][1]["source_run_id"] == "job-7"
     assert pricing.get_confirmation(token(card), "UFOUNDER", **origin) == saved
+
+
+@pytest.mark.asyncio
+async def test_paid_source_replay_preserves_original_six_point_quote_without_replacement_key(monkeypatch):
+    # The trusted backend has verified this source's original six-point debit
+    # and persisted original-paid-key, despite the current new-run price of 12.
+    # Its source-only contract deliberately does not expose or replace the key.
+    client, calls = setup_client(monkeypatch, [
+        (200, {"costPoints": 6}),
+        (200, {"status": "confirmed", "job_id": "original-paid-article"}),
+        (200, {"status": "confirmed", "job_id": "original-paid-article"}),
+    ])
+    card = await client.confirm_article_topic("legacy-paid-source", "UFOUNDER", option_index=0)
+    bind(card)
+    confirmed = pricing.get_confirmation(token(card), "UFOUNDER", **ORIGIN)
+    for _ in range(2):
+        result = await client.submit_article_request(confirmed["endpoint"], confirmed["payload"])
+        assert result["job_id"] == "original-paid-article"
+    assert calls[0] == ("/api/v1/content/quote", {
+        "slack_user_id": "UFOUNDER", "source_run_id": "legacy-paid-source",
+    })
+    assert [call[0] for call in calls[1:]] == ["/api/v1/content/jobs/legacy-paid-source/confirm"] * 2
+    assert all("client_request_id" not in payload for _, payload in calls)
+    assert all(payload["source_run_id"] == "legacy-paid-source" for _, payload in calls)
+    assert calls[1][1] == calls[2][1] == confirmed["payload"]
+    assert calls[1][1]["expected_cost_points"] == 6
+
+
+@pytest.mark.asyncio
+async def test_source_reconfirmation_keeps_authoritative_source_key_resolution(monkeypatch):
+    client, calls = setup_client(monkeypatch, [
+        (200, {"costPoints": 6}),
+        (409, {"code": "roo_points_quote_changed", "costPoints": 12}),
+        (200, {"costPoints": 12}),
+        (200, {"status": "confirmed", "job_id": "new-article"}),
+    ])
+    card = await client.confirm_article_topic("research-source", "UFOUNDER")
+    bind(card)
+    first = pricing.get_confirmation(token(card), "UFOUNDER", **ORIGIN)
+    refreshed = await client.submit_article_request(first["endpoint"], first["payload"])
+    assert len(calls) == 3  # Quote refresh does not dispatch the newly priced article.
+    assert refreshed["status"] == pricing.PRICE_CONFIRMATION_STATUS
+    bind(refreshed)
+    second = pricing.get_confirmation(token(refreshed), "UFOUNDER", **ORIGIN)
+    await client.submit_article_request(second["endpoint"], second["payload"])
+    assert all("client_request_id" not in payload for _, payload in calls)
+    assert all(payload["source_run_id"] == "research-source" for _, payload in calls)
+    assert calls[1][1]["expected_cost_points"] == 6
+    assert calls[3][1]["expected_cost_points"] == 12
+
+
+@pytest.mark.asyncio
+async def test_explicit_original_source_key_is_forwarded_without_rewriting(monkeypatch):
+    client, calls = setup_client(monkeypatch, [(200, {"costPoints": 6}), (200, {"status": "confirmed"})])
+    card = await client.confirm_article_topic("paid-source", "UFOUNDER", client_request_id="original-paid-key")
+    bind(card)
+    record = pricing.get_confirmation(token(card), "UFOUNDER", **ORIGIN)
+    await client.submit_article_request(record["endpoint"], record["payload"])
+    assert all(payload["client_request_id"] == "original-paid-key" for _, payload in calls)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("changed_snapshot", ["clicked", "source"])
+async def test_both_click_snapshot_and_fresh_source_must_match_saved_card(monkeypatch, changed_snapshot):
+    from roo import main, slack_client
+
+    card = pricing.create_confirmation("/api/v1/content/generate", {"slack_user_id": "UFOUNDER"}, 12)
+    bind(card)
+    clicked = {"user": "UROO", "ts": "111.222", "text": card["message"], "blocks": deepcopy(card["blocks"])}
+    source = deepcopy(clicked)
+    changed = clicked if changed_snapshot == "clicked" else source
+    changed["text"] = changed["text"].replace("12 Roo points", "6 Roo points")
+    read = Mock(return_value=source)
+    monkeypatch.setattr(slack_client, "read_article_price_message", read)
+    constructor = Mock()
+    monkeypatch.setattr(mlai_backend, "MLAIBackendClient", constructor)
+    result = await main._handle_article_price_confirmation({
+        "team": {"id": "TMLAI"}, "channel": {"id": "C123"}, "message": clicked,
+        "actions": [{"action_id": "confirm_article_price", "value": token(card)}],
+    }, "UFOUNDER")
+    assert json.loads(result.body)["response_type"] == "ephemeral"
+    read.assert_called_once_with(ORIGIN)
+    constructor.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["missing", "author", "thread", "workspace", "api_failure"])
+async def test_unverified_fresh_slack_source_never_submits(monkeypatch, failure):
+    from roo import main, slack_client
+
+    card = pricing.create_confirmation("/api/v1/content/generate", {"slack_user_id": "UFOUNDER"}, 12)
+    bind(card)
+    clicked = {"user": "UROO", "ts": "111.222", "text": card["message"], "blocks": deepcopy(card["blocks"])}
+    source = deepcopy(clicked)
+    if failure == "author":
+        source["user"] = "UOTHER"
+    elif failure == "thread":
+        source["thread_ts"] = "111.000"
+    slack = MagicMock()
+    slack.conversations_history.return_value = {
+        "ok": failure != "api_failure", "messages": [] if failure == "missing" else [source],
+    }
+    monkeypatch.setattr(slack_client, "get_slack_client", lambda: slack)
+    monkeypatch.setattr(slack_client, "get_slack_app_identity", lambda: {
+        "team_id": "TOTHER" if failure == "workspace" else "TMLAI", "user_id": "UROO",
+    })
+    constructor = Mock()
+    monkeypatch.setattr(mlai_backend, "MLAIBackendClient", constructor)
+    result = await main._handle_article_price_confirmation({
+        "team": {"id": "TMLAI"}, "channel": {"id": "C123"}, "message": clicked,
+        "actions": [{"action_id": "confirm_article_price", "value": token(card)}],
+    }, "UFOUNDER")
+    assert json.loads(result.body)["response_type"] == "ephemeral"
+    constructor.assert_not_called()
+
+
+@pytest.mark.parametrize("where", ["submitted", "receipt"])
+def test_changed_card_cannot_establish_initial_binding(where):
+    card = pricing.create_confirmation("/api/v1/content/generate", {"slack_user_id": "UFOUNDER"}, 12)
+    rendered = {"text": card["message"], "blocks": deepcopy(card["blocks"])}
+    receipt = deepcopy(rendered)
+    changed = rendered if where == "submitted" else receipt
+    changed["blocks"][1]["elements"][0]["text"]["text"] = "Confirm 6 Roo points"
+    with pytest.raises(pricing.ArticleConfirmationContentChangedError):
+        pricing.bind_confirmation_card(rendered["blocks"], text=rendered["text"], delivered_message=receipt, **ORIGIN)
+    assert token(card) not in pricing._confirmations

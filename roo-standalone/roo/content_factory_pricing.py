@@ -18,6 +18,36 @@ class ArticleQuoteUnavailableError(RuntimeError):
     """No article action may proceed without a usable authoritative quote."""
 
 
+class ArticleConfirmationContentChangedError(ValueError):
+    """The visible card no longer matches the server-created confirmation."""
+
+
+def _card_content(message: dict) -> dict:
+    def canonical(value):
+        if isinstance(value, list):
+            return [canonical(item) for item in value]
+        if isinstance(value, dict):
+            # Slack assigns block IDs and explicit plain-text emoji defaults.
+            # Preserve all content, actions, labels, values, order and styling.
+            result = {key: canonical(item) for key, item in value.items() if key != "block_id"}
+            if result.get("type") == "plain_text":
+                result.setdefault("emoji", True)
+            return result
+        return value
+
+    return canonical({
+        "text": message.get("text"), "blocks": message.get("blocks"),
+        "attachments": message.get("attachments") or [],
+    })
+
+
+def _require_card_content(record: dict, message: dict) -> None:
+    if _card_content(message) != record["card_content"]:
+        raise ArticleConfirmationContentChangedError(
+            "This article confirmation changed. Request a fresh quote and confirm its price before continuing."
+        )
+
+
 def valid_cost(value) -> bool:
     return type(value) is int and value >= 0
 
@@ -29,6 +59,18 @@ def create_confirmation(endpoint: str, payload: dict, cost_points: int, *, chang
     token = secrets.token_urlsafe(24)
     confirmed_payload = deepcopy(payload)
     confirmed_payload["expected_cost_points"] = cost_points
+    domain = str(payload.get("domain") or "your website")
+    topic = str(payload.get("topic") or payload.get("keyword") or "the selected topic")
+    prefix = "The article price changed. " if changed else ""
+    message = f"{prefix}Generate an article for {domain} about {topic} for {cost_points} Roo points?"
+    blocks = [
+        {"type": "section", "text": {"type": "plain_text", "text": message[:2900]}},
+        {"type": "actions", "elements": [{
+            "type": "button", "action_id": PRICE_CONFIRMATION_ACTION,
+            "text": {"type": "plain_text", "text": f"Confirm {cost_points} Roo points"[:75]},
+            "value": token, "style": "primary",
+        }]},
+    ]
     with _confirmation_lock:
         for key, record in list(_confirmations.items()):
             if record["expires_at"] <= now:
@@ -37,22 +79,12 @@ def create_confirmation(endpoint: str, payload: dict, cost_points: int, *, chang
             _confirmations.popitem(last=False)
         _confirmations[token] = {
             "endpoint": endpoint, "payload": confirmed_payload, "expires_at": now + _TTL_SECONDS,
+            "card_content": _card_content({"text": message, "blocks": blocks}),
         }
-    domain = str(payload.get("domain") or "your website")
-    topic = str(payload.get("topic") or payload.get("keyword") or "the selected topic")
-    prefix = "The article price changed. " if changed else ""
-    message = f"{prefix}Generate an article for {domain} about {topic} for {cost_points} Roo points?"
     return {
         "status": PRICE_CONFIRMATION_STATUS,
         "message": message,
-        "blocks": [
-            {"type": "section", "text": {"type": "plain_text", "text": message[:2900]}},
-            {"type": "actions", "elements": [{
-                "type": "button", "action_id": PRICE_CONFIRMATION_ACTION,
-                "text": {"type": "plain_text", "text": f"Confirm {cost_points} Roo points"[:75]},
-                "value": token, "style": "primary",
-            }]},
-        ],
+        "blocks": blocks,
     }
 
 
@@ -82,7 +114,7 @@ def confirmation_tokens(blocks: list) -> list[str]:
     ]
 
 
-def bind_confirmation_card(blocks: list, **origin_fields: str) -> None:
+def bind_confirmation_card(blocks: list, *, text: str, delivered_message: dict | None = None, **origin_fields: str) -> None:
     """Bind once, after Slack confirms delivery, to the actual displayed card."""
     tokens = confirmation_tokens(blocks)
     if len(tokens) != 1:
@@ -92,6 +124,13 @@ def bind_confirmation_card(blocks: list, **origin_fields: str) -> None:
     # concurrent deliveries cannot replace each other's established origin.
     with _confirmation_lock:
         record = _confirmation_record(tokens[0])
+        try:
+            _require_card_content(record, {"text": text, "blocks": blocks})
+            if delivered_message is not None:
+                _require_card_content(record, delivered_message)
+        except ArticleConfirmationContentChangedError:
+            _confirmations.pop(tokens[0], None)
+            raise
         if record.get("origin"):
             if record["origin"] != origin:
                 raise ValueError("The article price confirmation is already bound to another message.")
@@ -119,6 +158,22 @@ def get_confirmation(token: str, actor: str, **origin_fields: str) -> dict:
         if not record.get("origin") or record["origin"] != _card_origin(**origin_fields):
             raise ValueError("Confirm this price on its original message in the original conversation.")
         return deepcopy(record)
+
+
+def verify_confirmation_content(
+    token: str, actor: str, *, clicked_message: dict, source_message: dict, **origin_fields: str,
+) -> dict:
+    """Compare both the click snapshot and freshly read Slack source to our card."""
+    with _confirmation_lock:
+        record = get_confirmation(token, actor, **origin_fields)
+        try:
+            _require_card_content(record, clicked_message)
+            _require_card_content(record, source_message)
+        except ArticleConfirmationContentChangedError:
+            # A restored label or a later digest cannot revive altered consent.
+            _confirmations.pop(token, None)
+            raise
+        return record
 
 
 def invalidate_confirmation(token: str) -> None:

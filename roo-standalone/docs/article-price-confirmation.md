@@ -3,8 +3,13 @@
 Roo reads article prices from `POST /api/v1/content/quote` using its existing
 Content Factory service authentication. It sends the requesting founder's
 `requested_by_slack_user_id` (or `slack_user_id`), the domain, and the same
-`client_request_id` used for submission. Topic confirmation also sends
-`source_run_id`; legacy source-only buttons do not require a domain lookup.
+`client_request_id` used for submission for new generation. Topic confirmation
+sends `source_run_id` and omits `client_request_id` unless an existing key is
+explicitly provided. The backend resolves the source's persisted key after
+verifying source ownership, company, payer, payment lineage and refund state.
+This preserves an original paid price (including historical six-point debits)
+and the stable key for research/deferred sources. Roo never substitutes a new
+key for a source. Legacy source-only buttons do not require a domain lookup.
 The endpoint must verify the actor and ownership and return an integer
 `costPoints`. Authentication alone never authorizes a charge.
 
@@ -16,9 +21,18 @@ until successful Slack posting or updating binds it to that card's workspace,
 channel, thread, and message timestamp. The acting user and all four origin
 fields must match the saved record. A copied token cannot be rebound to a
 different message. Submission uses the saved destination; click payloads cannot
-change it. The confirmed request submits the unchanged
+change it. Roo also retains the original text and blocks, including the price,
+topic, button label, and opaque token. Before either a Slack or Chat confirmation
+can submit, Roo reads the exact bot-owned message from Slack and compares both
+that source and the click's message snapshot to the saved content. A digest of
+an edited message is insufficient. Changed content invalidates the token and
+requires a fresh quote and confirmation. Unavailable or unverified Slack source
+messages stop submission. Only Slack-generated block IDs and default plain-text
+emoji flags are normalized. The confirmed request submits the unchanged
 integer as `expected_cost_points`. Topic-less research keeps its existing
 request contract; its later article confirmation goes through the article gate.
+Price-card posts and updates disable Slack's automatic URL parsing, so fallback
+text remains comparable; updates also explicitly clear prior attachments.
 
 An HTTP 409 with `code: roo_points_quote_changed` refreshes the authoritative
 quote and asks for another click. It never automatically resubmits at the new

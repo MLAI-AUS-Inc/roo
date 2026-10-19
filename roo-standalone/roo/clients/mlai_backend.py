@@ -1240,7 +1240,10 @@ class MLAIBackendClient:
     async def submit_article_request(self, endpoint: str, payload: dict) -> dict:
         """Shared gate for all Roo article callers, including resumed actions."""
         payload = dict(payload)
-        payload.setdefault("client_request_id", f"content-factory-{uuid4().hex}")
+        # A source run's persisted key is resolved by the backend after its
+        # ownership/payment checks. A new key would break original-paid replay.
+        if not payload.get("source_run_id"):
+            payload.setdefault("client_request_id", f"content-factory-{uuid4().hex}")
         is_article = endpoint != "/api/v1/content/generate" or bool(payload.get("topic"))
         if is_article and not valid_cost(payload.get("expected_cost_points")):
             return await self._article_price_confirmation(endpoint, payload)
@@ -1427,8 +1430,9 @@ class MLAIBackendClient:
             "option_index": option_index,
             "request_source": request_source,
             "source_run_id": job_id,
-            "client_request_id": client_request_id or f"content-factory-confirm-{job_id}",
         }
+        if client_request_id:
+            payload["client_request_id"] = client_request_id
         if requested_by_slack_user_id:
             payload["requested_by_slack_user_id"] = self._clean_slack_id(requested_by_slack_user_id)
 
