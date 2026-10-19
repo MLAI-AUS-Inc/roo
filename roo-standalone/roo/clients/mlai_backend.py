@@ -24,6 +24,7 @@ from ..backend_identity import (
     get_backend_actor_context,
 )
 from ..config import get_settings
+from ..content_factory_pricing import ArticleQuoteUnavailableError, create_confirmation, valid_cost
 
 CONTENT_FACTORY_REQUEST_SOURCE = "roo_slackbot"
 FULL_POINTS_ADMIN_ROLES = {"admin", "committee", "portfolio_lead"}
@@ -1209,6 +1210,55 @@ class MLAIBackendClient:
         self._mark_registration_cached(clean_slack_id, normalized_email)
         return data
 
+    async def get_article_quote(self, payload: dict) -> dict:
+        """Read the requesting founder's price; never substitute a local price."""
+        quote_payload = {
+            key: payload[key] for key in (
+                "domain", "slack_user_id", "requested_by_slack_user_id",
+                "client_request_id", "source_run_id",
+            ) if payload.get(key)
+        }
+        try:
+            response = await self._request(
+                "POST", "/api/v1/content/quote", json=quote_payload,
+                timeout=15.0, circuit_breaker=True,
+            )
+            self._raise_for_status_or_backend_unavailable(response)
+            quote_data = response.json()
+            if not isinstance(quote_data, dict) or not valid_cost(quote_data.get("costPoints")):
+                raise ValueError("Invalid quote")
+        except (httpx.HTTPError, MLAIBackendUnavailableError, ValueError) as exc:
+            raise ArticleQuoteUnavailableError("I couldn't retrieve your article price. No article was started; please try again.") from exc
+        return quote_data
+
+    async def _article_price_confirmation(self, endpoint: str, payload: dict, *, changed=False) -> dict:
+        quote_data = await self.get_article_quote(payload)
+        if not payload.get("domain") and quote_data.get("domain"):
+            payload = {**payload, "domain": quote_data["domain"]}
+        return create_confirmation(endpoint, payload, quote_data["costPoints"], changed=changed)
+
+    async def submit_article_request(self, endpoint: str, payload: dict) -> dict:
+        """Shared gate for all Roo article callers, including resumed actions."""
+        payload = dict(payload)
+        payload.setdefault("client_request_id", f"content-factory-{uuid4().hex}")
+        is_article = endpoint != "/api/v1/content/generate" or bool(payload.get("topic"))
+        if is_article and not valid_cost(payload.get("expected_cost_points")):
+            return await self._article_price_confirmation(endpoint, payload)
+        response = await self._request(
+            "POST", endpoint, json=payload, timeout=30.0, circuit_breaker=True,
+        )
+        if response.status_code == 409:
+            try:
+                error_data = response.json()
+            except ValueError:
+                error_data = {}
+            if isinstance(error_data, dict) and error_data.get("code") == "roo_points_quote_changed":
+                # Refresh from the quote endpoint, but require a new human click.
+                payload.pop("expected_cost_points", None)
+                return await self._article_price_confirmation(endpoint, payload, changed=True)
+        self._raise_for_status_or_backend_unavailable(response)
+        return response.json()
+
     async def trigger_article_generation(
         self,
         slack_user_id: str,
@@ -1228,6 +1278,7 @@ class MLAIBackendClient:
         user_last_name: Optional[str] = None,
         user_avatar_url: Optional[str] = None,
         requested_by_slack_user_id: Optional[str] = None,
+        expected_cost_points: Optional[int] = None,
     ) -> dict:
         """
         Trigger article generation via mlai-backend.
@@ -1280,16 +1331,9 @@ class MLAIBackendClient:
             payload["user_last_name"] = user_last_name
         if user_avatar_url:
             payload["user_avatar_url"] = user_avatar_url
-
-        response = await self._request(
-            "POST",
-            "/api/v1/content/generate",
-            json=payload,
-            timeout=30.0,
-            circuit_breaker=True,
-        )
-        self._raise_for_status_or_backend_unavailable(response)
-        return response.json()
+        if expected_cost_points is not None:
+            payload["expected_cost_points"] = expected_cost_points
+        return await self.submit_article_request("/api/v1/content/generate", payload)
 
     async def attach_content_progress_message(
         self,
@@ -1356,6 +1400,8 @@ class MLAIBackendClient:
         delivery_mode_confirmed: Optional[bool] = None,
         request_source: str = CONTENT_FACTORY_REQUEST_SOURCE,
         requested_by_slack_user_id: Optional[str] = None,
+        expected_cost_points: Optional[int] = None,
+        client_request_id: Optional[str] = None,
     ) -> dict:
         """
         Confirm topic selection for article generation.
@@ -1380,6 +1426,8 @@ class MLAIBackendClient:
             "slack_user_id": self._clean_slack_id(slack_user_id),
             "option_index": option_index,
             "request_source": request_source,
+            "source_run_id": job_id,
+            "client_request_id": client_request_id or f"content-factory-confirm-{job_id}",
         }
         if requested_by_slack_user_id:
             payload["requested_by_slack_user_id"] = self._clean_slack_id(requested_by_slack_user_id)
@@ -1394,15 +1442,9 @@ class MLAIBackendClient:
             payload["delivery_mode"] = delivery_mode
             payload["delivery_mode_confirmed"] = bool(delivery_mode_confirmed)
             
-        response = await self._request(
-            "POST",
-            f"/api/v1/content/jobs/{job_id}/confirm",
-            json=payload,
-            timeout=30.0,
-            circuit_breaker=True,
-        )
-        self._raise_for_status_or_backend_unavailable(response)
-        return response.json()
+        if expected_cost_points is not None:
+            payload["expected_cost_points"] = expected_cost_points
+        return await self.submit_article_request(f"/api/v1/content/jobs/{job_id}/confirm", payload)
 
     async def get_content_org_config(self, slack_user_id: str, domain: Optional[str] = None) -> Optional[dict]:
         """

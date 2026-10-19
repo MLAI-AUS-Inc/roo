@@ -749,7 +749,7 @@ async def test_delegated_article_request_uses_effective_user_for_backend_and_req
     assert trigger_call["slack_user_id"] == "U0AQV5X9G0J"
     assert trigger_call["requested_by_slack_user_id"] == "U05QPB483K9"
     assert trigger_call["user_email"] == "sam@example.com"
-    assert FakeContentFactoryClient.last_instance.balance_checks == ["U05QPB483K9"]
+    assert FakeContentFactoryClient.last_instance.balance_checks == []
     assert FakeContentFactoryClient.last_instance.user_registration_calls == [
         {
             "slack_id": "U05QPB483K9",
@@ -1740,7 +1740,7 @@ async def test_explicit_research_request_starts_generation(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_content_factory_blocks_when_user_has_insufficient_points(monkeypatch):
+async def test_research_does_not_apply_a_local_article_price(monkeypatch):
     executor = SkillExecutor()
     _patch_content_factory(monkeypatch)
     FakeContentFactoryClient.balance_by_user["U999FREE"] = 3
@@ -1755,12 +1755,10 @@ async def test_content_factory_blocks_when_user_has_insufficient_points(monkeypa
         thread_ts="111.222",
     )
 
-    assert "Creating an article costs 4 Roo points" in result
-    assert "currently have 3" not in result
-    assert "balance is below that amount" in result
-    assert "DM Roo `points`" in result
-    assert FakeContentFactoryClient.last_instance.trigger_calls == []
-    assert FakeContentFactoryClient.last_instance.balance_checks == ["U999FREE"]
+    assert isinstance(result, dict)
+    assert FakeContentFactoryClient.last_instance.trigger_calls[0]["topic"] is None
+    assert FakeContentFactoryClient.last_instance.balance_checks == []
+
 
 
 @pytest.mark.asyncio
@@ -1785,13 +1783,13 @@ async def test_content_factory_blocks_when_slack_email_missing(monkeypatch):
     )
 
     assert "real Slack email" in result
-    assert "articles for mlai.au are free" in result.lower()
+    assert "free" not in result.lower()
     assert FakeContentFactoryClient.last_instance.trigger_calls == []
     assert FakeContentFactoryClient.last_instance.user_registration_calls == []
 
 
 @pytest.mark.asyncio
-async def test_free_domain_article_request_survives_registration_timeout(monkeypatch):
+async def test_article_request_fails_closed_on_registration_timeout(monkeypatch):
     executor = SkillExecutor()
     _patch_content_factory(monkeypatch)
     FakeContentFactoryClient.ensure_slack_user_registered_exception = (
@@ -1807,11 +1805,11 @@ async def test_free_domain_article_request_survives_registration_timeout(monkeyp
         thread_ts=None,
     )
 
-    assert isinstance(result, dict)
-    assert result["data"]["content_factory_progress_job_id"] == "job-123"
-    assert FakeContentFactoryClient.last_instance.trigger_calls
+    assert "haven't started" in result.lower()
+    assert FakeContentFactoryClient.last_instance.trigger_calls == []
     assert FakeContentFactoryClient.last_instance.user_registration_calls == []
     assert FakeContentFactoryClient.last_instance.balance_checks == []
+
 
 
 @pytest.mark.asyncio
@@ -2032,7 +2030,8 @@ def test_article_provide_topic_action_updates_message(monkeypatch):
     updated_blocks = updated_messages[0]["blocks"]
     assert all(block.get("type") != "actions" for block in updated_blocks)
     assert "@Roo write about AI for clinic workflows" in updated_blocks[-1]["elements"][0]["text"]
-    assert "free" in updated_blocks[-1]["elements"][0]["text"].lower()
+    assert "price for confirmation" in updated_blocks[-1]["elements"][0]["text"].lower()
+    assert "free" not in updated_blocks[-1]["elements"][0]["text"].lower()
 
 
 def test_article_research_best_action_triggers_backend_with_client_request_id(monkeypatch):
@@ -4280,3 +4279,16 @@ def test_confirm_content_factory_action_without_context_prompts_to_resend(monkey
             {"thread_ts": "111.222"},
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_executor_surfaces_price_confirmation_without_reporting_a_started_run(monkeypatch):
+    _patch_content_factory(monkeypatch)
+    card = {"status": "awaiting_price_confirmation", "message": "Confirm 12 Roo points", "blocks": []}
+    FakeContentFactoryClient.trigger_article_generation_result = card
+    result = await SkillExecutor()._execute_content_factory(
+        skill=None, text="write about AI", params={"domain": "mlai.au", "topic": "AI"},
+        user_id="U05QPB483K9", channel_id=None, thread_ts=None,
+    )
+    assert result == card
+    assert "content_factory_progress_job_id" not in result.get("data", {})

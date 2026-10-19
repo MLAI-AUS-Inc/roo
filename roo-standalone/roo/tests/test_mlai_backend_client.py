@@ -1332,6 +1332,7 @@ async def test_confirm_article_topic_raises_backend_unavailable_on_503(monkeypat
             job_id="job-123",
             slack_user_id="U123",
             confirmed_keyword="ai agents",
+            expected_cost_points=12,
         )
 
 
@@ -1355,6 +1356,7 @@ async def test_confirm_article_topic_includes_requested_by_when_provided(monkeyp
         job_id="job-123",
         slack_user_id="U0AQV5X9G0J",
         confirmed_keyword="ai agents",
+            expected_cost_points=12,
         requested_by_slack_user_id="U05QPB483K9",
     )
 

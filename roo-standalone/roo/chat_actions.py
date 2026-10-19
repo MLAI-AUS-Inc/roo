@@ -72,7 +72,7 @@ async def handle_chat_action(payload, *, client, dispatch):
     perform = payload.get("perform") is True
     if perform and (
         not re.fullmatch(
-            r"confirm_topic_btn_\d+|cancel_topic_btn|select_article_delivery_mode",
+            r"confirm_topic_btn_\d+|cancel_topic_btn|select_article_delivery_mode|confirm_article_price",
             values["action_id"],
         )
         or not re.fullmatch(r"[a-f0-9]{64}", values["action_hash"])

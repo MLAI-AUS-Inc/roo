@@ -22,11 +22,8 @@ import httpx
 
 from .loader import Skill
 from ..content_factory_progress import (
-    CONTENT_FACTORY_ARTICLE_COST_POINTS,
     CONTENT_FACTORY_REQUEST_SOURCE,
     build_live_status_blocks,
-    get_content_factory_article_cost_points,
-    is_free_content_factory_domain,
     normalize_content_factory_domain,
 )
 from ..content_factory_identity import (
@@ -1585,13 +1582,7 @@ class SkillExecutor:
         effective_slack_user_id: Optional[str] = None,
     ) -> list[dict]:
         """Build the preflight prompt for generic article requests."""
-        normalized_domain = normalize_content_factory_domain(domain) or domain
-        cost_points = get_content_factory_article_cost_points(domain)
-        cost_text = (
-            f"*Cost:* Articles for *{normalized_domain}* are free. No Roo points will be deducted for this run."
-            if cost_points == 0
-            else f"*Cost:* Starting the article run deducts {cost_points} Roo points."
-        )
+        cost_text = "*Cost:* I’ll show your article price for confirmation before generation starts."
         button_payload = build_content_factory_identity_payload(
             requested_by_slack_user_id=requested_by_slack_user_id or user_id,
             effective_slack_user_id=effective_slack_user_id or user_id,
@@ -8129,20 +8120,10 @@ Chunk {index} source: {label}
         from ..clients.mlai_backend import MLAIBackendUnavailableError
         from ..slack_client import get_user_info
 
-        normalized_domain = normalize_content_factory_domain(domain) or "this domain"
-        cost_points = get_content_factory_article_cost_points(domain)
         slack_info = get_user_info(user_id)
         email = str(slack_info.get("email") or "").strip().lower()
         if not email:
-            if cost_points == 0:
-                return (
-                    "I need access to your real Slack email before I can start Content Factory for you. "
-                    f"Once that's available, articles for {normalized_domain} are free."
-                )
-            return (
-                "I need access to your real Slack email before I can start Content Factory for you. "
-                f"Once that's available, creating an article costs {cost_points} Roo points."
-            )
+            return "I need access to your real Slack email before I can quote an article for you."
 
         real_name = str(slack_info.get("real_name") or "").strip()
         name_parts = real_name.split(" ", 1) if real_name else []
@@ -8158,42 +8139,11 @@ Chunk {index} source: {label}
                 last_name=last_name,
                 avatar_url=avatar_url,
             )
-        except MLAIBackendUnavailableError as exc:
-            print(f"⚠️ Failed to register content-factory user {user_id}: {exc!r}")
-            if cost_points == 0:
-                return None
+        except MLAIBackendUnavailableError:
             return self._content_factory_backend_unavailable_message()
-        except Exception as exc:
-            print(f"⚠️ Failed to register content-factory user {user_id}: {exc!r}")
-            if cost_points == 0:
-                return None
-            return (
-                "I couldn't link your Slack account to MLAI yet, so I haven't charged anything. "
-                "Please try again in a moment."
-            )
-
-        if cost_points == 0:
-            return None
-
-        try:
-            balance_data = await api_client.get_balance(user_id)
-        except MLAIBackendUnavailableError as exc:
-            print(f"⚠️ Failed to fetch Roo points balance for {user_id}: {exc!r}")
-            return self._content_factory_backend_unavailable_message()
-        except Exception as exc:
-            print(f"⚠️ Failed to fetch Roo points balance for {user_id}: {exc!r}")
-            return (
-                "I couldn't check your Roo points balance just now, so I haven't started the article yet. "
-                "Please try again in a moment."
-            )
-
-        balance = int(balance_data.get("balance") or 0)
-        if balance < cost_points:
-            return (
-                f"Creating an article costs {cost_points} Roo points, and your balance is below "
-                "that amount. DM Roo `points` to view your balance privately."
-            )
-
+        except Exception:
+            return "I couldn't link your Slack account to MLAI yet. Please try again in a moment."
+        # The backend quote and charge boundary own price and balance checks.
         return None
 
     def _build_content_factory_start_response(
@@ -8865,16 +8815,9 @@ Chunk {index} source: {label}
                 )
             )
             disclaimer_cost_text = (
-                f"*Cost:* Articles for **{normalize_content_factory_domain(domain) or domain or 'this domain'}** are free. "
-                "No Roo points will be deducted for this run.\n\n"
-                if is_free_content_factory_domain(domain)
-                else (
-                    f"*Cost:* Creating an article costs **{CONTENT_FACTORY_ARTICLE_COST_POINTS} Roo points**. "
-                    "Those points are deducted when article research/generation starts. "
-                    "If something goes wrong, message Dr Sam on Slack and he can help sort out a refund.\n\n"
-                )
+                "*Cost:* I’ll show your article price for confirmation before generation starts.\n\n"
             )
-            
+
             blocks = [
                 {
                     "type": "header",
@@ -9778,6 +9721,9 @@ Chunk {index} source: {label}
                 **delegated_backend_kwargs,
             )
             
+            if response.get("status") == "awaiting_price_confirmation":
+                return response
+
             job_id = response.get("job_id")
             if not job_id:
                 return "Failed to start generation: No job ID returned from backend."
