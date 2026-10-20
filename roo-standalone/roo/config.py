@@ -209,6 +209,8 @@ class Settings(BaseSettings):
     COWORKING_INTENT_RETENTION_DAYS: int = 30
     FOUNDER_ACCOUNT_LINK_ENABLED: bool = False
     ROO_POINTS_TOPUP_ENABLED: bool = False
+    ROO_EVENT_DISCOUNTS_ENABLED: bool = False
+    ROO_EVENT_DISCOUNTS_SLACK_TEAM_ID: str = ""
     ROO_POINTS_TOPUP_BUTTONS_ENABLED: bool = False
     ROO_POINTS_STRIPE_CHECKOUT_HOSTS: str = "checkout.stripe.com"
     MEETING_ROOM_BOOKING_ENABLED: bool = False

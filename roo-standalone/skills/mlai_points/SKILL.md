@@ -3,17 +3,17 @@ name: mlai-points
 description: Roo points, tasks, rewards and coworking
 routing:
   use_when: >
-    Roo points, rewards, tasks, coworking, and points admin.
+    Points, rewards, tasks, coworking, and event discounts.
   avoid_when: >
-    linear-meeting-actions, luma-events, meeting rooms, GitHub, and introductions.
+    Event reports, meeting rooms, GitHub, introductions.
   examples:
+    - {text: "Spend points for an AI Meetup discount", action: quote_event_discount}
     - {text: "how do I earn points?", action: list_tasks}
     - {text: "what's my balance", action: balance}
     - {text: "flex my points", action: flex_points}
     - {text: "book me in for coworking tomorrow", action: book_coworking}
     - {text: "pls book me in sept 18th", action: book_coworking}
     - {text: "is coworking available next Friday?", action: check_coworking}
-    - {text: "book me in for 1pm today", action: book_coworking}
     - {text: "claim task ROO-12", action: claim_task}
     - {text: "how busy was the coworking space in may?", action: coworking_report}
     - {text: "give 10 points to @member for organising the meetup", action: award_points}
@@ -28,6 +28,18 @@ routing:
     - {text: "book club is meeting thursday, can you remind the channel?", instead: respond_in_chat}
     - {text: "how many people came to our last event?", instead: luma-events}
 actions:
+  - name: quote_event_discount
+    description: Quote event discount.
+    params:
+      event_query: {type: string, description: "Event name or ID."}
+  - name: redeem_event_discount
+    description: Confirm quoted discount.
+  - name: get_event_redemption
+    description: Get own coupon.
+    params:
+      redemption_id: {type: string}
+  - name: list_event_redemptions
+    description: List own coupons.
   - name: link_founder_account
     description: Link the user's Slack and Founder Tools accounts.
   - name: balance
@@ -86,7 +98,7 @@ actions:
   - name: book_coworking
     description: Book the user a coworking day.
     params:
-      date: {type: string, description: "Preserve the user's date phrase, e.g. sept 18th, 18 September, next Friday, in two days, tomorrow, 16/09/2026, or an explicit ISO date. Do not invent a year or reduce multiple dates to one; the handler resolves or clarifies them."}
+      date: {type: string, description: "Preserve the user's date phrase, year and multiple dates. Do not invent a year; the handler resolves or clarifies dates."}
   - name: cancel_coworking
     description: Cancel the user's coworking booking.
     params:
@@ -511,3 +523,22 @@ That sounds like it could be 'Draft newsletter edition' (12 pts) or 'Newsletter 
 | No availability | "No spots left on {date}. Want to check another day?" |
 | Network error | "Having trouble reaching the points system. Mind trying again in a tick?" |
 | Permission denied | Friendly explanation, point to admins if they need help |
+
+## Event discount redemptions
+
+Use `quote_event_discount` when a member wants to spend Roo Points on a discount
+for a named event. Use `luma-events` for event discovery or attendance reports
+without points redemption. Only backend-configured event offers are available;
+never invent a points cost, discount, event, or coupon.
+
+Event quotes, confirmations, and coupon links are private. Ask the member to DM
+Roo when they request this in a channel. A quote shows the exact points cost,
+benefit, and expiry. Spending requires the member's exact original command
+`confirm event discount <quote_id>` in the same private conversation thread.
+The executor independently parses that command; extracted `confirmed`, user IDs,
+and quote IDs do not grant spending permission. A bare yes must prompt the member
+to copy the confirmation command. Repeating the command safely retrieves the
+same redemption. Use `get_event_redemption` or `list_event_redemptions` when the
+member asks for an existing link; do not redeem again. Processing means the
+backend has not yet confirmed coupon issuance. Never claim a coupon is ready
+until the backend returns a fulfilled result with a validated Luma booking link.
