@@ -57,6 +57,17 @@ def _allocated_days(work):
             for index in range(count)]
 
 
+def allocated_days_for_cutoff(work, end=None):
+    days = _allocated_days(work)
+    if end is None or end.time() == datetime.min.time():
+        return days
+    # A date alone cannot put Friday's work before 17:00. Retain supported
+    # earlier days for labelled monthly estimates; never invent clock times.
+    last_at = work.get('work_end_at')
+    precise = last_at is not None and timestamp(last_at) <= timestamp(end)
+    return [(day, units) for day, units in days if day < end.date() or (day == end.date() and precise)]
+
+
 def build_balance_report(client, selector, dataset, now):
     """Compute recorded work less purchased hours, including historical carry-in.
 
@@ -75,7 +86,9 @@ def build_balance_report(client, selector, dataset, now):
     source_day = timestamp(dataset['as_of']).astimezone(TZ).date()
     cutoff = min(coverage_end, current_day, source_day)
     start = max(coverage_start, requested_start.date())
-    end = min(requested_end.date() - timedelta(days=1), cutoff)
+    bounded = resolved.get('period') in {'weekly', 'month_to_date'}
+    last_requested_day = requested_end.date() - timedelta(days=int(requested_end.time() == datetime.min.time()))
+    end = min(last_requested_day, cutoff)
     has_coverage = start <= end
     allowed = set(client['project_ids'])
     work_days, estimated_days = defaultdict(int), defaultdict(int)
@@ -88,7 +101,7 @@ def build_balance_report(client, selector, dataset, now):
             raise TimesheetError('duplicate_client_balance_hours')
         work_ids.add(original['id'])
         work = dict(original)
-        allocated = _allocated_days(work)
+        allocated = allocated_days_for_cutoff(work, requested_end if bounded else None)
         estimated = work['date_basis'] != 'work_dates' or len(allocated) > 1
         period_units = included_units = 0
         for day, units in allocated:

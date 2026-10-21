@@ -313,6 +313,9 @@ class TimesheetService:
                       'for the saved report, or send a new `timesheet current` request for a fresh draft.')
         return terminal, notice
 
+    def request_error_status(self, request, code):
+        return 'error'
+
     def commands(self, now, *, queue=None):
         store = self.queue if queue is None else queue
         results = []
@@ -356,13 +359,13 @@ class TimesheetService:
                     results.append({'request': key, 'status': status})
                 except Exception as exc:
                     code = str(exc) if isinstance(exc, TimesheetError) else type(exc).__name__
-                    request['status'], request['error'] = 'error', code
+                    request['status'], request['error'] = self.request_error_status(request, code), code
                     # Source collection may take minutes. Back off from the
                     # failure, not the stale timestamp at the start of the scan.
                     request['retry_at'] = max(timestamp(now).timestamp() + time.monotonic() - started + 60,
                                               getattr(exc, 'retry_at', 0))
-                    results.append({'request': key, 'status': 'error', 'reason': code})
-                if request['status'] in {'error', 'needs_review'}:
+                    results.append({'request': key, 'status': request['status'], 'reason': code})
+                if request['status'] in {'error', 'needs_review', 'waiting_data'}:
                     terminal, notice = self.failure_notice(request)
                     try:
                         outcome = self.deliver_parts([{'kind': 'message', 'content': notice, 'status': 'pending'}],

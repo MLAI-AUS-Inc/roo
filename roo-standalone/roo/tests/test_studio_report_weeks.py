@@ -48,7 +48,7 @@ def test_week_includes_zero_projects_and_missing_effort_is_partial(setup):
     report = build_client_report(setup.config, setup.clients['UMARK'], WEEK,
                                 [ticket(size='Unknown', completed='2026-10-01T00:00:00Z')], FRIDAY)
     text = summary(report)
-    assert 'partial total' in text and 'Master App: 0h' in text and 'Cybertest: 0h' in text
+    assert 'partial total' in text and 'Master App: Unavailable' in text and 'Cybertest: 0h' in text
     assert 'studio-hours-unresolved.csv' in artifacts(report)
 
 

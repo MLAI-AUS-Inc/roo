@@ -6,13 +6,13 @@ Every microhour is allocated by the shared balance calculation exactly once.
 from collections import defaultdict
 from datetime import date
 
-from .studio_client_balance import HOUR_UNITS, _allocated_days, build_balance_report
+from .studio_client_balance import HOUR_UNITS, allocated_days_for_cutoff, build_balance_report
 from .studio_reports import month_offset
 from .timesheets import timestamp
 
 
 def build_recorded_report(config, client, selector, dataset, now):
-    if selector.get('period') in {'weekly', 'month_to_date'}:
+    if selector.get('period') == 'weekly':
         from .studio_recorded_hours_weekly import build_weekly_recorded_report
         return build_weekly_recorded_report(config, client, selector, dataset, now)
     balance = build_balance_report(client, selector, dataset, now)
@@ -26,10 +26,20 @@ def build_recorded_report(config, client, selector, dataset, now):
             and month_offset(month['month'], 1).date() > date.fromisoformat(balance['start']))
     by_month = {row['month']: row for row in monthly}
     invoices = {row['id']: row for row in dataset['contractor_invoices']}
-    rows = []
+    rows, exceptions = [], []
+    if resolved.get('period') == 'month_to_date':
+        cutoff = timestamp(resolved['end'])
+        for work in dataset['hours']:
+            if (work['work_start'] <= cutoff.date().isoformat() <= work['work_end']
+                    and (not work.get('work_end_at') or timestamp(work['work_end_at']) > cutoff)):
+                month = cutoff.strftime('%Y-%m')
+                exceptions.append({'month': month, 'project': config.projects[work['project_id']],
+                    'identifier': work['id'], 'reason': 'Cutoff-day work lacks supported times before the reporting cutoff; unavailable hours are not zero.'})
+                by_month[month]['unresolved'] += 1
     for work in balance['hours']:
         units_by_month = defaultdict(int)
-        for day, units in _allocated_days(work):
+        cutoff = timestamp(resolved['end']) if resolved.get('period') == 'month_to_date' else None
+        for day, units in allocated_days_for_cutoff(work, cutoff):
             if balance['period_has_coverage'] and balance['start'] <= day.isoformat() <= balance['end']:
                 units_by_month[day.strftime('%Y-%m')] += units
         estimated = (work['date_basis'] != 'work_dates'
@@ -62,7 +72,7 @@ def build_recorded_report(config, client, selector, dataset, now):
     # records are not copied to the ordinary work-hours report.
     return {'selector': resolved, 'client': client['name'],
             'projects': {key: config.projects[key] for key in client['project_ids']},
-            'monthly': monthly, 'rows': rows, 'exceptions': [],
+            'monthly': monthly, 'rows': rows, 'exceptions': exceptions,
             'generated_at': timestamp(now).isoformat(), 'complete': False,
             'basis': 'invoice_first_recorded_hours', 'unit_scale': HOUR_UNITS,
             'invoice_first_projects': list(client['project_ids']),
@@ -70,7 +80,7 @@ def build_recorded_report(config, client, selector, dataset, now):
             'estimated_month_units': sum(m.get('estimated_units', 0) for m in monthly),
             'recorded_snapshot': True, 'source_as_of': dataset['as_of'],
             'period_has_coverage': balance['period_has_coverage'],
-            'coverage_through': balance['coverage_through'], 'partial': balance['partial'],
+            'coverage_through': balance['coverage_through'], 'partial': balance['partial'] or bool(exceptions),
             'limitations': list(dataset['limitations']), 'pending_work_count': balance['pending_work_count']}
 
 

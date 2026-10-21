@@ -16,7 +16,7 @@ separately in the report.
 
 ## Delivery plan and source handoff
 
-1. The reconciliation agent reviews contractor invoice hours, work attribution,
+1. The Studio reviewer checks contractor invoice hours, work attribution,
    invoice revisions and payment evidence. The existing backend remains the sole
    owner of Xero OAuth credentials. The operator refreshes the evidence and exports
    a reviewed, read-only JSON projection with a coverage period and source timestamp.
@@ -29,8 +29,8 @@ separately in the report.
    when requested, detailed CSVs. The public runtime receives no finance snapshot
    or Xero credentials.
 
-The current implementation uses an **operator-reviewed snapshot**, with manual
-refresh and publication. It does not automatically sync Xero in real time. The
+The default implementation uses an **operator-reviewed snapshot**, with manual
+refresh and publication. Automatic Friday preparation is opt-in below. The
 report shows its source timestamp and reviewed coverage. A source older than seven
 days fails closed by default; an operator must refresh the audit and publish a new
 snapshot. An `as_of` timestamp should reflect a real review, not a file copy date.
@@ -51,7 +51,38 @@ payment burndown, monthly hours by project and total hours by project. All three
 charts use the same frozen reviewed dataset and cutoff; they make no additional
 accounting or Linear reads. Historical fallback also applies to Friday reports,
 where an uncovered week is shown as unavailable. It does not refresh the source:
-current Friday totals still require the reviewed evidence handoff to be updated.
+current Friday totals still require verified work coverage.
+
+## Automatic Friday preparation
+
+Enable `STUDIO_REPORTS_REFRESH_ENABLED` only in the private worker, with
+`STUDIO_REPORTS_SOURCE_URL` pointing to the backend's HTTPS
+`/api/v1/integrations/studio-reports/prepare` endpoint and a dedicated
+`STUDIO_REPORTS_SOURCE_KEY`. The backend owns all Xero/Gmail credentials. Its
+[source runbook](https://github.com/MLAI-AUS-Inc/mlai-backend/blob/main/docs/studio-report-source.md)
+defines the fixed client scope, private files and activation order. Neither
+the source key nor finance files may be mounted in Public Roo.
+
+At 16:30 Melbourne the worker prepares the upcoming Friday cutoff. At 17:00 it
+requires a closing pass, refreshing approved hours, contractor-invoice discovery,
+client invoices and actual reconciled payments. New invoice mail, missing hours,
+ambiguous allocations, reversals and failed provider reads block a current
+report. A successful Xero sync never advances work review coverage. Unsubmitted
+work cannot be recovered automatically; supported work records must be supplied
+and reviewed. Optional `work_start_at`/`work_end_at` timestamps can establish
+Friday work before 17:00; their local dates must match the work-date fields.
+The end timestamp is exclusive. Aggregate quantities are not guessed into a
+weekly split.
+
+Both recipients use the same owner/cutoff preparation and frozen snapshot, with
+weekly project hours, month-to-date project hours and payment burndown charts.
+The monthly view uses the calendar-month allocation policy, with estimated
+month assignments labelled. Source times and the original cutoff accompany
+delivery. Missing data produces one private notice and `waiting_data`, then
+retries every five minutes. No placeholder chart is marked as a completed
+current report. Historical on-demand requests retain their separate labelled
+fallback behaviour. Private `source-preparations/*.json` receipts contain gap
+codes and stream times; backend review receipts identify unreviewed invoices.
 
 ## Ask Roo
 

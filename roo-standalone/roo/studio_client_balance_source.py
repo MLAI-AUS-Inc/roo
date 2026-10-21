@@ -178,6 +178,11 @@ def validate_balance_snapshot(value, config, clients):
                 first, last = _date(cost['work_start']), _date(cost['work_end'])
                 if not start <= first <= last <= through:
                     raise ValueError
+                if 'work_start_at' in cost or 'work_end_at' in cost:
+                    first_at, last_at = timestamp(cost['work_start_at']), timestamp(cost['work_end_at'])
+                    if (first_at >= last_at or first_at.astimezone(config.tz).date() != first
+                            or last_at.astimezone(config.tz).date() != last):
+                        raise ValueError
                 if cost['date_basis'] not in {'work_dates', 'estimated_work_period', 'invoice_date'}:
                     raise ValueError
                 _text(cost['description'])

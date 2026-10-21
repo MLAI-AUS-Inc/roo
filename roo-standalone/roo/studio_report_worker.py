@@ -73,7 +73,7 @@ class StudioReportAPI(StudioSourceAPI):
 class StudioReportService(TimesheetService):
     def __init__(self, config, api, clients, backfill_path=None, *, balance_path=None,
                  balance_enabled=False, balance_max_age_days=7, schedules=None,
-                 allow_historical_snapshot=False):
+                 allow_historical_snapshot=False, refresh=None):
         super().__init__(config, api)
         self.clients = clients
         self.backfill_path = backfill_path
@@ -82,6 +82,7 @@ class StudioReportService(TimesheetService):
         self.balance_max_age_days = balance_max_age_days
         self.allow_historical_snapshot = allow_historical_snapshot
         self.schedules = schedules or []
+        self.refresh = refresh
         self.weekly_queue = ReceiptStore(config.directory / 'weekly-queue')
 
     def request_authorized(self, request):
@@ -106,6 +107,9 @@ class StudioReportService(TimesheetService):
         results = super().commands(now)
         results.extend(super().commands(now, queue=self.weekly_queue))
         return results
+
+    def request_error_status(self, request, code):
+        return 'waiting_data' if code == 'studio_source_waiting_data' else 'error'
 
     def scope_fingerprint(self, actor, selector=None):
         if actor not in self.clients:
@@ -135,11 +139,16 @@ class StudioReportService(TimesheetService):
         scope = self.scope_fingerprint(actor, selector)
         client, groups, targets = select_client(self.clients, actor, selector)
         reviewed, finance_owners, snapshot = [], [], None
+        preparation_key, source_checks = None, None
         source_stale = False
+        if selector.get('period') == 'weekly' and self.refresh:
+            # Source preparation is private and shared by owner + frozen cutoff,
+            # not repeated independently for Mark and Sam.
+            preparation_key, snapshot, source_checks = self.refresh.for_request(request, freshness_at)
         if self.balance_enabled and self.balance_path:
             from .studio_client_balance_source import load_balance_snapshot, validate_snapshot_age
             from .studio_recorded_hours import build_recorded_report
-            snapshot = load_balance_snapshot(self.balance_path, self.config, self.clients)
+            snapshot = snapshot or load_balance_snapshot(self.balance_path, self.config, self.clients)
             owners = targets or {key: self.clients[key] for key in
                                   [actor, *self.clients[actor].get('report_client_ids', [])]}
             for owner, owner_client in owners.items():
@@ -196,9 +205,24 @@ class StudioReportService(TimesheetService):
         report.update(actor=actor, scope=scope, backfill_digest=fingerprint(backfill))
         if month_report is not None:
             report['month_to_date'] = month_report
+        if preparation_key:
+            # Incomplete source quantities/timing cannot become a zero weekly
+            # bar or a completed delivery, even after a successful finance sync.
+            if (not finance_owners or report.get('partial') or report.get('exceptions')
+                    or not report.get('period_has_coverage')):
+                from .studio_report_refresh import SourcePending
+                self.refresh.reject_projection(preparation_key)
+                raise SourcePending(datetime.now(timezone.utc).timestamp() + 300)
+            report.update(preparation_key=preparation_key, source_checks=source_checks)
         # Freeze rendered parts too. A delivery retry uses the same content hash
         # even when font versions or optional chart availability change.
         parts = [{'kind': 'message', 'content': chunk, 'status': 'pending'} for chunk in split_messages(summary(report))]
+        if source_checks:
+            checked = min(check['checked_at'] for check in source_checks.values())
+            parts.insert(0, {'kind': 'message', 'content':
+                f"Sources checked: {timestamp(checked).astimezone(self.config.tz).isoformat()}. "
+                f"Reporting cutoff: {selector['end']}. Hours, invoices and payments use one verified snapshot.",
+                'status': 'pending'})
         try:
             if month_report is not None:
                 for period_report, filename in [(report, 'studio-hours-week.png'),
@@ -208,6 +232,17 @@ class StudioReportService(TimesheetService):
                                      for chunk in split_messages(summary(month_report)))
                     parts.append({'kind': 'file', 'filename': filename,
                                   'content': base64.b64encode(render_chart(period_report)).decode('ascii'),
+                                  'status': 'pending'})
+                if preparation_key:
+                    from .studio_client_balance import build_balance_report, render_chart as balance_chart, summary as balance_summary
+                    owner = finance_owners[0]
+                    payment_report = build_balance_report(self.clients[owner], month_selector,
+                        snapshot['clients'][owner], request['requested_at'])
+                    report['payment_report'] = payment_report
+                    parts.extend({'kind': 'message', 'content': chunk, 'status': 'pending'}
+                                 for chunk in split_messages(balance_summary(payment_report)))
+                    parts.append({'kind': 'file', 'filename': 'studio-client-payment-burndown.png',
+                                  'content': base64.b64encode(balance_chart(payment_report)).decode('ascii'),
                                   'status': 'pending'})
             else:
                 chart = render_chart(report)
@@ -301,7 +336,13 @@ class StudioReportService(TimesheetService):
             from .studio_client_balance_source import load_balance_snapshot, validate_snapshot_age
             if not self.balance_enabled:
                 raise TimesheetError('client_balance_not_configured')
-            snapshot = load_balance_snapshot(self.balance_path, self.config, self.clients)
+            if report.get('preparation_key'):
+                if not self.refresh or len(report['finance_owners']) != 1:
+                    raise TimesheetError('studio_source_not_ready')
+                snapshot = self.refresh.frozen(report['preparation_key'], report['finance_owners'][0],
+                                               request['selector']['end'], now)
+            else:
+                snapshot = load_balance_snapshot(self.balance_path, self.config, self.clients)
             if fingerprint(snapshot) != report.get('finance_digest'):
                 raise TimesheetError('client_balance_source_changed')
             for owner in report['finance_owners']:
@@ -328,6 +369,10 @@ class StudioReportService(TimesheetService):
 
     def failure_notice(self, request):
         error = request.get('error')
+        if error == 'studio_source_waiting_data':
+            return False, ('Your Friday charts are waiting for verified hours, invoices or payments. '
+                'Some data is missing, unreviewed or lacks precise work dates; unavailable data has not been counted as zero. '
+                'I’ll retry every five minutes and send the charts when the checks pass, using the original Friday 5 pm Melbourne cutoff.')
         if request.get('report_kind') == 'client_balance':
             if error in {'client_balance_not_configured', 'client_balance_access_unavailable',
                          'client_access_not_configured', 'report_client_unavailable', 'invalid_report_client'}:
@@ -388,6 +433,7 @@ def main(argv=None):
         config, clients = configuration(env)
         schedules = weekly_configuration(env, clients)
         with httpx.Client(timeout=30, follow_redirects=False) as client:
+            from .studio_report_refresh import SourceRefresh
             api = StudioReportAPI(client, linear_key=env.get('TIMESHEET_LINEAR_READ_API_KEY'),
                                   slack_token=env.get('TIMESHEET_SLACK_BOT_TOKEN'))
             service = StudioReportService(config, api, clients, env.get('STUDIO_REPORTS_BACKFILL_FILE'),
@@ -395,7 +441,8 @@ def main(argv=None):
                 balance_enabled=flag(env, 'STUDIO_CLIENT_BALANCE_WORKER_ENABLED'),
                 balance_max_age_days=int(env.get('STUDIO_CLIENT_BALANCE_MAX_AGE_DAYS', '7')),
                 schedules=schedules,
-                allow_historical_snapshot=flag(env, 'STUDIO_REPORTS_HISTORICAL_FALLBACK_ENABLED'))
+                allow_historical_snapshot=flag(env, 'STUDIO_REPORTS_HISTORICAL_FALLBACK_ENABLED'),
+                refresh=SourceRefresh.from_env(env, config, clients, client))
             if args.recover:
                 if args.part is None or not (args.confirmed_absent or args.delivered_reference):
                     raise TimesheetError('delivery_confirmation_required')
@@ -436,6 +483,8 @@ def main(argv=None):
                 signal.signal(signum, lambda *_: stop.set())
             while not stop.is_set():
                 now = datetime.now(timezone.utc)
+                if service.refresh:
+                    service.refresh.prewarm(schedules, now)
                 results = enqueue_weekly(service, schedules, now)
                 results.extend(service.commands(now))
                 if results or args.once:

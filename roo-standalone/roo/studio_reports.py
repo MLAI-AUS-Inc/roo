@@ -260,11 +260,15 @@ def project_breakdown(report, selected, project_ids=None):
         for row in rows:
             key = (row['builder_id'], row['builder'])
             builders[key] = builders.get(key, 0) + row['units']
-        parts.append(f"• *{_escape(project_name)}: {display_hours(sum(row['units'] for row in rows), report.get('unit_scale', 4))}h*")
+        units = sum(row['units'] for row in rows)
+        uncertain = any(item.get('project') == project_name for item in report.get('exceptions', []))
+        amount = ('Unavailable' if uncertain and not units else
+                  display_hours(units, report.get('unit_scale', 4)) + ('h + unverified' if uncertain else 'h'))
+        parts.append(f"• *{_escape(project_name)}: {amount}*")
         if builders:
             parts.append('  ' + ' · '.join(f'{_escape(name)} {display_hours(units, report.get("unit_scale", 4))}h'
                 for (_, name), units in sorted(builders.items(), key=lambda pair: (-pair[1], pair[0]))))
-        else:
+        elif not uncertain:
             parts.append('  No counted work recorded.')
     return parts
 
@@ -482,7 +486,10 @@ def month_to_date_summary(report):
     if not report['complete']:
         parts.append('Unsupported dates and allocations are excluded; the total is qualified by source coverage and review notes.')
     if report['basis'] != 'completed_ticket_size_hours':
-        parts.append('Only full supported work periods inside the cutoff count. Estimated dates and daily proration are excluded.')
+        parts.append('Month-to-date uses the same reviewed allocation as calendar-month reports; '
+                     'this is not a daily clock-time log. Cutoff-day work needs supported times.')
+        if report.get('estimated_month_units'):
+            parts.append(f"Includes {display_hours(report['estimated_month_units'], scale)}h with estimated monthly allocation; exact source quantities are preserved.")
     for note in report.get('qualifications', []):
         parts.append(f"• {_escape(report['projects'][note['project_id']])}: {_escape(note['reason'])}")
     return '\n'.join(parts)
@@ -665,7 +672,11 @@ def render_chart(report, breakdown=None):
                 axes.set_xlabel('Invoice/recorded hour-units by project' if report.get('recorded_snapshot') else 'Recorded hours by project')
             axes.set_xlim(0, max([1, *values]) * 1.23)
             for index, value in enumerate(values):
-                axes.text(value + max([1, *values]) * .025, index, display_hours(round(value * scale), scale) + 'h', va='center', weight='bold')
+                uncertain = any(item.get('project') in {report['projects'][key] for key in groups[index]['project_ids']}
+                                for item in report.get('exceptions', []))
+                label = ('Unavailable' if uncertain and not value else
+                         display_hours(round(value * scale), scale) + ('h + unverified' if uncertain else 'h'))
+                axes.text(value + max([1, *values]) * .025, index, label, va='center', weight='bold')
         if report.get('period_has_coverage', report.get('weekly_has_coverage')) is False:
             axes.clear()
             axes.set_position([.10, .22, .82, .40 if warning else .52])
