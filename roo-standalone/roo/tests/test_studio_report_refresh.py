@@ -94,6 +94,7 @@ def test_missing_data_flags_retries_and_sends_one_notice_without_zero_charts(set
     assert http.post.call_count == 1
     assert setup.api.upload_csv.call_count == 0
     assert setup.api.post_message.call_count == 2
+    assert all('waiting for: hours coverage' in call.args[1] for call in setup.api.post_message.call_args_list)
     for event in events:
         queued = setup.service.weekly_queue.read(event['request'])
         assert queued['status'] == 'waiting_data' and queued['retry_at'] >= FRIDAY.timestamp() + 300

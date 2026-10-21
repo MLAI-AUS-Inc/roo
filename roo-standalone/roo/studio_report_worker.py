@@ -370,9 +370,31 @@ class StudioReportService(TimesheetService):
     def failure_notice(self, request):
         error = request.get('error')
         if error == 'studio_source_waiting_data':
-            return False, ('Your Friday charts are waiting for verified hours, invoices or payments. '
-                'Some data is missing, unreviewed or lacks precise work dates; unavailable data has not been counted as zero. '
-                'I’ll retry every five minutes and send the charts when the checks pass, using the original Friday 5 pm Melbourne cutoff.')
+            # Freeze the first gap notice too, so changing source status cannot
+            # change an already-sent notice's durable delivery hash on retry.
+            notices = ReceiptStore(self.config.directory / 'source-notices')
+            key = fingerprint({field: request[field] for field in ('actor', 'team', 'selector', 'requested_at')})
+            with notices.locked(key) as acquired:
+                if not acquired:
+                    raise TimesheetError('report_busy')
+                saved = notices.read(key)
+                if saved is None:
+                    _, _, targets = select_client(self.clients, request['actor'], request['selector'])
+                    owner = next(iter(targets)) if targets else request['actor']
+                    prepared = self.refresh.store.read(self.refresh.identity(owner, request['selector']['end'])) if self.refresh else None
+                    gaps = (prepared or {}).get('result', {}).get('missing', ['source_connection_unavailable'])
+                    labels = {'hours_coverage_missing': 'hours coverage',
+                        'new_invoices_require_review': 'new contractor invoices awaiting review',
+                        'contractor_invoice_sync_failed': 'contractor invoice sync',
+                        'work_allocation_requires_review': 'work allocations',
+                        'work_dates_require_review': 'precise work dates',
+                        'source_connection_unavailable': 'source connection'}
+                    missing = ', '.join(sorted({labels.get(code, 'invoice/payment verification') for code in gaps}))
+                    saved = {'text': f'Your Friday charts are waiting for: {missing}. '
+                        'Unavailable data has not been counted as zero. I’ll retry every five minutes and send the charts '
+                        'when the checks pass, using the original Friday reporting cutoff.'}
+                    notices.write(key, saved)
+                return False, saved['text']
         if request.get('report_kind') == 'client_balance':
             if error in {'client_balance_not_configured', 'client_balance_access_unavailable',
                          'client_access_not_configured', 'report_client_unavailable', 'invalid_report_client'}:
