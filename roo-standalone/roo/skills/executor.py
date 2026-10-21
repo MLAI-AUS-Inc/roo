@@ -14239,7 +14239,9 @@ Chunk {index} source: {label}
         if discount_applied is False and cost > 0:
             message += (
                 "\n\n💡 Startup founders may qualify for 4-point coworking after "
-                "submitting an eligible monthly update. Submit yours here: "
+                "approving an eligible monthly update and sharing it publicly or "
+                "with the MLAI community. Private approvals earn 5 Roo points and "
+                "do not unlock discounts. Share yours here: "
                 "https://mlai.au/platform/login?app=founder-tools&next=/founder-tools"
             )
 
