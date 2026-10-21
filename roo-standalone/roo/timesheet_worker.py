@@ -366,8 +366,8 @@ class TimesheetService:
                                               getattr(exc, 'retry_at', 0))
                     results.append({'request': key, 'status': request['status'], 'reason': code})
                 if request['status'] in {'error', 'needs_review', 'waiting_data'}:
-                    terminal, notice = self.failure_notice(request)
                     try:
+                        terminal, notice = self.failure_notice(request)
                         outcome = self.deliver_parts([{'kind': 'message', 'content': notice, 'status': 'pending'}],
                             request['actor'], 'notice-' + key, now)
                         if terminal and outcome == 'sent':
