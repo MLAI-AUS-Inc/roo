@@ -435,6 +435,15 @@ Nice work! Check out "@Roo tasks" to earn more 🦘
 ```
 
 ### Rewards Catalog
+
+Use current backend quotes and recorded charges for every price. New founder
+discounts require an approved monthly update shared publicly or with the MLAI
+community and the existing Australian startup eligibility checks. Private
+approvals earn 5 Roo points and do not unlock discounts. Already-earned
+discounts retain their original expiry. The discount lasts 30 days from first
+approval; edits and reapproval do not renew it. Do not infer eligibility from
+an audience choice or a generated draft.
+
 ```
 🎁 **Available Roo Rewards**
 Your balance: **12 points**
@@ -442,13 +451,14 @@ Lifetime earned: **42 points**
 
 • **Sticker** (`STICKER`) - 1 point
   _Merch; admin approval; you can redeem this now_
-• **1 Day Hot-desk** (`COWORKING_DAY`) - 4 points
+• **1 Day Hot-desk** (`COWORKING_DAY`) - 8 points, or 4 with an earned founder discount
   _Coworking; instant redemption; you can redeem this now_
 • **Free Workshop Ticket** (`WORKSHOP_FREE`) - 42 points
   _Events (Limited Stock); 5 left; admin approval; need 30 more points_
 
 **Other ways to use Roo Points**
-• SEO article generation costs 4 Roo Points.
+• SEO article generation costs 12 Roo Points, or 6 with an earned founder discount.
+• New founder discounts require an approved update shared publicly or with the MLAI community. Private approvals earn 5 Roo points and do not unlock discounts.
 • MLAI sometimes auctions merch, cool items, or experiences for a variable Roo Points bid. Highest bidder wins.
 
 **How lifetime earned Roo Points matter**
@@ -475,7 +485,7 @@ Keen to help? Just say "task claim ROO-0042" to get started!
 You beauty! 🎉
 
 Booked you in for **20 Dec 2025** at the coworking space.
-Cost: 1 point (Balance remaining: 14 points)
+Cost: 8 points
 
 See you there, legend!
 
@@ -486,7 +496,7 @@ Reminder: no food is permitted in the coworking space.
 ```
 Ah sorry mate, looks like you're a bit short on points.
 
-You need 1 point for coworking, but you've got 0.
+You need 8 points for coworking, but you've got 0.
 
 Here are some ways to earn points:
 • Check out open tasks with "@Roo tasks"
