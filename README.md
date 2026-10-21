@@ -245,6 +245,10 @@ pytest
 Prefer targeted tests while developing. Application tests are under
 `roo/tests`; bridge tests are under `bridge/tests`.
 
+Member event discounts bought with Roo Points, private confirmation and recovery
+are described in [the event discount guide](roo-standalone/docs/event-discounts.md).
+The capability is disabled by default and requires the matching backend feature.
+
 ## Skills
 
 Runtime skills are directories under `roo-standalone/skills`. Inspect the

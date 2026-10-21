@@ -827,6 +827,19 @@ class RooAgent:
         """
         text_lower = text.lower().strip()
 
+        # Spending confirmation is parsed from the original member command.
+        from .event_discounts import confirmation_quote_id, is_chat_event_discount_request
+        try:
+            if is_chat_event_discount_request(text):
+                return "quote_event_discount"
+        except ValueError:
+            # The quote handler rejects ambiguous/invalid event markers.
+            pass
+        if confirmation_quote_id(text):
+            return "redeem_event_discount"
+        if text_lower in {"my event discounts", "my event coupons"}:
+            return "list_event_redemptions"
+
         # 1. Self-only account linking. Keep the grammar exact so GitHub or
         # other integration-link requests continue through their own skills.
         if re.fullmatch(
@@ -939,6 +952,12 @@ class RooAgent:
         if action is None:
             return None
 
+        if action in {"quote_event_discount", "redeem_event_discount", "list_event_redemptions"}:
+            return await self._execute_fast_points(
+                user_id, action, text=text,
+                channel_id=channel_id, thread_ts=thread_ts,
+            )
+
         if action in {"flex_points", "delete_flex"}:
             return await self._execute_fast_points(
                 user_id,
@@ -1030,7 +1049,15 @@ class RooAgent:
                 internal_api_key=settings.INTERNAL_API_KEY or settings.ROO_API_KEY or settings.MLAI_API_KEY,
             )
             
-            if action in {"flex_points", "delete_flex"}:
+            if action in {"quote_event_discount", "redeem_event_discount", "list_event_redemptions"}:
+                msg = await self.skill_executor._handle_points_action(
+                    client=client, action=action, params={},
+                    text=kwargs.get("text", ""), user_id=user_id,
+                    channel_id=kwargs.get("channel_id"),
+                    thread_ts=kwargs.get("thread_ts"), skill=skill,
+                )
+
+            elif action in {"flex_points", "delete_flex"}:
                 msg = await self.skill_executor._handle_points_action(
                     client=client,
                     action=action,

@@ -14860,6 +14860,17 @@ Chunk {index} source: {label}
     ) -> Any:
         """Handle individual points actions."""
         if action in {
+            "quote_event_discount", "redeem_event_discount",
+            "get_event_redemption", "list_event_redemptions",
+        }:
+            from ..event_discounts import handle_event_discount
+
+            return await handle_event_discount(
+                client=client, action=action, params=params, text=text,
+                user_id=user_id, channel_id=channel_id, thread_ts=thread_ts,
+                settings=get_settings(),
+            )
+        if action in {
             "book_coworking", "admin_checkin_coworking", "check_coworking",
         }:
             try:

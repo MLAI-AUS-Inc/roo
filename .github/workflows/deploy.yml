@@ -102,6 +102,7 @@ jobs:
           # it in a separate process to keep the security suite isolated.
           python -m pytest roo/tests/test_start_here_introductions.py -q
           python -m pytest roo/tests/test_agent_routing.py -q
+          python -m pytest roo/tests/test_event_discounts.py -q
           python -m pytest roo/tests/test_routing_eval_gate.py -q
           python -m compileall -q roo bridge
           # Isolate these from older tests that install module-level doubles.

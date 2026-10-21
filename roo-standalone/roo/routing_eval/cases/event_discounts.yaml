@@ -1,0 +1,17 @@
+# Member discount intent and deterministic spending consent.
+- id: points-event-discount-request
+  text: "I want to spend my points to get a discount to XYZ event"
+  expect: {skill: mlai-points, action: quote_event_discount}
+  tags: [event-discounts]
+- id: fast-event-discount-confirmation
+  text: "confirm event discount 00000000-0000-4000-8000-000000000001"
+  expect: {skill: mlai-points, action: redeem_event_discount}
+  tags: [event-discounts, fast-path]
+- id: fast-event-discounts-history
+  text: "my event discounts"
+  expect: {skill: mlai-points, action: list_event_redemptions}
+  tags: [event-discounts, fast-path]
+- id: fast-event-discount-card-request
+  text: "I want to spend my Roo Points to get a discount to Public Event Title (Luma event ID: evt-explicit-choice). Please check eligibility and quote the points cost and discount before I confirm."
+  expect: {skill: mlai-points, action: quote_event_discount}
+  tags: [event-discounts, fast-path]

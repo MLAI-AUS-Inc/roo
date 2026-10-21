@@ -636,6 +636,60 @@ class MLAIBackendClient:
         )
 
 
+    async def _event_discount_request(
+        self, method: str, suffix: str, *, payload: Optional[dict] = None,
+        request_id: Optional[str] = None,
+    ) -> dict:
+        """Call the member-only service with verified private actor context."""
+        from ..event_discounts import trusted_actor_payload
+
+        if self.surface != "public" or not self.roo_api_key:
+            raise BackendIdentityError("Public Roo service authentication is required")
+        values = {**(payload or {}), **trusted_actor_payload(self.actor_context)}
+        headers = {"X-API-Key": self.roo_api_key}
+        if request_id:
+            headers["Idempotency-Key"] = request_id
+        response = await self._request(
+            method, self._api_v1_endpoint(f"points/event-discounts/{suffix}"),
+            json=values if method == "POST" else None,
+            params=values if method == "GET" else None,
+            headers=headers, request_id=request_id, timeout=30.0,
+            redact_logs=True,
+        )
+        self._raise_for_status_or_backend_unavailable(response)
+        result = response.json()
+        if not isinstance(result, dict):
+            raise MLAIBackendUnavailableError("Invalid event discount response")
+        return result
+
+    async def quote_event_discount(self, event_query: str) -> dict:
+        """Quote one backend-configured event offer without reserving points."""
+        return await self._event_discount_request(
+            "POST", "quote/", payload={"event_query": event_query},
+        )
+
+    async def redeem_event_discount(self, quote_id: str) -> dict:
+        """Redeem an explicitly confirmed quote with a stable retry key."""
+        from ..event_discounts import redemption_request_id, trusted_actor_payload
+
+        identity = trusted_actor_payload(self.actor_context)
+        request_id = redemption_request_id(
+            identity["slack_team_id"], identity["slack_user_id"], quote_id,
+        )
+        return await self._event_discount_request(
+            "POST", "redeem/", request_id=request_id,
+            payload={"quote_id": quote_id, "confirmed": True, "request_id": request_id},
+        )
+
+    async def get_event_redemption(self, redemption_id: str) -> dict:
+        """Retrieve the actor's existing coupon without another points spend."""
+        safe_id = str(UUID(str(redemption_id)))
+        return await self._event_discount_request("GET", f"redemptions/{safe_id}/")
+
+    async def list_event_redemptions(self) -> dict:
+        """Retrieve only the verified actor's event redemption history."""
+        return await self._event_discount_request("GET", "redemptions/")
+
     def _org_memory_endpoint(self, suffix: str) -> str:
         """Support backend base URLs with or without an /api/v1 suffix."""
 
