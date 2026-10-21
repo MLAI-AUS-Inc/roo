@@ -6,6 +6,11 @@ request comes from a channel. Public Roo queues authenticated request metadata;
 a separate worker owns source credentials, verified client/project mappings,
 snapshots and delivery receipts. The feature is disabled by default.
 
+The private worker can explicitly enable labelled historical charts when the
+reviewed source expires, using `STUDIO_REPORTS_HISTORICAL_FALLBACK_ENABLED`.
+The default is false. The [hours and purchased-hours guide](studio-client-balance.md)
+describes the cutoff labels, unavailable periods and remaining source checks.
+
 ## Client experience
 
 - “How many of my 40 Studio hours have we used this month?”

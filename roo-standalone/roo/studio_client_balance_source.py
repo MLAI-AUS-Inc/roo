@@ -215,7 +215,8 @@ def load_balance_snapshot(path, config, clients):
     return validate_balance_snapshot(value, config, clients)
 
 
-def select_balance_dataset(snapshot, config, clients, actor, selector, now, *, max_age_days=7):
+def select_balance_dataset(snapshot, config, clients, actor, selector, now, *, max_age_days=7,
+                           allow_historical=False):
     """Existing project grants are necessary; a reviewed finance scope is required too."""
     if selector.get('client', 'self').casefold() == 'all':
         raise TimesheetError('client_balance_single_client_required')
@@ -224,15 +225,21 @@ def select_balance_dataset(snapshot, config, clients, actor, selector, now, *, m
     dataset = snapshot['clients'].get(owner)
     if dataset is None or set(dataset['project_ids']) != set(client['project_ids']):
         raise TimesheetError('client_balance_access_unavailable')
-    validate_snapshot_age(dataset, now, max_age_days=max_age_days)
+    validate_snapshot_age(dataset, now, max_age_days=max_age_days, allow_historical=allow_historical)
     return client, dataset, owner
 
 
-def validate_snapshot_age(dataset, now, *, max_age_days=7):
-    """The same freshness boundary applies to every view of reviewed work."""
+def validate_snapshot_age(dataset, now, *, max_age_days=7, allow_historical=False):
+    """Return whether the review expired; historical delivery requires explicit opt-in.
+
+    Historical mode never changes the review timestamp or coverage, and never
+    accepts a future-dated review. Callers must label every rendered view.
+    """
     as_of = timestamp(dataset['as_of'])
     current = timestamp(now)
     if type(max_age_days) is not int or not 1 <= max_age_days <= 31:
         raise TimesheetError('invalid_client_balance_max_age')
-    if as_of > current + timedelta(minutes=5) or current - as_of > timedelta(days=max_age_days):
+    expired = current - as_of > timedelta(days=max_age_days)
+    if as_of > current + timedelta(minutes=5) or (expired and not allow_historical):
         raise TimesheetError('client_balance_source_stale')
+    return expired

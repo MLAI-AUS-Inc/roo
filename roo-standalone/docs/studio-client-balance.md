@@ -35,6 +35,24 @@ report shows its source timestamp and reviewed coverage. A source older than sev
 days fails closed by default; an operator must refresh the audit and publish a new
 snapshot. An `as_of` timestamp should reflect a real review, not a file copy date.
 
+When the operator explicitly enables
+`STUDIO_REPORTS_HISTORICAL_FALLBACK_ENABLED=true` in the **private worker**,
+an expired review can instead produce a historical report. The text and every
+chart prominently identify the review/coverage cutoff. Work, receipts and invoice
+status remain bounded by the original reviewed coverage; later activity is
+unavailable, never zero. No review timestamp, source record, purchase rate or
+access grant is changed. Future-dated reviews, invalid sources and changed source
+digests still block delivery. A saved current report that expires before delivery
+is blocked rather than delivered without a historical label. The default is
+`false`, preserving the current-source freshness requirement.
+
+For datasets with `hours_reporting: true`, hours/payment requests include the
+payment burndown, monthly hours by project and total hours by project. All three
+charts use the same frozen reviewed dataset and cutoff; they make no additional
+accounting or Linear reads. Historical fallback also applies to Friday reports,
+where an uncovered week is shown as unavailable. It does not refresh the source:
+current Friday totals still require the reviewed evidence handoff to be updated.
+
 ## Ask Roo
 
 ```text

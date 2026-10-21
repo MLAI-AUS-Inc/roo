@@ -12,7 +12,7 @@ from io import BytesIO
 from threading import Lock
 
 from .payment_reminders import _escape
-from .studio_reports import TZ, resolve_period
+from .studio_reports import TZ, resolve_period, reviewed_cutoff_notice
 from .timesheets import TimesheetError, csv_file, timestamp
 
 HOUR_UNITS = 1_000_000
@@ -230,6 +230,8 @@ def summary(report):
     detailed = report['selector']['action'] == 'detailed'
     recorded_units = report.get('recorded_units_basis', False)
     parts = [f"*Studio hours and paid credits · {_escape(report['client'])}*"]
+    if reviewed_cutoff_notice(report):
+        parts.append('*' + reviewed_cutoff_notice(report) + '*')
     if report['period_has_coverage']:
         parts.extend([f"{report['start']} – {report['end']}",
                       f"{'Invoice/recorded hour-units' if recorded_units else 'Recorded hours used'}: *{display_hours(report['used_hour_units'])}h*",
@@ -357,6 +359,11 @@ def render_chart(report):
         canvas = FigureCanvasAgg(figure)
         axes = figure.add_subplot(111)
         figure.subplots_adjust(left=.12, right=.94, top=.69 if report['scope_label'] else .735, bottom=.25)
+        if reviewed_cutoff_notice(report):
+            figure.subplots_adjust(top=.63)
+            figure.text(.06, .68, f"Historical snapshot · reviewed through {report['coverage_through']}\n"
+                        'Later work, receipts and invoice status unavailable',
+                        fontsize=10, weight='bold', color='#9a4a00')
         figure.text(.06, .94, 'Studio work units and paid credits' if recorded_units else 'Studio hours and paid credits',
                     fontsize=22, weight='bold', color='#142c3a')
         figure.text(.06, .875, textwrap.shorten(report['client'], width=75, placeholder='…'), fontsize=14, color='#334b58')

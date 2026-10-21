@@ -279,6 +279,16 @@ def client_breakdown(report):
     return parts
 
 
+def reviewed_cutoff_notice(report):
+    """Keep the review cutoff visible when a historical fallback is rendered."""
+    if not report.get('source_stale'):
+        return ''
+    source = report.get('source_as_of', report.get('as_of'))
+    reviewed = timestamp(source).astimezone(TZ).strftime('%d %b %Y')
+    return (f"Historical snapshot · reviewed through {report['coverage_through']}. "
+            f"Last review: {reviewed} (Melbourne). Later activity is unavailable.")
+
+
 def summary(report):
     if report['selector'].get('period') == 'weekly':
         return weekly_summary(report)
@@ -290,6 +300,12 @@ def summary(report):
     detailed = report['selector']['action'] == 'detailed'
     heading = 'Studio hours' if report['selector'].get('client') else 'Your Studio hours'
     parts = [f"*{heading} · {_escape(report['client'])}*"]
+    if reviewed_cutoff_notice(report):
+        parts.append('*' + reviewed_cutoff_notice(report) + '*')
+    if report.get('period_has_coverage') is False:
+        parts.append('Hours are unavailable for the requested period; reviewed coverage ends '
+                     + report['coverage_through'] + '. Missing activity has not been counted as zero.')
+        return '\n'.join(parts)
     many = len(report['monthly']) > 1
     current = timestamp(report['generated_at']).astimezone(TZ).strftime('%Y-%m')
     if many:
@@ -309,6 +325,9 @@ def summary(report):
         parts.append(f"*{hours(report['estimated_month_units'])}h have estimated month assignments.* "
                      'These redistribute existing hours; the detailed report explains each invoice/work-date assumption.')
     for month in report['monthly']:
+        if month.get('coverage_available') is False:
+            parts.append(f"\n*{month_label(month['month'])} — hours unavailable outside reviewed coverage*")
+            continue
         used, allowance = month['units'], month['allowance_units']
         usage = (f'{hours(used)} hours used' if allowance is None else
                  f'{hours(used)} of {hours(allowance)} hours used')
@@ -316,7 +335,9 @@ def summary(report):
             usage = f'{hours(used)}h ' + ('allocated total' if month.get('estimated_units') else 'dated subtotal')
             usage += f' · {hours(allowance)}h allowance' if allowance is not None else ''
         parts.append(f"\n*{month_label(month['month'])} — {usage}*"
-                     + (' · month to date' if many and month['month'] == current else ''))
+                     + (f" · through {report['coverage_through']}" if report.get('recorded_snapshot')
+                        and month['month'] == report['coverage_through'][:7] and report.get('partial') else
+                        ' · month to date' if many and month['month'] == current else ''))
         if month.get('estimated_units'):
             parts.append(f"Includes {hours(month['estimated_units'])}h assigned using estimated work months."
                          + (" Remaining hours and overages aren't confirmed."
@@ -396,6 +417,7 @@ def weekly_summary(report):
     unavailable = report.get('weekly_has_coverage') is False and not report['rows']
     quantity = 'invoice/recorded hour-units' if report.get('recorded_snapshot') else 'hours'
     parts = [f"*Weekly Studio hours · {_escape(report['client'])}*",
+             *(['*' + reviewed_cutoff_notice(report) + '*'] if reviewed_cutoff_notice(report) else []),
              week_label(report['selector']) + ' · end time excluded',
              '*Weekly hours unavailable — reviewed records do not cover this week.*' if unavailable else
              f"*{hours(total_units(report))} {quantity} counted this week*"
@@ -446,6 +468,8 @@ def month_to_date_summary(report):
     title = month_label(report['selector']['month']) + ' · month to date'
     quantity = 'invoice/recorded hour-units' if report.get('recorded_snapshot') else 'hours'
     parts = [f'*{title}*', week_label(report['selector']) + ' · end time excluded']
+    if reviewed_cutoff_notice(report):
+        parts.insert(1, '*' + reviewed_cutoff_notice(report) + '*')
     parts.append('Reviewed records do not cover this period; monthly hours are unavailable.' if unavailable else
                  f'*{display_hours(total_units(report), scale)} {quantity} counted*'
                  + (' · partial total' if not report['complete'] else ''))
@@ -550,6 +574,12 @@ def render_chart(report, breakdown=None):
         axes = figure.add_subplot(111)
         bottom = (1.15 + .3 * legend_rows) / height if monthly_view else .22
         figure.subplots_adjust(left=.10 if monthly_view else .34, right=.92, top=.76, bottom=bottom)
+        warning = reviewed_cutoff_notice(report)
+        if warning:
+            figure.subplots_adjust(top=.66)
+            figure.text(.06, .745, f"Historical snapshot · reviewed through {report['coverage_through']}\n"
+                        'Later activity unavailable · source refresh required for a current report',
+                        fontsize=10, weight='bold', color='#9a4a00')
         figure.text(.06, .93, 'Weekly Studio hours' if weekly else
                     'Month-to-date Studio hours' if month_to_date else
                     'Studio hours' if report['selector'].get('client') else 'Your Studio hours',
@@ -560,7 +590,10 @@ def render_chart(report, breakdown=None):
             labels = [month_offset(m['month'], 0).strftime('%b %Y') for m in monthly]
             current = timestamp(report['generated_at']).astimezone(TZ).strftime('%Y-%m')
             axis_labels = [label + ('*' if month.get('estimated_units') else '')
-                           + ('\n(to date)' if month['month'] == current else '')
+                           + (f"\n(through {report['coverage_through'][8:10]} {month_offset(month['month'], 0):%b})"
+                              if report.get('recorded_snapshot') and report.get('partial')
+                              and month['month'] == report['coverage_through'][:7] else
+                              '\n(to date)' if month['month'] == current and not warning else '')
                            for label, month in zip(labels, monthly)]
             values = [m['units'] / scale for m in monthly]
             allowances = [m['allowance_units'] / scale if m['allowance_units'] is not None else None for m in monthly]
@@ -595,7 +628,8 @@ def render_chart(report, breakdown=None):
                             'Hours recorded' if report['basis'] == 'invoice_first_recorded_hours' else 'Hours used')
             axes.tick_params(axis='x', labelrotation=30 if len(monthly) > 6 else 0)
             for index, value in enumerate(values):
-                label = ('No dated\nhours' if value == 0 and index < len(monthly) and monthly[index]['unresolved']
+                label = ('Unavailable' if index < len(monthly) and monthly[index].get('coverage_available') is False else
+                         'No dated\nhours' if value == 0 and index < len(monthly) and monthly[index]['unresolved']
                          else display_hours(round(value * scale), scale) + 'h')
                 axes.annotate(label, (index, value), xytext=(0, 5),
                               textcoords='offset points', ha='center', zorder=4,
@@ -608,7 +642,9 @@ def render_chart(report, breakdown=None):
             if len(monthly) > 1 and not bounded:
                 period += ' – ' + month_offset(monthly[-1]['month'], 0).strftime('%b %Y')
             subtitle = f'{period} · total hours by {"client" if breakdown == "clients" else "project"}'
-            if not bounded and monthly[-1]['month'] == timestamp(report['generated_at']).astimezone(TZ).strftime('%Y-%m'):
+            if not bounded and report.get('recorded_snapshot') and report.get('partial'):
+                subtitle += ' · through ' + report['coverage_through']
+            elif not bounded and monthly[-1]['month'] == timestamp(report['generated_at']).astimezone(TZ).strftime('%Y-%m'):
                 subtitle += ' · to date'
             groups = (report['client_groups'] if breakdown == 'clients' else
                       [{'name': report['projects'][key], 'project_ids': [key]} for key in project_ids])
@@ -630,9 +666,9 @@ def render_chart(report, breakdown=None):
             axes.set_xlim(0, max([1, *values]) * 1.23)
             for index, value in enumerate(values):
                 axes.text(value + max([1, *values]) * .025, index, display_hours(round(value * scale), scale) + 'h', va='center', weight='bold')
-        if bounded and report.get('period_has_coverage', report.get('weekly_has_coverage')) is False:
+        if report.get('period_has_coverage', report.get('weekly_has_coverage')) is False:
             axes.clear()
-            axes.set_position([.10, .22, .82, .52])
+            axes.set_position([.10, .22, .82, .40 if warning else .52])
             axes.set_axis_off()
             axes.text(.5, .65, 'Reviewed hours unavailable',
                       transform=axes.transAxes, ha='center', fontsize=17, weight='bold', color='#334b58')
@@ -655,7 +691,7 @@ def render_chart(report, breakdown=None):
             caution = '\nPartial weekly total; see date exceptions and source qualifications.'
         if month_to_date and not report['complete']:
             caution = '\nPartial month-to-date total; see date exceptions and source qualifications.'
-        if bounded and report.get('period_has_coverage', report.get('weekly_has_coverage')) is False:
+        if report.get('period_has_coverage', report.get('weekly_has_coverage')) is False:
             basis = 'Hours unavailable · reviewed records do not cover this period'
             caution = ''
         if report.get('estimated_month_units'):

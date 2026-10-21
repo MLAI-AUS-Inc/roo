@@ -4,6 +4,7 @@ No ticket estimates or contractor money conversions enter this projection.
 Every microhour is allocated by the shared balance calculation exactly once.
 """
 from collections import defaultdict
+from datetime import date
 
 from .studio_client_balance import HOUR_UNITS, _allocated_days, build_balance_report
 from .studio_reports import month_offset
@@ -19,6 +20,10 @@ def build_recorded_report(config, client, selector, dataset, now):
     monthly = [{'month': month_offset(resolved['month'], i).strftime('%Y-%m'),
                 'units': 0, 'unresolved': 0, 'allowance_units': None}
                for i in range(resolved['months'])]
+    for month in monthly:
+        month['coverage_available'] = (balance['period_has_coverage']
+            and month_offset(month['month'], 0).date() <= date.fromisoformat(balance['end'])
+            and month_offset(month['month'], 1).date() > date.fromisoformat(balance['start']))
     by_month = {row['month']: row for row in monthly}
     invoices = {row['id']: row for row in dataset['contractor_invoices']}
     rows = []
@@ -64,6 +69,7 @@ def build_recorded_report(config, client, selector, dataset, now):
             'qualifications': qualifications, 'unallocated_units': 0,
             'estimated_month_units': sum(m.get('estimated_units', 0) for m in monthly),
             'recorded_snapshot': True, 'source_as_of': dataset['as_of'],
+            'period_has_coverage': balance['period_has_coverage'],
             'coverage_through': balance['coverage_through'], 'partial': balance['partial'],
             'limitations': list(dataset['limitations']), 'pending_work_count': balance['pending_work_count']}
 
@@ -111,6 +117,12 @@ def overlay_recorded_reports(report, reviewed):
                   partial=any(item['partial'] for item in reviewed),
                   limitations=list(dict.fromkeys(note for item in reviewed for note in item['limitations'])),
                   pending_work_count=sum(item['pending_work_count'] for item in reviewed))
+    if report.get('canonical_only') or covered == set(report['projects']):
+        for month in report['monthly']:
+            sources = [source_month for item in reviewed for source_month in item['monthly']
+                       if source_month['month'] == month['month']]
+            month['coverage_available'] = any(item.get('coverage_available', True) for item in sources)
+        report['period_has_coverage'] = any(item.get('period_has_coverage', True) for item in reviewed)
     if report['selector'].get('period') in {'weekly', 'month_to_date'}:
         report['period_has_coverage'] = all(item.get('period_has_coverage', True) for item in reviewed)
         if report['selector']['period'] == 'weekly':
