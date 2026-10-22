@@ -444,7 +444,7 @@ single shared local filesystem; separate unsynchronized replicas are unsupported
 
 ## Tests
 
-From `roo-standalone`, with synthetic credentials only:
+From `src`, with synthetic credentials only:
 
 ```bash
 SLACK_BOT_TOKEN=synthetic SLACK_SIGNING_SECRET=synthetic OPENAI_API_KEY=synthetic \

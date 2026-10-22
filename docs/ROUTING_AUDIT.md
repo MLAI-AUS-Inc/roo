@@ -1,6 +1,6 @@
 # Roo Routing Audit — Why Skill Selection Is Brittle
 
-**Date:** 2026-06-11 · **Scope:** `roo-standalone/` (agent.py, content_intent.py, skills/executor.py, main.py, skills/*/SKILL.md)
+**Date:** 2026-06-11 · **Scope:** `../roo-standalone` (agent.py, content_intent.py, skills/executor.py, main.py, skills/*/SKILL.md)
 
 ## TL;DR
 
@@ -24,7 +24,7 @@ Layers 2–5 are deterministic string matching. The LLM only sees messages that 
 
 ## Evidence: 28 realistic phrasings through the real code
 
-`routing_probe.py` (included alongside this report) imports the actual `content_intent.py` + SKILL.md frontmatter and replicates the agent's pre-LLM dispatch verbatim. Results for messages a community member would plausibly type:
+`../scripts/routing_probe.py` (included alongside this report) imports the actual `content_intent.py` + SKILL.md frontmatter and replicates the agent's pre-LLM dispatch verbatim. Results for messages a community member would plausibly type:
 
 | Message | Routed by | Routed to | Should be |
 |---|---|---|---|
@@ -88,8 +88,8 @@ Even when routing and `_extract_parameters` (executor.py:207) succeed, per-skill
 4. **Make channel scoping a routing constraint.** Filter the candidate skill list by `exclusive_channels` *before* routing, and boost `priority_channels` candidates in the router prompt — then delete the post-hoc refusals in the executors.
 5. **Fix the starved router config if you keep it short-term.** Include every skill in the examples (connect-users, medhack, watt, tone-of-voice are absent), pass the channel name always, raise reasoning effort, and expand descriptions. Cheap stopgap, real gains.
 6. **Loosen thread stickiness.** Sticky skill should be a router *hint* ("last skill in this thread was X"), not a bypass; drop the 2h TTL to something short or require the LLM to confirm continuation.
-7. **Build a routing eval set instead of one-phrase tests.** Collect real misrouted messages from Slack logs into a labelled set (message → expected skill/action, including `none`), run it in CI against the router. Then "fixing" routing means measurably improving the eval, not adding a regex that passes one test. `routing_probe.py` is a starting skeleton.
+7. **Build a routing eval set instead of one-phrase tests.** Collect real misrouted messages from Slack logs into a labelled set (message → expected skill/action, including `none`), run it in CI against the router. Then "fixing" routing means measurably improving the eval, not adding a regex that passes one test. `../scripts/routing_probe.py` is a starting skeleton.
 
 ## Files reviewed
 
-`roo/agent.py` (838 ln), `roo/content_intent.py` (246), `roo/skills/executor.py` (8,030), `roo/skills/loader.py` (243), `roo/main.py` (5,208, partial), `roo/config.py`, `roo/llm.py`, all 9 `skills/*/SKILL.md`, `roo/tests/test_agent_routing.py`. Probe script: `routing_probe.py`.
+`roo/agent.py` (838 ln), `roo/content_intent.py` (246), `roo/skills/executor.py` (8,030), `roo/skills/loader.py` (243), `roo/main.py` (5,208, partial), `roo/config.py`, `roo/llm.py`, all 9 `skills/*/SKILL.md`, `roo/tests/test_agent_routing.py`. Probe script: `../scripts/routing_probe.py`.

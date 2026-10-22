@@ -11,10 +11,10 @@ sale and a Stripe charge are two views of the same transaction. Stripe settles
 them to the bank as batched payouts — the payout is what gets reconciled.
 
 ## Key files
-- Luma-Stripe-Xero-Reconciliation-Plan.md — full plan + monthly runbook. Read first.
-- Luma-Stripe-Reconcile/luma_stripe_merge.py — the pull-and-merge script (real + --mock).
-- Luma-Stripe-Reconcile/README.md — how to run it.
-- Luma-Stripe-Reconcile/sample_reconciliation.xlsx — the target output shape.
+- `../../agents/plans/Luma-Stripe-Xero-Reconciliation-Plan.md` — full plan + monthly runbook. Read first.
+- `luma_stripe_merge.py` — the pull-and-merge script (real + --mock).
+- `README.md` — how to run it.
+- `sample_reconciliation.xlsx` — the target output shape.
 
 ## Output data model
 - Sales detail — one row per ticket: date bought, event, ticket type, buyer, gross,

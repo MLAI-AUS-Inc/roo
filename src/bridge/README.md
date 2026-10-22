@@ -3,7 +3,7 @@
 Mirrors channels between the **MLAI** workspace (the hub) and one or more partner
 Slack workspaces, relayed by this service on the droplet. Members of each org
 read and write entirely in their own workspace. Full design + rationale:
-[`../../SLACK_BRIDGE_PLAN.md`](../../SLACK_BRIDGE_PLAN.md).
+[`../../agents/plans/SLACK_BRIDGE_PLAN.md`](../../agents/plans/SLACK_BRIDGE_PLAN.md).
 
 ## Design
 

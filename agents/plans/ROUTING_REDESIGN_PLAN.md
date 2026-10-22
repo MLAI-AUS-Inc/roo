@@ -1,6 +1,6 @@
 # Roo Routing Redesign — Implementation Plan
 
-**Date:** 2026-06-11 · **Scope:** `roo-standalone/` · **Companion:** `ROUTING_AUDIT.md`, `routing_probe.py`
+**Date:** 2026-06-11 · **Scope:** `../../roo-standalone` · **Companion:** `../../docs/ROUTING_AUDIT.md`, `../../scripts/routing_probe.py`
 
 > **Status (2026-06-12):** Phases 0, 1, and 2 implemented (uncommitted, on `main`'s working tree).
 > Phase 0+1: eval harness `roo/routing_eval/` (174 cases) + `scripts/run_routing_eval.py` + pytest
@@ -24,7 +24,7 @@ Roo should pick the right skill and the right action inside it from *meaning*, n
 |---|---|---|
 | Skill selection accuracy on eval set | ≥ 95% | eval runner (Phase 0) |
 | Action selection accuracy (right skill *and* right action) | ≥ 90% | eval runner |
-| The 10 deterministic misroutes in `routing_probe.py` | 10/10 fixed | probe cases ported into eval set |
+| The 10 deterministic misroutes in `../../scripts/routing_probe.py` | 10/10 fixed | probe cases ported into eval set |
 | Existing blessed phrasings (all of `test_agent_routing.py`) | 100% still pass | ported into eval set as regression cases |
 | Paraphrase robustness: ≥ 8 phrasings per skill that appear nowhere in SKILL.md text | ≥ 90% | eval runner |
 | Misroute fix workflow | description/eval edit only, no `agent.py`/`executor.py` change | code review convention + lint |
@@ -83,14 +83,14 @@ Four load-bearing decisions:
   ```
 
 - Seed sources, in order:
-  1. the 28 cases in `routing_probe.py` (10 are known deterministic misroutes — tag them),
+  1. the 28 cases in `../../scripts/routing_probe.py` (10 are known deterministic misroutes — tag them),
   2. every phrasing asserted in `roo/tests/test_agent_routing.py` (~40 — these are the regression floor),
   3. real misrouted messages pulled from Slack (search Roo's history for threads where users rephrased or corrected it),
   4. 8–10 generated paraphrases per skill, human-reviewed, **including negative cases** ("summarise this article" → `none`) and cross-skill traps ("add a task to linear…" → linear-meeting-actions, not mlai-points).
   Target ≈ 150–200 cases at Phase 0, growing forever after.
 
 - `scripts/run_routing_eval.py` — runner with two modes:
-  - `--deterministic` — replays cases through the *current* pre-LLM funnel only (the logic `routing_probe.py` already replicates; import the real functions). Hermetic, runs on every PR.
+  - `--deterministic` — replays cases through the *current* pre-LLM funnel only (the logic `../../scripts/routing_probe.py` already replicates; import the real functions). Hermetic, runs on every PR.
   - `--full` — calls the real router (v1 now, v2 later) with live LLM. Run nightly and on any change to `skills/**`, `router.py`, or prompts. ~200 cases on a mini-class model costs cents.
   - Output: per-skill precision/recall, action accuracy, confusion matrix, and a diff vs a checked-in `baseline.json`. Non-zero exit on regression.
 

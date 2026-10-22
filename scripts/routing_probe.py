@@ -1,8 +1,11 @@
-"""Empirical probe of Roo's deterministic (pre-LLM) routing layers.
+"""Historical probe used for the June 2026 routing audit.
 
-Imports the REAL content_intent.py and loader.py, and replicates agent.py's
-pre-LLM dispatch order 1:1 (fast path -> parse_routing_intent -> _looks_like_*
--> keyword scoring). Anything not caught here falls through to the LLM router.
+This one-off script copies the routing logic as it existed at the time; it is
+not part of Roo's runtime or current test pipeline and may not reflect current
+behaviour. It also contains a hard-coded path from the original environment,
+so it is not runnable as-is in a normal checkout. The 28 cases were carried
+into roo-standalone/roo/routing_eval/cases/audit_misroutes.yaml; use the current
+routing eval harness for testing.
 """
 import re
 import sys
@@ -25,7 +28,7 @@ for d in sorted((REPO / "skills").iterdir()):
             "keywords": post.metadata.get("trigger_keywords", []) or [],
         })
 
-# ---- 1:1 copies of agent.py private matchers (they are pure functions) ----
+# ---- Historical copies of agent.py private matchers ----
 def looks_like_content(text):
     pats = (r'\barticle\b', r'\bblog(?:\s+post)?\b', r'\bseo\b', r'\bkeyword\b',
             r'\btopic\b', r'\bwrite\b.*\b(article|blog(?:\s+post)?)\b',
@@ -77,7 +80,7 @@ def fast_path(text):
     return None
 
 def route(text, has_file=False):
-    """Replicates RooAgent.handle_mention pre-LLM dispatch order."""
+    """Approximate the historical pre-LLM dispatch order."""
     clean = " ".join(normalize_slack_text(text).split()).strip()
     fp = fast_path(clean)
     if fp:

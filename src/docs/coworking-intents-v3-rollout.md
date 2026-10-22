@@ -25,7 +25,7 @@ and verify the active deployment revision and replay response contract; merely
 observing the table or an older receipt-capable release is not sufficient.
 
 Take a volume snapshot and stop every Roo process that can write the shared
-SQLite volume. From `roo-standalone`, run:
+SQLite volume. From `src`, run:
 
 ```bash
 python scripts/migrate_coworking_booking_intents_v3.py

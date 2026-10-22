@@ -7,7 +7,7 @@
 > - `mlai-backend` — Django + DRF, at `/Users/samdonegan/Documents/Code/mlai-backend`.
 >   Holds ALL secrets (Luma, Stripe, and the new Xero keys). All external API calls
 >   happen here.
-> - `roo-standalone` — FastAPI Slack agent, in THIS repo under `roo-standalone/`.
+> - `src` — FastAPI Slack agent, in THIS repo under `../../src`.
 >   Holds no secrets; talks to mlai-backend via `roo/clients/mlai_backend.py`.
 
 ---
@@ -72,10 +72,10 @@ Scopes needed: `accounting.transactions`, `accounting.settings.read`,
 
 | Piece | Where | Status |
 |---|---|---|
-| Merge/report engine (standalone) | `Luma-Stripe-Reconcile/luma_stripe_merge.py` (this repo) | ✅ Working, payout-driven, produces `brief.md` + 2-tab `xlsx`; mock verified. **Port this logic to mlai-backend in Phase 1** |
-| Cowork brief format | `Luma-Stripe-Reconcile/sample_reconciliation_cowork_brief.md` | ✅ Maps to Xero Create-tab fields (Who/What/Why/Event Name/Project Name/Tax Rate) |
-| Skill pipeline (LLM tool-calling router) | `roo-standalone/roo/router.py` (`route()` L327, `build_tools()` L203), `roo/skills/loader.py` (`load_skills()` L75) | ✅ Skills auto-discovered from `skills/<dir>/SKILL.md`; no manual registration |
-| Points-admin check (Roo side) | `roo-standalone/roo/clients/mlai_backend.py:1654` `is_admin()`; executor helpers `_is_full_points_admin_details` / `_full_points_admin_denial` (`executor.py` ~L6916–6933) | ✅ Roles `{admin, committee, portfolio_lead}`; copy the `create_task` gating pattern (executor.py ~L8729) |
+| Merge/report engine (standalone) | `../../scripts/Luma-Stripe-Reconcile/luma_stripe_merge.py` (this repo) | ✅ Working, payout-driven, produces `brief.md` + 2-tab `xlsx`; mock verified. **Port this logic to mlai-backend in Phase 1** |
+| Cowork brief format | `../../scripts/Luma-Stripe-Reconcile/sample_reconciliation_cowork_brief.md` | ✅ Maps to Xero Create-tab fields (Who/What/Why/Event Name/Project Name/Tax Rate) |
+| Skill pipeline (LLM tool-calling router) | `../../src/roo/router.py` (`route()` L327, `build_tools()` L203), `roo/skills/loader.py` (`load_skills()` L75) | ✅ Skills auto-discovered from `skills/<dir>/SKILL.md`; no manual registration |
+| Points-admin check (Roo side) | `../../src/roo/clients/mlai_backend.py:1654` `is_admin()`; executor helpers `_is_full_points_admin_details` / `_full_points_admin_denial` (`executor.py` ~L6916–6933) | ✅ Roles `{admin, committee, portfolio_lead}`; copy the `create_task` gating pattern (executor.py ~L8729) |
 | Points-admin check (backend side) | `mlai-backend/roo/permissions.py:34–53` `is_points_admin()` | ✅ Reuse as-is |
 | Role-gated integration endpoint template | `mlai-backend/integrations/api_views_luma.py:18–97` `LumaAttendeeReportView` + URL at `integrations/api_urls.py:19` | ✅ Copy this shape exactly (HasRooApiKey, `slack_user_id` query param, permission gate, base64 file payload) |
 | Luma service (no pricing yet) | `mlai-backend/integrations/services/luma.py:31–102` | ⚠️ Pulls guests/tickets/check-ins only — **no order amounts** |
@@ -100,7 +100,7 @@ accounting.contacts`. Put `XERO_CLIENT_ID` / `XERO_CLIENT_SECRET` into
 `mlai-backend/.env`. If Custom Connections isn't available on the plan, create a
 standard OAuth2 app instead and tell the agent — Phase 2 has a fallback note.
 
-**P0.2 (agent): ✅ DONE 2026-07-01 — see `Luma-Stripe-Reconcile/PHASE-0.2-FINDINGS.md`.**
+**P0.2 (agent): ✅ DONE 2026-07-01 — see `../../scripts/Luma-Stripe-Reconcile/PHASE-0.2-FINDINGS.md`.**
 Live read-only probes confirmed: Luma exposes per-order **amounts** in integer cents
 (`event_ticket_orders[].amount` + `currency`, via `get-guest` detail); Stripe payouts
 + balance_transactions work and **tie out to the cent**; and — critically — every
@@ -113,7 +113,7 @@ the spine, Luma is per-event enrichment, and the Xero split drops the Luma-fee l
 
 **P0.3 (agent):** Read-only Xero sanity check: with the new credentials, call
 `GET https://api.xro/2.0/Organisation`, `GET /Accounts`, `GET /TrackingCategories`.
-Record (into `Luma-Stripe-Reconcile/xero_map.json`, committed):
+Record (into `../../scripts/Luma-Stripe-Reconcile/xero_map.json`, committed):
 - The **bank account** code/ID the Stripe payouts land in (match by name with Sam).
 - Account codes for ticket income / Stripe fees / Luma fees (create in Xero UI if
   missing — human step; suggest names "Ticket Sales", "Stripe Fees", "Luma Fees").
@@ -137,7 +137,7 @@ Sam has signed off on account codes + tracking policy.
 > Branch: `feature/luma-stripe-reconciliation` in mlai-backend.
 
 **1.1 `integrations/services/reconciliation.py` (new)** — `LumaStripeReconciliationService`.
-Port the logic from this repo's `Luma-Stripe-Reconcile/luma_stripe_merge.py`:
+Port the logic from this repo's `../../scripts/Luma-Stripe-Reconcile/luma_stripe_merge.py`:
 
 - **Stripe side (payout-driven — this ordering matters):**
   `GET /v1/payouts?arrival_date[gte]=&arrival_date[lt]=` then per payout
@@ -282,7 +282,7 @@ bank rec screen shows the green Match for that deposit).
 
 ## Phase 3 — roo-standalone: client methods
 
-> Branch in THIS repo, `roo-standalone/roo/clients/mlai_backend.py`. Mirror
+> Branch in THIS repo, `../../src/roo/clients/mlai_backend.py`. Mirror
 > `get_luma_attendee_report` (L1097–1126).
 
 ```python

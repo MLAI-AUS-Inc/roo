@@ -2,7 +2,7 @@
 
 Roo is MLAI's Slack-facing AI agent service. The active FastAPI application,
 tests, skills, runtime configuration, and Docker files live under
-[`roo-standalone/`](roo-standalone/).
+[`src/`](src/).
 
 Roo integrates with Slack, `mlai-backend`, Linear, content services, and
 configured AI providers. It supports separate public and administrative
@@ -10,7 +10,8 @@ surfaces; their credentials and permissions must remain isolated.
 
 For the wider platform map, start with
 [`mlai-engineering`](https://github.com/MLAI-AUS-Inc/mlai-engineering). AI
-coding agents must read [`AGENTS.md`](AGENTS.md).
+coding agents must read [`agents/AGENTS.md`](agents/AGENTS.md). Repository
+quality work is recorded in the [improvement log](IMPROVEMENT_LOG.md).
 
 ## Repository layout
 
@@ -25,6 +26,7 @@ roo/
 │   ├── .env.example          # Public Roo configuration template
 │   ├── .env.admin.example    # Admin Roo configuration template
 │   └── docker-compose*.yml   # Runtime profiles
+├── agents/                   # Coding-agent instructions and plans
 ├── Luma-Stripe-Reconcile/    # Standalone reconciliation utility
 └── *.md                      # Historical audits and implementation plans
 ```
@@ -34,23 +36,23 @@ authoritative runtime instructions unless this README or a current service
 document links to them explicitly.
 
 Studio timesheet commands, local testing, cutoff rules and recovery are described
-in [the timesheet guide](roo-standalone/docs/studio-timesheets.md). The feature is
+in [the timesheet guide](src/docs/studio-timesheets.md). The feature is
 disabled by default and uses a separate report worker.
 
 Member invoices to MLAI, fillable PDF details, fortnightly draft/final delivery
-and recovery are described in [the invoice guide](roo-standalone/docs/studio-invoices.md).
+and recovery are described in [the invoice guide](src/docs/studio-invoices.md).
 They extend the same private timesheet worker and are disabled by default.
 
 Client-owned monthly usage reports, opt-in Friday reports, project/builder
 breakdowns and detailed work exports are described in
-[the client hours guide](roo-standalone/docs/studio-client-hours.md).
+[the client hours guide](src/docs/studio-client-hours.md).
 They use a separate opt-in worker and verified client/project mappings.
 
 Client hours used versus purchased-hour credits, with a private balance chart and
 reviewed invoice/payment evidence, are described in the
-[hours and purchased-hours guide](roo-standalone/docs/studio-client-balance.md).
+[hours and purchased-hours guide](src/docs/studio-client-balance.md).
 
-The [30 September company-brain review](roo-standalone/docs/company-brain/2026-09-30-review-and-plan.md) preserves a dated, aggregate-only inspection and a proposed delivery plan. It is historical context and does not authorize changes to either runtime.
+The [30 September company-brain review](src/docs/company-brain/2026-09-30-review-and-plan.md) preserves a dated, aggregate-only inspection and a proposed delivery plan. It is historical context and does not authorize changes to either runtime.
 
 ## Requirements
 
@@ -61,7 +63,7 @@ The [30 September company-brain review](roo-standalone/docs/company-brain/2026-0
 
 ## Local setup
 
-Run application commands from `roo-standalone`, not the repository root:
+Run application commands from `src`, not the repository root:
 
 ```bash
 cd roo-standalone
@@ -99,7 +101,7 @@ editing or authorize the reader in other channels. Production's
 ### Configure the local services
 
 Complete the local setup above, then populate the untracked
-`roo-standalone/.env` in the checkout or worktree you will actually run:
+`src/.env` in the checkout or worktree you will actually run:
 
 ```dotenv
 SLACK_BOT_TOKEN=xoxb-replace-with-roo-dev-bot-token
@@ -118,7 +120,7 @@ worktree has its own local `.env`; switching worktrees does not copy it.
 
 For Linear queries, configure the local backend's database, `LINEAR_API_KEY`,
 channel binding, and matching `ROO_API_KEY` using the
-[Linear channel reader guide](roo-standalone/docs/linear-channel-issues.md).
+[Linear channel reader guide](src/docs/linear-channel-issues.md).
 Start Django from that backend checkout with its development environment active:
 
 ```bash
@@ -130,7 +132,7 @@ explicit approval for the specific migration. The backend's local Compose web
 service enables migrations on startup, so use the direct command above for
 this workflow.
 
-In another terminal, from `roo-standalone` with its virtual environment active:
+In another terminal, from `src` with its virtual environment active:
 
 ```bash
 uvicorn roo.main:app --reload --host 127.0.0.1 --port 8000
@@ -178,7 +180,7 @@ token belongs to a user and workspace and can manage multiple apps; it is not
 limited to Roo Dev.
 
 Store the returned values in the running worktree's untracked
-`roo-standalone/.env`:
+`src/.env`:
 
 ```dotenv
 SLACK_CONFIG_TOKEN=replace-with-configuration-access-token
@@ -236,7 +238,7 @@ channel; a successful chat reply alone does not verify the backend integration.
 
 ## Tests
 
-From `roo-standalone`:
+From `src`:
 
 ```bash
 pytest
@@ -246,14 +248,14 @@ Prefer targeted tests while developing. Application tests are under
 `roo/tests`; bridge tests are under `bridge/tests`.
 
 Member event discounts bought with Roo Points, private confirmation and recovery
-are described in [the event discount guide](roo-standalone/docs/event-discounts.md).
+are described in [the event discount guide](src/docs/event-discounts.md).
 The capability is disabled by default and requires the matching backend feature.
 
 ## Skills
 
-Runtime skills are directories under `roo-standalone/skills`. Inspect the
+Runtime skills are directories under `src/skills`. Inspect the
 selected skill package and its tests before changing routing or permissions.
-The similarly named Python modules under `roo-standalone/roo/skills` implement
+The similarly named Python modules under `src/roo/skills` implement
 application-side behavior and are not Markdown-only skill definitions.
 
 Skill availability is constrained by the runtime surface and configuration.
@@ -287,7 +289,7 @@ it. Compose startup may contact external services when credentials are present.
 
 ## Slack configuration
 
-Slack manifests live in `roo-standalone/slack-app-manifests`. Required scopes
+Slack manifests live in `src/slack-app-manifests`. Required scopes
 depend on the enabled features. File handling requires `files:read`; contextual
 Linear features require the appropriate channel history/read scopes plus
 `users:read` and `users:read.email` for identity matching. Reinstalling a Slack
@@ -295,12 +297,12 @@ application may rotate credentials, so coordinate manifest changes with the
 runtime owner.
 
 For the local, channel-bound Linear issue reader workflow, see
-[`roo-standalone/docs/linear-channel-issues.md`](roo-standalone/docs/linear-channel-issues.md).
+[`src/docs/linear-channel-issues.md`](src/docs/linear-channel-issues.md).
 
 Office Manager volunteering and Victor applicant reporting were retired on
 12 October 2026. Coworking and meeting-room bookings remain supported.
-The former [Office Manager runbook](roo-standalone/docs/office-manager.md)
-and [Victor reporting runbook](roo-standalone/docs/victor-ai-applications.md)
+The former [Office Manager runbook](src/docs/office-manager.md)
+and [Victor reporting runbook](src/docs/victor-ai-applications.md)
 now record retirement and historical-data behavior.
 
 ## Scheduled jobs
@@ -308,7 +310,7 @@ now record retirement and historical-data behavior.
 Builder payment reminders have a separate, opt-in worker. It DMs each configured
 human member of #mlai-studio-builders their full list of open Linear tasks (or an
 hours reminder when none are open) on the Thursday before a fortnightly
-payment Friday. See the [payment reminder guide](roo-standalone/docs/payment-reminders.md)
+payment Friday. See the [payment reminder guide](src/docs/payment-reminders.md)
 for configuration, preview, activation, and delivery recovery.
 
 The recommended production arrangement keeps `JOBS_SCHEDULER_ENABLED=false` in

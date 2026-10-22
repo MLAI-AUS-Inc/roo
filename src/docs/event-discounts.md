@@ -93,7 +93,7 @@ private explanation rather than raw backend responses or upstream details.
 
 ## Verification
 
-From `roo-standalone`, with the isolated development virtualenv:
+From `src`, with the isolated development virtualenv:
 
 ```bash
 SLACK_BOT_TOKEN=test SLACK_SIGNING_SECRET=test OPENAI_API_KEY=test \

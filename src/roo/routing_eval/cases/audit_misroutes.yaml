@@ -1,4 +1,4 @@
-# The 28 probe cases from ROUTING_AUDIT.md / routing_probe.py, labelled with
+# The 28 probe cases from docs/ROUTING_AUDIT.md / scripts/routing_probe.py, labelled with
 # what the user actually wanted. Cases tagged `misroute-guard` were routed to
 # the WRONG skill deterministically (before any LLM) at audit time (2026-06-11).
 #

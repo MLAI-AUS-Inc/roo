@@ -2,7 +2,7 @@
 
 Historical evidence for the original slash-command version. The subsequently
 approved mention entry point is documented in
-[the current guide](../../../roo-standalone/docs/coworking-today-command.md).
+[the current guide](../../../src/docs/coworking-today-command.md).
 
 Implemented on `codex/coworking-booking-command` in both repositories, starting
 from current `origin/main` snapshots. Code commits:
@@ -50,7 +50,7 @@ before Slack's three-second deadline.
 
 Code is committed locally; no push, merge, deployment, or Slack registration
 has occurred. Staging smoke checks remain outstanding. See
-[the rollout guide](../../../roo-standalone/docs/coworking-today-command.md).
+[the rollout guide](../../../src/docs/coworking-today-command.md).
 
 ## Independent review
 

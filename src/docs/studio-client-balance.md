@@ -273,7 +273,7 @@ STUDIO_CLIENT_BALANCE_MAX_AGE_DAYS=7
 workspace, organization, builder/project mappings and client grants are reused.
 Public Roo holds no Xero token, invoice attachment directory or financial snapshot.
 
-From `roo-standalone`, validate the operator-reviewed source offline:
+From `src`, validate the operator-reviewed source offline:
 
 ```bash
 python scripts/install_studio_client_balance.py \

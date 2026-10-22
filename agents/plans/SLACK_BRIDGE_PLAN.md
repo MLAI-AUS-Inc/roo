@@ -1,6 +1,6 @@
 # Slack Cross-Org Channel Bridge — Implementation Plan
 
-> **Status (updated 2026-07-20):** Running as a **dedicated "Bridge" Slack app installed in both workspaces** — the symmetric two-bot design (a.k.a. Path A). Both channels are polled and `chat:write.customize` preserves author name/avatar. Destination-aware native mentions are supported through explicit ID overrides, exact email matching, and Slack-autocomplete-safe qualified handles such as `hex:alice` (with legacy `@hex:alice` support). Identity directories include configured channel members so Slack Connect participants omitted by `users.list` remain addressable; unresolved identities remain inert. Roo is untouched. Code lives in `roo-standalone/bridge/`.
+> **Status (updated 2026-07-20):** Running as a **dedicated "Bridge" Slack app installed in both workspaces** — the symmetric two-bot design (a.k.a. Path A). Both channels are polled and `chat:write.customize` preserves author name/avatar. Destination-aware native mentions are supported through explicit ID overrides, exact email matching, and Slack-autocomplete-safe qualified handles such as `hex:alice` (with legacy `@hex:alice` support). Identity directories include configured channel members so Slack Connect participants omitted by `users.list` remain addressable; unresolved identities remain inert. Roo is untouched. Code lives in `../../src/bridge`.
 
 **Goal:** Bidirectional sync between one channel in the MLAI Slack workspace (where Roo lives) and one channel in the Stone & Chalk (S&C) Slack workspace, relayed by the existing DigitalOcean droplet. Members of each org read and write entirely from their own workspace.
 
@@ -89,7 +89,7 @@ Separate request-URL paths per app so each endpoint verifies with its own signin
 ## Relay service design
 
 ### Where it lives
-New package `roo-standalone/bridge/` — its own FastAPI app, port, and systemd unit (`slack-bridge.service`), proxied by the existing nginx. Deliberately **not** inside Roo's app: independent deploys, and a Roo crash shouldn't take the bridge down. Copy Roo's signature-verification and `slack_sdk` client patterns ([main.py](roo-standalone/roo/main.py), [slack_client.py](roo-standalone/roo/slack_client.py)).
+New package `../../src/bridge` — its own FastAPI app, port, and systemd unit (`slack-bridge.service`), proxied by the existing nginx. Deliberately **not** inside Roo's app: independent deploys, and a Roo crash shouldn't take the bridge down. Copy Roo's signature-verification and `slack_sdk` client patterns ([main.py](../../src/roo/main.py), [slack_client.py](../../src/roo/slack_client.py)).
 
 ```
 roo-standalone/bridge/

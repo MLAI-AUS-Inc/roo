@@ -81,7 +81,7 @@ allowlist so moving a ticket out after cutoff does not hide it.
 
 ## Local testing without external calls
 
-From `roo-standalone`, install `requirements.txt` into a Python 3.11+ environment.
+From `src`, install `requirements.txt` into a Python 3.11+ environment.
 Run the tests with synthetic values, without loading a real `.env`:
 
 ```bash
@@ -155,7 +155,7 @@ workspace ID, verified recipient/requester IDs, and the manual builder map.
 Set `TIMESHEETS_ENABLED=true` and keep `TIMESHEETS_SCHEDULE_ENABLED=false`.
 Do not guess Sam's Slack ID. For an isolated development fixture use a verified
 test recipient and a separate data directory; production identity is never reused.
-Relative paths resolve from `roo-standalone`.
+Relative paths resolve from `src`.
 
 ```bash
 python -m roo.timesheet_worker --env-file .env.timesheets --preflight

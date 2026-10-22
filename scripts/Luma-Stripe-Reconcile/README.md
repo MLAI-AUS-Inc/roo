@@ -38,7 +38,7 @@ account names (Ticket Sales / Stripe Fees / Luma Fees) at the top of
 Each Stripe charge links to a Luma sale by (1) Luma order id in the Stripe description/metadata, else (2) buyer email + gross amount. A charge with no Luma match still appears (so the payout total ties), labelled `UNKNOWN (no Luma match)` — pick its event manually.
 
 ## Then reconcile in Xero
-Booked as **gross income + fees**: each payout's bank line is split into ticket-income line(s) per event (gross) minus a Stripe-fee and a Luma-fee line, netting to the deposit. Cowork fills the Create form per the brief; **a human clicks OK to confirm.** Only Stripe/Luma deposits are touched — every other bank line is left alone. See ../Luma-Stripe-Xero-Reconciliation-Plan.md.
+Booked as **gross income + fees**: each payout's bank line is split into ticket-income line(s) per event (gross) minus a Stripe-fee and a Luma-fee line, netting to the deposit. Cowork fills the Create form per the brief; **a human clicks OK to confirm.** Only Stripe/Luma deposits are touched — every other bank line is left alone. See [the reconciliation plan](../../agents/plans/Luma-Stripe-Xero-Reconciliation-Plan.md).
 
 ## Notes
 - Live API calls follow the Luma/Stripe REST docs; validate field names on the first real run.
