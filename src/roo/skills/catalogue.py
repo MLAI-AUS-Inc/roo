@@ -117,3 +117,7 @@ def inspect_catalogue(root: Path) -> list[Package]:
             for package in matches:
                 package.diagnostics.append(Diagnostic(package.path, f"Duplicate skill name {name!r}"))
     return packages
+
+
+# Package requirements, independent of runtime executor imports.
+REQUIRED_CLIENTS = {"linear-meeting-actions": "LinearMeetingActionsClient"}

@@ -12,7 +12,7 @@ from roo.skills.catalogue import inspect_catalogue
 from roo.skills.loader import load_skill_report, Skill
 from roo.skills.lint import main as lint
 from roo.skills.executor import SkillExecutor
-from roo.skills.registry import HANDLERS
+from roo.skills.registry import EXECUTORS
 
 
 def package(root, folder='example', name='example', client=None, **metadata):
@@ -126,7 +126,7 @@ def test_every_current_package_has_explicit_handler_or_event_binding():
     root = Path(__file__).resolve().parents[2] / 'src/skills'
     for item in inspect_catalogue(root):
         assert not item.diagnostics
-        assert item.name in HANDLERS or item.name in EVENT_ONLY_SKILLS
+        assert item.name in EXECUTORS or item.name in EVENT_ONLY_SKILLS
 
 
 def test_agent_requires_default_packages_and_rejects_unbound_packages(tmp_path, monkeypatch):
@@ -181,7 +181,7 @@ def test_unknown_field_warns_without_disabling_valid_skill(tmp_path, capsys):
     assert 'require_auth' in report.entries[0].warnings[0]
 
 
-@pytest.mark.parametrize('name', sorted(set(HANDLERS) - {'studio-invoices', 'studio-hours', 'studio-client-balance'}))
+@pytest.mark.parametrize('name', sorted(set(EXECUTORS) - {'studio-invoices', 'studio-hours', 'studio-client-balance'}))
 def test_registry_dispatch_preserves_actor_and_rich_result(name, monkeypatch):
     executor = SkillExecutor()
     expected = '_execute_' + name.replace('-', '_')
@@ -212,3 +212,22 @@ def test_required_domain_client_is_checked_at_lint_and_load_time(tmp_path):
     report = load_skill_report(tmp_path)
     assert report.entries[0].status == 'broken'
     assert 'LinearMeetingActionsClient' in report.entries[0].errors[0]
+
+
+def test_metadata_lint_and_loading_do_not_import_runtime_registry():
+    import subprocess
+    code = '''
+import sys
+from pathlib import Path
+sys.modules['roo.skills.registry'] = None
+sys.modules['roo.skills.executors'] = None
+from roo.skills.lint import main
+from roo.skills.loader import load_skill_report
+assert main(['--public-defaults']) == 0
+report = load_skill_report(Path('skills'), import_clients=False)
+assert len(report.skills) == 20
+assert all(entry.status == 'loaded' for entry in report.entries)
+'''
+    result = subprocess.run([sys.executable, '-c', code], capture_output=True, text=True,
+                            cwd=Path(__file__).resolve().parents[2] / 'src')
+    assert result.returncode == 0, result.stdout + result.stderr

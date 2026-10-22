@@ -1,7 +1,7 @@
 """Run from src: python -m roo.skills.lint [--required name ...]."""
 import argparse
 from pathlib import Path
-from .catalogue import inspect_catalogue
+from .catalogue import inspect_catalogue, REQUIRED_CLIENTS
 
 
 def main(argv=None):
@@ -15,15 +15,11 @@ def main(argv=None):
         from ..config import Settings
         required.update(Settings.PUBLIC_DEFAULT_SKILLS)
     packages = inspect_catalogue(args.skills_dir)
-    from .registry import HANDLERS, EVENT_ONLY_SKILLS, REQUIRED_CLIENTS
     errors = 0
     for package in packages:
         for item in package.diagnostics:
             print(f'{item.severity.upper()} {item.path}: {item.message}')
             errors += item.severity == 'error'
-        if package.name and not any(d.severity == 'error' for d in package.diagnostics) and package.name not in HANDLERS and package.name not in EVENT_ONLY_SKILLS:
-            print(f'ERROR {package.path}: no registered execution handler')
-            errors += 1
         if package.name in REQUIRED_CLIENTS and (package.path.name != 'SKILL.md'
                                                 or not (package.path.parent / 'client.py').is_file()):
             print(f'ERROR {package.path}: required client.py is missing')

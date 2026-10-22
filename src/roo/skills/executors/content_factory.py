@@ -1,6 +1,6 @@
 """Content factory skill execution."""
 from __future__ import annotations
-from ..contracts import SkillRequest
+from ..contracts import SkillRequest, SkillExecutorInterface
 from typing import Any, Optional, List
 from ...content_factory_progress import CONTENT_FACTORY_ARTICLE_COST_POINTS, CONTENT_FACTORY_REQUEST_SOURCE, build_live_status_blocks, get_content_factory_article_cost_points, is_free_content_factory_domain, normalize_content_factory_domain
 from ...clients.mlai_backend import MLAIBackendClient, MLAIBackendUnavailableError
@@ -15,7 +15,7 @@ from ...slack_client import post_message
 from .publishing_support import PublishingSupport
 
 
-class ContentFactoryHandler(PublishingSupport):
+class ContentFactoryExecutor(PublishingSupport, SkillExecutorInterface):
     async def execute(self, request: SkillRequest):
         skill, text, params, user_id = request.skill, request.text, request.params, request.user_id
         channel_id, thread_ts = request.channel_id, request.thread_ts

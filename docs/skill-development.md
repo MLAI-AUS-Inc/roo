@@ -18,49 +18,61 @@ effective allowlist, including feature-flag additions.
 
 Errors include malformed metadata, incorrect field types, duplicate skill or
 action names, examples referencing undeclared actions, missing required packages,
-and missing execution bindings. Errors exit with status 1. Unknown metadata
+and missing required client files. Errors exit with status 1. Unknown metadata
 fields produce spelling-check warnings without disabling the skill. Validation
 does not prove user authorization, backend availability, or successful client
 imports; those remain runtime concerns. CI runs the metadata linter and the
-isolated loading/dispatch contract suite before its existing checks.
+isolated loading/dispatch contract suite before its existing checks. Executor
+registration and interface compliance are checked separately by runtime startup
+and registry tests; metadata lint never imports the runtime registry.
 
 ## Adding a capability
 
 1. Add `src/skills/<package>/SKILL.md` with a unique `name`, `description`,
    routing rules, and declared actions/parameters. Use actual YAML booleans for
    `requires_auth`. It is descriptive metadata, not an authorization grant.
-2. Implement a class under `roo/skills/handlers/` with
-   `async execute(request: SkillRequest)`. Register its module and class with
-   `HandlerBinding` in `roo/skills/registry.py`. Each coordinator owns handler
-   instances; there are no global mutable handler instances. The request carries
+2. Implement a class under `roo/skills/executors/` inheriting
+   `SkillExecutorInterface` from `roo.skills.contracts`, with
+   `async execute(request: SkillRequest)`. Import the class normally and add
+   `"skill-name": YourExecutor` to `EXECUTORS` in `roo/skills/registry.py`.
+   Each coordinator owns executor
+   instances; there are no global mutable executor instances. The request carries
    the skill, text, parameters, actor/channel/thread, history, and event metadata.
    Retain backend authorization and write gates inside the owning domain.
-   If the handler consumes a package client class, declare it in
-   `REQUIRED_CLIENTS`: lint checks that `client.py` exists, and runtime loading
+   If the executor consumes a package client class, declare it in
+   `catalogue.REQUIRED_CLIENTS`: lint checks that `client.py` exists, and runtime loading
    verifies that it exports the required class.
 3. Add it to the appropriate deployment configuration only after reviewing
    Public/Admin ownership. Registration does not enable a skill or grant access.
-4. Add offline handler, denied-action, and routing tests. Run the linter and
+4. Add offline executor, denied-action, and routing tests. Run the linter and
    affected suites separately where import stubs require isolation.
 
 There is no implicit generic-chat fallback for unregistered skills. Text-only
-skills also need an explicit handler. Event-driven capabilities are explicitly
-registered in `EVENT_HANDLERS` (which defines `EVENT_ONLY_SKILLS`) and continue
+skills also need an explicit executor. Event-driven capabilities are explicitly
+registered in `EVENT_EXECUTORS` (which defines `EVENT_ONLY_SKILLS`) and continue
 to execute through their dedicated ingress; that list does not grant execution
-through chat. StartHereIntroductionsHandler accepts a Slack event, rather than
+through chat. StartHereIntroductionsExecutor accepts a Slack event, rather than
 pretending it is a chat request.
 
 ## Executor structure
 
+`SkillExecutorInterface` is an abstract base class requiring
+`async execute(request: SkillRequest) -> str | dict[str, Any]`. Registered
+classes inherit it and implement an async method. Abstract classes cannot be
+instantiated; registry tests check inheritance and asynchronous execution for
+every entry. `EventSkillExecutorInterface` defines the separate event contract.
+Typed class maps and tests keep event and chat executors separate. There are no
+binding objects, string-based class lookups, or custom executor factories.
+
 `SkillExecutor` dispatches requests and normalizes results. All domain execution
 methods now live in their owning classes. Existing Slack callbacks can still
 access legacy helper names through the coordinator's forwarding interface;
-handlers never call back into that coordinator. New callers should use
-`handler.execute(request)` instead of private helper methods.
+executors never call back into that coordinator. New callers should use
+`executor.execute(request)` instead of private helper methods.
 
 `PromptExecutor` supplies shared prompt execution with injectable `chat_fn` and
-`client_factory` dependencies. `ToneOfVoiceHandler` uses it with the existing
-tone prompt and model options; `ConnectUsersHandler` uses the generic skill
+`client_factory` dependencies. `ToneOfVoiceExecutor` uses it with the existing
+tone prompt and model options; `ConnectUsersExecutor` uses the generic skill
 instructions prompt. Watt-the-hack and points retain their existing explicit
 prompt fallback paths. This does not introduce fallback for unknown skills.
 

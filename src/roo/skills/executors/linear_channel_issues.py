@@ -1,6 +1,6 @@
 """Linear channel issues skill execution."""
 from __future__ import annotations
-from ..contracts import SkillRequest
+from ..contracts import SkillRequest, SkillExecutorInterface
 from typing import Any, Optional, List
 from ...config import get_settings
 import httpx
@@ -9,7 +9,7 @@ from .backend_errors import BackendErrors
 from .linear_read_support import LinearReadSupport
 
 
-class LinearChannelIssuesHandler(BackendErrors, LinearReadSupport):
+class LinearChannelIssuesExecutor(BackendErrors, LinearReadSupport, SkillExecutorInterface):
     async def execute(self, request: SkillRequest):
         skill, text, params, user_id = request.skill, request.text, request.params, request.user_id
         channel_id, thread_ts = request.channel_id, request.thread_ts

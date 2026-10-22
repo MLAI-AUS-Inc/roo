@@ -1,7 +1,8 @@
 """Common input and output contracts for independently executable skills."""
 from __future__ import annotations
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from abc import ABC, abstractmethod
+from typing import Any
 from .loader import Skill
 
 @dataclass
@@ -24,7 +25,18 @@ class SkillResult:
     blocks: list | None = None
     suppress_post: bool = False
 
-class SkillHandler(Protocol):
+class SkillExecutorInterface(ABC):
+    """Required interface for every chat skill executor."""
+
+    @abstractmethod
     async def execute(self, request: SkillRequest) -> str | dict[str, Any]:
         """Run one capability; the coordinator normalizes its response."""
-        ...
+        raise NotImplementedError
+
+
+class EventSkillExecutorInterface(ABC):
+    """Event skills receive verified ingress events rather than chat requests."""
+
+    @abstractmethod
+    async def execute(self, event: dict[str, Any], **options: Any) -> dict[str, Any]:
+        raise NotImplementedError

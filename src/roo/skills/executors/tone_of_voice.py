@@ -3,7 +3,7 @@ from __future__ import annotations
 from ..contracts import SkillRequest
 from .prompt import PromptExecutor
 
-class ToneOfVoiceHandler(PromptExecutor):
+class ToneOfVoiceExecutor(PromptExecutor):
     async def execute(self, request: SkillRequest):
         return await self._execute_tone_of_voice(request.skill, request.text, request.params, request.user_id)
 

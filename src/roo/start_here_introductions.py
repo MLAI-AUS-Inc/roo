@@ -14,6 +14,7 @@ from uuid import uuid4
 
 import httpx
 
+from .skills.contracts import EventSkillExecutorInterface
 from .config import get_settings
 
 
@@ -924,7 +925,7 @@ async def process_classification(
     return await process_award(claimed, store=store, client=client)
 
 
-class StartHereIntroductionsHandler:
+class StartHereIntroductionsExecutor(EventSkillExecutorInterface):
     """Event-only executor; not available through chat routing."""
     async def execute(
         self,
@@ -986,7 +987,7 @@ async def handle_start_here_intro(
     notify_duplicate: Optional[Callable[[dict[str, Any]], Any]] = None,
 ) -> dict[str, Any]:
     """Compatibility entry point for signed Slack event ingress."""
-    return await StartHereIntroductionsHandler().execute(
+    return await StartHereIntroductionsExecutor().execute(
         event, store=store, client=client, llm_chat=llm_chat,
         min_confidence=min_confidence, post_feedback=post_feedback,
         notify_duplicate=notify_duplicate,

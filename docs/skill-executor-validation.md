@@ -6,31 +6,31 @@ The central `SkillExecutor` performs dispatch and response normalization.
 
 ## Skill coverage
 
-Paths below are relative to `src/roo/skills/handlers/`; test names are relative
+Paths below are relative to `src/roo/skills/executors/`; test names are relative
 to `tests/roo/` and have the `test_` prefix and `.py` suffix.
 
 | Skill | Executor | Behavioral suites |
 | --- | --- | --- |
-| admin-brain | `admin_brain.AdminBrainHandler` | `admin_brain`, `admin_brain_interactions`, `unified_admin_routing` |
-| admin-actions | `admin_actions.AdminActionsHandler` | `admin_actions`, `admin_worker` |
-| committee-candidate-emails | `committee_candidate_emails.CommitteeCandidateEmailsHandler` | `committee_candidate_emails` |
-| connect-users | `connect_users.ConnectUsersHandler` | `skill_execution_behaviors` |
-| content-factory | `content_factory.ContentFactoryHandler` | `content_factory_article_flow` |
-| github-integration | `github_integration.GithubIntegrationHandler` | `skill_execution_behaviors`, shared publishing coverage in `content_factory_article_flow` |
-| healthhack | `healthhack.HealthhackHandler` | `healthhack_announcements` |
-| linear-channel-issues | `linear_channel_issues.LinearChannelIssuesHandler` | `linear_channel_issues` |
-| linear-meeting-actions | `linear_meeting_actions.LinearMeetingActionsHandler` | `linear_meeting_actions`, `linear_effort_sizing`, `linear_meeting_sources`, `linear_inference` |
-| luma-events | `luma_events.LumaEventsHandler` | `luma_events` |
-| meeting-room-booking | `meeting_room_booking.MeetingRoomBookingHandler` | `meeting_room_booking`, `meeting_room_availability`, `meeting_room_actions`, `meeting_room_clarifications` |
-| mlai-data-query | `mlai_data_query.MlaiDataQueryHandler` | `mlai_data_query` |
-| mlai-points | `mlai_points.MlaiPointsHandler` | `points_requests`, `points_flex`, `private_points_delivery`, `event_discounts`, `founder_account_link`, `rate_card`, coworking suites |
-| reconciliation-report | `reconciliation_report.ReconciliationReportHandler` | `reconciliation_report` |
-| start-here-introductions | `roo.start_here_introductions.StartHereIntroductionsHandler` | `start_here_introductions`, `skill_executor_classes` |
-| studio-client-balance | `studio_client_balance.StudioClientBalanceHandler` | `studio_client_balance_routing` |
-| studio-hours | `studio_hours.StudioHoursHandler` | `studio_report_routing` |
-| studio-invoices | `studio_invoices.StudioInvoicesHandler` | `invoice_ingress`, `skill_execution_behaviors` |
-| tone-of-voice | `tone_of_voice.ToneOfVoiceHandler` | `skill_loading_contract`, `skill_executor_classes` |
-| watt-the-hack | `watt_the_hack.WattTheHackHandler` | `skill_execution_behaviors` |
+| admin-brain | `admin_brain.AdminBrainExecutor` | `admin_brain`, `admin_brain_interactions`, `unified_admin_routing` |
+| admin-actions | `admin_actions.AdminActionsExecutor` | `admin_actions`, `admin_worker` |
+| committee-candidate-emails | `committee_candidate_emails.CommitteeCandidateEmailsExecutor` | `committee_candidate_emails` |
+| connect-users | `connect_users.ConnectUsersExecutor` | `skill_execution_behaviors` |
+| content-factory | `content_factory.ContentFactoryExecutor` | `content_factory_article_flow` |
+| github-integration | `github_integration.GithubIntegrationExecutor` | `skill_execution_behaviors`, shared publishing coverage in `content_factory_article_flow` |
+| healthhack | `healthhack.HealthhackExecutor` | `healthhack_announcements` |
+| linear-channel-issues | `linear_channel_issues.LinearChannelIssuesExecutor` | `linear_channel_issues` |
+| linear-meeting-actions | `linear_meeting_actions.LinearMeetingActionsExecutor` | `linear_meeting_actions`, `linear_effort_sizing`, `linear_meeting_sources`, `linear_inference` |
+| luma-events | `luma_events.LumaEventsExecutor` | `luma_events` |
+| meeting-room-booking | `meeting_room_booking.MeetingRoomBookingExecutor` | `meeting_room_booking`, `meeting_room_availability`, `meeting_room_actions`, `meeting_room_clarifications` |
+| mlai-data-query | `mlai_data_query.MlaiDataQueryExecutor` | `mlai_data_query` |
+| mlai-points | `mlai_points.MlaiPointsExecutor` | `points_requests`, `points_flex`, `private_points_delivery`, `event_discounts`, `founder_account_link`, `rate_card`, coworking suites |
+| reconciliation-report | `reconciliation_report.ReconciliationReportExecutor` | `reconciliation_report` |
+| start-here-introductions | `roo.start_here_introductions.StartHereIntroductionsExecutor` | `start_here_introductions`, `skill_executor_classes` |
+| studio-client-balance | `studio_client_balance.StudioClientBalanceExecutor` | `studio_client_balance_routing` |
+| studio-hours | `studio_hours.StudioHoursExecutor` | `studio_report_routing` |
+| studio-invoices | `studio_invoices.StudioInvoicesExecutor` | `invoice_ingress`, `skill_execution_behaviors` |
+| tone-of-voice | `tone_of_voice.ToneOfVoiceExecutor` | `skill_loading_contract`, `skill_executor_classes` |
+| watt-the-hack | `watt_the_hack.WattTheHackExecutor` | `skill_execution_behaviors` |
 
 Every registered class also has construction/ownership coverage. Existing
 registry tests check argument forwarding and rich response preservation.
@@ -66,11 +66,29 @@ live integration validation.
 ## Compatibility and remaining scope
 
 The coordinator retains legacy helper forwarding for existing Slack callbacks
-and test callers. Handlers never depend on or call back into the coordinator.
+and test callers. Executors never depend on or call back into the coordinator.
 Old tests patch dependencies at their new import sites using
 `skill_test_support.patch_skill_dependency`; their behavioral assertions remain
-intact. New tests use individual handlers and injected model clients directly.
+intact. New tests use individual executors and injected model clients directly.
 
 Shared publishing and Linear reading helpers are kept in focused support
 classes. Points and Linear meeting actions remain large domains; this extraction
 does not redesign their workflows or change their permission model.
+
+## Executor interface and simple registry
+
+Renamed the implementation package to `roo.skills.executors` and all capability
+classes to `*Executor`. `SkillExecutorInterface` and
+`EventSkillExecutorInterface` are explicit abstract contracts. The final runtime
+registry is a typed name-to-class dictionary with ordinary imports. Coordinators
+instantiate those classes directly; no binding objects or dynamic class lookups
+remain. Registry tests check interface inheritance and async execution.
+
+Metadata lint and metadata-only loading are independent of that registry. A
+subprocess test blocks runtime imports and verifies both still work. Package
+requirements live in `catalogue.REQUIRED_CLIENTS`; runtime startup and registry
+tests separately catch missing executors.
+
+After simplifying the registry, 1,391 tests passed across 40 offline suites;
+all 20 packages pass metadata lint. Disposable database approval and the
+network restrictions described above remained in force.

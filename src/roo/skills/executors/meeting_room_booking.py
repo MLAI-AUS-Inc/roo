@@ -1,6 +1,6 @@
 """Meeting room booking skill execution."""
 from __future__ import annotations
-from ..contracts import SkillRequest
+from ..contracts import SkillRequest, SkillExecutorInterface
 from ...meeting_room_booking import CONFERENCE_ROOM_SLUG, MELBOURNE_TZ, MeetingRoomInputError, backend_error_message as meeting_room_backend_error_message, booking_preview, cancellation_selection, format_interval as format_meeting_room_interval, has_date_reference as has_meeting_room_date_reference, parse_backend_timestamp, room_selection_prompt, room_slug_from_text, resolve_availability_interval as resolve_meeting_room_availability_interval, resolve_interval as resolve_meeting_room_interval, resolve_local_date as resolve_meeting_room_date, supported_active_rooms
 from ...clients.mlai_backend import MLAIBackendClient, MLAIBackendUnavailableError
 from typing import Optional
@@ -13,7 +13,7 @@ import re
 from ...slack_client import send_dm
 
 
-class MeetingRoomBookingHandler:
+class MeetingRoomBookingExecutor(SkillExecutorInterface):
     async def execute(self, request: SkillRequest):
         skill, text, params, user_id = request.skill, request.text, request.params, request.user_id
         channel_id, thread_ts = request.channel_id, request.thread_ts

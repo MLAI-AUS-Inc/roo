@@ -1,12 +1,12 @@
 """Prompt skill execution."""
 from __future__ import annotations
-from ..contracts import SkillRequest
+from ..contracts import SkillRequest, SkillExecutorInterface
 from typing import Optional, List
 from ..loader import Skill
 from ...llm import chat, get_llm_client
 
 
-class PromptExecutor:
+class PromptExecutor(SkillExecutorInterface):
     """Execute prompt instructions with injectable model dependencies."""
     def __init__(self, *, chat_fn=None, client_factory=None):
         self._chat_fn = chat_fn

@@ -104,8 +104,7 @@ class SkillLoadReport:
 def load_skill_report(skills_dir: Path, allowed_names: Optional[Set[str]] = None,
                       *, import_clients: bool = True) -> SkillLoadReport:
     """Validate before imports; report failures without advertising broken skills."""
-    from .catalogue import inspect_catalogue
-    from .registry import REQUIRED_CLIENTS
+    from .catalogue import inspect_catalogue, REQUIRED_CLIENTS
     report = SkillLoadReport()
     for package in inspect_catalogue(skills_dir):
         if package.name and allowed_names is not None and package.name not in allowed_names:

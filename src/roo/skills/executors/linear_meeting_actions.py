@@ -1,6 +1,6 @@
 """Linear meeting actions skill execution."""
 from __future__ import annotations
-from ..contracts import SkillRequest
+from ..contracts import SkillRequest, SkillExecutorInterface
 from typing import Any, Optional, List
 from ...linear_effort_sizing import EFFORT_LABELS, assessment_metadata, assess_studio_effort_batch, is_project_issue, is_terminal_candidate
 from .constants import LINEAR_MEETING_TIMEOUT_RECOVERY_OVERLAP_CHARS
@@ -19,7 +19,7 @@ import json
 import re
 
 
-class LinearMeetingActionsHandler:
+class LinearMeetingActionsExecutor(SkillExecutorInterface):
     async def execute(self, request: SkillRequest):
         skill, text, params, user_id = request.skill, request.text, request.params, request.user_id
         channel_id, thread_ts = request.channel_id, request.thread_ts

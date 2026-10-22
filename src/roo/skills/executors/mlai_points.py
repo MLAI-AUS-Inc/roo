@@ -33,7 +33,7 @@ from .backend_errors import BackendErrors
 from .prompt import PromptExecutor
 
 
-class MlaiPointsHandler(BackendErrors, PromptExecutor):
+class MlaiPointsExecutor(BackendErrors, PromptExecutor):
     async def execute(self, request: SkillRequest):
         skill, text, params, user_id = request.skill, request.text, request.params, request.user_id
         channel_id, thread_ts = request.channel_id, request.thread_ts
@@ -708,7 +708,7 @@ class MlaiPointsHandler(BackendErrors, PromptExecutor):
         user_id: str,
         channel_id: Optional[str],
     ) -> Any:
-        if MlaiPointsHandler._is_direct_message_channel(channel_id):
+        if MlaiPointsExecutor._is_direct_message_channel(channel_id):
             return message
 
         try:
@@ -719,7 +719,7 @@ class MlaiPointsHandler(BackendErrors, PromptExecutor):
                 f"exc_type={exc.__class__.__name__}"
             )
             dm_response = None
-        if not MlaiPointsHandler._slack_delivery_succeeded(dm_response):
+        if not MlaiPointsExecutor._slack_delivery_succeeded(dm_response):
             return {
                 "message": (
                     f"I couldn't confirm a private Slack DM was delivered to <@{user_id}>. "

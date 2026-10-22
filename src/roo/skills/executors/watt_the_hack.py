@@ -11,7 +11,7 @@ import re
 from .prompt import PromptExecutor
 
 
-class WattTheHackHandler(PromptExecutor):
+class WattTheHackExecutor(PromptExecutor):
     async def execute(self, request: SkillRequest):
         skill, text, params, user_id = request.skill, request.text, request.params, request.user_id
         channel_id, thread_ts = request.channel_id, request.thread_ts

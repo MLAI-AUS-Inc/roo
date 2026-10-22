@@ -1,6 +1,6 @@
 """Mlai data query skill execution."""
 from __future__ import annotations
-from ..contracts import SkillRequest
+from ..contracts import SkillRequest, SkillExecutorInterface
 from typing import Any, Optional, List
 from ..loader import Skill
 from ...config import get_settings
@@ -11,7 +11,7 @@ from .backend_errors import BackendErrors
 from .linear_read_support import LinearReadSupport
 
 
-class MlaiDataQueryHandler(BackendErrors, LinearReadSupport):
+class MlaiDataQueryExecutor(BackendErrors, LinearReadSupport, SkillExecutorInterface):
     async def execute(self, request: SkillRequest):
         skill, text, params, user_id = request.skill, request.text, request.params, request.user_id
         channel_id, thread_ts = request.channel_id, request.thread_ts

@@ -68,8 +68,8 @@ class RooAgent:
         self.skill_load_report = load_skill_report(skills_dir, allowed_names=allowed_skill_names)
         self.skill_load_report.require(allowed_skill_names)
         self.skills = self.skill_load_report.skills
-        from .skills.registry import HANDLERS, EVENT_ONLY_SKILLS
-        unbound = allowed_skill_names - (HANDLERS.keys() | EVENT_ONLY_SKILLS)
+        from .skills.registry import EXECUTORS, EVENT_ONLY_SKILLS
+        unbound = allowed_skill_names - (EXECUTORS.keys() | EVENT_ONLY_SKILLS)
         if unbound:
             raise ValueError("Enabled skills have no execution binding: " + ", ".join(sorted(unbound)))
         self.skill_executor = SkillExecutor()

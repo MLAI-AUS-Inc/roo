@@ -294,7 +294,7 @@ The capability is disabled by default and requires the matching backend feature.
 ## Skills
 
 See [skill development and validation](docs/skill-development.md) for the
-metadata-only linter, structured load reports, and explicit handler registry.
+metadata-only linter, structured load reports, and explicit executor registry.
 
 The general chat fallback system prompt lives in
 [`src/roo/prompts/system_prompt.md`](src/roo/prompts/system_prompt.md).

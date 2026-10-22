@@ -1,6 +1,6 @@
 """Admin actions skill execution."""
 from __future__ import annotations
-from ..contracts import SkillRequest
+from ..contracts import SkillRequest, SkillExecutorInterface
 from ...backend_identity import BackendIdentityError, get_backend_actor_context
 from ...clients.mlai_backend import MLAIBackendClient, MLAIBackendUnavailableError
 from typing import Optional
@@ -11,7 +11,7 @@ import httpx
 import json
 
 
-class AdminActionsHandler:
+class AdminActionsExecutor(SkillExecutorInterface):
     async def execute(self, request: SkillRequest):
         skill, text, params, user_id = request.skill, request.text, request.params, request.user_id
         channel_id, thread_ts = request.channel_id, request.thread_ts

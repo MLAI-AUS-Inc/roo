@@ -1,8 +1,8 @@
 from __future__ import annotations
 import asyncio
-from ..contracts import SkillRequest
+from ..contracts import SkillRequest, SkillExecutorInterface
 
-class StudioInvoicesHandler:
+class StudioInvoicesExecutor(SkillExecutorInterface):
     async def execute(self, request: SkillRequest):
         skill, params = request.skill, request.params
         user_id, channel_id, thread_ts = request.user_id, request.channel_id, request.thread_ts

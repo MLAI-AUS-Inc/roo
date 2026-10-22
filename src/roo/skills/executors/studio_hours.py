@@ -2,9 +2,9 @@ from __future__ import annotations
 import asyncio
 from ...config import get_settings
 from ...backend_identity import get_backend_actor_context
-from ..contracts import SkillRequest
+from ..contracts import SkillRequest, SkillExecutorInterface
 
-class StudioHoursHandler:
+class StudioHoursExecutor(SkillExecutorInterface):
     report_kind = None
 
     async def execute(self, request: SkillRequest):
@@ -12,7 +12,7 @@ class StudioHoursHandler:
         user_id, channel_id, thread_ts = request.user_id, request.channel_id, request.thread_ts
         from ...studio_report_commands import enqueue as enqueue_studio_report
 
-        # The handler fixes the report capability. Model parameters
+        # The executor fixes the report capability. Model parameters
         # may select a period/client, never another report kind.
         report_options = ({'report_kind': self.report_kind}
                           if self.report_kind else {})

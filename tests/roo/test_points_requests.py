@@ -1,4 +1,4 @@
-from roo.skills.handlers.constants import POINTS_SUPER_ADMIN_SLACK_ID as skill_points_super_admin_slack_id
+from roo.skills.executors.constants import POINTS_SUPER_ADMIN_SLACK_ID as skill_points_super_admin_slack_id
 from tests.roo.skill_test_support import patch_skill_dependency
 import asyncio
 import importlib
