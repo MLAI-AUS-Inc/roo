@@ -39,3 +39,36 @@ Pass suite-specific options after the mode:
 Do not overwrite `evals/routing/baseline.json` just to make a regression pass.
 Review intentional behavior changes before updating the baseline through the
 underlying Python CLI.
+
+## Capability honesty evals
+
+Run `tests/roo/test_capability_honesty.py` in its own pytest process.
+It covers adding an agenda item, a same-channel correction, and checking whether
+the item was saved. From `src`, with the Python 3.11 test environment active:
+
+```bash
+SLACK_BOT_TOKEN=test SLACK_SIGNING_SECRET=test OPENAI_API_KEY=test \
+FOUNDER_TOOLS_LINK_ORIGINS=https://mlai.au \
+python -m pytest ../tests/roo/test_capability_honesty.py -q -rx
+```
+
+The three offline probes inject invented model replies and currently have strict
+expected-failure markers: Roo passes those replies through without proof of an
+agenda write. Use `--runxfail` to see the failing assertions. These probes test
+enforcement, not whether a real model chooses to hallucinate.
+
+To inspect actual generated replies, explicitly provision a **development-only**
+OpenAI key in `ROO_CAPABILITY_EVAL_DEV_OPENAI_API_KEY` and run the same command with
+`-k test_live -s`. Never use a production key. The live probes incur model API usage,
+use Roo's default OpenAI chat model and public skill descriptions, and force the
+no-skill fallback. They do not evaluate routing. Slack history is synthetic and
+skill execution is blocked; no backend writes or Slack posts occur.
+
+Read the printed replies: the automated checks only screen for a limitation or
+non-completion disclosure and reject unverified URLs and observed unsupported
+channel redirects. They are not a semantic
+judge of honesty or correct handling of both sponsorship options. Provider errors
+must not be interpreted as successful honesty evaluations.
+
+The [22 October 2026 live report](evals/capability_honesty/2026-10-22.md) records the
+observed replies and distinguishes unsupported advice from false write claims.

@@ -293,6 +293,11 @@ The capability is disabled by default and requires the matching backend feature.
 
 ## Skills
 
+The general chat fallback system prompt lives in
+[`src/roo/prompts/system_prompt.md`](src/roo/prompts/system_prompt.md).
+Roo fills `{skill_list}` and `{history_context}` at request time. Preserve these
+placeholders when editing; escape any other literal braces as `{{` and `}}`.
+
 Runtime skills are directories under `src/skills`. Inspect the
 selected skill package and its tests before changing routing or permissions.
 The similarly named Python modules under `src/roo/skills` implement
@@ -303,6 +308,10 @@ Adding a skill directory does not grant the public agent permission to perform
 administrative actions.
 
 ## Public and Admin Roo
+
+The proposed [message-routing modularisation plan](plans/message-routing-modular-classes.md)
+defines service boundaries and staged extractions for ingress, Admin dispatch,
+request context, and reply delivery. It is a proposal, not current architecture.
 
 - Public Roo handles approved community-facing interactions.
 - Admin Roo is a separately scoped internal surface.
