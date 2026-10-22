@@ -1,3 +1,4 @@
+from tests.roo.skill_test_support import patch_skill_dependency
 import asyncio
 import importlib.util
 import json
@@ -1023,16 +1024,12 @@ async def test_linear_meeting_executor_surfaces_backend_context_detail(monkeypat
             assert name == "LinearMeetingActionsClient"
             return FailingClient
 
-    monkeypatch.setattr(
-        executor_module,
-        "get_settings",
-        lambda: SimpleNamespace(
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: SimpleNamespace(
             LINEAR_DEFAULT_TEAM=None,
             LINEAR_MEETING_AUTO_CREATE_MIN_CONFIDENCE=0.85,
             LINEAR_MEETING_UNCERTAIN_MIN_CONFIDENCE=0.65,
-        ),
-    )
-    monkeypatch.setattr(executor, "_build_linear_meeting_source_result", fake_source_result)
+        ))
+    monkeypatch.setattr(executor.owner_of('_build_linear_meeting_source_result'), '_build_linear_meeting_source_result', fake_source_result)
 
     result = await executor._execute_linear_meeting_actions(
         skill=FakeSkill(),
@@ -1051,7 +1048,7 @@ async def test_linear_meeting_executor_surfaces_backend_context_detail(monkeypat
 
 
 def test_linear_project_resolution_reports_access_failure_not_not_found():
-    message = SkillExecutor._linear_explicit_project_resolution_error_message(
+    message = SkillExecutor().owner_of("_linear_explicit_project_resolution_error_message")._linear_explicit_project_resolution_error_message(
         "[Studio] Sansoni Master App",
         {
             "status": "unavailable",
@@ -1103,7 +1100,7 @@ async def test_linear_meeting_candidate_extraction_chunks_sources(monkeypatch):
             }
         ]
 
-    monkeypatch.setattr(executor, "_extract_linear_meeting_candidates", fake_extract)
+    monkeypatch.setattr(executor.owner_of('_extract_linear_meeting_candidates'), '_extract_linear_meeting_candidates', fake_extract)
     long_text = ("Sam will update onboarding docs after the meeting.\n\n" * 350).strip()
 
     candidates = await executor._extract_linear_meeting_candidates_from_sources(
@@ -1170,7 +1167,7 @@ async def test_linear_meeting_timeout_retries_only_failed_chunk_at_smaller_scope
             }
         ]
 
-    monkeypatch.setattr(executor, "_extract_linear_meeting_candidates", fake_extract)
+    monkeypatch.setattr(executor.owner_of('_extract_linear_meeting_candidates'), '_extract_linear_meeting_candidates', fake_extract)
 
     candidates = await executor._extract_linear_meeting_candidates_from_sources(
         sources=[ParsedSource(label="notes.pdf", text=body, kind="pdf")],
@@ -1225,7 +1222,7 @@ async def test_linear_meeting_chunk_extraction_uses_bounded_concurrency(monkeypa
             }
         ]
 
-    monkeypatch.setattr(executor, "_extract_linear_meeting_candidates", fake_extract)
+    monkeypatch.setattr(executor.owner_of('_extract_linear_meeting_candidates'), '_extract_linear_meeting_candidates', fake_extract)
     paragraphs = [
         f"Sam will complete action {index}. " + ("context " * 550)
         for index in range(1, 6)
@@ -1309,7 +1306,7 @@ async def test_linear_meeting_production_sized_batch_recovers_failed_chunk_twice
             }
         ]
 
-    monkeypatch.setattr(executor, "_extract_linear_meeting_candidates", fake_extract)
+    monkeypatch.setattr(executor.owner_of('_extract_linear_meeting_candidates'), '_extract_linear_meeting_candidates', fake_extract)
 
     candidates = await executor._extract_linear_meeting_candidates_from_sources(
         sources=[
@@ -1345,17 +1342,13 @@ async def test_linear_meeting_terminal_chunk_failure_cancels_siblings(
     second_started = asyncio.Event()
     second_cancelled = asyncio.Event()
     calls = []
-    monkeypatch.setattr(
-        executor_module,
-        "get_settings",
-        lambda: SimpleNamespace(
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: SimpleNamespace(
             LINEAR_MEETING_EXTRACTION_CONCURRENCY=2,
             LINEAR_MEETING_EXTRACTION_TOTAL_TIMEOUT_SECONDS=360,
             LINEAR_MEETING_EXTRACTION_CHUNK_MAX_CHARS=8_000,
             LINEAR_MEETING_EXTRACTION_RECOVERY_MAX_CHARS=4_000,
             LINEAR_MEETING_EXTRACTION_RECOVERY_DEPTH=0,
-        ),
-    )
+        ))
 
     async def fake_extract(
         *,
@@ -1386,7 +1379,7 @@ async def test_linear_meeting_terminal_chunk_failure_cancels_siblings(
                 raise
         return []
 
-    monkeypatch.setattr(executor, "_extract_linear_meeting_candidates", fake_extract)
+    monkeypatch.setattr(executor.owner_of('_extract_linear_meeting_candidates'), '_extract_linear_meeting_candidates', fake_extract)
 
     with pytest.raises(LinearInferenceTimeoutError):
         await asyncio.wait_for(
@@ -1454,13 +1447,9 @@ async def test_linear_meeting_repeated_timeout_aborts_before_any_linear_write(
             assert name == "LinearMeetingActionsClient"
             return FakeClient
 
-    monkeypatch.setattr(executor_module, "get_settings", lambda: SimpleNamespace())
-    monkeypatch.setattr(executor, "_build_linear_meeting_source_result", fake_source_result)
-    monkeypatch.setattr(
-        executor,
-        "_extract_linear_meeting_candidates_from_sources",
-        timed_out_extraction,
-    )
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: SimpleNamespace())
+    monkeypatch.setattr(executor.owner_of('_build_linear_meeting_source_result'), '_build_linear_meeting_source_result', fake_source_result)
+    monkeypatch.setattr(executor.owner_of('_extract_linear_meeting_candidates_from_sources'), '_extract_linear_meeting_candidates_from_sources', timed_out_extraction)
 
     result = await executor._execute_linear_meeting_actions(
         skill=FakeSkill(),
@@ -1536,13 +1525,9 @@ async def test_linear_meeting_missing_explicit_project_stops_before_extraction(
             assert name == "LinearMeetingActionsClient"
             return FakeClient
 
-    monkeypatch.setattr(executor_module, "get_settings", lambda: SimpleNamespace())
-    monkeypatch.setattr(executor, "_build_linear_meeting_source_result", fake_source_result)
-    monkeypatch.setattr(
-        executor,
-        "_extract_linear_meeting_candidates_from_sources",
-        unexpected_extraction,
-    )
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: SimpleNamespace())
+    monkeypatch.setattr(executor.owner_of('_build_linear_meeting_source_result'), '_build_linear_meeting_source_result', fake_source_result)
+    monkeypatch.setattr(executor.owner_of('_extract_linear_meeting_candidates_from_sources'), '_extract_linear_meeting_candidates_from_sources', unexpected_extraction)
 
     result = await executor._execute_linear_meeting_actions(
         skill=FakeSkill(),
@@ -1647,21 +1632,13 @@ async def test_linear_meeting_executor_queues_review_from_parsed_file_source(mon
             assert name == "LinearMeetingActionsClient"
             return FakeClient
 
-    monkeypatch.setattr(
-        executor_module,
-        "get_settings",
-        lambda: SimpleNamespace(
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: SimpleNamespace(
             LINEAR_DEFAULT_TEAM=None,
             LINEAR_MEETING_AUTO_CREATE_MIN_CONFIDENCE=0.85,
             LINEAR_MEETING_UNCERTAIN_MIN_CONFIDENCE=0.65,
-        ),
-    )
-    monkeypatch.setattr(executor, "_build_linear_meeting_source_result", fake_source_result)
-    monkeypatch.setattr(
-        executor,
-        "_extract_linear_meeting_candidates_from_sources",
-        fake_candidates_from_sources,
-    )
+        ))
+    monkeypatch.setattr(executor.owner_of('_build_linear_meeting_source_result'), '_build_linear_meeting_source_result', fake_source_result)
+    monkeypatch.setattr(executor.owner_of('_extract_linear_meeting_candidates_from_sources'), '_extract_linear_meeting_candidates_from_sources', fake_candidates_from_sources)
 
     result = await executor._execute_linear_meeting_actions(
         skill=FakeSkill(),
@@ -1751,21 +1728,13 @@ async def test_explicit_bulk_create_writes_committed_resolved_file_item(monkeypa
         def get_client_class(self, name):
             return FakeClient
 
-    monkeypatch.setattr(
-        executor_module,
-        "get_settings",
-        lambda: SimpleNamespace(
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: SimpleNamespace(
             LINEAR_DEFAULT_TEAM=None,
             LINEAR_MEETING_AUTO_CREATE_MIN_CONFIDENCE=0.85,
             LINEAR_MEETING_UNCERTAIN_MIN_CONFIDENCE=0.65,
-        ),
-    )
-    monkeypatch.setattr(executor, "_build_linear_meeting_source_result", fake_source_result)
-    monkeypatch.setattr(
-        executor,
-        "_extract_linear_meeting_candidates_from_sources",
-        fake_candidates_from_sources,
-    )
+        ))
+    monkeypatch.setattr(executor.owner_of('_build_linear_meeting_source_result'), '_build_linear_meeting_source_result', fake_source_result)
+    monkeypatch.setattr(executor.owner_of('_extract_linear_meeting_candidates_from_sources'), '_extract_linear_meeting_candidates_from_sources', fake_candidates_from_sources)
 
     result = await executor._execute_linear_meeting_actions(
         skill=FakeSkill(),
@@ -1846,22 +1815,14 @@ async def test_linear_direct_issue_command_creates_immediately(monkeypatch):
             assert name == "LinearMeetingActionsClient"
             return FakeClient
 
-    monkeypatch.setattr(
-        executor_module,
-        "run_linear_structured_inference",
-        fake_inference,
-    )
-    monkeypatch.setattr(executor, "_extract_linear_meeting_candidates_from_sources", fail_meeting_extraction)
-    monkeypatch.setattr(
-        executor_module,
-        "get_settings",
-        lambda: SimpleNamespace(
+    patch_skill_dependency(monkeypatch, 'run_linear_structured_inference', fake_inference)
+    monkeypatch.setattr(executor.owner_of('_extract_linear_meeting_candidates_from_sources'), '_extract_linear_meeting_candidates_from_sources', fail_meeting_extraction)
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: SimpleNamespace(
             OPENAI_API_KEY=None,
             LINEAR_DEFAULT_TEAM=None,
             LINEAR_MEETING_AUTO_CREATE_MIN_CONFIDENCE=0.85,
             LINEAR_MEETING_UNCERTAIN_MIN_CONFIDENCE=0.65,
-        ),
-    )
+        ))
 
     result = await executor._execute_linear_meeting_actions(
         skill=FakeSkill(),
@@ -1938,17 +1899,13 @@ async def test_linear_direct_issue_command_reports_ambiguous_project(monkeypatch
         def get_client_class(self, name):
             return FakeClient
 
-    monkeypatch.setattr(executor_module, "chat", fake_chat)
-    monkeypatch.setattr(
-        executor_module,
-        "get_settings",
-        lambda: SimpleNamespace(
+    patch_skill_dependency(monkeypatch, 'chat', fake_chat)
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: SimpleNamespace(
             OPENAI_API_KEY=None,
             LINEAR_DEFAULT_TEAM=None,
             LINEAR_MEETING_AUTO_CREATE_MIN_CONFIDENCE=0.85,
             LINEAR_MEETING_UNCERTAIN_MIN_CONFIDENCE=0.65,
-        ),
-    )
+        ))
 
     result = await executor._execute_linear_meeting_actions(
         skill=FakeSkill(),
@@ -2018,17 +1975,13 @@ async def test_linear_direct_issue_command_reports_ambiguous_assignee(monkeypatc
         def get_client_class(self, name):
             return FakeClient
 
-    monkeypatch.setattr(executor_module, "chat", fake_chat)
-    monkeypatch.setattr(
-        executor_module,
-        "get_settings",
-        lambda: SimpleNamespace(
+    patch_skill_dependency(monkeypatch, 'chat', fake_chat)
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: SimpleNamespace(
             OPENAI_API_KEY=None,
             LINEAR_DEFAULT_TEAM=None,
             LINEAR_MEETING_AUTO_CREATE_MIN_CONFIDENCE=0.85,
             LINEAR_MEETING_UNCERTAIN_MIN_CONFIDENCE=0.65,
-        ),
-    )
+        ))
 
     result = await executor._execute_linear_meeting_actions(
         skill=FakeSkill(),
@@ -2087,8 +2040,8 @@ async def test_linear_direct_command_preserves_team_selection_failures(monkeypat
             LinearCandidate(title="Fix login flow", description="Fix login flow", confidence=0.96)
         ]))
 
-    monkeypatch.setattr(executor_module, "run_linear_structured_inference", fake_inference)
-    monkeypatch.setattr(executor_module, "get_settings", lambda: SimpleNamespace(
+    patch_skill_dependency(monkeypatch, 'run_linear_structured_inference', fake_inference)
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: SimpleNamespace(
         OPENAI_API_KEY=None,
         LINEAR_DEFAULT_TEAM=None,
         LINEAR_MEETING_AUTO_CREATE_MIN_CONFIDENCE=0.85,
@@ -2191,17 +2144,13 @@ async def test_linear_direct_prd_command_creates_without_assignee_or_project(mon
             assert name == "LinearMeetingActionsClient"
             return FakeClient
 
-    monkeypatch.setattr(executor_module, "run_linear_structured_inference", fake_inference)
-    monkeypatch.setattr(
-        executor_module,
-        "get_settings",
-        lambda: SimpleNamespace(
+    patch_skill_dependency(monkeypatch, 'run_linear_structured_inference', fake_inference)
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: SimpleNamespace(
             OPENAI_API_KEY=None,
             LINEAR_DEFAULT_TEAM=None,
             LINEAR_MEETING_AUTO_CREATE_MIN_CONFIDENCE=0.85,
             LINEAR_MEETING_UNCERTAIN_MIN_CONFIDENCE=0.65,
-        ),
-    )
+        ))
 
     result = await executor._execute_linear_meeting_actions(
         skill=FakeSkill(),
@@ -2276,17 +2225,13 @@ async def test_linear_direct_prd_command_uses_configured_default_team(monkeypatc
         def get_client_class(self, name):
             return FakeClient
 
-    monkeypatch.setattr(executor_module, "run_linear_structured_inference", fake_inference)
-    monkeypatch.setattr(
-        executor_module,
-        "get_settings",
-        lambda: SimpleNamespace(
+    patch_skill_dependency(monkeypatch, 'run_linear_structured_inference', fake_inference)
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: SimpleNamespace(
             OPENAI_API_KEY=None,
             LINEAR_DEFAULT_TEAM="MLA",
             LINEAR_MEETING_AUTO_CREATE_MIN_CONFIDENCE=0.85,
             LINEAR_MEETING_UNCERTAIN_MIN_CONFIDENCE=0.65,
-        ),
-    )
+        ))
 
     result = await executor._execute_linear_meeting_actions(
         skill=FakeSkill(),
@@ -2350,17 +2295,13 @@ async def test_linear_direct_prd_command_asks_for_team_when_several_exist(monkey
         def get_client_class(self, name):
             return FakeClient
 
-    monkeypatch.setattr(executor_module, "run_linear_structured_inference", fake_inference)
-    monkeypatch.setattr(
-        executor_module,
-        "get_settings",
-        lambda: SimpleNamespace(
+    patch_skill_dependency(monkeypatch, 'run_linear_structured_inference', fake_inference)
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: SimpleNamespace(
             OPENAI_API_KEY=None,
             LINEAR_DEFAULT_TEAM=None,
             LINEAR_MEETING_AUTO_CREATE_MIN_CONFIDENCE=0.85,
             LINEAR_MEETING_UNCERTAIN_MIN_CONFIDENCE=0.65,
-        ),
-    )
+        ))
 
     result = await executor._execute_linear_meeting_actions(
         skill=FakeSkill(),
@@ -2476,17 +2417,13 @@ async def test_linear_meeting_executor_creates_project_update_when_requested(mon
             assert name == "LinearMeetingActionsClient"
             return FakeClient
 
-    monkeypatch.setattr(
-        executor_module,
-        "get_settings",
-        lambda: SimpleNamespace(
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: SimpleNamespace(
             LINEAR_DEFAULT_TEAM=None,
             LINEAR_MEETING_AUTO_CREATE_MIN_CONFIDENCE=0.85,
             LINEAR_MEETING_UNCERTAIN_MIN_CONFIDENCE=0.65,
-        ),
-    )
-    monkeypatch.setattr(executor, "_build_linear_meeting_source_result", fake_source_result)
-    monkeypatch.setattr(executor, "_extract_linear_meeting_candidates_from_sources", fake_candidates_from_sources)
+        ))
+    monkeypatch.setattr(executor.owner_of('_build_linear_meeting_source_result'), '_build_linear_meeting_source_result', fake_source_result)
+    monkeypatch.setattr(executor.owner_of('_extract_linear_meeting_candidates_from_sources'), '_extract_linear_meeting_candidates_from_sources', fake_candidates_from_sources)
     async def fake_project_update_input(**kwargs):
         assert kwargs["recent_issues"][0]["identifier"] == "MLA-1"
         assert kwargs["project"]["lastUpdate"]["id"] == "update-0"
@@ -2496,7 +2433,7 @@ async def test_linear_meeting_executor_creates_project_update_when_requested(mon
             "health": "onTrack",
         }
 
-    monkeypatch.setattr(executor, "_build_linear_meeting_project_update_input", fake_project_update_input)
+    monkeypatch.setattr(executor.owner_of('_build_linear_meeting_project_update_input'), '_build_linear_meeting_project_update_input', fake_project_update_input)
 
     result = await executor._execute_linear_meeting_actions(
         skill=FakeSkill(),
@@ -2547,11 +2484,7 @@ async def test_linear_project_update_writer_uses_chunk_summaries_last_update_and
             )
         )
 
-    monkeypatch.setattr(
-        executor_module,
-        "run_linear_structured_inference",
-        fake_inference,
-    )
+    patch_skill_dependency(monkeypatch, 'run_linear_structured_inference', fake_inference)
 
     project = {
         "id": "project-1",
@@ -2641,17 +2574,13 @@ async def test_linear_project_update_skips_when_project_match_low_confidence(mon
             assert name == "LinearMeetingActionsClient"
             return FakeClient
 
-    monkeypatch.setattr(
-        executor_module,
-        "get_settings",
-        lambda: SimpleNamespace(
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: SimpleNamespace(
             LINEAR_DEFAULT_TEAM=None,
             LINEAR_MEETING_AUTO_CREATE_MIN_CONFIDENCE=0.85,
             LINEAR_MEETING_UNCERTAIN_MIN_CONFIDENCE=0.65,
-        ),
-    )
-    monkeypatch.setattr(executor, "_build_linear_meeting_source_result", fake_source_result)
-    monkeypatch.setattr(executor, "_extract_linear_meeting_candidates_from_sources", no_candidates)
+        ))
+    monkeypatch.setattr(executor.owner_of('_build_linear_meeting_source_result'), '_build_linear_meeting_source_result', fake_source_result)
+    monkeypatch.setattr(executor.owner_of('_extract_linear_meeting_candidates_from_sources'), '_extract_linear_meeting_candidates_from_sources', no_candidates)
 
     result = await executor._execute_linear_meeting_actions(
         skill=FakeSkill(),
@@ -2743,19 +2672,15 @@ async def test_linear_thread_reference_fallback_requires_review(monkeypatch):
             assert name == "LinearMeetingActionsClient"
             return FakeClient
 
-    monkeypatch.setattr(
-        executor_module,
-        "get_settings",
-        lambda: SimpleNamespace(
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: SimpleNamespace(
             LINEAR_DEFAULT_TEAM=None,
             LINEAR_MEETING_AUTO_CREATE_MIN_CONFIDENCE=0.85,
             LINEAR_MEETING_UNCERTAIN_MIN_CONFIDENCE=0.65,
-        ),
-    )
+        ))
     monkeypatch.setattr("roo.slack_client.get_user_info", lambda user_id: {"email": "yana@example.com"})
-    monkeypatch.setattr(executor, "_build_linear_meeting_source_result", fake_source_result)
-    monkeypatch.setattr(executor, "_extract_linear_meeting_candidates_from_sources", no_concrete_candidates)
-    monkeypatch.setattr(executor, "_extract_linear_thread_context_candidate", contextual_candidate)
+    monkeypatch.setattr(executor.owner_of('_build_linear_meeting_source_result'), '_build_linear_meeting_source_result', fake_source_result)
+    monkeypatch.setattr(executor.owner_of('_extract_linear_meeting_candidates_from_sources'), '_extract_linear_meeting_candidates_from_sources', no_concrete_candidates)
+    monkeypatch.setattr(executor.owner_of('_extract_linear_thread_context_candidate'), '_extract_linear_thread_context_candidate', contextual_candidate)
 
     result = await executor._execute_linear_meeting_actions(
         skill=FakeSkill(),
@@ -2843,18 +2768,14 @@ async def test_linear_thread_reference_fallback_skips_when_assignee_unresolved(m
             assert name == "LinearMeetingActionsClient"
             return FakeClient
 
-    monkeypatch.setattr(
-        executor_module,
-        "get_settings",
-        lambda: SimpleNamespace(
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: SimpleNamespace(
             LINEAR_DEFAULT_TEAM=None,
             LINEAR_MEETING_AUTO_CREATE_MIN_CONFIDENCE=0.85,
             LINEAR_MEETING_UNCERTAIN_MIN_CONFIDENCE=0.65,
-        ),
-    )
-    monkeypatch.setattr(executor, "_build_linear_meeting_source_result", fake_source_result)
-    monkeypatch.setattr(executor, "_extract_linear_meeting_candidates_from_sources", no_concrete_candidates)
-    monkeypatch.setattr(executor, "_extract_linear_thread_context_candidate", contextual_candidate)
+        ))
+    monkeypatch.setattr(executor.owner_of('_build_linear_meeting_source_result'), '_build_linear_meeting_source_result', fake_source_result)
+    monkeypatch.setattr(executor.owner_of('_extract_linear_meeting_candidates_from_sources'), '_extract_linear_meeting_candidates_from_sources', no_concrete_candidates)
+    monkeypatch.setattr(executor.owner_of('_extract_linear_thread_context_candidate'), '_extract_linear_thread_context_candidate', contextual_candidate)
 
     result = await executor._execute_linear_meeting_actions(
         skill=FakeSkill(),
@@ -3212,18 +3133,14 @@ async def test_linear_meeting_command_with_file_uses_extraction_not_direct_path(
         def get_client_class(self, name):
             return FakeClient
 
-    monkeypatch.setattr(
-        executor_module,
-        "get_settings",
-        lambda: SimpleNamespace(
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: SimpleNamespace(
             LINEAR_DEFAULT_TEAM=None,
             LINEAR_MEETING_AUTO_CREATE_MIN_CONFIDENCE=0.85,
             LINEAR_MEETING_UNCERTAIN_MIN_CONFIDENCE=0.65,
-        ),
-    )
-    monkeypatch.setattr(executor, "_build_linear_meeting_source_result", fake_source_result)
-    monkeypatch.setattr(executor, "_extract_linear_meeting_candidates_from_sources", fake_candidates_from_sources)
-    monkeypatch.setattr(executor, "_extract_linear_direct_issue_candidates", fail_direct)
+        ))
+    monkeypatch.setattr(executor.owner_of('_build_linear_meeting_source_result'), '_build_linear_meeting_source_result', fake_source_result)
+    monkeypatch.setattr(executor.owner_of('_extract_linear_meeting_candidates_from_sources'), '_extract_linear_meeting_candidates_from_sources', fake_candidates_from_sources)
+    monkeypatch.setattr(executor.owner_of('_extract_linear_direct_issue_candidates'), '_extract_linear_direct_issue_candidates', fail_direct)
 
     result = await executor._execute_linear_meeting_actions(
         skill=FakeSkill(),
@@ -3378,17 +3295,13 @@ async def test_contextual_founder_games_assignment_creates_one_step(monkeypatch)
             assert name == "LinearMeetingActionsClient"
             return FakeClient
 
-    monkeypatch.setattr(
-        executor_module,
-        "get_settings",
-        lambda: SimpleNamespace(
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: SimpleNamespace(
             OPENAI_API_KEY=None,
             LINEAR_DEFAULT_TEAM=None,
             LINEAR_MEETING_AUTO_CREATE_MIN_CONFIDENCE=0.85,
             LINEAR_MEETING_UNCERTAIN_MIN_CONFIDENCE=0.65,
             LINEAR_CONTEXTUAL_AUTO_CREATE_ENABLED=True,
-        ),
-    )
+        ))
     monkeypatch.setattr(
         "roo.slack_client.get_user_info",
         lambda user_id: {"email": "sam@example.com"} if user_id == "USAM" else {},
@@ -3397,11 +3310,7 @@ async def test_contextual_founder_games_assignment_creates_one_step(monkeypatch)
         "roo.slack_client.get_message_permalink",
         lambda channel_id, message_ts: "https://slack.test/source-message",
     )
-    monkeypatch.setattr(
-        executor,
-        "_extract_linear_meeting_candidates_from_sources",
-        extracted_candidates,
-    )
+    monkeypatch.setattr(executor.owner_of('_extract_linear_meeting_candidates_from_sources'), '_extract_linear_meeting_candidates_from_sources', extracted_candidates)
 
     result = await executor._execute_linear_meeting_actions(
         skill=FakeSkill(),
@@ -3472,17 +3381,13 @@ async def test_linear_meeting_unmatched_owner_skipped_without_fallback(monkeypat
         def get_client_class(self, name):
             return FakeClient
 
-    monkeypatch.setattr(
-        executor_module,
-        "get_settings",
-        lambda: SimpleNamespace(
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: SimpleNamespace(
             LINEAR_DEFAULT_TEAM=None,
             LINEAR_MEETING_AUTO_CREATE_MIN_CONFIDENCE=0.85,
             LINEAR_MEETING_UNCERTAIN_MIN_CONFIDENCE=0.65,
-        ),
-    )
-    monkeypatch.setattr(executor, "_build_linear_meeting_source_result", fake_source_result)
-    monkeypatch.setattr(executor, "_extract_linear_meeting_candidates_from_sources", fake_candidates_from_sources)
+        ))
+    monkeypatch.setattr(executor.owner_of('_build_linear_meeting_source_result'), '_build_linear_meeting_source_result', fake_source_result)
+    monkeypatch.setattr(executor.owner_of('_extract_linear_meeting_candidates_from_sources'), '_extract_linear_meeting_candidates_from_sources', fake_candidates_from_sources)
 
     result = await executor._execute_linear_meeting_actions(
         skill=FakeSkill(),
@@ -3584,11 +3489,7 @@ def test_bulk_creation_authorization_distinguishes_create_from_preview():
 
 @pytest.mark.asyncio
 async def test_contextual_command_without_readable_history_explains_recovery(monkeypatch):
-    monkeypatch.setattr(
-        executor_module,
-        "get_settings",
-        lambda: SimpleNamespace(OPENAI_API_KEY=None),
-    )
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: SimpleNamespace(OPENAI_API_KEY=None))
     current_message = {
         "user": "USAM",
         "text": "@Roo add this as a task for me in Linear",

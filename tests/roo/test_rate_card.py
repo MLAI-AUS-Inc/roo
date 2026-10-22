@@ -1,4 +1,5 @@
 """Rate-card display and smart-award behavior using external-boundary doubles."""
+from tests.roo.skill_test_support import patch_skill_dependency
 
 from types import MethodType, SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -56,15 +57,15 @@ def points_context(monkeypatch):
     client._clean_slack_id = MethodType(backend_module.MLAIBackendClient._clean_slack_id, client)
     send_dm = Mock()
     monkeypatch.setattr(backend_module, "MLAIBackendClient", lambda **kwargs: client)
-    monkeypatch.setattr(executor_module, "get_settings", lambda: SimpleNamespace(
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: SimpleNamespace(
         MLAI_BACKEND_URL="https://backend.test", ROO_API_KEY="roo-test-key",
         MLAI_API_KEY="legacy-test-key", INTERNAL_API_KEY="different-admin-test-key",
     ))
-    monkeypatch.setattr(executor_module, "send_dm", send_dm)
+    patch_skill_dependency(monkeypatch, 'send_dm', send_dm)
     monkeypatch.setattr("roo.slack_client.get_bot_user_id", lambda: "UBOT")
-    monkeypatch.setattr(executor_module, "get_bot_user_id", lambda: "UBOT")
+    patch_skill_dependency(monkeypatch, 'get_bot_user_id', lambda: "UBOT")
     for name in ("chat", "embed", "get_llm_client"):
-        monkeypatch.setattr(executor_module, name, Mock(side_effect=AssertionError("No provider calls")))
+        patch_skill_dependency(monkeypatch, name, Mock(side_effect=AssertionError("No provider calls")))
     executor = executor_module.SkillExecutor()
 
     async def execute(action="view_rate_card", text=None, **params):
@@ -143,7 +144,7 @@ async def test_explicit_amount_award_does_not_fetch_rate_card(points_context):
 
 @pytest.mark.asyncio
 async def test_unrelated_points_failure_keeps_general_guard(points_context, monkeypatch):
-    monkeypatch.setattr(points_context.executor, "_handle_points_action", AsyncMock(
+    monkeypatch.setattr(points_context.executor.owner_of('_handle_points_action'), "_handle_points_action", AsyncMock(
         side_effect=backend_module.MLAIBackendUnavailableError("test error"),
     ))
     assert await points_context.execute("balance") == (

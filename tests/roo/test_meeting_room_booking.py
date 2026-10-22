@@ -52,7 +52,7 @@ MELBOURNE = ZoneInfo("Australia/Melbourne")
 
 
 def _patch_executor(monkeypatch, configured, client_class=None):
-    globals_dict = SkillExecutor._execute_meeting_room_booking.__globals__
+    globals_dict = SkillExecutor().owner_of("_execute_meeting_room_booking")._execute_meeting_room_booking.__globals__
     monkeypatch.setitem(globals_dict, "get_settings", lambda: configured)
     monkeypatch.setitem(
         globals_dict,
@@ -736,7 +736,7 @@ async def test_public_unspecified_booking_asks_for_room_in_same_thread(
         lambda: datetime(2026, 8, 25, 7, 20, tzinfo=MELBOURNE),
     )
     monkeypatch.setitem(
-        SkillExecutor._deliver_meeting_room_response.__globals__,
+        SkillExecutor().owner_of("_deliver_meeting_room_response")._deliver_meeting_room_response.__globals__,
         "send_dm",
         lambda user_id, message, **kwargs: sent.append((user_id, message, kwargs)) or {"ok": True},
     )
@@ -803,7 +803,7 @@ async def test_public_room_reply_sends_only_private_deterministic_preview(monkey
     sent = []
     _patch_executor(monkeypatch, configured)
     monkeypatch.setitem(
-        SkillExecutor._deliver_meeting_room_response.__globals__,
+        SkillExecutor().owner_of("_deliver_meeting_room_response")._deliver_meeting_room_response.__globals__,
         "send_dm",
         lambda user_id, message, **kwargs: (
             sent.append((user_id, message, kwargs)) or {"ok": True}
@@ -843,7 +843,7 @@ async def test_public_room_preview_recovers_duplicate_deterministic_dm(monkeypat
         response = {"error": "duplicate_message"}
 
     monkeypatch.setitem(
-        SkillExecutor._deliver_meeting_room_response.__globals__,
+        SkillExecutor().owner_of("_deliver_meeting_room_response")._deliver_meeting_room_response.__globals__,
         "send_dm",
         lambda *args, **kwargs: (_ for _ in ()).throw(DuplicateMessageError()),
     )
@@ -865,7 +865,7 @@ async def test_public_room_preview_surfaces_uncertain_dm_for_durable_retry(monke
     configured = _settings()
     _patch_executor(monkeypatch, configured)
     monkeypatch.setitem(
-        SkillExecutor._deliver_meeting_room_response.__globals__,
+        SkillExecutor().owner_of("_deliver_meeting_room_response")._deliver_meeting_room_response.__globals__,
         "send_dm",
         lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("response lost")),
     )
@@ -887,12 +887,12 @@ async def test_public_room_prompt_fails_closed_when_state_cannot_persist(monkeyp
     sent = []
     _patch_executor(monkeypatch, configured)
     monkeypatch.setitem(
-        SkillExecutor._execute_meeting_room_booking.__globals__,
+        SkillExecutor().owner_of("_execute_meeting_room_booking")._execute_meeting_room_booking.__globals__,
         "get_meeting_room_clarification_store",
         lambda path: (_ for _ in ()).throw(RuntimeError("state unavailable")),
     )
     monkeypatch.setitem(
-        SkillExecutor._deliver_meeting_room_response.__globals__,
+        SkillExecutor().owner_of("_deliver_meeting_room_response")._deliver_meeting_room_response.__globals__,
         "send_dm",
         lambda *args, **kwargs: sent.append((args, kwargs)) or {"ok": True},
     )
@@ -1192,7 +1192,7 @@ async def test_public_dm_failure_never_exposes_booking_details(monkeypatch):
     configured = _settings()
     _patch_executor(monkeypatch, configured)
     monkeypatch.setitem(
-        SkillExecutor._deliver_meeting_room_response.__globals__,
+        SkillExecutor().owner_of("_deliver_meeting_room_response")._deliver_meeting_room_response.__globals__,
         "send_dm",
         lambda *args, **kwargs: None,
     )
@@ -1235,7 +1235,7 @@ async def test_day_discovery_uses_day_snapshot_and_stays_private(monkeypatch, te
     for module in (room_module, availability_module):
         monkeypatch.setattr(module, 'get_current_datetime', lambda: datetime(2026, 9, 14, 12, tzinfo=MELBOURNE))
     delivered = []
-    monkeypatch.setitem(SkillExecutor._deliver_meeting_room_response.__globals__, 'send_dm',
+    monkeypatch.setitem(SkillExecutor().owner_of("_deliver_meeting_room_response")._deliver_meeting_room_response.__globals__, 'send_dm',
                         lambda user_id, message, **kwargs: delivered.append((user_id, message)) or {'ok': True})
     result = await SkillExecutor()._execute_meeting_room_booking(
         text=text, params={'action': 'check_room_availability', 'room': 'conference-room'},
@@ -1276,7 +1276,7 @@ async def test_chosen_slot_is_rechecked_before_booking_preview(monkeypatch):
 
 
 def test_date_availability_makes_an_empty_day_explicitly_clear():
-    message = SkillExecutor._format_meeting_room_availability(
+    message = SkillExecutor().owner_of("_format_meeting_room_availability")._format_meeting_room_availability(
         {
             "room": {"name": "Meeting Room"},
             "requested_interval": None,
@@ -1293,7 +1293,7 @@ def test_date_availability_makes_an_empty_day_explicitly_clear():
 
 
 def test_date_availability_lists_busy_intervals_without_claiming_other_times_are_free():
-    message = SkillExecutor._format_meeting_room_availability(
+    message = SkillExecutor().owner_of("_format_meeting_room_availability")._format_meeting_room_availability(
         {
             "room": {"name": "Meeting Room"},
             "requested_interval": None,
@@ -2139,7 +2139,7 @@ async def test_conference_denial_is_only_unavailable_and_private(monkeypatch, ac
             })
             response.raise_for_status()
     _patch_executor(monkeypatch, _settings(), DeniedClient)
-    monkeypatch.setitem(SkillExecutor._deliver_meeting_room_response.__globals__, 'send_dm',
+    monkeypatch.setitem(SkillExecutor().owner_of("_deliver_meeting_room_response")._deliver_meeting_room_response.__globals__, 'send_dm',
         lambda user_id, message, **kwargs: sent.append((user_id, message)) or {'ok': True})
     result = await SkillExecutor()._execute_meeting_room_booking(
         text=text, params={'action': action}, user_id='UOWNER', channel_id=channel_id,

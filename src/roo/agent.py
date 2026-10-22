@@ -33,7 +33,7 @@ from .logging_safety import (
     sanitize_log_value,
     slack_destination_type,
 )
-from .skills.loader import Skill, load_skills
+from .skills.loader import Skill, load_skills, load_skill_report
 from .skills.executor import SkillExecutor
 from .slack_client import get_thread_messages
 
@@ -65,26 +65,20 @@ class RooAgent:
         skills_dir = Path(settings.SKILLS_DIR)
 
         allowed_skill_names = settings.enabled_skill_names
-        self.skills = load_skills(
-            skills_dir,
-            allowed_names=allowed_skill_names,
-        )
-        if settings.has_explicit_skill_allowlist:
-            loaded_names = {skill.name for skill in self.skills}
-            missing_names = allowed_skill_names - loaded_names
-            if missing_names:
-                raise ValueError(
-                    "ROO_ENABLED_SKILLS references missing or invalid skills: "
-                    + ", ".join(sorted(missing_names))
-                )
+        self.skill_load_report = load_skill_report(skills_dir, allowed_names=allowed_skill_names)
+        self.skill_load_report.require(allowed_skill_names)
+        self.skills = self.skill_load_report.skills
+        from .skills.registry import HANDLERS, EVENT_ONLY_SKILLS
+        unbound = allowed_skill_names - (HANDLERS.keys() | EVENT_ONLY_SKILLS)
+        if unbound:
+            raise ValueError("Enabled skills have no execution binding: " + ", ".join(sorted(unbound)))
         self.skill_executor = SkillExecutor()
         self._thread_skill_context: Dict[str, Dict[str, Any]] = {}
         self._admin_routing_skill: Optional[Skill] = None
         if self._surface == "public" and settings.ROO_UNIFIED_ADMIN_ROUTING_ENABLED:
-            admin_route_skills = load_skills(
-                skills_dir,
-                allowed_names={"admin-brain"},
-            )
+            admin_route_skills = load_skill_report(
+                skills_dir, allowed_names={"admin-brain"}, import_clients=False,
+            ).skills
             if len(admin_route_skills) != 1:
                 raise ValueError(
                     "Unified Admin routing requires exactly one admin-brain route definition"

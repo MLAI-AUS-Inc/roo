@@ -316,7 +316,7 @@ async def test_executor_returns_grounded_blocks_and_never_calls_generic_fallback
         async def get_org_memory_query_trace(self, query_id, **kwargs):
             return {"selected_claim_ids": ["claim-1"]}
 
-    executor_globals = SkillExecutor._execute_admin_brain.__globals__
+    executor_globals = SkillExecutor().owner_of("_execute_admin_brain")._execute_admin_brain.__globals__
     monkeypatch.setitem(executor_globals, "get_settings", lambda: configured)
     monkeypatch.setitem(executor_globals, "MLAIBackendClient", FakeClient)
     executor = SkillExecutor()
@@ -324,7 +324,7 @@ async def test_executor_returns_grounded_blocks_and_never_calls_generic_fallback
     async def forbidden_fallback(*args, **kwargs):
         raise AssertionError("Admin Brain must never fall back to the generic LLM executor")
 
-    monkeypatch.setattr(executor, "_execute_with_llm", forbidden_fallback)
+    monkeypatch.setattr(executor.owner_of('_execute_with_llm'), "_execute_with_llm", forbidden_fallback)
     result = await executor.execute(
         Skill(
             name="admin-brain",
@@ -355,7 +355,7 @@ async def test_executor_fails_closed_when_memory_backend_is_unavailable(monkeypa
         async def answer_org_memory(self, *args, **kwargs):
             raise MLAIBackendUnavailableError("timeout")
 
-    executor_globals = SkillExecutor._execute_admin_brain.__globals__
+    executor_globals = SkillExecutor().owner_of("_execute_admin_brain")._execute_admin_brain.__globals__
     monkeypatch.setitem(executor_globals, "get_settings", lambda: configured)
     monkeypatch.setitem(executor_globals, "MLAIBackendClient", FailingClient)
     result = await SkillExecutor().execute(

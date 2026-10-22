@@ -1,3 +1,5 @@
+import asyncio as skill_asyncio
+from tests.roo.skill_test_support import patch_skill_dependency
 import importlib
 import json
 import sys
@@ -9,7 +11,6 @@ import httpx
 import pytest
 
 sys.path.insert(0, str((Path(__file__).resolve().parents[2] / "src")))
-sys.modules.setdefault("frontmatter", SimpleNamespace(load=lambda *args, **kwargs: None))
 sys.modules.pop("roo.skills.executor", None)
 sys.modules.pop("roo.main", None)
 
@@ -366,16 +367,12 @@ def _patch_content_factory(monkeypatch):
     FakeContentFactoryClient.auth_url_exception = None
     FakeContentFactoryClient.ensure_slack_user_registered_exception = None
 
-    monkeypatch.setattr(
-        executor_module,
-        "get_settings",
-        lambda: SimpleNamespace(
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: SimpleNamespace(
             MLAI_BACKEND_URL="https://backend.test",
             MLAI_API_KEY="api-key",
             INTERNAL_API_KEY="internal-key",
             ROO_API_KEY="roo-api-key",
-        ),
-    )
+        ))
     monkeypatch.setattr(
         slack_client_module,
         "get_user_info",
@@ -397,11 +394,7 @@ async def test_generic_article_request_prompts_for_direction(monkeypatch):
     executor = SkillExecutor()
     posted_messages = []
     _patch_content_factory(monkeypatch)
-    monkeypatch.setattr(
-        executor_module,
-        "post_message",
-        lambda *args, **kwargs: posted_messages.append({"args": args, "kwargs": kwargs}) or {"ts": "111.222"},
-    )
+    patch_skill_dependency(monkeypatch, 'post_message', lambda *args, **kwargs: posted_messages.append({"args": args, "kwargs": kwargs}) or {"ts": "111.222"})
 
     result = await executor._execute_content_factory(
         skill=None,
@@ -429,11 +422,7 @@ async def test_requirements_prompt_serializes_original_request_for_resume(monkey
     _patch_content_factory(monkeypatch)
     FakeContentFactoryClient.generic_integration = None
     FakeContentFactoryClient.domain_integrations["woofya.com.au"] = None
-    monkeypatch.setattr(
-        executor_module,
-        "post_message",
-        lambda *args, **kwargs: posted_messages.append({"args": args, "kwargs": kwargs}) or {"ts": "111.222"},
-    )
+    patch_skill_dependency(monkeypatch, 'post_message', lambda *args, **kwargs: posted_messages.append({"args": args, "kwargs": kwargs}) or {"ts": "111.222"})
 
     result = await executor._execute_content_factory(
         skill=None,
@@ -491,11 +480,7 @@ async def test_new_domain_requests_domain_github_auth_without_falling_back_to_ge
         "needs_github_auth": True,
         "oauth_url": "https://github.test/auth/woofya",
     }
-    monkeypatch.setattr(
-        executor_module,
-        "post_message",
-        lambda *args, **kwargs: posted_messages.append({"args": args, "kwargs": kwargs}) or {"ts": "111.222"},
-    )
+    patch_skill_dependency(monkeypatch, 'post_message', lambda *args, **kwargs: posted_messages.append({"args": args, "kwargs": kwargs}) or {"ts": "111.222"})
 
     result = await executor._execute_content_factory(
         skill=None,
@@ -562,11 +547,7 @@ async def test_requested_domain_bypasses_generic_multi_domain_error(monkeypatch)
         ],
         "selected_domain": "woofya.com.au",
     }
-    monkeypatch.setattr(
-        executor_module,
-        "post_message",
-        lambda *args, **kwargs: posted_messages.append({"args": args, "kwargs": kwargs}) or {"ts": "111.222"},
-    )
+    patch_skill_dependency(monkeypatch, 'post_message', lambda *args, **kwargs: posted_messages.append({"args": args, "kwargs": kwargs}) or {"ts": "111.222"})
 
     result = await executor._execute_content_factory(
         skill=None,
@@ -634,11 +615,7 @@ async def test_publish_ready_registry_target_writes_without_scaffold_prompt(monk
         ],
         "selected_domain": "skedy.io",
     }
-    monkeypatch.setattr(
-        executor_module,
-        "post_message",
-        lambda *args, **kwargs: posted_messages.append({"args": args, "kwargs": kwargs}) or {"ts": "111.222"},
-    )
+    patch_skill_dependency(monkeypatch, 'post_message', lambda *args, **kwargs: posted_messages.append({"args": args, "kwargs": kwargs}) or {"ts": "111.222"})
 
     result = await executor._execute_content_factory(
         skill=None,
@@ -693,11 +670,7 @@ async def test_unsafe_registry_target_shows_diagnostic_instead_of_scaffold_promp
         ],
         "selected_domain": "skedy.io",
     }
-    monkeypatch.setattr(
-        executor_module,
-        "post_message",
-        lambda *args, **kwargs: posted_messages.append({"args": args, "kwargs": kwargs}) or {"ts": "111.222"},
-    )
+    patch_skill_dependency(monkeypatch, 'post_message', lambda *args, **kwargs: posted_messages.append({"args": args, "kwargs": kwargs}) or {"ts": "111.222"})
 
     result = await executor._execute_content_factory(
         skill=None,
@@ -719,11 +692,7 @@ async def test_unsafe_registry_target_shows_diagnostic_instead_of_scaffold_promp
 async def test_delegated_article_request_uses_effective_user_for_backend_and_requester_for_billing(monkeypatch):
     executor = SkillExecutor()
     _patch_content_factory(monkeypatch)
-    monkeypatch.setattr(
-        executor_module,
-        "post_message",
-        lambda *args, **kwargs: {"ts": "111.222"},
-    )
+    patch_skill_dependency(monkeypatch, 'post_message', lambda *args, **kwargs: {"ts": "111.222"})
 
     result = await executor._execute_content_factory(
         skill=None,
@@ -806,11 +775,7 @@ async def test_delegated_scan_auth_blocker_returns_error_without_reconnect(monke
 async def test_delegated_publish_code_article_preflight_queues_when_backend_reports_connected(monkeypatch):
     executor = SkillExecutor()
     _patch_content_factory(monkeypatch)
-    monkeypatch.setattr(
-        executor_module,
-        "post_message",
-        lambda *args, **kwargs: {"ts": "111.222"},
-    )
+    patch_skill_dependency(monkeypatch, 'post_message', lambda *args, **kwargs: {"ts": "111.222"})
     FakeContentFactoryClient.domain_integrations["woofya.com.au"] = {
         **FakeContentFactoryClient.domain_integrations["woofya.com.au"],
         "article_delivery_mode": "publish_code",
@@ -842,11 +807,7 @@ async def test_delegated_publish_code_article_preflight_queues_when_backend_repo
 async def test_delegated_publish_code_article_returns_auth_error_only_when_backend_requires_reconnect(monkeypatch):
     executor = SkillExecutor()
     _patch_content_factory(monkeypatch)
-    monkeypatch.setattr(
-        executor_module,
-        "post_message",
-        lambda *args, **kwargs: {"ts": "111.222"},
-    )
+    patch_skill_dependency(monkeypatch, 'post_message', lambda *args, **kwargs: {"ts": "111.222"})
     FakeContentFactoryClient.domain_integrations["woofya.com.au"] = {
         **FakeContentFactoryClient.domain_integrations["woofya.com.au"],
         "article_delivery_mode": "publish_code",
@@ -897,11 +858,7 @@ async def test_explicit_content_only_request_without_repo_starts_generation(monk
         "scan_summary": None,
         "article_system": {},
     }
-    monkeypatch.setattr(
-        executor_module,
-        "post_message",
-        lambda *args, **kwargs: posted_messages.append({"args": args, "kwargs": kwargs}) or {"ts": "111.222"},
-    )
+    patch_skill_dependency(monkeypatch, 'post_message', lambda *args, **kwargs: posted_messages.append({"args": args, "kwargs": kwargs}) or {"ts": "111.222"})
 
     result = await executor._execute_content_factory(
         skill=None,
@@ -945,11 +902,7 @@ async def test_repo_less_request_awaits_delivery_mode_instead_of_showing_github_
         "workflow": "direct_generate",
         "recommended_delivery_mode": "content_only",
     }
-    monkeypatch.setattr(
-        executor_module,
-        "post_message",
-        lambda *args, **kwargs: posted_messages.append({"args": args, "kwargs": kwargs}) or {"ts": "111.222"},
-    )
+    patch_skill_dependency(monkeypatch, 'post_message', lambda *args, **kwargs: posted_messages.append({"args": args, "kwargs": kwargs}) or {"ts": "111.222"})
 
     result = await executor._execute_content_factory(
         skill=None,
@@ -1157,11 +1110,7 @@ async def test_new_domain_requires_repo_selection_without_falling_back_to_generi
         ],
         "needs_github_auth": False,
     }
-    monkeypatch.setattr(
-        executor_module,
-        "post_message",
-        lambda *args, **kwargs: posted_messages.append({"args": args, "kwargs": kwargs}) or {"ts": "111.222"},
-    )
+    patch_skill_dependency(monkeypatch, 'post_message', lambda *args, **kwargs: posted_messages.append({"args": args, "kwargs": kwargs}) or {"ts": "111.222"})
 
     result = await executor._execute_content_factory(
         skill=None,
@@ -1194,7 +1143,7 @@ async def test_execute_passes_param_overrides_to_handlers(monkeypatch):
         captured_params.update(params)
         return "ok"
 
-    monkeypatch.setattr(executor, "_execute_content_factory", fake_content_factory)
+    monkeypatch.setattr(executor.owner_of('_execute_content_factory'), "_execute_content_factory", fake_content_factory)
 
     result = await executor.execute(
         skill=SimpleNamespace(name="content-factory"),
@@ -1215,11 +1164,7 @@ async def test_explicit_content_factory_scan_with_existing_scan_prompts_for_conf
     executor = SkillExecutor()
     posted_messages = []
     _patch_content_factory(monkeypatch)
-    monkeypatch.setattr(
-        executor_module,
-        "post_message",
-        lambda *args, **kwargs: posted_messages.append({"args": args, "kwargs": kwargs}) or {"ts": "111.222"},
-    )
+    patch_skill_dependency(monkeypatch, 'post_message', lambda *args, **kwargs: posted_messages.append({"args": args, "kwargs": kwargs}) or {"ts": "111.222"})
 
     result = await executor._execute_content_factory(
         skill=None,
@@ -1317,11 +1262,7 @@ async def test_natural_language_content_factory_scan_phrase_prompts_for_confirma
             }
         ],
     }
-    monkeypatch.setattr(
-        executor_module,
-        "post_message",
-        lambda *args, **kwargs: posted_messages.append({"args": args, "kwargs": kwargs}) or {"ts": "111.222"},
-    )
+    patch_skill_dependency(monkeypatch, 'post_message', lambda *args, **kwargs: posted_messages.append({"args": args, "kwargs": kwargs}) or {"ts": "111.222"})
 
     result = await executor._execute_content_factory(
         skill=None,
@@ -1344,11 +1285,7 @@ async def test_explicit_github_scan_with_existing_scan_prompts_for_confirmation(
     executor = SkillExecutor()
     posted_messages = []
     _patch_content_factory(monkeypatch)
-    monkeypatch.setattr(
-        executor_module,
-        "post_message",
-        lambda *args, **kwargs: posted_messages.append({"args": args, "kwargs": kwargs}) or {"ts": "111.222"},
-    )
+    patch_skill_dependency(monkeypatch, 'post_message', lambda *args, **kwargs: posted_messages.append({"args": args, "kwargs": kwargs}) or {"ts": "111.222"})
 
     result = await executor._execute_github_integration(
         skill=None,
@@ -1371,11 +1308,7 @@ async def test_manual_github_reconnect_returns_already_connected_without_scannin
     executor = SkillExecutor()
     posted_messages = []
     _patch_content_factory(monkeypatch)
-    monkeypatch.setattr(
-        executor_module,
-        "post_message",
-        lambda *args, **kwargs: posted_messages.append({"args": args, "kwargs": kwargs}) or {"ts": "111.222"},
-    )
+    patch_skill_dependency(monkeypatch, 'post_message', lambda *args, **kwargs: posted_messages.append({"args": args, "kwargs": kwargs}) or {"ts": "111.222"})
 
     result = await executor._execute_github_integration(
         skill=None,
@@ -1413,11 +1346,7 @@ async def test_manual_github_reconnect_posts_auth_button_when_auth_started(monke
         "auth_url": "https://github.test/reconnect",
         "message": "GitHub needs to be connected for mlai.au before Roo can continue.",
     }
-    monkeypatch.setattr(
-        executor_module,
-        "post_message",
-        lambda *args, **kwargs: posted_messages.append({"args": args, "kwargs": kwargs}) or {"ts": "111.222"},
-    )
+    patch_skill_dependency(monkeypatch, 'post_message', lambda *args, **kwargs: posted_messages.append({"args": args, "kwargs": kwargs}) or {"ts": "111.222"})
 
     result = await executor._execute_github_integration(
         skill=None,
@@ -1453,11 +1382,7 @@ async def test_publish_code_article_preflights_github_reconnect_before_queueing(
         "auth_url": "https://github.test/reconnect",
         "message": "GitHub needs to be connected for mlai.au before Roo can continue.",
     }
-    monkeypatch.setattr(
-        executor_module,
-        "post_message",
-        lambda *args, **kwargs: posted_messages.append({"args": args, "kwargs": kwargs}) or {"ts": "111.222"},
-    )
+    patch_skill_dependency(monkeypatch, 'post_message', lambda *args, **kwargs: posted_messages.append({"args": args, "kwargs": kwargs}) or {"ts": "111.222"})
 
     result = await executor._execute_content_factory(
         skill=None,
@@ -1528,11 +1453,7 @@ async def test_scan_preflights_github_reconnect_before_queueing(monkeypatch):
         "auth_url": "https://github.test/reconnect",
         "message": "GitHub needs to be connected for mlai.au before Roo can continue.",
     }
-    monkeypatch.setattr(
-        executor_module,
-        "post_message",
-        lambda *args, **kwargs: posted_messages.append({"args": args, "kwargs": kwargs}) or {"ts": "111.222"},
-    )
+    patch_skill_dependency(monkeypatch, 'post_message', lambda *args, **kwargs: posted_messages.append({"args": args, "kwargs": kwargs}) or {"ts": "111.222"})
 
     result = await executor._execute_content_factory(
         skill=None,
@@ -1571,11 +1492,7 @@ async def test_article_auth_required_412_posts_single_reconnect_cta(monkeypatch)
         raise httpx.HTTPStatusError("precondition failed", request=request, response=response)
 
     monkeypatch.setattr(FakeContentFactoryClient, "trigger_article_generation", raise_auth_required)
-    monkeypatch.setattr(
-        executor_module,
-        "post_message",
-        lambda *args, **kwargs: posted_messages.append({"args": args, "kwargs": kwargs}) or {"ts": "111.222"},
-    )
+    patch_skill_dependency(monkeypatch, 'post_message', lambda *args, **kwargs: posted_messages.append({"args": args, "kwargs": kwargs}) or {"ts": "111.222"})
 
     result = await executor._execute_content_factory(
         skill=None,
@@ -1618,11 +1535,7 @@ async def test_write_request_survives_pending_intent_timeout_with_local_fallback
     FakeContentFactoryClient.generic_integration = None
     FakeContentFactoryClient.domain_integrations["mlai.au"] = None
     FakeContentFactoryClient.save_pending_intent_exception = httpx.ReadTimeout("backend timed out")
-    monkeypatch.setattr(
-        executor_module,
-        "post_message",
-        lambda *args, **kwargs: posted_messages.append({"args": args, "kwargs": kwargs}) or {"ts": "111.222"},
-    )
+    patch_skill_dependency(monkeypatch, 'post_message', lambda *args, **kwargs: posted_messages.append({"args": args, "kwargs": kwargs}) or {"ts": "111.222"})
 
     result = await executor._execute_content_factory(
         skill=None,
@@ -1671,11 +1584,7 @@ async def test_explicit_scaffold_returns_existing_pr_and_preview(monkeypatch):
         }
 
     monkeypatch.setattr(FakeContentFactoryClient, "scaffold_articles", fake_scaffold_articles, raising=False)
-    monkeypatch.setattr(
-        executor_module,
-        "post_message",
-        lambda *args, **kwargs: posted_messages.append({"args": args, "kwargs": kwargs}) or {"ts": "111.222"},
-    )
+    patch_skill_dependency(monkeypatch, 'post_message', lambda *args, **kwargs: posted_messages.append({"args": args, "kwargs": kwargs}) or {"ts": "111.222"})
 
     result = await executor._execute_content_factory(
         skill=None,
@@ -1699,15 +1608,11 @@ async def test_explicit_research_request_starts_generation(monkeypatch):
     created_tasks = []
     posted_messages = []
     monkeypatch.setattr(
-        executor_module.asyncio,
+        skill_asyncio,
         "create_task",
         lambda coro: created_tasks.append(coro) or coro,
     )
-    monkeypatch.setattr(
-        executor_module,
-        "post_message",
-        lambda *args, **kwargs: posted_messages.append((args, kwargs)),
-    )
+    patch_skill_dependency(monkeypatch, 'post_message', lambda *args, **kwargs: posted_messages.append((args, kwargs)))
 
     result = await executor._execute_content_factory(
         skill=None,
@@ -1744,7 +1649,7 @@ async def test_content_factory_blocks_when_user_has_insufficient_points(monkeypa
     executor = SkillExecutor()
     _patch_content_factory(monkeypatch)
     FakeContentFactoryClient.balance_by_user["U999FREE"] = 3
-    monkeypatch.setattr(executor_module, "post_message", lambda *args, **kwargs: {"ts": "111.222"})
+    patch_skill_dependency(monkeypatch, 'post_message', lambda *args, **kwargs: {"ts": "111.222"})
 
     result = await executor._execute_content_factory(
         skill=None,
@@ -1767,7 +1672,7 @@ async def test_content_factory_blocks_when_user_has_insufficient_points(monkeypa
 async def test_content_factory_blocks_when_slack_email_missing(monkeypatch):
     executor = SkillExecutor()
     _patch_content_factory(monkeypatch)
-    monkeypatch.setattr(executor_module, "post_message", lambda *args, **kwargs: {"ts": "111.222"})
+    patch_skill_dependency(monkeypatch, 'post_message', lambda *args, **kwargs: {"ts": "111.222"})
     FakeContentFactoryClient.user_profiles["U_NO_EMAIL"] = {
         "id": "U_NO_EMAIL",
         "email": "",
@@ -1841,7 +1746,7 @@ async def test_topic_led_article_request_mentions_seo_optimization(monkeypatch):
     _patch_content_factory(monkeypatch)
     created_tasks = []
     monkeypatch.setattr(
-        executor_module.asyncio,
+        skill_asyncio,
         "create_task",
         lambda coro: created_tasks.append(coro) or coro,
     )
@@ -1874,12 +1779,8 @@ async def test_topic_led_article_request_starts_monitor_when_threaded(monkeypatc
         coro.close()
         return SimpleNamespace(cancel=lambda: None)
 
-    monkeypatch.setattr(executor_module.asyncio, "create_task", capture_task)
-    monkeypatch.setattr(
-        executor_module,
-        "post_message",
-        lambda *args, **kwargs: posted_messages.append((args, kwargs)),
-    )
+    monkeypatch.setattr(skill_asyncio, "create_task", capture_task)
+    patch_skill_dependency(monkeypatch, 'post_message', lambda *args, **kwargs: posted_messages.append((args, kwargs)))
 
     result = await executor._execute_content_factory(
         skill=None,
@@ -1930,16 +1831,12 @@ async def test_monitor_generation_returns_on_awaiting_confirmation(monkeypatch):
 
     client = AwaitingConfirmationClient()
 
-    monkeypatch.setattr(
-        executor_module,
-        "post_message",
-        lambda *args, **kwargs: posted_messages.append((args, kwargs)),
-    )
+    patch_skill_dependency(monkeypatch, 'post_message', lambda *args, **kwargs: posted_messages.append((args, kwargs)))
 
     async def no_sleep(*_args, **_kwargs):
         return None
 
-    monkeypatch.setattr(executor_module.asyncio, "sleep", no_sleep)
+    monkeypatch.setattr(skill_asyncio, "sleep", no_sleep)
 
     await executor._monitor_generation(client, "job-123", "C123", "111.222", "U123")
 

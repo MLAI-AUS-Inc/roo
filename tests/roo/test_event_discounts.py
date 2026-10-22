@@ -1,4 +1,5 @@
 """Hermetic member redemption contract and consent tests; no DB or services."""
+from tests.roo.skill_test_support import patch_skill_dependency
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -133,7 +134,7 @@ async def test_untrusted_or_mismatched_coupon_links_are_never_returned(url):
 @pytest.mark.asyncio
 async def test_executor_wires_event_action_without_passing_model_identity(monkeypatch):
     from roo.skills import executor
-    monkeypatch.setattr(executor, "get_settings", lambda: SETTINGS)
+    patch_skill_dependency(monkeypatch, "get_settings", lambda: SETTINGS)
     client = fake_client()
     with use_backend_actor_context(ACTOR):
         result = await executor.SkillExecutor()._handle_points_action(
@@ -239,7 +240,7 @@ async def test_disabled_new_redemptions_preserve_private_history():
 @pytest.mark.parametrize("params", [{}, {"event_query": "Completely different reward"}, {"event_query": "evt-tampered", "slack_user_id": "UFORGED"}])
 async def test_original_chat_event_marker_overrides_model_query_without_changing_actor(monkeypatch, params):
     from roo.skills import executor
-    monkeypatch.setattr(executor, "get_settings", lambda: SETTINGS)
+    patch_skill_dependency(monkeypatch, "get_settings", lambda: SETTINGS)
     client = fake_client()
     client.quote_event_discount.return_value["event"]["id"] = "evt-explicit-choice"
     text = (

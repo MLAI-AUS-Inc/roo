@@ -293,6 +293,9 @@ The capability is disabled by default and requires the matching backend feature.
 
 ## Skills
 
+See [skill development and validation](docs/skill-development.md) for the
+metadata-only linter, structured load reports, and explicit handler registry.
+
 The general chat fallback system prompt lives in
 [`src/roo/prompts/system_prompt.md`](src/roo/prompts/system_prompt.md).
 Roo fills `{skill_list}` and `{history_context}` at request time. Preserve these
@@ -310,8 +313,9 @@ administrative actions.
 ## Public and Admin Roo
 
 The proposed [message-routing modularisation plan](plans/message-routing-modular-classes.md)
-defines service boundaries and staged extractions for ingress, Admin dispatch,
-request context, and reply delivery. It is a proposal, not current architecture.
+defines SlackInterface, MessageRouter, AdminAgent, SlackReplyDelivery, SkillLoader,
+and Skill boundaries. Admin authorization and transport stay internal to the
+agent interface. It is a proposal, not current architecture.
 
 - Public Roo handles approved community-facing interactions.
 - Admin Roo is a separately scoped internal surface.

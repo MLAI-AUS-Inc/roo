@@ -1,3 +1,5 @@
+from roo.skills.handlers.constants import POINTS_SUPER_ADMIN_SLACK_ID as skill_points_super_admin_slack_id
+from tests.roo.skill_test_support import patch_skill_dependency
 import asyncio
 import importlib
 import sys
@@ -431,11 +433,7 @@ async def test_request_points_creates_request_and_suppresses_auto_post(monkeypat
     client = FakePointsClient()
     posted_messages = []
 
-    monkeypatch.setattr(
-        executor_module,
-        "post_message",
-        lambda **kwargs: posted_messages.append(kwargs) or {"ts": "222.333"},
-    )
+    patch_skill_dependency(monkeypatch, 'post_message', lambda **kwargs: posted_messages.append(kwargs) or {"ts": "222.333"})
     monkeypatch.setattr(slack_client_module, "get_bot_user_id", lambda: "UBOT")
 
     result = await executor._handle_points_action(
@@ -486,11 +484,7 @@ async def test_request_points_handles_im_requesting_phrase(monkeypatch):
     client = FakePointsClient()
     posted_messages = []
 
-    monkeypatch.setattr(
-        executor_module,
-        "post_message",
-        lambda **kwargs: posted_messages.append(kwargs) or {"ts": "222.333"},
-    )
+    patch_skill_dependency(monkeypatch, 'post_message', lambda **kwargs: posted_messages.append(kwargs) or {"ts": "222.333"})
     monkeypatch.setattr(slack_client_module, "get_bot_user_id", lambda: "UBOT")
 
     result = await executor._handle_points_action(
@@ -536,11 +530,7 @@ async def test_request_points_attach_failure_keeps_slack_approval_active(monkeyp
     executor = SkillExecutor()
     posted_messages = []
 
-    monkeypatch.setattr(
-        executor_module,
-        "post_message",
-        lambda **kwargs: posted_messages.append(kwargs) or {"ts": "222.333"},
-    )
+    patch_skill_dependency(monkeypatch, 'post_message', lambda **kwargs: posted_messages.append(kwargs) or {"ts": "222.333"})
     monkeypatch.setattr(slack_client_module, "get_bot_user_id", lambda: "UBOT")
 
     result = await executor._handle_points_action(
@@ -569,11 +559,7 @@ async def test_award_me_phrase_is_converted_into_points_request(monkeypatch):
     client = FakePointsClient()
     posted_messages = []
 
-    monkeypatch.setattr(
-        executor_module,
-        "post_message",
-        lambda **kwargs: posted_messages.append(kwargs) or {"ts": "222.333"},
-    )
+    patch_skill_dependency(monkeypatch, 'post_message', lambda **kwargs: posted_messages.append(kwargs) or {"ts": "222.333"})
     monkeypatch.setattr(slack_client_module, "get_bot_user_id", lambda: "UBOT")
 
     result = await executor._handle_points_action(
@@ -808,11 +794,7 @@ async def test_topup_points_disabled_returns_feature_message(monkeypatch):
     executor = SkillExecutor()
     client = FakeTopupPurchaseClient()
 
-    monkeypatch.setattr(
-        executor_module,
-        "get_settings",
-        lambda: SimpleNamespace(ROO_POINTS_TOPUP_ENABLED=False),
-    )
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: SimpleNamespace(ROO_POINTS_TOPUP_ENABLED=False))
 
     result = await executor._handle_points_action(
         client=client,
@@ -833,11 +815,7 @@ async def test_topup_points_disabled_returns_feature_message(monkeypatch):
 async def test_topup_points_missing_pack_lists_fixed_packs(monkeypatch):
     executor = SkillExecutor()
 
-    monkeypatch.setattr(
-        executor_module,
-        "get_settings",
-        lambda: SimpleNamespace(ROO_POINTS_TOPUP_ENABLED=True),
-    )
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: SimpleNamespace(ROO_POINTS_TOPUP_ENABLED=True))
 
     result = await executor._handle_points_action(
         client=FakeTopupPurchaseClient(),
@@ -865,23 +843,15 @@ async def test_topup_points_missing_pack_sends_three_stripe_buttons_by_dm(
     client = FakeTopupButtonsClient()
     delivered = {}
 
-    monkeypatch.setattr(
-        executor_module,
-        "get_settings",
-        lambda: SimpleNamespace(
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: SimpleNamespace(
             ROO_POINTS_TOPUP_ENABLED=True,
             ROO_POINTS_TOPUP_BUTTONS_ENABLED=True,
             roo_points_stripe_checkout_hosts={"checkout.stripe.com"},
-        ),
-    )
-    monkeypatch.setattr(
-        executor_module,
-        "send_dm",
-        lambda user_id, text, **kwargs: (
+        ))
+    patch_skill_dependency(monkeypatch, 'send_dm', lambda user_id, text, **kwargs: (
             delivered.update({"user_id": user_id, "text": text, **kwargs})
             or {"ok": True, "channel": "D123", "ts": "333.444"}
-        ),
-    )
+        ))
 
     result = await executor._handle_points_action(
         client=client,
@@ -935,16 +905,12 @@ async def test_topup_points_dm_failure_posts_safe_public_recovery(monkeypatch):
     executor = SkillExecutor()
     client = FakeTopupButtonsClient()
 
-    monkeypatch.setattr(
-        executor_module,
-        "get_settings",
-        lambda: SimpleNamespace(
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: SimpleNamespace(
             ROO_POINTS_TOPUP_ENABLED=True,
             ROO_POINTS_TOPUP_BUTTONS_ENABLED=True,
             roo_points_stripe_checkout_hosts={"checkout.stripe.com"},
-        ),
-    )
-    monkeypatch.setattr(executor_module, "send_dm", lambda *args, **kwargs: None)
+        ))
+    patch_skill_dependency(monkeypatch, 'send_dm', lambda *args, **kwargs: None)
 
     result = await executor._handle_points_action(
         client=client,
@@ -973,22 +939,14 @@ async def test_topup_points_explicit_pack_returns_one_button_in_dm(monkeypatch):
     executor = SkillExecutor()
     client = FakeTopupButtonsClient()
 
-    monkeypatch.setattr(
-        executor_module,
-        "get_settings",
-        lambda: SimpleNamespace(
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: SimpleNamespace(
             ROO_POINTS_TOPUP_ENABLED=True,
             ROO_POINTS_TOPUP_BUTTONS_ENABLED=True,
             roo_points_stripe_checkout_hosts={"checkout.stripe.com"},
-        ),
-    )
-    monkeypatch.setattr(
-        executor_module,
-        "send_dm",
-        lambda *args, **kwargs: pytest.fail(
+        ))
+    patch_skill_dependency(monkeypatch, 'send_dm', lambda *args, **kwargs: pytest.fail(
             "An existing DM checkout must post to its current channel"
-        ),
-    )
+        ))
 
     result = await executor._handle_points_action(
         client=client,
@@ -1030,20 +988,12 @@ async def test_topup_points_rejects_untrusted_checkout_url(monkeypatch):
         }
     )
 
-    monkeypatch.setattr(
-        executor_module,
-        "get_settings",
-        lambda: SimpleNamespace(
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: SimpleNamespace(
             ROO_POINTS_TOPUP_ENABLED=True,
             ROO_POINTS_TOPUP_BUTTONS_ENABLED=True,
             roo_points_stripe_checkout_hosts={"checkout.stripe.com"},
-        ),
-    )
-    monkeypatch.setattr(
-        executor_module,
-        "send_dm",
-        lambda *args, **kwargs: pytest.fail("Untrusted links must never be posted"),
-    )
+        ))
+    patch_skill_dependency(monkeypatch, 'send_dm', lambda *args, **kwargs: pytest.fail("Untrusted links must never be posted"))
 
     result = await executor._handle_points_action(
         client=client,
@@ -1065,11 +1015,7 @@ async def test_topup_points_rejects_untrusted_checkout_url(monkeypatch):
 async def test_topup_points_unsupported_pack_is_rejected(monkeypatch):
     executor = SkillExecutor()
 
-    monkeypatch.setattr(
-        executor_module,
-        "get_settings",
-        lambda: SimpleNamespace(ROO_POINTS_TOPUP_ENABLED=True),
-    )
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: SimpleNamespace(ROO_POINTS_TOPUP_ENABLED=True))
 
     result = await executor._handle_points_action(
         client=FakeTopupPurchaseClient(),
@@ -1090,11 +1036,7 @@ async def test_topup_points_valid_pack_creates_purchase(monkeypatch):
     executor = SkillExecutor()
     client = FakeTopupPurchaseClient()
 
-    monkeypatch.setattr(
-        executor_module,
-        "get_settings",
-        lambda: SimpleNamespace(ROO_POINTS_TOPUP_ENABLED=True),
-    )
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: SimpleNamespace(ROO_POINTS_TOPUP_ENABLED=True))
 
     result = await executor._handle_points_action(
         client=client,
@@ -1127,11 +1069,7 @@ async def test_topup_points_valid_pack_creates_purchase(monkeypatch):
 async def test_topup_points_backend_error_is_friendly(monkeypatch):
     executor = SkillExecutor()
 
-    monkeypatch.setattr(
-        executor_module,
-        "get_settings",
-        lambda: SimpleNamespace(ROO_POINTS_TOPUP_ENABLED=True),
-    )
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: SimpleNamespace(ROO_POINTS_TOPUP_ENABLED=True))
 
     result = await executor._handle_points_action(
         client=FailingTopupPurchaseClient(),
@@ -1152,11 +1090,7 @@ async def test_topup_points_backend_error_is_friendly(monkeypatch):
 async def test_topup_points_balance_cap_message_is_clear(monkeypatch):
     executor = SkillExecutor()
 
-    monkeypatch.setattr(
-        executor_module,
-        "get_settings",
-        lambda: SimpleNamespace(ROO_POINTS_TOPUP_ENABLED=True),
-    )
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: SimpleNamespace(ROO_POINTS_TOPUP_ENABLED=True))
 
     result = await executor._handle_points_action(
         client=BalanceCapTopupPurchaseClient(),
@@ -1194,19 +1128,15 @@ async def test_execute_mlai_points_prefers_roo_api_key(monkeypatch):
         captured["action"] = action
         return {"ok": True}
 
-    monkeypatch.setattr(
-        executor_module,
-        "get_settings",
-        lambda: SimpleNamespace(
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: SimpleNamespace(
             MLAI_BACKEND_URL="https://backend.test",
             MLAI_API_KEY="mlai-api-key",
             ROO_API_KEY="roo-api-key",
             INTERNAL_API_KEY="internal-key",
-        ),
-    )
+        ))
     monkeypatch.setattr(backend_module, "MLAIBackendClient", InitCapturingBackendClient)
     monkeypatch.setattr(
-        SkillExecutor,
+        type(executor.owner_of("_handle_points_action")),
         "_handle_points_action",
         fake_handle_points_action,
     )
@@ -1239,7 +1169,7 @@ async def test_promote_points_admin_authorized(monkeypatch):
     async def fake_ensure_user_exists(user_id):
         ensured_users.append(user_id)
 
-    monkeypatch.setattr(executor, "_ensure_user_exists", fake_ensure_user_exists)
+    monkeypatch.setattr(executor.owner_of('_ensure_user_exists'), "_ensure_user_exists", fake_ensure_user_exists)
     monkeypatch.setattr(slack_client_module, "get_bot_user_id", lambda: "UBOT")
 
     result = await executor._handle_points_action(
@@ -1247,7 +1177,7 @@ async def test_promote_points_admin_authorized(monkeypatch):
         action="promote_points_admin",
         params={},
         text="promote <@UTARGET> to roo points admin",
-        user_id=executor_module.POINTS_SUPER_ADMIN_SLACK_ID,
+        user_id=skill_points_super_admin_slack_id,
         channel_id="C123",
         thread_ts="111.222",
         skill=None,
@@ -1255,7 +1185,7 @@ async def test_promote_points_admin_authorized(monkeypatch):
 
     assert ensured_users == ["UTARGET"]
     assert client.promote_args == (
-        executor_module.POINTS_SUPER_ADMIN_SLACK_ID,
+        skill_points_super_admin_slack_id,
         "UTARGET",
     )
     assert "<@UTARGET> is now a Roo Points Admin" in result
@@ -1270,7 +1200,7 @@ async def test_promote_points_admin_denies_unauthorized_user(monkeypatch):
     async def fake_ensure_user_exists(user_id):
         ensured_users.append(user_id)
 
-    monkeypatch.setattr(executor, "_ensure_user_exists", fake_ensure_user_exists)
+    monkeypatch.setattr(executor.owner_of('_ensure_user_exists'), "_ensure_user_exists", fake_ensure_user_exists)
     monkeypatch.setattr(slack_client_module, "get_bot_user_id", lambda: "UBOT")
 
     result = await executor._handle_points_action(
@@ -1301,7 +1231,7 @@ async def test_promote_points_admin_requires_exactly_one_tagged_user(monkeypatch
         action="promote_points_admin",
         params={},
         text="promote sam to roo points admin",
-        user_id=executor_module.POINTS_SUPER_ADMIN_SLACK_ID,
+        user_id=skill_points_super_admin_slack_id,
         channel_id="C123",
         thread_ts="111.222",
         skill=None,
@@ -1311,7 +1241,7 @@ async def test_promote_points_admin_requires_exactly_one_tagged_user(monkeypatch
         action="promote_points_admin",
         params={},
         text="promote <@UONE> and <@UTWO> to roo points admin",
-        user_id=executor_module.POINTS_SUPER_ADMIN_SLACK_ID,
+        user_id=skill_points_super_admin_slack_id,
         channel_id="C123",
         thread_ts="111.222",
         skill=None,
@@ -1329,7 +1259,7 @@ async def test_promote_points_admin_handles_already_admin_idempotently(monkeypat
     async def fake_ensure_user_exists(_user_id):
         return None
 
-    monkeypatch.setattr(executor, "_ensure_user_exists", fake_ensure_user_exists)
+    monkeypatch.setattr(executor.owner_of('_ensure_user_exists'), "_ensure_user_exists", fake_ensure_user_exists)
     monkeypatch.setattr(slack_client_module, "get_bot_user_id", lambda: "UBOT")
 
     result = await executor._handle_points_action(
@@ -1337,14 +1267,14 @@ async def test_promote_points_admin_handles_already_admin_idempotently(monkeypat
         action="promote_points_admin",
         params={},
         text="make <@UTARGET> a roo points admin",
-        user_id=executor_module.POINTS_SUPER_ADMIN_SLACK_ID,
+        user_id=skill_points_super_admin_slack_id,
         channel_id="C123",
         thread_ts="111.222",
         skill=None,
     )
 
     assert client.promote_args == (
-        executor_module.POINTS_SUPER_ADMIN_SLACK_ID,
+        skill_points_super_admin_slack_id,
         "UTARGET",
     )
     assert "<@UTARGET> is already a Roo Points Admin." == result
@@ -1362,14 +1292,14 @@ async def test_revoke_points_admin_authorized(monkeypatch):
         action="revoke_points_admin",
         params={},
         text="remove <@UTARGET> as roo points admin",
-        user_id=executor_module.POINTS_SUPER_ADMIN_SLACK_ID,
+        user_id=skill_points_super_admin_slack_id,
         channel_id="C123",
         thread_ts="111.222",
         skill=None,
     )
 
     assert client.revoke_args == (
-        executor_module.POINTS_SUPER_ADMIN_SLACK_ID,
+        skill_points_super_admin_slack_id,
         "UTARGET",
     )
     assert "✅ Removed Roo Points Admin access from <@UTARGET>." == result
@@ -1409,14 +1339,14 @@ async def test_revoke_points_admin_handles_already_revoked_idempotently(monkeypa
         action="revoke_points_admin",
         params={},
         text="revoke <@UTARGET> as roo points admin",
-        user_id=executor_module.POINTS_SUPER_ADMIN_SLACK_ID,
+        user_id=skill_points_super_admin_slack_id,
         channel_id="C123",
         thread_ts="111.222",
         skill=None,
     )
 
     assert client.revoke_args == (
-        executor_module.POINTS_SUPER_ADMIN_SLACK_ID,
+        skill_points_super_admin_slack_id,
         "UTARGET",
     )
     assert "<@UTARGET> already doesn't have Roo Points Admin access." == result
@@ -1434,14 +1364,14 @@ async def test_set_points_admin_allowance_authorized(monkeypatch):
         action="set_points_admin_allowance",
         params={},
         text="change <@UTARGET> weekly points allowance to 150",
-        user_id=executor_module.POINTS_SUPER_ADMIN_SLACK_ID,
+        user_id=skill_points_super_admin_slack_id,
         channel_id="C123",
         thread_ts="111.222",
         skill=None,
     )
 
     assert client.allowance_args == (
-        executor_module.POINTS_SUPER_ADMIN_SLACK_ID,
+        skill_points_super_admin_slack_id,
         "UTARGET",
         150,
     )
@@ -1482,7 +1412,7 @@ async def test_set_points_admin_allowance_requires_numeric_positive_value(monkey
         action="set_points_admin_allowance",
         params={},
         text="set <@UTARGET> weekly points allowance",
-        user_id=executor_module.POINTS_SUPER_ADMIN_SLACK_ID,
+        user_id=skill_points_super_admin_slack_id,
         channel_id="C123",
         thread_ts="111.222",
         skill=None,
@@ -1492,7 +1422,7 @@ async def test_set_points_admin_allowance_requires_numeric_positive_value(monkey
         action="set_points_admin_allowance",
         params={},
         text="set <@UTARGET> weekly points allowance to 0",
-        user_id=executor_module.POINTS_SUPER_ADMIN_SLACK_ID,
+        user_id=skill_points_super_admin_slack_id,
         channel_id="C123",
         thread_ts="111.222",
         skill=None,
@@ -1514,14 +1444,14 @@ async def test_set_points_admin_allowance_surfaces_target_not_admin(monkeypatch)
         action="set_points_admin_allowance",
         params={},
         text="set <@UTARGET> weekly points allowance to 150",
-        user_id=executor_module.POINTS_SUPER_ADMIN_SLACK_ID,
+        user_id=skill_points_super_admin_slack_id,
         channel_id="C123",
         thread_ts="111.222",
         skill=None,
     )
 
     assert client.allowance_args == (
-        executor_module.POINTS_SUPER_ADMIN_SLACK_ID,
+        skill_points_super_admin_slack_id,
         "UTARGET",
         150,
     )
@@ -1540,14 +1470,14 @@ async def test_award_flow_reroutes_management_phrase_to_allowance_update(monkeyp
         action="award_points",
         params={"action": "award_points"},
         text="please increase the number of points <@UTARGET> can give out weekly to 48",
-        user_id=executor_module.POINTS_SUPER_ADMIN_SLACK_ID,
+        user_id=skill_points_super_admin_slack_id,
         channel_id="C123",
         thread_ts="111.222",
         skill=None,
     )
 
     assert client.allowance_args == (
-        executor_module.POINTS_SUPER_ADMIN_SLACK_ID,
+        skill_points_super_admin_slack_id,
         "UTARGET",
         48,
     )
@@ -1568,7 +1498,7 @@ async def test_award_flow_reroutes_missing_tag_management_phrase_to_clarificatio
         action="award_points",
         params={"action": "award_points"},
         text="please increase the number of points sam can give out weekly to 48",
-        user_id=executor_module.POINTS_SUPER_ADMIN_SLACK_ID,
+        user_id=skill_points_super_admin_slack_id,
         channel_id="C123",
         thread_ts="111.222",
         skill=None,
@@ -2691,20 +2621,16 @@ async def test_execute_mlai_points_returns_backend_unavailable_message(monkeypat
         raise backend_module.MLAIBackendUnavailableError("backend unavailable")
 
     monkeypatch.setattr(
-        executor,
+        executor.owner_of('_handle_points_action'),
         "_handle_points_action",
         fake_handle_points_action,
     )
-    monkeypatch.setattr(
-        executor_module,
-        "get_settings",
-        lambda: SimpleNamespace(
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: SimpleNamespace(
             MLAI_BACKEND_URL="https://backend.test",
             MLAI_API_KEY="api-key",
             ROO_API_KEY="roo-api-key",
             INTERNAL_API_KEY="internal-key",
-        ),
-    )
+        ))
 
     result = await executor._execute_mlai_points(
         skill=skill,
@@ -2739,8 +2665,8 @@ async def test_book_coworking_still_succeeds_when_balance_refresh_times_out(tmp_
 
     executor = SkillExecutor()
     monkeypatch.setattr("roo.utils.get_current_date", lambda: __import__("datetime").date(2026, 4, 9))
-    monkeypatch.setattr(executor_module, "get_coworking_intent_store", lambda: store)
-    monkeypatch.setattr(executor_module, "send_dm", lambda *args, **kwargs: {"ok": True})
+    patch_skill_dependency(monkeypatch, 'get_coworking_intent_store', lambda: store)
+    patch_skill_dependency(monkeypatch, 'send_dm', lambda *args, **kwargs: {"ok": True})
 
     try:
         result = await executor._handle_points_action(
@@ -2783,8 +2709,8 @@ async def test_book_coworking_defaults_missing_date_to_today(tmp_path, monkeypat
     client = FakeCoworkingClient()
     executor = SkillExecutor()
     monkeypatch.setattr("roo.utils.get_current_date", lambda: date(2026, 5, 4))
-    monkeypatch.setattr(executor_module, "get_coworking_intent_store", lambda: store)
-    monkeypatch.setattr(executor_module, "send_dm", lambda *args, **kwargs: {"ok": True})
+    patch_skill_dependency(monkeypatch, 'get_coworking_intent_store', lambda: store)
+    patch_skill_dependency(monkeypatch, 'send_dm', lambda *args, **kwargs: {"ok": True})
 
     result = await executor._handle_points_action(
         client=client,
@@ -2845,14 +2771,10 @@ async def test_admin_checkin_books_target_for_today(tmp_path, monkeypatch):
     client = FakeAdminCheckinCoworkingClient(balance=13)
     executor = SkillExecutor()
     monkeypatch.setattr("roo.utils.get_current_date", lambda: date(2026, 5, 4))
-    monkeypatch.setattr(executor_module, "get_coworking_intent_store", lambda: store)
+    patch_skill_dependency(monkeypatch, 'get_coworking_intent_store', lambda: store)
     monkeypatch.setattr(slack_client_module, "get_bot_user_id", lambda: "UROO")
     direct_messages = []
-    monkeypatch.setattr(
-        executor_module,
-        "send_dm",
-        lambda user_id, text, **kwargs: direct_messages.append((user_id, text)) or {"ok": True},
-    )
+    patch_skill_dependency(monkeypatch, 'send_dm', lambda user_id, text, **kwargs: direct_messages.append((user_id, text)) or {"ok": True})
 
     result = await executor._handle_points_action(
         client=client,
@@ -2881,9 +2803,9 @@ async def test_admin_checkin_book_mention_phrase_books_target_for_today(tmp_path
     client = FakeAdminCheckinCoworkingClient(balance=13)
     executor = SkillExecutor()
     monkeypatch.setattr("roo.utils.get_current_date", lambda: date(2026, 5, 4))
-    monkeypatch.setattr(executor_module, "get_coworking_intent_store", lambda: store)
+    patch_skill_dependency(monkeypatch, 'get_coworking_intent_store', lambda: store)
     monkeypatch.setattr(slack_client_module, "get_bot_user_id", lambda: "UROO")
-    monkeypatch.setattr(executor_module, "send_dm", lambda *args, **kwargs: {"ok": True})
+    patch_skill_dependency(monkeypatch, 'send_dm', lambda *args, **kwargs: {"ok": True})
 
     action = executor._resolve_routed_points_action(
         {"action": "book_coworking", "target_users": ["<@UTARGET>"]},
@@ -2914,9 +2836,9 @@ async def test_admin_checkin_honors_explicit_date(tmp_path, monkeypatch):
     store = coworking_intent_store(tmp_path / "intents.db")
     client = FakeAdminCheckinCoworkingClient()
     executor = SkillExecutor()
-    monkeypatch.setattr(executor_module, "get_coworking_intent_store", lambda: store)
+    patch_skill_dependency(monkeypatch, 'get_coworking_intent_store', lambda: store)
     monkeypatch.setattr(slack_client_module, "get_bot_user_id", lambda: "UROO")
-    monkeypatch.setattr(executor_module, "send_dm", lambda *args, **kwargs: {"ok": True})
+    patch_skill_dependency(monkeypatch, 'send_dm', lambda *args, **kwargs: {"ok": True})
 
     result = await executor._handle_points_action(
         client=client,
@@ -2940,7 +2862,7 @@ async def test_admin_checkin_denies_partner_without_booking(tmp_path, monkeypatc
     client = FakeAdminCheckinCoworkingClient(role="partner")
     executor = SkillExecutor()
     monkeypatch.setattr("roo.utils.get_current_date", lambda: date(2026, 5, 4))
-    monkeypatch.setattr(executor_module, "get_coworking_intent_store", lambda: store)
+    patch_skill_dependency(monkeypatch, 'get_coworking_intent_store', lambda: store)
     monkeypatch.setattr(slack_client_module, "get_bot_user_id", lambda: "UROO")
 
     result = await executor._handle_points_action(
@@ -2986,8 +2908,8 @@ async def test_book_coworking_with_target_mention_uses_admin_checkin(tmp_path, m
     client = FakeAdminCheckinCoworkingClient()
     executor = SkillExecutor()
     monkeypatch.setattr("roo.utils.get_current_date", lambda: date(2026, 5, 4))
-    monkeypatch.setattr(executor_module, "get_coworking_intent_store", lambda: store)
-    monkeypatch.setattr(executor_module, "send_dm", lambda *args, **kwargs: {"ok": True})
+    patch_skill_dependency(monkeypatch, 'get_coworking_intent_store', lambda: store)
+    patch_skill_dependency(monkeypatch, 'send_dm', lambda *args, **kwargs: {"ok": True})
     monkeypatch.setattr(slack_client_module, "get_bot_user_id", lambda: "UROO")
 
     result = await executor._handle_points_action(
@@ -3021,7 +2943,7 @@ async def test_admin_checkin_insufficient_balance_message_names_target(tmp_path,
     )
     executor = SkillExecutor()
     monkeypatch.setattr("roo.utils.get_current_date", lambda: date(2026, 5, 4))
-    monkeypatch.setattr(executor_module, "get_coworking_intent_store", lambda: store)
+    patch_skill_dependency(monkeypatch, 'get_coworking_intent_store', lambda: store)
     monkeypatch.setattr(slack_client_module, "get_bot_user_id", lambda: "UROO")
 
     result = await executor._handle_points_action(
@@ -3101,7 +3023,7 @@ class FakeCoworkingReportClient:
         self.reports_by_range = reports_by_range or {}
         self.admin_roles = {
             slack_id: "admin"
-            for slack_id in (admin_slack_ids or [executor_module.POINTS_SUPER_ADMIN_SLACK_ID])
+            for slack_id in (admin_slack_ids or [skill_points_super_admin_slack_id])
         }
         self.admin_roles.update(admin_roles or {})
 
@@ -3124,15 +3046,15 @@ class FakeCoworkingReportClient:
 def coworking_chart_uploads(monkeypatch, request):
     """Keep existing report tests offline; real PNG rendering has its own tests."""
     uploads = []
-    monkeypatch.setattr(executor_module, "render_coworking_chart", lambda *args, **kwargs: b"test-png")
-    monkeypatch.setattr(executor_module, "upload_file", lambda **kwargs: uploads.append(kwargs) or {"ok": True})
+    patch_skill_dependency(monkeypatch, 'render_coworking_chart', lambda *args, **kwargs: b"test-png")
+    patch_skill_dependency(monkeypatch, 'upload_file', lambda **kwargs: uploads.append(kwargs) or {"ok": True})
     if request.node.name.startswith("test_coworking_"):
         monkeypatch.setattr("roo.utils.get_current_date", lambda: date(2026, 9, 16))
 
         async def offline_chat(*args, **kwargs):
             raise RuntimeError("LLM disabled in report tests")
 
-        monkeypatch.setattr(executor_module, "chat", offline_chat)
+        patch_skill_dependency(monkeypatch, 'chat', offline_chat)
     return uploads
 
 
@@ -3142,7 +3064,7 @@ async def run_chart_report(**overrides):
         "action": "coworking_report",
         "params": {},
         "text": "show a daily coworking chart for the last 3 months",
-        "user_id": executor_module.POINTS_SUPER_ADMIN_SLACK_ID,
+        "user_id": skill_points_super_admin_slack_id,
         "channel_id": "C123",
         "thread_ts": "111.222",
         "skill": SimpleNamespace(name="mlai-points"),
@@ -3158,7 +3080,7 @@ def shared_report_settings(monkeypatch, **overrides):
         "COWORKING_REPORT_SLACK_CHANNEL_ID": "CSHARED",
     }
     settings.update(overrides)
-    monkeypatch.setattr(executor_module, "get_settings", lambda: SimpleNamespace(**settings))
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: SimpleNamespace(**settings))
 
 
 @pytest.mark.asyncio
@@ -3267,7 +3189,7 @@ async def test_coworking_report_shared_chat_does_not_grant_task_management(monke
 async def test_coworking_daily_chart_uses_report_dates_and_same_thread(monkeypatch, coworking_chart_uploads):
     monkeypatch.setattr("roo.utils.get_current_date", lambda: date(2026, 9, 16))
     rendered = []
-    monkeypatch.setattr(executor_module, "render_coworking_chart", lambda report, **kwargs: rendered.append(report) or b"png")
+    patch_skill_dependency(monkeypatch, 'render_coworking_chart', lambda report, **kwargs: rendered.append(report) or b"png")
     result = await run_chart_report()
     assert len(rendered[0]["daily"]) == 92
     assert coworking_chart_uploads == [{
@@ -3319,9 +3241,9 @@ async def test_coworking_requested_chart_fetches_only_selected_lookback(monkeypa
         rendered.append(report)
         return render_coworking_chart(report, **kwargs)
 
-    monkeypatch.setattr(executor_module, "render_coworking_chart", render)
+    patch_skill_dependency(monkeypatch, 'render_coworking_chart', render)
     result = await run_chart_report(client=client, text=f"show daily coworking bookings as a chart for the last {months} months")
-    assert client.calls == [(executor_module.POINTS_SUPER_ADMIN_SLACK_ID, start, "2026-09-16")]
+    assert client.calls == [(skill_points_super_admin_slack_id, start, "2026-09-16")]
     assert len(rendered[0]["daily"]) == days
     assert len(coworking_chart_uploads) == 1
     assert coworking_chart_uploads[0]["filename"] == f"coworking-usage-{start}-to-2026-09-16.png"
@@ -3340,7 +3262,7 @@ async def test_coworking_chart_can_be_requested_by_parameter(coworking_chart_upl
 async def test_coworking_report_renders_real_png_before_upload(monkeypatch, coworking_chart_uploads):
     from roo.coworking_charts import render_coworking_chart
 
-    monkeypatch.setattr(executor_module, "render_coworking_chart", render_coworking_chart)
+    patch_skill_dependency(monkeypatch, 'render_coworking_chart', render_coworking_chart)
     result = await run_chart_report()
     assert "chart attached" in result
     assert coworking_chart_uploads[0]["content"].startswith(b"\x89PNG\r\n\x1a\n")
@@ -3358,7 +3280,7 @@ async def test_coworking_comparison_attaches_only_primary_range(coworking_chart_
 async def test_coworking_chart_permission_denial_never_renders_or_uploads(monkeypatch, coworking_chart_uploads):
     def forbidden(*args, **kwargs):
         pytest.fail("Must not render an unauthorized report")
-    monkeypatch.setattr(executor_module, "render_coworking_chart", forbidden)
+    patch_skill_dependency(monkeypatch, 'render_coworking_chart', forbidden)
     result = await run_chart_report(user_id="UNOTADMIN")
     assert "need to be a Points Admin" in result
     assert coworking_chart_uploads == []
@@ -3368,7 +3290,7 @@ async def test_coworking_chart_permission_denial_never_renders_or_uploads(monkey
 async def test_coworking_chart_render_failure_keeps_text(monkeypatch, coworking_chart_uploads):
     def fail_render(*args, **kwargs):
         raise RuntimeError("render failed")
-    monkeypatch.setattr(executor_module, "render_coworking_chart", fail_render)
+    patch_skill_dependency(monkeypatch, 'render_coworking_chart', fail_render)
     result = await run_chart_report()
     assert "Booked user-days: 3" in result
     assert "couldn't render" in result
@@ -3385,7 +3307,7 @@ async def test_coworking_chart_upload_failure_keeps_text(monkeypatch, error, as_
         if as_exception:
             raise SlackApiError("Upload failed", response={"ok": False, "error": error})
         return {"ok": False, "error": error}
-    monkeypatch.setattr(executor_module, "upload_file", fail_upload)
+    patch_skill_dependency(monkeypatch, 'upload_file', fail_upload)
     result = await run_chart_report()
     assert "Booked user-days: 3" in result
     assert "couldn't attach" in result
@@ -3398,7 +3320,7 @@ async def test_coworking_chart_upload_failure_keeps_text(monkeypatch, error, as_
 async def test_coworking_chart_transport_failure_keeps_text(monkeypatch):
     def fail_upload(**kwargs):
         raise TimeoutError("Slack unreachable")
-    monkeypatch.setattr(executor_module, "upload_file", fail_upload)
+    patch_skill_dependency(monkeypatch, 'upload_file', fail_upload)
     result = await run_chart_report()
     assert "Booked user-days: 3" in result
     assert "couldn't attach" in result
@@ -3422,14 +3344,14 @@ async def test_coworking_report_exact_range_formats_slack_report():
         action="coworking_report",
         params={},
         text="coworking report from 2026-01-01 to 2026-01-31",
-        user_id=executor_module.POINTS_SUPER_ADMIN_SLACK_ID,
+        user_id=skill_points_super_admin_slack_id,
         channel_id="C123",
         thread_ts="111.222",
         skill=SimpleNamespace(name="mlai-points"),
     )
 
     assert client.calls == [
-        (executor_module.POINTS_SUPER_ADMIN_SLACK_ID, "2026-01-01", "2026-01-31")
+        (skill_points_super_admin_slack_id, "2026-01-01", "2026-01-31")
     ]
     assert "*Coworking usage*" in result
     assert "Source: Active coworking bookings (not door check-ins)" in result
@@ -3517,14 +3439,14 @@ async def test_coworking_report_last_three_months_uses_current_date(monkeypatch)
         action="coworking_report",
         params={},
         text="coworking report last 3 months",
-        user_id=executor_module.POINTS_SUPER_ADMIN_SLACK_ID,
+        user_id=skill_points_super_admin_slack_id,
         channel_id="C123",
         thread_ts="111.222",
         skill=SimpleNamespace(name="mlai-points"),
     )
 
     assert client.calls == [
-        (executor_module.POINTS_SUPER_ADMIN_SLACK_ID, "2026-01-29", "2026-04-28")
+        (skill_points_super_admin_slack_id, "2026-01-29", "2026-04-28")
     ]
 
 
@@ -3539,14 +3461,14 @@ async def test_coworking_report_this_week_uses_monday_through_today(monkeypatch)
         action="coworking_report",
         params={},
         text="how many people used the coworking space this week",
-        user_id=executor_module.POINTS_SUPER_ADMIN_SLACK_ID,
+        user_id=skill_points_super_admin_slack_id,
         channel_id="C123",
         thread_ts="111.222",
         skill=SimpleNamespace(name="mlai-points"),
     )
 
     assert client.calls == [
-        (executor_module.POINTS_SUPER_ADMIN_SLACK_ID, "2026-04-27", "2026-04-28")
+        (skill_points_super_admin_slack_id, "2026-04-27", "2026-04-28")
     ]
 
 
@@ -3561,14 +3483,14 @@ async def test_coworking_report_last_week_uses_previous_sunday_through_saturday(
         action="coworking_report",
         params={},
         text="give me a report for how many people used the coworking space last week",
-        user_id=executor_module.POINTS_SUPER_ADMIN_SLACK_ID,
+        user_id=skill_points_super_admin_slack_id,
         channel_id="C123",
         thread_ts="111.222",
         skill=SimpleNamespace(name="mlai-points"),
     )
 
     assert client.calls == [
-        (executor_module.POINTS_SUPER_ADMIN_SLACK_ID, "2026-04-19", "2026-04-25")
+        (skill_points_super_admin_slack_id, "2026-04-19", "2026-04-25")
     ]
 
 
@@ -3577,7 +3499,7 @@ async def test_coworking_report_last_week_compares_week_prior(monkeypatch):
     async def fail_chat(*args, **kwargs):
         raise RuntimeError("no llm in deterministic comparison test")
 
-    monkeypatch.setattr(executor_module, "chat", fail_chat)
+    patch_skill_dependency(monkeypatch, 'chat', fail_chat)
     monkeypatch.setattr("roo.utils.get_current_date", lambda: date(2026, 5, 4))
     client = FakeCoworkingReportClient(
         reports_by_range={
@@ -3602,15 +3524,15 @@ async def test_coworking_report_last_week_compares_week_prior(monkeypatch):
         action="coworking_report",
         params={},
         text="how many people used the coworking space last week and how does that compare to the week prior?",
-        user_id=executor_module.POINTS_SUPER_ADMIN_SLACK_ID,
+        user_id=skill_points_super_admin_slack_id,
         channel_id="C123",
         thread_ts="111.222",
         skill=SimpleNamespace(name="mlai-points"),
     )
 
     assert client.calls == [
-        (executor_module.POINTS_SUPER_ADMIN_SLACK_ID, "2026-04-26", "2026-05-02"),
-        (executor_module.POINTS_SUPER_ADMIN_SLACK_ID, "2026-04-19", "2026-04-25"),
+        (skill_points_super_admin_slack_id, "2026-04-26", "2026-05-02"),
+        (skill_points_super_admin_slack_id, "2026-04-19", "2026-04-25"),
     ]
     assert "Last week had 28 booked user-days" in result
     assert "up 9 (+47.4%)" in result
@@ -3622,7 +3544,7 @@ async def test_coworking_report_previous_period_uses_same_length_range(monkeypat
     async def fail_chat(*args, **kwargs):
         raise RuntimeError("no llm in deterministic comparison test")
 
-    monkeypatch.setattr(executor_module, "chat", fail_chat)
+    patch_skill_dependency(monkeypatch, 'chat', fail_chat)
     client = FakeCoworkingReportClient(
         reports_by_range={
             ("2026-01-08", "2026-01-14"): make_coworking_report(
@@ -3644,15 +3566,15 @@ async def test_coworking_report_previous_period_uses_same_length_range(monkeypat
         action="coworking_report",
         params={},
         text="coworking report from 2026-01-08 to 2026-01-14 compared with the previous period",
-        user_id=executor_module.POINTS_SUPER_ADMIN_SLACK_ID,
+        user_id=skill_points_super_admin_slack_id,
         channel_id="C123",
         thread_ts="111.222",
         skill=SimpleNamespace(name="mlai-points"),
     )
 
     assert client.calls == [
-        (executor_module.POINTS_SUPER_ADMIN_SLACK_ID, "2026-01-08", "2026-01-14"),
-        (executor_module.POINTS_SUPER_ADMIN_SLACK_ID, "2026-01-01", "2026-01-07"),
+        (skill_points_super_admin_slack_id, "2026-01-08", "2026-01-14"),
+        (skill_points_super_admin_slack_id, "2026-01-01", "2026-01-07"),
     ]
     assert "up 7 (+100.0%)" in result
 
@@ -3678,14 +3600,14 @@ async def test_coworking_report_busiest_day_last_month(monkeypatch):
         action="coworking_report",
         params={},
         text="which day was busiest for coworking last month?",
-        user_id=executor_module.POINTS_SUPER_ADMIN_SLACK_ID,
+        user_id=skill_points_super_admin_slack_id,
         channel_id="C123",
         thread_ts="111.222",
         skill=SimpleNamespace(name="mlai-points"),
     )
 
     assert client.calls == [
-        (executor_module.POINTS_SUPER_ADMIN_SLACK_ID, "2026-04-01", "2026-04-30")
+        (skill_points_super_admin_slack_id, "2026-04-01", "2026-04-30")
     ]
     assert "Last month's busiest day was 2026-04-15 (8)" in result
 
@@ -3707,7 +3629,7 @@ async def test_coworking_report_trends_and_recommendations_use_gpt54(monkeypatch
             )
         )
 
-    monkeypatch.setattr(executor_module, "chat", fake_chat)
+    patch_skill_dependency(monkeypatch, 'chat', fake_chat)
     monkeypatch.setattr("roo.utils.get_current_date", lambda: date(2026, 4, 28))
     client = FakeCoworkingReportClient(
         reports_by_range={
@@ -3725,13 +3647,13 @@ async def test_coworking_report_trends_and_recommendations_use_gpt54(monkeypatch
         action="coworking_report",
         params={},
         text="coworking report last 3 months with any trends or recommendations",
-        user_id=executor_module.POINTS_SUPER_ADMIN_SLACK_ID,
+        user_id=skill_points_super_admin_slack_id,
         channel_id="C123",
         thread_ts="111.222",
         skill=SimpleNamespace(name="mlai-points"),
     )
 
-    assert captured["kwargs"]["model"] == executor_module.get_settings().ROUTER_MODEL
+    assert captured["kwargs"]["model"] == executor._generate_coworking_llm_response.__globals__["get_settings"]().ROUTER_MODEL
     assert "active coworking bookings" in captured["messages"][1]["content"]
     assert "*Interpretation*" in result
     assert "Usage is concentrated mid-week." in result
@@ -3742,7 +3664,7 @@ async def test_coworking_report_gpt_failure_falls_back_to_deterministic_summary(
     async def fail_chat(*args, **kwargs):
         raise RuntimeError("gpt unavailable")
 
-    monkeypatch.setattr(executor_module, "chat", fail_chat)
+    patch_skill_dependency(monkeypatch, 'chat', fail_chat)
     monkeypatch.setattr("roo.utils.get_current_date", lambda: date(2026, 4, 28))
     client = FakeCoworkingReportClient(
         reports_by_range={
@@ -3760,7 +3682,7 @@ async def test_coworking_report_gpt_failure_falls_back_to_deterministic_summary(
         action="coworking_report",
         params={},
         text="coworking report last 3 months with any trends",
-        user_id=executor_module.POINTS_SUPER_ADMIN_SLACK_ID,
+        user_id=skill_points_super_admin_slack_id,
         channel_id="C123",
         thread_ts="111.222",
         skill=SimpleNamespace(name="mlai-points"),
@@ -3804,23 +3726,19 @@ async def test_execute_mlai_points_html_500_uses_backend_unavailable_message(mon
         )
         raise httpx.HTTPStatusError("server error", request=request, response=response)
 
-    monkeypatch.setattr(executor, "_handle_points_action", fake_handle_points_action)
-    monkeypatch.setattr(
-        executor_module,
-        "get_settings",
-        lambda: SimpleNamespace(
+    monkeypatch.setattr(executor.owner_of('_handle_points_action'), "_handle_points_action", fake_handle_points_action)
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: SimpleNamespace(
             MLAI_BACKEND_URL="https://backend.test",
             MLAI_API_KEY="api-key",
             ROO_API_KEY="roo-api-key",
             INTERNAL_API_KEY="internal-key",
-        ),
-    )
+        ))
 
     result = await executor._execute_mlai_points(
         skill=skill,
         text="how many people used the coworking space this week",
         params={"action": "coworking_report"},
-        user_id=executor_module.POINTS_SUPER_ADMIN_SLACK_ID,
+        user_id=skill_points_super_admin_slack_id,
         channel_id="C123",
         thread_ts="111.222",
     )
@@ -3838,7 +3756,7 @@ async def test_book_coworking_persists_intent_and_queues_backend_timeout(tmp_pat
             raise backend_module.MLAIBackendUnavailableError("backend unavailable")
 
     executor = SkillExecutor()
-    monkeypatch.setattr(executor_module, "get_coworking_intent_store", lambda: store)
+    patch_skill_dependency(monkeypatch, 'get_coworking_intent_store', lambda: store)
 
     result = await executor._handle_points_action(
         client=TimeoutCoworkingClient(),
@@ -3881,7 +3799,7 @@ async def test_immediate_coworking_stale_worker_cannot_overwrite_winner(
         )
 
     monkeypatch.setattr(store, "reserve_for_processing", reserve_with_expired_sync_lease)
-    monkeypatch.setattr(executor_module, "get_coworking_intent_store", lambda: store)
+    patch_skill_dependency(monkeypatch, 'get_coworking_intent_store', lambda: store)
 
     winner_result = complete_coworking_booking_result(
         "2026-04-22",
@@ -3964,7 +3882,7 @@ async def test_book_coworking_surfaces_terminal_backend_reason_instead_of_outage
 
     client = UnlinkedCoworkingClient()
     executor = SkillExecutor()
-    monkeypatch.setattr(executor_module, "get_coworking_intent_store", lambda: store)
+    patch_skill_dependency(monkeypatch, 'get_coworking_intent_store', lambda: store)
     monkeypatch.setattr(
         coworking_module,
         "_safe_post_message",
@@ -4016,7 +3934,7 @@ async def test_terminal_coworking_rejection_survives_delivery_crash(
     def fail_delivery(**kwargs):
         raise RuntimeError("Slack unavailable")
 
-    monkeypatch.setattr(executor_module, "get_coworking_intent_store", lambda: store)
+    patch_skill_dependency(monkeypatch, 'get_coworking_intent_store', lambda: store)
     monkeypatch.setattr(coworking_module, "_safe_post_message", fail_delivery)
 
     result = await SkillExecutor()._handle_points_action(
@@ -4075,13 +3993,9 @@ async def test_book_coworking_redacts_balance_rejection_in_channel(
         async def get_balance(self, slack_user_id):
             return {"balance": 0}
 
-    monkeypatch.setattr(executor_module, "get_coworking_intent_store", lambda: store)
-    monkeypatch.setattr(
-        executor_module,
-        "send_dm",
-        lambda user_id, text, **kwargs: direct_messages.append((user_id, text))
-        or {"ok": True},
-    )
+    patch_skill_dependency(monkeypatch, 'get_coworking_intent_store', lambda: store)
+    patch_skill_dependency(monkeypatch, 'send_dm', lambda user_id, text, **kwargs: direct_messages.append((user_id, text))
+        or {"ok": True})
     monkeypatch.setattr(
         coworking_module,
         "_safe_post_message",
@@ -4251,14 +4165,10 @@ async def test_book_coworking_nudges_founder_when_charged_standard_price(tmp_pat
     executor = SkillExecutor()
     delivered = {}
     monkeypatch.setattr("roo.utils.get_current_date", lambda: date(2026, 5, 4))
-    monkeypatch.setattr(executor_module, "get_coworking_intent_store", lambda: store)
-    monkeypatch.setattr(
-        executor_module,
-        "send_dm",
-        lambda user_id, text, **kwargs: (
+    patch_skill_dependency(monkeypatch, 'get_coworking_intent_store', lambda: store)
+    patch_skill_dependency(monkeypatch, 'send_dm', lambda user_id, text, **kwargs: (
             delivered.update({"user_id": user_id, "text": text}) or {"ok": True}
-        ),
-    )
+        ))
 
     result = await executor._handle_points_action(
         client=FakeCoworkingClient(),
@@ -4299,7 +4209,7 @@ async def test_book_coworking_treats_missing_link_state_as_commit_uncertain(
 
     executor = SkillExecutor()
     monkeypatch.setattr("roo.utils.get_current_date", lambda: date(2026, 5, 4))
-    monkeypatch.setattr(executor_module, "get_coworking_intent_store", lambda: store)
+    patch_skill_dependency(monkeypatch, 'get_coworking_intent_store', lambda: store)
 
     result = await executor._handle_points_action(
         client=FakeCoworkingClient(),
@@ -4348,8 +4258,8 @@ async def test_book_coworking_omits_nudge_when_discount_applied(tmp_path, monkey
 
     executor = SkillExecutor()
     monkeypatch.setattr("roo.utils.get_current_date", lambda: date(2026, 5, 4))
-    monkeypatch.setattr(executor_module, "get_coworking_intent_store", lambda: store)
-    monkeypatch.setattr(executor_module, "send_dm", lambda *args, **kwargs: {"ok": True})
+    patch_skill_dependency(monkeypatch, 'get_coworking_intent_store', lambda: store)
+    patch_skill_dependency(monkeypatch, 'send_dm', lambda *args, **kwargs: {"ok": True})
 
     result = await executor._handle_points_action(
         client=FakeCoworkingClient(),
@@ -4391,8 +4301,8 @@ async def test_book_coworking_omits_link_nudge_when_accounts_are_linked(
 
     executor = SkillExecutor()
     monkeypatch.setattr("roo.utils.get_current_date", lambda: date(2026, 5, 4))
-    monkeypatch.setattr(executor_module, "get_coworking_intent_store", lambda: store)
-    monkeypatch.setattr(executor_module, "send_dm", lambda *args, **kwargs: {"ok": True})
+    patch_skill_dependency(monkeypatch, 'get_coworking_intent_store', lambda: store)
+    patch_skill_dependency(monkeypatch, 'send_dm', lambda *args, **kwargs: {"ok": True})
 
     result = await executor._handle_points_action(
         client=FakeCoworkingClient(),

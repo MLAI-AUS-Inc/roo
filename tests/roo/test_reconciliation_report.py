@@ -1,3 +1,5 @@
+import httpx as skill_httpx
+from tests.roo.skill_test_support import patch_skill_dependency
 import base64
 import importlib
 import json
@@ -331,7 +333,7 @@ def _reset(monkeypatch, *, uploaded=None, settings_overrides=None):
     FakeReconBackendClient.calls = []
     FakeReconBackendClient.operation_results = {}
     executor = SkillExecutor()
-    monkeypatch.setattr(executor_module, "get_settings", lambda: _settings(**(settings_overrides or {})))
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: _settings(**(settings_overrides or {})))
     monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeReconBackendClient)
     if uploaded is not None:
         monkeypatch.setattr(
@@ -491,7 +493,7 @@ async def test_start_uses_treasurer_agent_when_configured(monkeypatch):
         }
 
     monkeypatch.setattr(
-        executor,
+        executor.owner_of('_trigger_reconciliation_agent_prepare'),
         "_trigger_reconciliation_agent_prepare",
         fake_trigger,
     )
@@ -540,13 +542,13 @@ async def test_treasurer_agent_trigger_is_authenticated_and_idempotency_scoped(m
             timeout=kwargs.get("timeout"),
         )
 
-    monkeypatch.setattr(executor_module.httpx, "AsyncClient", fake_async_client)
+    monkeypatch.setattr(skill_httpx, "AsyncClient", fake_async_client)
     settings = _settings(
         MLAI_API_KEY="shared-service-key",
         RECONCILIATION_AGENT_TIMEOUT_SECONDS=30,
     )
 
-    result = await SkillExecutor._trigger_reconciliation_agent_prepare(
+    result = await SkillExecutor().owner_of("_trigger_reconciliation_agent_prepare")._trigger_reconciliation_agent_prepare(
         settings=settings,
         agent_url="https://roo.mlai.au/",
         user_id="UADMIN",

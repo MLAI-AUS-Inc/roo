@@ -1,3 +1,4 @@
+from tests.roo.skill_test_support import patch_skill_dependency
 import json
 import os
 import sqlite3
@@ -254,17 +255,9 @@ class FlexBalanceClient:
 async def test_flex_preview_is_private_and_uses_only_verified_actor(monkeypatch, tmp_path):
     client = FlexBalanceClient()
     previews = []
-    monkeypatch.setattr(
-        executor_module,
-        "get_settings",
-        lambda: _settings(tmp_path),
-    )
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: _settings(tmp_path))
     monkeypatch.setattr("roo.slack_client.get_bot_user_id", lambda: "UROO")
-    monkeypatch.setattr(
-        executor_module,
-        "post_ephemeral",
-        lambda **kwargs: previews.append(kwargs) or {"ok": True},
-    )
+    patch_skill_dependency(monkeypatch, 'post_ephemeral', lambda **kwargs: previews.append(kwargs) or {"ok": True})
 
     result = await SkillExecutor()._handle_points_action(
         client=client,
@@ -306,11 +299,7 @@ async def test_flex_rejects_tagged_targets_before_balance_lookup(monkeypatch):
     client = FlexBalanceClient()
     notices = []
     monkeypatch.setattr("roo.slack_client.get_bot_user_id", lambda: "UROO")
-    monkeypatch.setattr(
-        executor_module,
-        "post_ephemeral",
-        lambda **kwargs: notices.append(kwargs) or {"ok": True},
-    )
+    patch_skill_dependency(monkeypatch, 'post_ephemeral', lambda **kwargs: notices.append(kwargs) or {"ok": True})
 
     result = await SkillExecutor()._handle_points_action(
         client=client,
@@ -332,11 +321,7 @@ async def test_flex_rejects_tagged_targets_before_balance_lookup(monkeypatch):
 @pytest.mark.asyncio
 async def test_flex_in_dm_redirects_to_destination_channel_without_lookup(monkeypatch):
     client = FlexBalanceClient()
-    monkeypatch.setattr(
-        executor_module,
-        "post_ephemeral",
-        lambda **kwargs: pytest.fail("no ephemeral message expected in a DM"),
-    )
+    patch_skill_dependency(monkeypatch, 'post_ephemeral', lambda **kwargs: pytest.fail("no ephemeral message expected in a DM"))
 
     result = await SkillExecutor()._handle_points_action(
         client=client,
@@ -357,22 +342,10 @@ async def test_flex_in_dm_redirects_to_destination_channel_without_lookup(monkey
 @pytest.mark.asyncio
 async def test_preview_failure_never_posts_points_and_sends_generic_dm(monkeypatch, tmp_path):
     direct_messages = []
-    monkeypatch.setattr(
-        executor_module,
-        "get_settings",
-        lambda: _settings(tmp_path),
-    )
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: _settings(tmp_path))
     monkeypatch.setattr("roo.slack_client.get_bot_user_id", lambda: "UROO")
-    monkeypatch.setattr(
-        executor_module,
-        "post_ephemeral",
-        lambda **kwargs: (_ for _ in ()).throw(RuntimeError("Slack unavailable")),
-    )
-    monkeypatch.setattr(
-        executor_module,
-        "send_dm",
-        lambda user_id, text, **kwargs: direct_messages.append((user_id, text)) or {"ok": True},
-    )
+    patch_skill_dependency(monkeypatch, 'post_ephemeral', lambda **kwargs: (_ for _ in ()).throw(RuntimeError("Slack unavailable")))
+    patch_skill_dependency(monkeypatch, 'send_dm', lambda user_id, text, **kwargs: direct_messages.append((user_id, text)) or {"ok": True})
 
     result = await SkillExecutor()._handle_points_action(
         client=FlexBalanceClient(),
@@ -979,13 +952,9 @@ async def test_delete_preview_is_private_and_lists_only_verified_actors_flexes(
     second = _seed_shared_flex(store, message_ts="300.001", now=time.time() + 5)
     _seed_shared_flex(store, user="UOTHER", message_ts="400.001", now=time.time() + 10)
     previews = []
-    monkeypatch.setattr(executor_module, "get_settings", lambda: settings)
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: settings)
     monkeypatch.setattr("roo.slack_client.get_bot_user_id", lambda: "UROO")
-    monkeypatch.setattr(
-        executor_module,
-        "post_ephemeral",
-        lambda **kwargs: previews.append(kwargs) or {"ok": True},
-    )
+    patch_skill_dependency(monkeypatch, 'post_ephemeral', lambda **kwargs: previews.append(kwargs) or {"ok": True})
 
     result = await SkillExecutor()._handle_points_action(
         client=FlexBalanceClient(),
@@ -1022,13 +991,9 @@ async def test_delete_preview_is_private_and_lists_only_verified_actors_flexes(
 @pytest.mark.asyncio
 async def test_delete_request_rejects_tagged_target_before_lookup(monkeypatch, tmp_path):
     notices = []
-    monkeypatch.setattr(executor_module, "get_settings", lambda: _settings(tmp_path))
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: _settings(tmp_path))
     monkeypatch.setattr("roo.slack_client.get_bot_user_id", lambda: "UROO")
-    monkeypatch.setattr(
-        executor_module,
-        "post_ephemeral",
-        lambda **kwargs: notices.append(kwargs) or {"ok": True},
-    )
+    patch_skill_dependency(monkeypatch, 'post_ephemeral', lambda **kwargs: notices.append(kwargs) or {"ok": True})
 
     result = await SkillExecutor()._handle_points_action(
         client=FlexBalanceClient(),
@@ -1063,13 +1028,9 @@ async def test_delete_in_dm_lists_owned_flexes_across_channels(monkeypatch, tmp_
         message_ts="400.001",
         now=time.time() + 10,
     )
-    monkeypatch.setattr(executor_module, "get_settings", lambda: settings)
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: settings)
     monkeypatch.setattr("roo.slack_client.get_bot_user_id", lambda: "UROO")
-    monkeypatch.setattr(
-        executor_module,
-        "post_ephemeral",
-        lambda **kwargs: pytest.fail("DM controls should use the normal private response"),
-    )
+    patch_skill_dependency(monkeypatch, 'post_ephemeral', lambda **kwargs: pytest.fail("DM controls should use the normal private response"))
 
     result = await SkillExecutor()._handle_points_action(
         client=FlexBalanceClient(),
@@ -1107,7 +1068,7 @@ async def test_delete_in_dm_lists_owned_flexes_across_channels(monkeypatch, tmp_
 
 @pytest.mark.asyncio
 async def test_delete_in_dm_with_no_flexes_replies_privately(monkeypatch, tmp_path):
-    monkeypatch.setattr(executor_module, "get_settings", lambda: _settings(tmp_path))
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: _settings(tmp_path))
     monkeypatch.setattr("roo.slack_client.get_bot_user_id", lambda: "UROO")
 
     result = await SkillExecutor()._handle_points_action(

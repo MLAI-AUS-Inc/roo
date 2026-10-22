@@ -924,6 +924,57 @@ async def process_classification(
     return await process_award(claimed, store=store, client=client)
 
 
+class StartHereIntroductionsHandler:
+    """Event-only executor; not available through chat routing."""
+    async def execute(
+        self,
+        event: dict[str, Any],
+        *,
+        store: Optional[StartHereIntroductionStore] = None,
+        client: Any = None,
+        llm_chat: Optional[Callable[..., Any]] = None,
+        min_confidence: Optional[float] = None,
+        post_feedback: Optional[Callable[..., Any]] = None,
+        notify_duplicate: Optional[Callable[[dict[str, Any]], Any]] = None,
+    ) -> dict[str, Any]:
+        intro_event = normalize_intro_event(event)
+        if intro_event is None:
+            return {"status": "ignored", "reason": "ineligible_event"}
+
+        store = store or get_start_here_store()
+        created, submission = store.reserve(intro_event)
+        if submission["canonical_message_ts"] != intro_event.message_ts:
+            notifier = notify_duplicate or notify_duplicate_submission
+            if store.mark_duplicate_notified(int(submission["id"])):
+                try:
+                    notifier(submission)
+                except Exception as exc:
+                    print(
+                        "⚠️ start_here_duplicate_notice_failed "
+                        f"submission_id={submission.get('id')} error={exc}"
+                    )
+            return {"status": "duplicate_post", "submission": submission}
+
+        if not created:
+            changed, submission = store.update_canonical_text(int(submission["id"]), intro_event.text)
+            if not changed and submission["status"] != "pending_classification":
+                return {"status": "duplicate_event", "submission": submission}
+
+        claimed = store.claim_classification(
+            int(submission["id"]), owner=f"intro-{uuid4().hex}"
+        )
+        if not claimed:
+            return {"status": "classification_in_progress", "submission": submission}
+        return await process_classification(
+            claimed,
+            store=store,
+            client=client,
+            llm_chat=llm_chat,
+            min_confidence=min_confidence,
+            post_feedback=post_feedback,
+        )
+
+
 async def handle_start_here_intro(
     event: dict[str, Any],
     *,
@@ -934,41 +985,11 @@ async def handle_start_here_intro(
     post_feedback: Optional[Callable[..., Any]] = None,
     notify_duplicate: Optional[Callable[[dict[str, Any]], Any]] = None,
 ) -> dict[str, Any]:
-    intro_event = normalize_intro_event(event)
-    if intro_event is None:
-        return {"status": "ignored", "reason": "ineligible_event"}
-
-    store = store or get_start_here_store()
-    created, submission = store.reserve(intro_event)
-    if submission["canonical_message_ts"] != intro_event.message_ts:
-        notifier = notify_duplicate or notify_duplicate_submission
-        if store.mark_duplicate_notified(int(submission["id"])):
-            try:
-                notifier(submission)
-            except Exception as exc:
-                print(
-                    "⚠️ start_here_duplicate_notice_failed "
-                    f"submission_id={submission.get('id')} error={exc}"
-                )
-        return {"status": "duplicate_post", "submission": submission}
-
-    if not created:
-        changed, submission = store.update_canonical_text(int(submission["id"]), intro_event.text)
-        if not changed and submission["status"] != "pending_classification":
-            return {"status": "duplicate_event", "submission": submission}
-
-    claimed = store.claim_classification(
-        int(submission["id"]), owner=f"intro-{uuid4().hex}"
-    )
-    if not claimed:
-        return {"status": "classification_in_progress", "submission": submission}
-    return await process_classification(
-        claimed,
-        store=store,
-        client=client,
-        llm_chat=llm_chat,
-        min_confidence=min_confidence,
-        post_feedback=post_feedback,
+    """Compatibility entry point for signed Slack event ingress."""
+    return await StartHereIntroductionsHandler().execute(
+        event, store=store, client=client, llm_chat=llm_chat,
+        min_confidence=min_confidence, post_feedback=post_feedback,
+        notify_duplicate=notify_duplicate,
     )
 
 

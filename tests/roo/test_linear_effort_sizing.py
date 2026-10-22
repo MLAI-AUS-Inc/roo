@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tests.roo.skill_test_support import patch_skill_dependency
 
 import json
 import re
@@ -301,7 +302,7 @@ async def test_executor_batches_one_sizing_call_per_studio_project(monkeypatch):
             "display": {"title": title},
         }
 
-    monkeypatch.setattr(executor_module, "assess_studio_effort_batch", fake_assess)
+    patch_skill_dependency(monkeypatch, 'assess_studio_effort_batch', fake_assess)
     prepared_candidates = [
         prepared("c1", "Update the run sheet"),
         prepared("c2", "Email the final run sheet"),
@@ -354,7 +355,7 @@ async def test_executor_bounds_studio_sizing_batches(monkeypatch):
             for candidate in kwargs["candidates"]
         }
 
-    monkeypatch.setattr(executor_module, "assess_studio_effort_batch", fake_assess)
+    patch_skill_dependency(monkeypatch, 'assess_studio_effort_batch', fake_assess)
     candidates = [
         {"candidate_key": f"c{index}", "title": f"Task {index}"}
         for index in range(1, 8)
@@ -457,7 +458,7 @@ async def test_failed_studio_batch_recovers_per_candidate_and_preserves_successe
             "display": {"title": f"Task {key}"},
         }
 
-    monkeypatch.setattr(executor_module, "assess_studio_effort_batch", fake_assess)
+    patch_skill_dependency(monkeypatch, 'assess_studio_effort_batch', fake_assess)
     prepared_candidates = [prepared("c1"), prepared("c2"), prepared("c3")]
 
     shadow = await executor._size_linear_studio_prepared_candidates(
@@ -531,7 +532,7 @@ async def test_new_issue_sizing_runs_for_non_studio_project(monkeypatch):
         async def get_issue_receipt(self, _key):
             return {"status": "not_found"}
 
-    monkeypatch.setattr(executor_module, "assess_studio_effort_batch", fake_assess)
+    patch_skill_dependency(monkeypatch, 'assess_studio_effort_batch', fake_assess)
     prepared = {
         "candidate_key": "c1",
         "idempotency_key": "a" * 64,
@@ -682,11 +683,7 @@ async def test_project_backfill_builds_no_write_preview_with_full_context(monkey
         assert len(kwargs["project_context"]["activeIssues"]["nodes"]) == 2
         return {"issue-open": _assessment("issue-open")}, {}
 
-    monkeypatch.setattr(
-        executor,
-        "_assess_linear_studio_candidates_resilient",
-        fake_resilient,
-    )
+    monkeypatch.setattr(executor.owner_of('_assess_linear_studio_candidates_resilient'), '_assess_linear_studio_candidates_resilient', fake_resilient)
     result = await executor._execute_linear_project_issue_sizing(
         text="Size the unsized tasks in Linear project Aaron AI",
         params={
@@ -750,7 +747,7 @@ async def test_completed_receipt_skips_project_context_and_model(monkeypatch):
     async def fail_assess(**kwargs):
         raise AssertionError("completed receipts should bypass model sizing")
 
-    monkeypatch.setattr(executor_module, "assess_studio_effort_batch", fail_assess)
+    patch_skill_dependency(monkeypatch, 'assess_studio_effort_batch', fail_assess)
     await executor._size_linear_studio_prepared_candidates(
         prepared_candidates=[prepared],
         client=FakeClient(),
@@ -896,13 +893,10 @@ async def test_required_mode_creates_studio_issue_with_exact_effort_label(monkey
             assert name == "LinearMeetingActionsClient"
             return FakeClient
 
-    monkeypatch.setattr(executor, "_build_linear_meeting_source_result", fake_source_result)
-    monkeypatch.setattr(executor, "_extract_linear_direct_issue_candidates", fake_candidates)
-    monkeypatch.setattr(executor_module, "assess_studio_effort_batch", fake_assess)
-    monkeypatch.setattr(
-        executor_module,
-        "get_settings",
-        lambda: SimpleNamespace(
+    monkeypatch.setattr(executor.owner_of('_build_linear_meeting_source_result'), '_build_linear_meeting_source_result', fake_source_result)
+    monkeypatch.setattr(executor.owner_of('_extract_linear_direct_issue_candidates'), '_extract_linear_direct_issue_candidates', fake_candidates)
+    patch_skill_dependency(monkeypatch, 'assess_studio_effort_batch', fake_assess)
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: SimpleNamespace(
             LINEAR_DEFAULT_TEAM=None,
             LINEAR_MEETING_AUTO_CREATE_MIN_CONFIDENCE=0.85,
             LINEAR_MEETING_UNCERTAIN_MIN_CONFIDENCE=0.65,
@@ -911,8 +905,7 @@ async def test_required_mode_creates_studio_issue_with_exact_effort_label(monkey
             LINEAR_STUDIO_SIZING_AUTO_CREATE_MIN_CONFIDENCE=0.75,
             LINEAR_STUDIO_SIZING_CONTEXT_MAX_CHARS=40000,
             LINEAR_STUDIO_SIZING_RUBRIC_VERSION="studio-effort-v1",
-        ),
-    )
+        ))
 
     result = await executor._execute_linear_meeting_actions(
         skill=FakeSkill(),
@@ -1044,26 +1037,11 @@ async def test_required_mode_creates_recovered_candidates_and_skips_only_failure
             assert name == "LinearMeetingActionsClient"
             return FakeClient
 
-    monkeypatch.setattr(
-        executor,
-        "_build_linear_meeting_source_result",
-        fake_source_result,
-    )
-    monkeypatch.setattr(
-        executor,
-        "_extract_linear_direct_issue_candidates",
-        fake_candidates,
-    )
-    monkeypatch.setattr(
-        executor,
-        "_extract_linear_meeting_candidates_from_sources",
-        fake_candidates,
-    )
-    monkeypatch.setattr(executor_module, "assess_studio_effort_batch", fake_assess)
-    monkeypatch.setattr(
-        executor_module,
-        "get_settings",
-        lambda: SimpleNamespace(
+    monkeypatch.setattr(executor.owner_of('_build_linear_meeting_source_result'), '_build_linear_meeting_source_result', fake_source_result)
+    monkeypatch.setattr(executor.owner_of('_extract_linear_direct_issue_candidates'), '_extract_linear_direct_issue_candidates', fake_candidates)
+    monkeypatch.setattr(executor.owner_of('_extract_linear_meeting_candidates_from_sources'), '_extract_linear_meeting_candidates_from_sources', fake_candidates)
+    patch_skill_dependency(monkeypatch, 'assess_studio_effort_batch', fake_assess)
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: SimpleNamespace(
             LINEAR_DEFAULT_TEAM=None,
             LINEAR_MEETING_AUTO_CREATE_MIN_CONFIDENCE=0.85,
             LINEAR_MEETING_UNCERTAIN_MIN_CONFIDENCE=0.65,
@@ -1073,8 +1051,7 @@ async def test_required_mode_creates_recovered_candidates_and_skips_only_failure
             LINEAR_STUDIO_SIZING_CONTEXT_MAX_CHARS=40_000,
             LINEAR_STUDIO_SIZING_BATCH_SIZE=2,
             LINEAR_STUDIO_SIZING_RUBRIC_VERSION="studio-effort-v1",
-        ),
-    )
+        ))
 
     result = await executor._execute_linear_meeting_actions(
         skill=FakeSkill(),

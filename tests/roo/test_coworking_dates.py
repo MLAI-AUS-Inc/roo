@@ -99,8 +99,8 @@ def executor(monkeypatch):
     monkeypatch.setattr("roo.utils.get_current_date", lambda: TODAY)
     monkeypatch.setattr("roo.slack_client.get_bot_user_id", lambda: "UROO")
     executor = SkillExecutor()
-    executor._book_coworking_with_intent = AsyncMock(return_value="Booked")
-    executor._book_coworking_many_for_admin = AsyncMock(return_value="Booked group")
+    executor.owner_of("_book_coworking_with_intent")._book_coworking_with_intent = AsyncMock(return_value="Booked")
+    executor.owner_of("_book_coworking_many_for_admin")._book_coworking_many_for_admin = AsyncMock(return_value="Booked group")
     return executor
 
 

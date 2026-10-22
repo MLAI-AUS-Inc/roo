@@ -1,3 +1,4 @@
+from tests.roo.skill_test_support import patch_skill_dependency
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -197,7 +198,7 @@ def test_ambiguous_negated_or_hallucinated_create_is_rejected(text, params):
 @pytest.mark.asyncio
 async def test_explicit_issue_create_uses_scoped_backend(monkeypatch):
     FakeClient.creates = []
-    monkeypatch.setattr(executor_module, "get_settings", lambda: settings())
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: settings())
     monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeClient)
 
     result = await SkillExecutor()._execute_linear_channel_issues(
@@ -225,10 +226,7 @@ async def test_explicit_issue_create_uses_scoped_backend(monkeypatch):
 @pytest.mark.asyncio
 async def test_issue_create_respects_write_kill_switch(monkeypatch):
     FakeClient.creates = []
-    monkeypatch.setattr(
-        executor_module, "get_settings",
-        lambda: settings(LINEAR_CHANNEL_ISSUE_WRITES_ENABLED=False),
-    )
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: settings(LINEAR_CHANNEL_ISSUE_WRITES_ENABLED=False))
     monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeClient)
 
     result = await SkillExecutor()._execute_linear_channel_issues(
@@ -250,7 +248,7 @@ async def test_list_status_is_inferred_when_router_omits_optional_status(monkeyp
         captured.update(kwargs)
         return {"list": {"displayName": "In Review"}, "issues": [], "pageInfo": {}}
 
-    monkeypatch.setattr(executor_module, "get_settings", lambda: settings())
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: settings())
     monkeypatch.setattr(FakeClient, "list_linear_channel_issues", capture_list)
     monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeClient)
 
@@ -359,7 +357,7 @@ def test_explicit_polite_command_prefixes_are_accepted(text):
 @pytest.mark.asyncio
 async def test_lists_live_statuses(monkeypatch):
     FakeClient.status_calls = 0
-    monkeypatch.setattr(executor_module, "get_settings", lambda: settings())
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: settings())
     monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeClient)
 
     result = await SkillExecutor()._execute_linear_channel_issues(
@@ -377,7 +375,7 @@ async def test_lists_live_statuses(monkeypatch):
 async def test_issue_status_question_returns_issue_detail_not_status_catalogue(monkeypatch):
     FakeClient.writes = []
     FakeClient.status_calls = 0
-    monkeypatch.setattr(executor_module, "get_settings", lambda: settings())
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: settings())
     monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeClient)
 
     result = await SkillExecutor()._execute_linear_channel_issues(
@@ -396,7 +394,7 @@ async def test_issue_status_question_returns_issue_detail_not_status_catalogue(m
 @pytest.mark.asyncio
 async def test_read_cannot_become_write_from_hallucinated_router_fields(monkeypatch):
     FakeClient.writes = []
-    monkeypatch.setattr(executor_module, "get_settings", lambda: settings())
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: settings())
     monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeClient)
 
     result = await SkillExecutor()._execute_linear_channel_issues(
@@ -416,7 +414,7 @@ async def test_read_cannot_become_write_from_hallucinated_router_fields(monkeypa
 @pytest.mark.asyncio
 async def test_raw_issue_identifier_cannot_be_overridden_by_router(monkeypatch):
     FakeClient.writes = []
-    monkeypatch.setattr(executor_module, "get_settings", lambda: settings())
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: settings())
     monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeClient)
 
     result = await SkillExecutor()._execute_linear_channel_issues(
@@ -436,8 +434,8 @@ async def test_raw_issue_identifier_cannot_be_overridden_by_router(monkeypatch):
 @pytest.mark.asyncio
 async def test_pronoun_write_target_comes_from_thread_not_comment_body(monkeypatch):
     FakeClient.writes = []
-    monkeypatch.setattr(executor_module, "get_settings", lambda: settings())
-    monkeypatch.setattr(executor_module, "get_bot_user_id", lambda: "UROO")
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: settings())
+    patch_skill_dependency(monkeypatch, 'get_bot_user_id', lambda: "UROO")
     monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeClient)
 
     result = await SkillExecutor()._execute_linear_channel_issues(
@@ -467,8 +465,8 @@ async def test_pronoun_write_target_comes_from_thread_not_comment_body(monkeypat
 @pytest.mark.asyncio
 async def test_targetless_write_does_not_inherit_thread_issue(monkeypatch):
     FakeClient.writes = []
-    monkeypatch.setattr(executor_module, "get_settings", lambda: settings())
-    monkeypatch.setattr(executor_module, "get_bot_user_id", lambda: "UROO")
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: settings())
+    patch_skill_dependency(monkeypatch, 'get_bot_user_id', lambda: "UROO")
     monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeClient)
 
     result = await SkillExecutor()._execute_linear_channel_issues(
@@ -496,7 +494,7 @@ async def test_targetless_write_does_not_inherit_thread_issue(monkeypatch):
 @pytest.mark.asyncio
 async def test_target_cannot_come_from_another_field_inside_value(monkeypatch):
     FakeClient.writes = []
-    monkeypatch.setattr(executor_module, "get_settings", lambda: settings())
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: settings())
     monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeClient)
 
     result = await SkillExecutor()._execute_linear_channel_issues(
@@ -527,7 +525,7 @@ async def test_unresolved_pronoun_cannot_match_issue_title(monkeypatch):
             "pageInfo": {"hasNextPage": False},
         }
 
-    monkeypatch.setattr(executor_module, "get_settings", lambda: settings())
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: settings())
     monkeypatch.setattr(FakeClient, "list_linear_channel_issues", list_with_pronoun_title)
     monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeClient)
 
@@ -551,7 +549,7 @@ async def test_unresolved_pronoun_cannot_match_issue_title(monkeypatch):
 
 
 def test_successful_write_confirmation_becomes_latest_pronoun_context(monkeypatch):
-    monkeypatch.setattr(executor_module, "get_bot_user_id", lambda: "UROO")
+    patch_skill_dependency(monkeypatch, 'get_bot_user_id', lambda: "UROO")
     executor = SkillExecutor()
     thread_history = [
         {
@@ -574,7 +572,7 @@ def test_successful_write_confirmation_becomes_latest_pronoun_context(monkeypatc
 
 
 def test_successful_create_confirmation_becomes_latest_pronoun_context(monkeypatch):
-    monkeypatch.setattr(executor_module, "get_bot_user_id", lambda: "UROO")
+    patch_skill_dependency(monkeypatch, 'get_bot_user_id', lambda: "UROO")
     executor = SkillExecutor()
     thread_history = [
         {
@@ -600,7 +598,7 @@ def test_successful_create_confirmation_becomes_latest_pronoun_context(monkeypat
 
 
 def test_ambiguous_choices_block_older_pronoun_context(monkeypatch):
-    monkeypatch.setattr(executor_module, "get_bot_user_id", lambda: "UROO")
+    patch_skill_dependency(monkeypatch, 'get_bot_user_id', lambda: "UROO")
     executor = SkillExecutor()
     thread_history = [
         {
@@ -629,7 +627,7 @@ def test_ambiguous_choices_block_older_pronoun_context(monkeypatch):
 @pytest.mark.asyncio
 async def test_comment_without_body_cannot_use_hallucinated_router_value(monkeypatch):
     FakeClient.writes = []
-    monkeypatch.setattr(executor_module, "get_settings", lambda: settings())
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: settings())
     monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeClient)
 
     result = await SkillExecutor()._execute_linear_channel_issues(
@@ -649,7 +647,7 @@ async def test_comment_without_body_cannot_use_hallucinated_router_value(monkeyp
 @pytest.mark.asyncio
 async def test_multiple_edits_are_rejected_as_ambiguous(monkeypatch):
     FakeClient.writes = []
-    monkeypatch.setattr(executor_module, "get_settings", lambda: settings())
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: settings())
     monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeClient)
 
     result = await SkillExecutor()._execute_linear_channel_issues(
@@ -773,7 +771,7 @@ def test_supported_write_followed_by_destructive_action_is_rejected():
 @pytest.mark.asyncio
 async def test_explicit_status_change_uses_current_issue_version(monkeypatch):
     FakeClient.writes = []
-    monkeypatch.setattr(executor_module, "get_settings", lambda: settings())
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: settings())
     monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeClient)
 
     result = await SkillExecutor()._execute_linear_channel_issues(
@@ -795,7 +793,7 @@ async def test_explicit_status_change_uses_current_issue_version(monkeypatch):
 @pytest.mark.asyncio
 async def test_value_before_description_append_executes(monkeypatch):
     FakeClient.writes = []
-    monkeypatch.setattr(executor_module, "get_settings", lambda: settings())
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: settings())
     monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeClient)
 
     result = await SkillExecutor()._execute_linear_channel_issues(
@@ -822,7 +820,7 @@ async def test_value_before_description_append_executes(monkeypatch):
 @pytest.mark.asyncio
 async def test_disabled_writes_fail_before_mutation(monkeypatch):
     FakeClient.writes = []
-    monkeypatch.setattr(executor_module, "get_settings", lambda: settings(LINEAR_CHANNEL_ISSUE_WRITES_ENABLED=False))
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: settings(LINEAR_CHANNEL_ISSUE_WRITES_ENABLED=False))
     monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeClient)
 
     result = await SkillExecutor()._execute_linear_channel_issues(
@@ -839,7 +837,7 @@ async def test_disabled_writes_fail_before_mutation(monkeypatch):
 @pytest.mark.asyncio
 async def test_destructive_request_is_refused(monkeypatch):
     FakeClient.writes = []
-    monkeypatch.setattr(executor_module, "get_settings", lambda: settings())
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: settings())
     monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeClient)
 
     result = await SkillExecutor()._execute_linear_channel_issues(

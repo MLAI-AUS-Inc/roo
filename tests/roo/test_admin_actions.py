@@ -248,7 +248,7 @@ async def test_admin_actions_executor_creates_and_executes_local_draft(monkeypat
                 ),
             }
 
-    executor_globals = SkillExecutor._execute_admin_actions.__globals__
+    executor_globals = SkillExecutor().owner_of("_execute_admin_actions")._execute_admin_actions.__globals__
     monkeypatch.setitem(executor_globals, "get_settings", lambda: configured)
     monkeypatch.setitem(executor_globals, "MLAIBackendClient", FakeClient)
 
@@ -284,7 +284,7 @@ async def test_admin_actions_executor_refuses_incomplete_linear_proposal(monkeyp
         async def create_org_memory_action(self, **kwargs):
             raise AssertionError("An incomplete action must not reach the backend")
 
-    executor_globals = SkillExecutor._execute_admin_actions.__globals__
+    executor_globals = SkillExecutor().owner_of("_execute_admin_actions")._execute_admin_actions.__globals__
     monkeypatch.setitem(executor_globals, "get_settings", lambda: configured)
     monkeypatch.setitem(executor_globals, "MLAIBackendClient", ForbiddenClient)
     result = await SkillExecutor().execute(

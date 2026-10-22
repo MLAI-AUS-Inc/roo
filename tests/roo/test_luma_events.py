@@ -1,3 +1,4 @@
+from tests.roo.skill_test_support import patch_skill_dependency
 import base64
 import importlib
 import sys
@@ -93,7 +94,7 @@ def _freeze_today(monkeypatch):
         def today(cls):
             return cls(2026, 5, 4)
 
-    monkeypatch.setattr(executor_module, "date", FrozenDate)
+    patch_skill_dependency(monkeypatch, 'date', FrozenDate)
 
 
 @pytest.mark.asyncio
@@ -101,7 +102,7 @@ async def test_luma_executor_summary_prompt_calls_backend_without_csv(monkeypatc
     _reset_fake_backend()
     _freeze_today(monkeypatch)
     executor = SkillExecutor()
-    monkeypatch.setattr(executor_module, "get_settings", lambda: _settings())
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: _settings())
     monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeLumaBackendClient)
 
     result = await executor._execute_luma_events(
@@ -140,7 +141,7 @@ async def test_luma_executor_parses_event_dates(monkeypatch, text, expected_date
     _reset_fake_backend()
     _freeze_today(monkeypatch)
     executor = SkillExecutor()
-    monkeypatch.setattr(executor_module, "get_settings", lambda: _settings())
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: _settings())
     monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeLumaBackendClient)
 
     await executor._execute_luma_events(
@@ -179,7 +180,7 @@ async def test_luma_executor_csv_prompt_uploads_backend_csv(monkeypatch):
         "total_guest_count": 1,
     }
     executor = SkillExecutor()
-    monkeypatch.setattr(executor_module, "get_settings", lambda: _settings())
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: _settings())
     monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeLumaBackendClient)
     monkeypatch.setattr(
         slack_client_module,
@@ -214,7 +215,7 @@ async def test_luma_executor_report_prompt_does_not_upload(monkeypatch):
     _reset_fake_backend()
     uploaded = []
     executor = SkillExecutor()
-    monkeypatch.setattr(executor_module, "get_settings", lambda: _settings())
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: _settings())
     monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeLumaBackendClient)
     monkeypatch.setattr(slack_client_module, "upload_file", lambda **kwargs: uploaded.append(kwargs))
 
@@ -235,7 +236,7 @@ async def test_luma_executor_report_prompt_does_not_upload(monkeypatch):
 @pytest.mark.asyncio
 async def test_luma_executor_reports_missing_backend_url(monkeypatch):
     executor = SkillExecutor()
-    monkeypatch.setattr(executor_module, "get_settings", lambda: _settings(MLAI_BACKEND_URL=""))
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: _settings(MLAI_BACKEND_URL=""))
 
     result = await executor._execute_luma_events(
         skill=SimpleNamespace(get_client_class=lambda name: None),
@@ -254,7 +255,7 @@ async def test_luma_executor_reports_backend_unavailable(monkeypatch):
     _reset_fake_backend()
     FakeLumaBackendClient.unavailable = True
     executor = SkillExecutor()
-    monkeypatch.setattr(executor_module, "get_settings", lambda: _settings())
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: _settings())
     monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeLumaBackendClient)
 
     result = await executor._execute_luma_events(
@@ -282,7 +283,7 @@ async def test_luma_executor_reports_backend_http_errors(monkeypatch, status_cod
     _reset_fake_backend()
     FakeLumaBackendClient.status_code = status_code
     executor = SkillExecutor()
-    monkeypatch.setattr(executor_module, "get_settings", lambda: _settings())
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: _settings())
     monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeLumaBackendClient)
 
     result = await executor._execute_luma_events(
@@ -303,7 +304,7 @@ async def test_luma_executor_empty_event_response(monkeypatch):
     _freeze_today(monkeypatch)
     FakeLumaBackendClient.report = {"events": [], "total_guest_count": 0}
     executor = SkillExecutor()
-    monkeypatch.setattr(executor_module, "get_settings", lambda: _settings())
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: _settings())
     monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeLumaBackendClient)
 
     result = await executor._execute_luma_events(

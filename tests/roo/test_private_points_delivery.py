@@ -1,3 +1,4 @@
+from tests.roo.skill_test_support import patch_skill_dependency
 import os
 from types import SimpleNamespace
 
@@ -41,7 +42,7 @@ def test_points_error_redaction_preserves_reason_without_exposing_balance(
     detail,
     expected,
 ):
-    assert SkillExecutor._redact_points_balance_error(detail) == expected
+    assert SkillExecutor().owner_of("_redact_points_balance_error")._redact_points_balance_error(detail) == expected
 
 
 class PersonalPointsClient:
@@ -92,8 +93,8 @@ def _capture_private_delivery(monkeypatch, *, dm_ok=True, ephemeral_ok=True):
             raise ephemeral_ok
         return {"ok": ephemeral_ok}
 
-    monkeypatch.setattr(executor_module, "send_dm", fake_send_dm)
-    monkeypatch.setattr(executor_module, "post_ephemeral", fake_post_ephemeral)
+    patch_skill_dependency(monkeypatch, 'send_dm', fake_send_dm)
+    patch_skill_dependency(monkeypatch, 'post_ephemeral', fake_post_ephemeral)
     return direct_messages, ephemeral_messages
 
 
@@ -319,16 +320,12 @@ async def test_balance_backend_failure_returns_no_personal_data(monkeypatch):
             raise RuntimeError("balance=37 for UVERIFIED")
 
     monkeypatch.setattr("roo.clients.mlai_backend.MLAIBackendClient", FailingClient)
-    monkeypatch.setattr(
-        executor_module,
-        "get_settings",
-        lambda: SimpleNamespace(
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: SimpleNamespace(
             MLAI_BACKEND_URL="https://backend.test",
             MLAI_API_KEY="api-key",
             ROO_API_KEY="roo-key",
             INTERNAL_API_KEY="internal-key",
-        ),
-    )
+        ))
 
     result = await SkillExecutor()._execute_mlai_points(
         skill=SimpleNamespace(name="mlai-points"),
@@ -428,7 +425,7 @@ async def test_fast_coworking_booking_surfaces_terminal_backend_reason(
     agent = object.__new__(RooAgent)
     agent.skills = [FakeSkill()]
     agent.skill_executor = SkillExecutor()
-    monkeypatch.setattr(executor_module, "get_coworking_intent_store", lambda: store)
+    patch_skill_dependency(monkeypatch, 'get_coworking_intent_store', lambda: store)
     monkeypatch.setattr(
         coworking_module,
         "_safe_post_message",
@@ -559,7 +556,7 @@ async def test_channel_coworking_confirmation_keeps_remaining_balance_in_member_
 ):
     direct_messages, _ = _capture_private_delivery(monkeypatch)
     store = coworking_intent_store(tmp_path / "coworking.db")
-    monkeypatch.setattr(executor_module, "get_coworking_intent_store", lambda: store)
+    patch_skill_dependency(monkeypatch, 'get_coworking_intent_store', lambda: store)
 
     result = await SkillExecutor()._book_coworking_with_intent(
         client=CoworkingClient(balance=9),
@@ -592,7 +589,7 @@ async def test_dm_coworking_confirmation_returns_remaining_balance_directly(
 
     monkeypatch.setattr("roo.slack_client.post_message", post_current_dm)
     store = coworking_intent_store(tmp_path / "coworking.db")
-    monkeypatch.setattr(executor_module, "get_coworking_intent_store", lambda: store)
+    patch_skill_dependency(monkeypatch, 'get_coworking_intent_store', lambda: store)
 
     result = await SkillExecutor()._book_coworking_with_intent(
         client=CoworkingClient(balance=9),
@@ -619,7 +616,7 @@ async def test_admin_coworking_confirmation_never_exposes_target_balance(
 ):
     direct_messages, _ = _capture_private_delivery(monkeypatch)
     store = coworking_intent_store(tmp_path / "coworking.db")
-    monkeypatch.setattr(executor_module, "get_coworking_intent_store", lambda: store)
+    patch_skill_dependency(monkeypatch, 'get_coworking_intent_store', lambda: store)
 
     result = await SkillExecutor()._book_coworking_with_intent(
         client=CoworkingClient(balance=13),

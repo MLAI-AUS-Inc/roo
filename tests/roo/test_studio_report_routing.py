@@ -1,4 +1,5 @@
 """Exercise the real executor queue boundary and opt-in catalog, no model calls."""
+from tests.roo.skill_test_support import patch_skill_dependency
 import importlib
 import sys
 from pathlib import Path
@@ -36,7 +37,7 @@ async def test_real_executor_queues_authenticated_request_and_returns_text(tmp_p
     executor = importlib.import_module('roo.skills.executor')
     settings = SimpleNamespace(ROO_SURFACE='public', STUDIO_REPORTS_ENABLED=True,
                                STUDIO_REPORTS_SLACK_TEAM_ID='T123', STUDIO_REPORTS_QUEUE_DIR=str(tmp_path))
-    monkeypatch.setattr(executor, 'get_settings', lambda: settings)
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: settings)
     skill = Skill(name='studio-hours', description='', content='', path=Path('.'))
     context = BackendActorContext('T123', 'UMARK', 'C123', '1.0', 'Ev123')
     with use_backend_actor_context(context):

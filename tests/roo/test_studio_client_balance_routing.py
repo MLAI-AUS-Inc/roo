@@ -1,4 +1,5 @@
 """Hermetic balance skill routing and authenticated queue boundary checks."""
+from tests.roo.skill_test_support import patch_skill_dependency
 from datetime import datetime, timedelta, timezone
 import importlib
 import json
@@ -87,7 +88,7 @@ async def test_real_executor_queues_fixed_kind_and_authenticated_actor(setup, mo
     if current is not None and not getattr(current, '__file__', None):
         sys.modules.pop('roo.skills.executor')
     executor = importlib.import_module('roo.skills.executor')
-    monkeypatch.setattr(executor, 'get_settings', lambda: setup.settings)
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: setup.settings)
     skill = Skill(name='studio-client-balance', description='', content='', path=Path('.'))
     context = BackendActorContext('T123', 'UMARK', 'C123', '1.0', 'Ev123')
     malicious = {**params, 'actor': 'UOTHER', 'project_ids': ['secret'], 'source_path': '/tmp/private',

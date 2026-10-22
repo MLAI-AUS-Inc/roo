@@ -1,3 +1,4 @@
+from tests.roo.skill_test_support import patch_skill_dependency
 import importlib
 import sys
 from pathlib import Path
@@ -16,7 +17,7 @@ SkillExecutor = executor_module.SkillExecutor
 
 @pytest.fixture(autouse=True)
 def _roo_bot_identity(monkeypatch):
-    monkeypatch.setattr(executor_module, "get_bot_user_id", lambda: "UROO")
+    patch_skill_dependency(monkeypatch, 'get_bot_user_id', lambda: "UROO")
 
 
 def _settings(**overrides):
@@ -137,7 +138,7 @@ def _reset_fake_client():
 async def test_linear_channel_issue_list_returns_titles_first(monkeypatch):
     _reset_fake_client()
     executor = SkillExecutor()
-    monkeypatch.setattr(executor_module, "get_settings", lambda: _settings())
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: _settings())
     monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeDataBackendClient)
 
     result = await executor._execute_mlai_data_query(
@@ -168,7 +169,7 @@ async def test_linear_channel_issue_list_returns_titles_first(monkeypatch):
 async def test_linear_channel_issue_detail_by_identifier(monkeypatch):
     _reset_fake_client()
     executor = SkillExecutor()
-    monkeypatch.setattr(executor_module, "get_settings", lambda: _settings())
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: _settings())
     monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeDataBackendClient)
 
     result = await executor._execute_mlai_data_query(
@@ -201,7 +202,7 @@ async def test_linear_channel_issue_detail_by_identifier(monkeypatch):
 async def test_linear_channel_issue_detail_resolves_number_from_thread(monkeypatch, text):
     _reset_fake_client()
     executor = SkillExecutor()
-    monkeypatch.setattr(executor_module, "get_settings", lambda: _settings())
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: _settings())
     monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeDataBackendClient)
 
     await executor._execute_mlai_data_query(
@@ -247,7 +248,7 @@ async def test_linear_channel_issue_bare_detail_followup_executes_for_current_is
 ):
     _reset_fake_client()
     executor = SkillExecutor()
-    monkeypatch.setattr(executor_module, "get_settings", lambda: _settings())
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: _settings())
     monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeDataBackendClient)
 
     await executor._execute_mlai_data_query(
@@ -283,7 +284,7 @@ async def test_generic_detail_query_is_not_reclassified_as_linear(monkeypatch):
         "has_more": False,
     }
     executor = SkillExecutor()
-    monkeypatch.setattr(executor_module, "get_settings", lambda: _settings())
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: _settings())
     monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeDataBackendClient)
 
     await executor._execute_mlai_data_query(
@@ -321,7 +322,7 @@ async def test_explicit_synced_linear_detail_query_is_not_reclassified_as_live(m
         "has_more": False,
     }
     executor = SkillExecutor()
-    monkeypatch.setattr(executor_module, "get_settings", lambda: _settings())
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: _settings())
     monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeDataBackendClient)
 
     await executor._execute_mlai_data_query(
@@ -557,7 +558,7 @@ def test_linear_channel_issue_context_ignores_other_roo_linear_outputs():
 async def test_linear_channel_issue_detail_resolves_unique_title(monkeypatch):
     _reset_fake_client()
     executor = SkillExecutor()
-    monkeypatch.setattr(executor_module, "get_settings", lambda: _settings())
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: _settings())
     monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeDataBackendClient)
 
     await executor._execute_mlai_data_query(
@@ -587,7 +588,7 @@ async def test_linear_channel_issue_title_resolution_follows_page_cursor(monkeyp
         },
     ]
     executor = SkillExecutor()
-    monkeypatch.setattr(executor_module, "get_settings", lambda: _settings())
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: _settings())
     monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeDataBackendClient)
 
     await executor._execute_mlai_data_query(
@@ -631,7 +632,7 @@ async def test_linear_channel_issue_title_resolution_detects_cross_page_ambiguit
         },
     ]
     executor = SkillExecutor()
-    monkeypatch.setattr(executor_module, "get_settings", lambda: _settings())
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: _settings())
     monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeDataBackendClient)
 
     result = await executor._execute_mlai_data_query(
@@ -652,7 +653,7 @@ async def test_linear_channel_issue_title_resolution_detects_cross_page_ambiguit
 async def test_linear_channel_issue_actions_require_slack_context(monkeypatch):
     _reset_fake_client()
     executor = SkillExecutor()
-    monkeypatch.setattr(executor_module, "get_settings", lambda: _settings())
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: _settings())
     monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeDataBackendClient)
 
     result = await executor._execute_mlai_data_query(
@@ -670,7 +671,7 @@ async def test_linear_channel_issue_actions_require_slack_context(monkeypatch):
 async def test_data_query_catalog_calls_backend_catalog(monkeypatch):
     _reset_fake_client()
     executor = SkillExecutor()
-    monkeypatch.setattr(executor_module, "get_settings", lambda: _settings())
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: _settings())
     monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeDataBackendClient)
 
     result = await executor._execute_mlai_data_query(
@@ -690,7 +691,7 @@ async def test_data_query_catalog_calls_backend_catalog(monkeypatch):
 async def test_explicit_catalog_action_survives_linear_thread_context(monkeypatch):
     _reset_fake_client()
     executor = SkillExecutor()
-    monkeypatch.setattr(executor_module, "get_settings", lambda: _settings())
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: _settings())
     monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeDataBackendClient)
 
     result = await executor._execute_mlai_data_query(
@@ -718,7 +719,7 @@ async def test_explicit_catalog_action_survives_linear_thread_context(monkeypatc
 async def test_data_query_vibe_raising_count_payload(monkeypatch):
     _reset_fake_client()
     executor = SkillExecutor()
-    monkeypatch.setattr(executor_module, "get_settings", lambda: _settings())
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: _settings())
     monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeDataBackendClient)
 
     result = await executor._execute_mlai_data_query(
@@ -743,7 +744,7 @@ async def test_data_query_vibe_raising_count_payload(monkeypatch):
 async def test_data_query_specific_count_beats_bad_catalog_param(monkeypatch):
     _reset_fake_client()
     executor = SkillExecutor()
-    monkeypatch.setattr(executor_module, "get_settings", lambda: _settings())
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: _settings())
     monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeDataBackendClient)
 
     result = await executor._execute_mlai_data_query(
@@ -788,7 +789,7 @@ async def test_data_query_content_factory_failed_jobs_payload(monkeypatch):
         "has_more": False,
     }
     executor = SkillExecutor()
-    monkeypatch.setattr(executor_module, "get_settings", lambda: _settings())
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: _settings())
     monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeDataBackendClient)
 
     result = await executor._execute_mlai_data_query(
@@ -841,7 +842,7 @@ async def test_data_query_raw_text_beats_bad_resource_and_operation_params(monke
         "has_more": False,
     }
     executor = SkillExecutor()
-    monkeypatch.setattr(executor_module, "get_settings", lambda: _settings())
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: _settings())
     monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeDataBackendClient)
 
     await executor._execute_mlai_data_query(
@@ -869,7 +870,7 @@ async def test_data_query_uses_explicit_resource_params(monkeypatch):
         "has_more": False,
     }
     executor = SkillExecutor()
-    monkeypatch.setattr(executor_module, "get_settings", lambda: _settings())
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: _settings())
     monkeypatch.setattr(backend_module, "MLAIBackendClient", FakeDataBackendClient)
 
     await executor._execute_mlai_data_query(

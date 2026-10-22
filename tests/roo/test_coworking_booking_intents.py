@@ -1,3 +1,4 @@
+from tests.roo.skill_test_support import patch_skill_dependency
 import asyncio
 import hashlib
 import importlib
@@ -131,8 +132,8 @@ def capture_delivery(
     # patch the live modules used by the retry worker, not collection-time refs.
     executor_module = importlib.import_module("roo.skills.executor")
     slack_client_module = importlib.import_module("roo.slack_client")
-    monkeypatch.setattr(executor_module, "send_dm", send_dm)
-    monkeypatch.setattr(executor_module, "post_ephemeral", post_ephemeral)
+    patch_skill_dependency(monkeypatch, 'send_dm', send_dm)
+    patch_skill_dependency(monkeypatch, 'post_ephemeral', post_ephemeral)
     monkeypatch.setattr(slack_client_module, "post_message", post_message)
     return direct_messages, channel_messages, ephemeral_messages
 

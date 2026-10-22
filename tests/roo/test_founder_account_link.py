@@ -1,3 +1,4 @@
+from tests.roo.skill_test_support import patch_skill_dependency
 import importlib
 import sys
 from datetime import datetime, timedelta, timezone
@@ -36,15 +37,11 @@ def successful_slack_response() -> SlackResponse:
 
 @pytest.fixture(autouse=True)
 def trusted_founder_tools_origin(monkeypatch):
-    monkeypatch.setattr(
-        executor_module,
-        "get_settings",
-        lambda: SimpleNamespace(
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: SimpleNamespace(
             FOUNDER_ACCOUNT_LINK_ENABLED=True,
             founder_tools_link_origins={"https://mlai.au"},
             is_production=False,
-        ),
-    )
+        ))
 
 
 class FakeLinkClient:
@@ -83,15 +80,11 @@ async def execute_link(client, *, channel_id="D123", params=None):
 @pytest.mark.asyncio
 async def test_link_is_fail_closed_without_release_enablement(monkeypatch):
     client = FakeLinkClient()
-    monkeypatch.setattr(
-        executor_module,
-        "get_settings",
-        lambda: SimpleNamespace(
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: SimpleNamespace(
             FOUNDER_ACCOUNT_LINK_ENABLED=False,
             founder_tools_link_origins={"https://mlai.au"},
             is_production=False,
-        ),
-    )
+        ))
 
     result = await execute_link(client)
 
@@ -105,11 +98,7 @@ async def test_link_is_fail_closed_without_release_enablement(monkeypatch):
 @pytest.mark.asyncio
 async def test_link_in_dm_uses_event_identity_and_returns_accessible_button(monkeypatch):
     client = FakeLinkClient()
-    monkeypatch.setattr(
-        executor_module,
-        "send_dm",
-        lambda *args, **kwargs: pytest.fail("An existing DM must use its current channel"),
-    )
+    patch_skill_dependency(monkeypatch, 'send_dm', lambda *args, **kwargs: pytest.fail("An existing DM must use its current channel"))
 
     result = await execute_link(
         client,
@@ -139,11 +128,7 @@ async def test_public_link_sends_private_button_and_posts_token_free_ack(monkeyp
         delivered.update({"user_id": user_id, "text": text, **kwargs})
         return successful_slack_response()
 
-    monkeypatch.setattr(
-        executor_module,
-        "send_dm",
-        deliver_link,
-    )
+    patch_skill_dependency(monkeypatch, 'send_dm', deliver_link)
 
     result = await execute_link(client, channel_id="C123")
 
@@ -163,14 +148,10 @@ async def test_public_link_sends_private_button_and_posts_token_free_ack(monkeyp
 async def test_missing_channel_context_never_returns_the_private_button(monkeypatch):
     delivered = {}
     client = FakeLinkClient()
-    monkeypatch.setattr(
-        executor_module,
-        "send_dm",
-        lambda user_id, text, **kwargs: (
+    patch_skill_dependency(monkeypatch, 'send_dm', lambda user_id, text, **kwargs: (
             delivered.update({"user_id": user_id, "text": text, **kwargs})
             or {"ok": True}
-        ),
-    )
+        ))
 
     result = await execute_link(client, channel_id=None)
 
@@ -185,7 +166,7 @@ async def test_missing_channel_context_never_returns_the_private_button(monkeypa
 @pytest.mark.asyncio
 async def test_malformed_dm_response_fails_without_exposing_the_link(monkeypatch):
     client = FakeLinkClient()
-    monkeypatch.setattr(executor_module, "send_dm", lambda *args, **kwargs: "ok")
+    patch_skill_dependency(monkeypatch, 'send_dm', lambda *args, **kwargs: "ok")
 
     result = await execute_link(client, channel_id="C123")
 
@@ -197,7 +178,7 @@ async def test_malformed_dm_response_fails_without_exposing_the_link(monkeypatch
 @pytest.mark.asyncio
 async def test_public_link_dm_failure_never_exposes_url(monkeypatch):
     client = FakeLinkClient()
-    monkeypatch.setattr(executor_module, "send_dm", lambda *args, **kwargs: None)
+    patch_skill_dependency(monkeypatch, 'send_dm', lambda *args, **kwargs: None)
 
     result = await execute_link(client, channel_id="C123")
 
@@ -216,7 +197,7 @@ async def test_public_link_dm_exception_never_exposes_url(monkeypatch):
     def fail_dm(*args, **kwargs):
         raise RuntimeError("Slack transport failed")
 
-    monkeypatch.setattr(executor_module, "send_dm", fail_dm)
+    patch_skill_dependency(monkeypatch, 'send_dm', fail_dm)
 
     result = await execute_link(client, channel_id="C123")
 
@@ -236,11 +217,7 @@ async def test_already_linked_response_has_no_button(monkeypatch):
         delivered.update({"user_id": user_id, "text": text, **kwargs})
         return successful_slack_response()
 
-    monkeypatch.setattr(
-        executor_module,
-        "send_dm",
-        deliver_status,
-    )
+    patch_skill_dependency(monkeypatch, 'send_dm', deliver_status)
 
     result = await execute_link(client, channel_id="C123")
 
@@ -258,11 +235,7 @@ async def test_already_linked_response_has_no_button(monkeypatch):
 @pytest.mark.asyncio
 async def test_already_linked_response_is_direct_inside_roo_dm(monkeypatch):
     client = FakeLinkClient(response={"status": "already_linked"})
-    monkeypatch.setattr(
-        executor_module,
-        "send_dm",
-        lambda *args, **kwargs: pytest.fail("An existing DM must use its current channel"),
-    )
+    patch_skill_dependency(monkeypatch, 'send_dm', lambda *args, **kwargs: pytest.fail("An existing DM must use its current channel"))
 
     result = await execute_link(client, channel_id="D123")
 
@@ -273,7 +246,7 @@ async def test_already_linked_response_is_direct_inside_roo_dm(monkeypatch):
 @pytest.mark.asyncio
 async def test_already_linked_dm_failure_keeps_status_private(monkeypatch):
     client = FakeLinkClient(response={"status": "already_linked"})
-    monkeypatch.setattr(executor_module, "send_dm", lambda *args, **kwargs: None)
+    patch_skill_dependency(monkeypatch, 'send_dm', lambda *args, **kwargs: None)
 
     result = await execute_link(client, channel_id="C123")
 
@@ -304,11 +277,7 @@ async def test_untrusted_backend_link_is_not_delivered(monkeypatch):
             "expires_at": future_expiry(),
         }
     )
-    monkeypatch.setattr(
-        executor_module,
-        "send_dm",
-        lambda *args, **kwargs: pytest.fail("Unsafe URLs must not be delivered"),
-    )
+    patch_skill_dependency(monkeypatch, 'send_dm', lambda *args, **kwargs: pytest.fail("Unsafe URLs must not be delivered"))
 
     result = await execute_link(client, channel_id="C123")
 
@@ -344,11 +313,7 @@ async def test_untrusted_or_malformed_backend_links_are_not_delivered(
             "expires_at": future_expiry(),
         }
     )
-    monkeypatch.setattr(
-        executor_module,
-        "send_dm",
-        lambda *args, **kwargs: pytest.fail("Unsafe URLs must not be delivered"),
-    )
+    patch_skill_dependency(monkeypatch, 'send_dm', lambda *args, **kwargs: pytest.fail("Unsafe URLs must not be delivered"))
 
     result = await execute_link(client, channel_id="C123")
 
@@ -375,11 +340,7 @@ async def test_missing_invalid_expired_or_naive_expiry_is_rejected(
 ):
     client = FakeLinkClient()
     client.response["expires_at"] = expires_at
-    monkeypatch.setattr(
-        executor_module,
-        "send_dm",
-        lambda *args, **kwargs: pytest.fail("Invalid link metadata must not be delivered"),
-    )
+    patch_skill_dependency(monkeypatch, 'send_dm', lambda *args, **kwargs: pytest.fail("Invalid link metadata must not be delivered"))
 
     result = await execute_link(client, channel_id="C123")
 
@@ -393,14 +354,10 @@ async def test_malformed_direct_message_channel_never_receives_link_inline(
     channel_id,
 ):
     delivered = {}
-    monkeypatch.setattr(
-        executor_module,
-        "send_dm",
-        lambda user_id, text, **kwargs: (
+    patch_skill_dependency(monkeypatch, 'send_dm', lambda user_id, text, **kwargs: (
             delivered.update({"user_id": user_id, "text": text, **kwargs})
             or {"ok": True}
-        ),
-    )
+        ))
 
     result = await execute_link(FakeLinkClient(), channel_id=channel_id)
 
@@ -422,11 +379,11 @@ def test_localhost_link_requires_explicit_development_origin():
         is_production=True,
     )
 
-    assert SkillExecutor._is_safe_founder_account_link_url(
+    assert SkillExecutor().owner_of("_is_safe_founder_account_link_url")._is_safe_founder_account_link_url(
         link_url,
         settings=development,
     )
-    assert not SkillExecutor._is_safe_founder_account_link_url(
+    assert not SkillExecutor().owner_of("_is_safe_founder_account_link_url")._is_safe_founder_account_link_url(
         link_url,
         settings=production,
     )
@@ -526,11 +483,7 @@ async def test_malformed_success_payload_is_rejected_without_delivery(
     payload,
 ):
     client = FakeLinkClient(response=payload)
-    monkeypatch.setattr(
-        executor_module,
-        "send_dm",
-        lambda *args, **kwargs: pytest.fail("Malformed responses must not be delivered"),
-    )
+    patch_skill_dependency(monkeypatch, 'send_dm', lambda *args, **kwargs: pytest.fail("Malformed responses must not be delivered"))
 
     result = await execute_link(client, channel_id="C123")
 
@@ -543,7 +496,7 @@ async def test_malformed_success_payload_is_rejected_without_delivery(
 def test_chat_startup_link_uses_same_strict_token_and_origin_checks():
     from types import SimpleNamespace
     settings = SimpleNamespace(founder_tools_link_origins={"https://mlai.au", "https://chat.mlai.au"}, is_production=True)
-    validator = executor_module.SkillExecutor._is_safe_founder_account_link_url
+    validator = executor_module.SkillExecutor().owner_of("_is_safe_founder_account_link_url")._is_safe_founder_account_link_url
     assert validator(f"https://chat.mlai.au/my-startup/link-roo?token={LINK_TOKEN}", settings=settings)
     assert not validator(f"https://chat.mlai.au.evil/my-startup/link-roo?token={LINK_TOKEN}", settings=settings)
     assert not validator(f"https://chat.mlai.au/my-startup/link-roo?token={LINK_TOKEN}&next=/", settings=settings)

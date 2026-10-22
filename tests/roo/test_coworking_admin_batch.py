@@ -1,3 +1,4 @@
+from tests.roo.skill_test_support import patch_skill_dependency
 import importlib
 import sys
 from pathlib import Path
@@ -150,12 +151,12 @@ def batch_runtime(monkeypatch, tmp_path):
     db_path = tmp_path / "coworking.db"
     schema_module.migrate_coworking_booking_intents_v3(db_path)
     store = coworking_module.CoworkingBookingIntentStore(db_path)
-    monkeypatch.setattr(executor_module, "get_coworking_intent_store", lambda: store)
+    patch_skill_dependency(monkeypatch, 'get_coworking_intent_store', lambda: store)
     direct_messages = []
     def send_dm(user_id, text, **kwargs):
         direct_messages.append({"user": user_id, "text": text, **kwargs})
         return {"ok": True}
-    monkeypatch.setattr(executor_module, "send_dm", send_dm)
+    patch_skill_dependency(monkeypatch, 'send_dm', send_dm)
     monkeypatch.setattr(
         coworking_module,
         "_safe_send_dm",
@@ -535,7 +536,7 @@ async def test_batch_private_notifications_survive_delivery_failure_and_restart(
     def fail_dm(user_id, text, **kwargs):
         failed_message_ids.append(kwargs.get("client_msg_id"))
         raise RuntimeError("injected Slack failure")
-    monkeypatch.setattr(executor_module, "send_dm", fail_dm)
+    patch_skill_dependency(monkeypatch, 'send_dm', fail_dm)
     client = FakeCoworkingClient(admin_details={"role": "admin"})
     result = await _run_points_action(
         client, action="admin_checkin_coworking", text="check <@U1> <@U2> in today"
@@ -553,7 +554,7 @@ async def test_batch_private_notifications_survive_delivery_failure_and_restart(
     def deliver_dm(user_id, text, **kwargs):
         delivered.append({"user": user_id, "client_msg_id": kwargs.get("client_msg_id")})
         return {"ok": True}
-    monkeypatch.setattr(executor_module, "send_dm", deliver_dm)
+    patch_skill_dependency(monkeypatch, 'send_dm', deliver_dm)
     due = restart_store.claim_due_notifications(limit=10, owner="restart-worker")
     for notification in due:
         await coworking_module.deliver_coworking_booking_notification(

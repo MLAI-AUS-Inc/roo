@@ -35,6 +35,10 @@ jobs:
       - name: Install Roo dependencies
         run: python -m pip install -r src/requirements.txt
 
+      - name: Validate skill configuration without importing clients
+        working-directory: src
+        run: python -m roo.skills.lint --public-defaults
+
       - name: Run Health Hack security and AI regressions
         working-directory: src
         env:
@@ -43,6 +47,8 @@ jobs:
           OPENAI_API_KEY: test
           FOUNDER_TOOLS_LINK_ORIGINS: https://mlai.au
         run: |
+          python -m pytest ../tests/roo/test_skill_loading_contract.py -q
+          python -m pytest ../tests/roo/test_skill_execution_behaviors.py ../tests/roo/test_skill_executor_classes.py -q
           # Several legacy suites install import-time module stubs. Keep the
           # surface boundary gate isolated so collection order cannot weaken it.
           python -m pytest ../tests/roo/test_surface_security.py -q

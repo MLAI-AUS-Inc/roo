@@ -1,3 +1,4 @@
+from tests.roo.skill_test_support import patch_skill_dependency
 import os
 import sys
 from pathlib import Path
@@ -129,9 +130,9 @@ async def test_public_request_sends_private_email_list_using_event_actor(monkeyp
         captured["dms"].append((user_id, text, kwargs.get("blocks")))
         return {"ok": True}
 
-    monkeypatch.setattr(executor_module, "get_settings", _settings)
+    patch_skill_dependency(monkeypatch, 'get_settings', _settings)
     monkeypatch.setattr("roo.clients.mlai_backend.MLAIBackendClient", FakeClient)
-    monkeypatch.setattr(executor_module, "send_dm", fake_send_dm)
+    patch_skill_dependency(monkeypatch, 'send_dm', fake_send_dm)
 
     result = await SkillExecutor()._execute_committee_candidate_emails(
         text="list members with 100 earned points",
@@ -156,13 +157,9 @@ async def test_direct_message_returns_list_without_second_dm(monkeypatch):
         async def list_committee_candidate_emails(self, requester_slack_id):
             return _candidate_data()
 
-    monkeypatch.setattr(executor_module, "get_settings", _settings)
+    patch_skill_dependency(monkeypatch, 'get_settings', _settings)
     monkeypatch.setattr("roo.clients.mlai_backend.MLAIBackendClient", FakeClient)
-    monkeypatch.setattr(
-        executor_module,
-        "send_dm",
-        lambda *args, **kwargs: pytest.fail("A one-message DM result should render directly"),
-    )
+    patch_skill_dependency(monkeypatch, 'send_dm', lambda *args, **kwargs: pytest.fail("A one-message DM result should render directly"))
 
     result = await SkillExecutor()._execute_committee_candidate_emails(
         text="committee candidate emails",
@@ -187,13 +184,9 @@ async def test_missing_channel_fails_closed_to_private_dm(monkeypatch):
         async def list_committee_candidate_emails(self, requester_slack_id):
             return _candidate_data()
 
-    monkeypatch.setattr(executor_module, "get_settings", _settings)
+    patch_skill_dependency(monkeypatch, 'get_settings', _settings)
     monkeypatch.setattr("roo.clients.mlai_backend.MLAIBackendClient", FakeClient)
-    monkeypatch.setattr(
-        executor_module,
-        "send_dm",
-        lambda user_id, text, **kwargs: captured.append((user_id, text)) or {"ok": True},
-    )
+    patch_skill_dependency(monkeypatch, 'send_dm', lambda user_id, text, **kwargs: captured.append((user_id, text)) or {"ok": True})
 
     result = await SkillExecutor()._execute_committee_candidate_emails(
         text="committee candidate emails",
@@ -215,9 +208,9 @@ async def test_dm_failure_never_returns_emails_to_public_channel(monkeypatch):
         async def list_committee_candidate_emails(self, requester_slack_id):
             return _candidate_data()
 
-    monkeypatch.setattr(executor_module, "get_settings", _settings)
+    patch_skill_dependency(monkeypatch, 'get_settings', _settings)
     monkeypatch.setattr("roo.clients.mlai_backend.MLAIBackendClient", FakeClient)
-    monkeypatch.setattr(executor_module, "send_dm", lambda *args, **kwargs: {"ok": False})
+    patch_skill_dependency(monkeypatch, 'send_dm', lambda *args, **kwargs: {"ok": False})
 
     result = await SkillExecutor()._execute_committee_candidate_emails(
         text="committee candidate emails",
@@ -242,7 +235,7 @@ async def test_permission_denial_and_backend_failure_are_safe(monkeypatch):
             response = httpx.Response(403, request=request, json={"error": "denied"})
             raise httpx.HTTPStatusError("denied", request=request, response=response)
 
-    monkeypatch.setattr(executor_module, "get_settings", _settings)
+    patch_skill_dependency(monkeypatch, 'get_settings', _settings)
     monkeypatch.setattr("roo.clients.mlai_backend.MLAIBackendClient", DeniedClient)
     denied = await SkillExecutor()._execute_committee_candidate_emails(
         text="committee candidate emails",
