@@ -1,5 +1,45 @@
 # Running evaluations
 
+## Booking and Roo Points smoke tests
+
+From `src` with the application Python environment:
+
+```bash
+python ../tests/run_skill_smoke.py
+python ../tests/run_skill_smoke.py --live --env-file .env --report /tmp/roo-skill-smoke.json
+```
+
+The default run makes no model calls. `--live` opts into seven real router
+queries using a **development-only** OpenAI key from
+`ROO_SMOKE_DEV_OPENAI_API_KEY`, `OPENAI_API_KEY`, or the specified dotenv file.
+Only the model key and optional `ROUTER_MODEL` are taken from that file;
+operational settings are synthetic. `--model` can explicitly override the
+configured router model. Never use production tokens.
+
+Cases cover coworking today/tomorrow/an explicit date with a time range,
+requesting Roo Points, and approving an existing points request in chat.
+The latter must not turn into a task approval or a fresh points request:
+the current approval mechanism is a Slack reaction. Two additional offline
+tests exercise reaction approval success and backend permission denial.
+
+Routing uses the real public skill catalogue. Booking tests exercise the real
+executor and date parser, then substitute booking persistence. Points tests use
+a fake backend and fake Slack delivery. Only OpenAI HTTP traffic is allowed;
+no real booking, points mutation, Slack message, database or migration occurs.
+Reaction tests start at the internal event handler; they do not test Slack
+signature verification or real backend authorization. Each model request has
+a 45-second timeout and no SDK retries; the router retains its existing
+tool-parse retry. Live results are nondeterministic and incur API usage.
+
+Failures remain failures (exit status 1), including provider errors. Reports
+contain synthetic queries, decisions, responses and test outcomes, never keys.
+The [23 October report](evals/skill_smoke/2026-10-23.md) records observed issues.
+
+The model tool-call/execution separation follows the
+[official function-calling workflow](https://developers.openai.com/api/docs/guides/function-calling).
+
+## Routing and addressing evaluations
+
 From the repository root (or use the script's absolute path from anywhere):
 
 ```bash

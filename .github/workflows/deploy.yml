@@ -49,6 +49,8 @@ jobs:
         run: |
           python -m pytest ../tests/roo/test_skill_loading_contract.py -q
           python -m pytest ../tests/roo/test_skill_execution_behaviors.py ../tests/roo/test_skill_executor_classes.py -q
+          # Offline approval checks only; live model tests run locally with --live.
+          python -m pytest ../tests/roo/test_live_skill_smoke.py::test_reaction_approval_uses_event_actor_and_backend_result -q
           # Several legacy suites install import-time module stubs. Keep the
           # surface boundary gate isolated so collection order cannot weaken it.
           python -m pytest ../tests/roo/test_surface_security.py -q
