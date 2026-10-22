@@ -159,7 +159,7 @@ def test_default_freshness_gate_is_unchanged():
         validate_snapshot_age(dataset, timestamp('2026-10-24T17:00:00+11:00'))
 
 
-def test_month_to_date_contains_earlier_month_work_once_and_excludes_estimated_or_cutoff_dates():
+def test_month_to_date_matches_monthly_allocation_and_flags_ambiguous_cutoff_day():
     dataset = data(work(key='earlier', first='2026-10-03', last='2026-10-07', units=8_000_001),
                    work(key='current', units=1_000_001),
                    work(key='friday', first='2026-10-16', last='2026-10-16', units=4_000_000),
@@ -167,11 +167,38 @@ def test_month_to_date_contains_earlier_month_work_once_and_excludes_estimated_o
                    work(key='estimated', first='2026-10-04', last='2026-10-05', date_basis='estimated_work_period'))
     month = report(dataset, {'period': 'month_to_date', 'end': NOW.isoformat()})
     assert month['selector']['start'] == '2026-10-01T00:00:00+10:00'
-    assert {row['issue_id'] for row in month['rows']} == {'earlier', 'current'}
-    assert month['monthly'][0]['units'] == 9_000_002
-    assert month['unit_scale'] == 1_000_000 and month['estimated_month_units'] == 0
-    assert month['monthly'][0]['unresolved'] == 3
-    assert all('month-to-date' in item['reason'] for item in month['exceptions'])
+    assert {row['issue_id'].split(':')[0] for row in month['rows']} == {'earlier', 'current', 'month-boundary', 'estimated'}
+    assert month['monthly'][0]['units'] == 12_500_003
+    assert month['unit_scale'] == 1_000_000 and month['estimated_month_units'] == 3_500_001
+    assert month['monthly'][0]['unresolved'] == 1
+    assert 'Cutoff-day work' in month['exceptions'][0]['reason']
+    ordinary = report(data(*[w for w in dataset['hours'] if w['id'] != 'friday']),
+                      {'month': '2026-10', 'action': 'summary'})
+    assert ordinary['monthly'][0]['units'] == month['monthly'][0]['units']
+
+
+def test_friday_work_with_supported_times_before_cutoff_counts_once():
+    row = work(first='2026-10-16', last='2026-10-16', units=4_000_001)
+    row.update(work_start_at='2026-10-16T10:00:00+11:00', work_end_at='2026-10-16T16:00:00+11:00')
+    weekly = report(data(row))
+    month = report(data(row), {'period': 'month_to_date', 'end': NOW.isoformat()})
+    assert weekly['monthly'][0]['units'] == month['monthly'][0]['units'] == 4_000_001
+    assert not weekly['exceptions'] and not month['exceptions']
+
+
+def test_unresolved_project_is_labelled_unavailable_in_text_and_png(monkeypatch):
+    from matplotlib.axes import Axes
+    from roo.studio_reports import render_chart, summary
+    result = report(data(work(first='2026-10-16', last='2026-10-16')))
+    assert 'Project A: Unavailable' in summary(result)
+    captured = []
+    original = Axes.text
+    def capture(axes, x, y, text, *args, **kwargs):
+        captured.append(text)
+        return original(axes, x, y, text, *args, **kwargs)
+    monkeypatch.setattr(Axes, 'text', capture)
+    assert render_chart(result).startswith(b'\x89PNG')
+    assert 'Unavailable' in captured
 
 
 def _finance_weekly_request(setup, monkeypatch, read_at, *, as_of='2026-10-17T12:00:00+11:00'):

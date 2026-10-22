@@ -132,12 +132,13 @@ def test_retry_sends_only_unsent_month_chart_using_same_frozen_source(setup):
     assert report['month_to_date']['selector']['end'] == report['selector']['end']
 
 
-def test_week_without_source_coverage_still_has_labelled_chart_and_valid_month_data(finance_setup, monkeypatch):
+@pytest.mark.parametrize('historical', [False, True])
+def test_week_without_source_coverage_still_has_labelled_chart_and_valid_month_data(finance_setup, monkeypatch, historical):
     import roo.studio_report_worker as worker
     class Clock:
         @classmethod
         def now(cls, tz):
-            return FRIDAY.astimezone(tz)
+            return (FRIDAY + timedelta(days=10 if historical else 0)).astimezone(tz)
     monkeypatch.setattr(worker, 'datetime', Clock)
     finance_setup.dataset.update(hours_reporting=True)
     finance_setup.dataset['hours'][0].update(work_start='2026-10-08', work_end='2026-10-09', hour_units=5_000_000,
@@ -148,6 +149,7 @@ def test_week_without_source_coverage_still_has_labelled_chart_and_valid_month_d
         'STUDIO_REPORTS_WEEKLY_SCHEDULES_JSON': json.dumps([
             {'id': 'mark-friday', 'actor': 'UMARK', 'client': 'UMARK', 'starts_on': '2026-10-16'}])}, finance_setup.clients)
     finance_setup.service.schedules = schedules
+    finance_setup.service.allow_historical_snapshot = historical
     key = enqueue_weekly(finance_setup.service, schedules, FRIDAY)[0]['request']
     request = finance_setup.service.weekly_queue.read(key)
     report = finance_setup.service.report_for_request(request)
@@ -158,6 +160,8 @@ def test_week_without_source_coverage_still_has_labelled_chart_and_valid_month_d
     assert all(base64.b64decode(part['content']).startswith(b'\x89PNG') for part in files)
     text = '\n'.join(part['content'] for part in report['parts'] if part['kind'] == 'message')
     assert 'Weekly hours unavailable' in text and '5 invoice/recorded hour-units counted' in text
+    assert report['source_stale'] is historical and report['month_to_date']['source_stale'] is historical
+    assert ('Historical snapshot' in text) is historical
     assert 'payments' not in json.dumps(report) and 'BANK1' not in json.dumps(report)
     finance_setup.api.collect.assert_not_called()
 

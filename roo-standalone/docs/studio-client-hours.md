@@ -6,6 +6,11 @@ request comes from a channel. Public Roo queues authenticated request metadata;
 a separate worker owns source credentials, verified client/project mappings,
 snapshots and delivery receipts. The feature is disabled by default.
 
+The private worker can explicitly enable labelled historical charts when the
+reviewed source expires, using `STUDIO_REPORTS_HISTORICAL_FALLBACK_ENABLED`.
+The default is false. The [hours and purchased-hours guide](studio-client-balance.md)
+describes the cutoff labels, unavailable periods and remaining source checks.
+
 ## Client experience
 
 - “How many of my 40 Studio hours have we used this month?”
@@ -328,11 +333,27 @@ previous month remains in a crossing weekly window, but is excluded from the
 month-to-date view. Project colours match across both charts, and both include
 all mapped projects. The text includes the matching period totals.
 
-Both views use the same source read and reviewed snapshot. The month-to-date
-companion uses the weekly view's exact date containment rules: unsupported
-monthly estimates or cross-boundary work remain unresolved without daily
-proration. Ordinary calendar-month reports retain their existing allocation
-policy. Exceptions for the month-to-date view have their own CSV attachment.
+Both views use the same source read and reviewed snapshot. Month-to-date uses
+the same allocation as calendar-month reports, with estimated month assignments
+labelled explicitly. Weekly actuals still require full supported work periods;
+monthly allocation estimates cannot establish weekly hours. Cutoff-day work
+requires supported times. Exceptions have their own CSV attachment.
+
+With `STUDIO_REPORTS_REFRESH_ENABLED=true`, Friday reports require the private
+backend source barrier and include a third PNG: the month-to-date payment
+burndown, including historical carry-in. All three charts use one frozen dataset.
+The worker prepares at 16:30 Melbourne and performs a closing refresh at 17:00.
+Both recipients share the preparation; each retains a separate private DM and
+durable delivery receipt. Source times and the original cutoff accompany the
+charts. Configure the dedicated HTTPS URL and key only in `.env.studio-reports`.
+See the [refresh contract](studio-client-balance.md#automatic-friday-preparation).
+
+Missing work coverage, unreviewed invoices, provider errors, ambiguous weekly
+dates and unverified payments become `waiting_data`. Roo sends one private
+notice and retries every five minutes. It sends no zero/placeholder chart and
+does not mark the report done until verified charts are delivered. A corrected
+work manifest is fetched on retry. A prepared successful snapshot and rendered
+parts stay frozen through delivery retries; confirmed parts are not resent.
 
 Configure only `.env.studio-reports`, using verified Slack IDs rather than a
 guessed name or recipient. The `actor` receives the DM and must already have
@@ -386,9 +407,11 @@ the separate worker.
 
 When a client uses the canonical reviewed finance snapshot, weekly reports use
 the same source and freshness gate as their monthly hours reports. They never
-fall back to ticket estimates for those projects. Reviewed records must be
-refreshed at least weekly through the operator reconciliation handoff; this
-scheduler does not synchronise Xero or invent source review timestamps.
+fall back to ticket estimates for those projects. Without the refresh flag,
+reviewed records must be refreshed through the operator handoff. With refresh
+enabled, Xero and mailbox reads are automatic; work submissions and ambiguous
+invoice allocations still require review. Neither path invents review times
+or unsubmitted hours.
 If a fresh snapshot does not cover either period, its chart explicitly says that
 reviewed hours are unavailable, with the source coverage date. It never displays
 an apparent zero-hours total for missing coverage. Stale sources
@@ -401,7 +424,7 @@ Snapshots and rendered parts persist before sending. Confirmed messages/files
 are not resent; rate limits retry after the indicated delay. A timeout after an
 attempted send remains uncertain and requires operator review. On-demand reports
 can deliver text totals if chart rendering is unavailable. Friday reports require
-both charts to render before any report parts are delivered; safe render failures
+every required chart to render before any report parts are delivered; safe render failures
 remain queued for retry. Attachment upload failures retain the
 already-delivered text and follow the same delivery recovery rules.
 

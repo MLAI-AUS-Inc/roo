@@ -1,5 +1,6 @@
 """Finance source conservation, access and transport using synthetic records only."""
 from copy import deepcopy
+import base64
 from datetime import timedelta
 import json
 from types import SimpleNamespace
@@ -279,3 +280,111 @@ def test_pending_work_is_unknown_hours_not_zero_or_money_inferred(setup):
     pending['hour_units'] = 0
     with pytest.raises(TimesheetError, match='invalid_client_balance_snapshot'):
         validate_balance_snapshot(value, setup.config, setup.clients)
+
+
+def test_explicit_historical_fallback_delivers_all_three_charts_with_one_cutoff(setup, monkeypatch):
+    from matplotlib.figure import Figure
+    from roo.studio_reports import total_units
+    enable_recorded_hours(setup)
+    original_source = setup.path.read_bytes()
+    setup.service.allow_historical_snapshot = True
+    now = NOW + timedelta(days=10)
+    req = {**request('USAM', client='Mark', month='2026-06', months=5), 'requested_at': now.isoformat()}
+    labels = []
+    original_text = Figure.text
+    def capture_text(figure, x, y, text, *args, **kwargs):
+        labels.append(text)
+        return original_text(figure, x, y, text, *args, **kwargs)
+    monkeypatch.setattr(Figure, 'text', capture_text)
+    report = setup.service.report_for_request(req)
+    assert report['source_stale'] and report['hours_report']['source_stale']
+    assert report['coverage_through'] == '2026-10-11'
+    assert report['as_of'] == NOW.isoformat()
+    assert report['used_hour_units'] == total_units(report['hours_report']) == 123010000
+    charts = [p for p in report['parts'] if p.get('filename', '').endswith('.png')]
+    assert {p['filename'] for p in charts} == {
+        'studio-client-balance.png', 'studio-hours.png', 'studio-hours-projects.png'}
+    assert all(base64.b64decode(p['content']).startswith(b'\x89PNG\r\n\x1a\n') for p in charts)
+    assert sum('Historical snapshot · reviewed through 2026-10-11' in label for label in labels) == 3
+    text = '\n'.join(p['content'] for p in report['parts'] if p['kind'] == 'message')
+    assert text.index('Historical snapshot') < text.index('Invoice/recorded hour-units:')
+    assert 'Later activity is unavailable' in text and 'through 2026-10-11' in text
+    assert 'month to date' not in text
+    with setup.service.requests.locked('frozen') as acquired:
+        assert acquired
+        setup.service.requests.write('frozen', report)
+    assert setup.service.deliver_request(setup.service.requests.read('frozen'), req, 'HISTORICAL', now) == 'sent'
+    assert setup.api.open_dm.call_args.args == ('USAM',)
+    assert setup.api.upload_csv.call_count == 3
+    assert setup.service.deliver_request(setup.service.requests.read('frozen'), req, 'HISTORICAL', now) == 'sent'
+    assert setup.api.upload_csv.call_count == 3  # No duplicate uploads on retry.
+    assert setup.path.read_bytes() == original_source
+    setup.api.collect.assert_not_called()
+    setup.api.verify.assert_not_called()
+
+
+@pytest.mark.parametrize('kind', ['hours', 'client_balance'])
+def test_historical_opt_in_cannot_send_an_unlabelled_current_snapshot_after_expiry(setup, kind):
+    enable_recorded_hours(setup)
+    req = {**request(), 'report_kind': kind}
+    report = setup.service.report_for_request(req)
+    assert report['source_stale'] is False
+    setup.service.allow_historical_snapshot = True
+    with pytest.raises(TimesheetError, match='source_stale'):
+        setup.service.deliver_request(report, req, 'EXPIRED', NOW + timedelta(days=10))
+    setup.api.open_dm.assert_not_called()
+
+
+def test_historical_fallback_rechecks_scope_source_and_operator_flag(setup):
+    setup.service.allow_historical_snapshot = True
+    now = NOW + timedelta(days=10)
+    req = {**request(), 'requested_at': now.isoformat()}
+    report = setup.service.report_for_request(req)
+    setup.service.allow_historical_snapshot = False
+    with pytest.raises(TimesheetError, match='source_stale'):
+        setup.service.deliver_request(report, req, 'REVOKED', now)
+    setup.service.allow_historical_snapshot = True
+    setup.dataset['limitations'].append('New review')
+    setup.path.write_text(json.dumps(setup.value))
+    with pytest.raises(TimesheetError, match='source_changed'):
+        setup.service.deliver_request(report, req, 'CHANGED', now)
+    setup.clients['UMARK']['project_ids'] = [P2]
+    with pytest.raises(TimesheetError, match='client_access_changed'):
+        setup.service.deliver_request(report, req, 'SCOPE', now)
+    setup.api.open_dm.assert_not_called()
+
+
+def test_future_review_still_blocks_historical_fallback(setup):
+    setup.service.allow_historical_snapshot = True
+    with pytest.raises(TimesheetError, match='source_stale'):
+        setup.service.report_for_request({**request(), 'requested_at': (NOW - timedelta(hours=1)).isoformat()})
+    setup.api.open_dm.assert_not_called()
+    setup.api.verify_recipient.assert_not_called()
+
+
+def test_historical_months_outside_coverage_show_unavailable_instead_of_zero(setup):
+    from roo.studio_reports import summary
+    enable_recorded_hours(setup)
+    setup.service.allow_historical_snapshot = True
+    now = NOW + timedelta(days=25)
+    req = {**request(month='2026-10', months=2), 'requested_at': now.isoformat()}
+    report = setup.service.report_for_request(req)
+    hours = report['hours_report']
+    assert [m['coverage_available'] for m in hours['monthly']] == [True, False]
+    text = summary(hours)
+    assert 'November 2026 — hours unavailable outside reviewed coverage' in text
+    assert 'November 2026 — 0' not in text
+    req['selector'].update(month='2026-11', months=1)
+    uncovered = setup.service.report_for_request(req)
+    assert uncovered['period_has_coverage'] is False
+    assert 'Hours are unavailable for the requested period' in summary(uncovered['hours_report'])
+
+
+def test_failed_companion_chart_cannot_send_a_partial_report_bundle(setup, monkeypatch):
+    enable_recorded_hours(setup)
+    setup.service.allow_historical_snapshot = True
+    monkeypatch.setattr('roo.studio_report_worker.render_chart', Mock(side_effect=RuntimeError('render failed')))
+    with pytest.raises(RuntimeError, match='render failed'):
+        setup.service.report_for_request({**request(), 'requested_at': (NOW + timedelta(days=10)).isoformat()})
+    setup.api.upload_csv.assert_not_called()
+    setup.api.post_message.assert_not_called()

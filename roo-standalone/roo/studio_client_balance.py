@@ -12,7 +12,7 @@ from io import BytesIO
 from threading import Lock
 
 from .payment_reminders import _escape
-from .studio_reports import TZ, resolve_period
+from .studio_reports import TZ, resolve_period, reviewed_cutoff_notice
 from .timesheets import TimesheetError, csv_file, timestamp
 
 HOUR_UNITS = 1_000_000
@@ -57,6 +57,17 @@ def _allocated_days(work):
             for index in range(count)]
 
 
+def allocated_days_for_cutoff(work, end=None):
+    days = _allocated_days(work)
+    if end is None or end.time() == datetime.min.time():
+        return days
+    # A date alone cannot put Friday's work before 17:00. Retain supported
+    # earlier days for labelled monthly estimates; never invent clock times.
+    last_at = work.get('work_end_at')
+    precise = last_at is not None and timestamp(last_at) <= timestamp(end)
+    return [(day, units) for day, units in days if day < end.date() or (day == end.date() and precise)]
+
+
 def build_balance_report(client, selector, dataset, now):
     """Compute recorded work less purchased hours, including historical carry-in.
 
@@ -75,7 +86,9 @@ def build_balance_report(client, selector, dataset, now):
     source_day = timestamp(dataset['as_of']).astimezone(TZ).date()
     cutoff = min(coverage_end, current_day, source_day)
     start = max(coverage_start, requested_start.date())
-    end = min(requested_end.date() - timedelta(days=1), cutoff)
+    bounded = resolved.get('period') in {'weekly', 'month_to_date'}
+    last_requested_day = requested_end.date() - timedelta(days=int(requested_end.time() == datetime.min.time()))
+    end = min(last_requested_day, cutoff)
     has_coverage = start <= end
     allowed = set(client['project_ids'])
     work_days, estimated_days = defaultdict(int), defaultdict(int)
@@ -88,7 +101,7 @@ def build_balance_report(client, selector, dataset, now):
             raise TimesheetError('duplicate_client_balance_hours')
         work_ids.add(original['id'])
         work = dict(original)
-        allocated = _allocated_days(work)
+        allocated = allocated_days_for_cutoff(work, requested_end if bounded else None)
         estimated = work['date_basis'] != 'work_dates' or len(allocated) > 1
         period_units = included_units = 0
         for day, units in allocated:
@@ -230,6 +243,8 @@ def summary(report):
     detailed = report['selector']['action'] == 'detailed'
     recorded_units = report.get('recorded_units_basis', False)
     parts = [f"*Studio hours and paid credits · {_escape(report['client'])}*"]
+    if reviewed_cutoff_notice(report):
+        parts.append('*' + reviewed_cutoff_notice(report) + '*')
     if report['period_has_coverage']:
         parts.extend([f"{report['start']} – {report['end']}",
                       f"{'Invoice/recorded hour-units' if recorded_units else 'Recorded hours used'}: *{display_hours(report['used_hour_units'])}h*",
@@ -357,6 +372,11 @@ def render_chart(report):
         canvas = FigureCanvasAgg(figure)
         axes = figure.add_subplot(111)
         figure.subplots_adjust(left=.12, right=.94, top=.69 if report['scope_label'] else .735, bottom=.25)
+        if reviewed_cutoff_notice(report):
+            figure.subplots_adjust(top=.63)
+            figure.text(.06, .68, f"Historical snapshot · reviewed through {report['coverage_through']}\n"
+                        'Later work, receipts and invoice status unavailable',
+                        fontsize=10, weight='bold', color='#9a4a00')
         figure.text(.06, .94, 'Studio work units and paid credits' if recorded_units else 'Studio hours and paid credits',
                     fontsize=22, weight='bold', color='#142c3a')
         figure.text(.06, .875, textwrap.shorten(report['client'], width=75, placeholder='…'), fontsize=14, color='#334b58')
