@@ -1,0 +1,20 @@
+name: roo-studio-reports
+
+services:
+  studio-reports:
+    build:
+      context: ../src
+      dockerfile: ../infra/Dockerfile
+    command: ["python", "-m", "roo.studio_report_worker"]
+    env_file:
+      - ../src/.env.studio-reports
+    environment:
+      STUDIO_REPORTS_DATA_DIR: /app/studio-reports/data
+      STUDIO_REPORTS_QUEUE_DIR: /app/studio-reports/queue
+    restart: unless-stopped
+    volumes:
+      - studio-report-data:/app/studio-reports/data
+      - ../src/data/studio-report-queue:/app/studio-reports/queue
+
+volumes:
+  studio-report-data:

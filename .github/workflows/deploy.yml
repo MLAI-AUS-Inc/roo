@@ -30,122 +30,130 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-          cache-dependency-path: roo-standalone/requirements.txt
+          cache-dependency-path: src/requirements.txt
 
       - name: Install Roo dependencies
-        run: python -m pip install -r roo-standalone/requirements.txt
+        run: python -m pip install -r src/requirements.txt
+
+      - name: Validate skill configuration without importing clients
+        working-directory: src
+        run: python -m roo.skills.lint --public-defaults
 
       - name: Run Health Hack security and AI regressions
-        working-directory: roo-standalone
+        working-directory: src
         env:
           SLACK_BOT_TOKEN: test
           SLACK_SIGNING_SECRET: test
           OPENAI_API_KEY: test
           FOUNDER_TOOLS_LINK_ORIGINS: https://mlai.au
         run: |
+          python -m pytest ../tests/roo/test_skill_loading_contract.py -q
+          python -m pytest ../tests/roo/test_skill_execution_behaviors.py ../tests/roo/test_skill_executor_classes.py -q
+          # Offline approval checks only; live model tests run locally with --live.
+          python -m pytest ../tests/roo/test_live_skill_smoke.py::test_reaction_approval_uses_event_actor_and_backend_result -q
           # Several legacy suites install import-time module stubs. Keep the
           # surface boundary gate isolated so collection order cannot weaken it.
-          python -m pytest roo/tests/test_surface_security.py -q
-          python -m pytest roo/tests/test_deployment_checks.py -q
-          python -m pytest roo/tests/test_bridge_mentions.py -q
+          python -m pytest ../tests/roo/test_surface_security.py -q
+          python -m pytest ../tests/roo/test_deployment_checks.py -q
+          python -m pytest ../tests/roo/test_bridge_mentions.py -q
           # Chart rendering and binary uploads run offline, isolated from legacy stubs.
-          python -m pytest roo/tests/test_coworking_charts.py roo/tests/test_slack_file_upload.py -q
-          python -m pytest roo/tests/test_points_requests.py -k coworking -q
+          python -m pytest ../tests/roo/test_coworking_charts.py ../tests/roo/test_slack_file_upload.py -q
+          python -m pytest ../tests/roo/test_points_requests.py -k coworking -q
           # Meeting-room schema tests need the real skill parser, so keep them
           # isolated from legacy suites that stub the frontmatter module.
           python -m pytest \
-            roo/tests/test_meeting_room_booking.py \
-            roo/tests/test_meeting_room_clarifications.py \
-            roo/tests/test_meeting_room_actions.py \
+            ../tests/roo/test_meeting_room_booking.py \
+            ../tests/roo/test_meeting_room_clarifications.py \
+            ../tests/roo/test_meeting_room_actions.py \
             -q
           python -m pytest \
-            roo/tests/test_slack_security.py \
-            roo/tests/test_internal_mentions.py \
-            roo/tests/test_coworking_dates.py \
-            roo/tests/test_backend_identity.py \
-            roo/tests/test_mlai_backend_client.py \
-            roo/tests/test_rate_card.py \
-            roo/tests/test_founder_account_link.py \
-            roo/tests/test_coworking_booking_intents.py \
-            roo/tests/test_coworking_admin_batch.py \
-            roo/tests/test_replay_failed_coworking.py \
-            roo/tests/test_points_requests.py::test_book_coworking_persists_intent_and_queues_backend_timeout \
-            roo/tests/test_points_requests.py::test_immediate_coworking_stale_worker_cannot_overwrite_winner \
-            roo/tests/test_points_requests.py::test_book_coworking_nudges_founder_when_charged_standard_price \
-            roo/tests/test_points_requests.py::test_book_coworking_treats_missing_link_state_as_commit_uncertain \
-            roo/tests/test_points_requests.py::test_book_coworking_omits_nudge_when_discount_applied \
-            roo/tests/test_points_requests.py::test_book_coworking_omits_link_nudge_when_accounts_are_linked \
-            roo/tests/test_jobs_scheduler.py \
-            roo/tests/test_private_points_delivery.py \
-            roo/tests/test_points_flex.py \
-            roo/tests/test_admin_brain.py \
-            roo/tests/test_admin_brain_interactions.py \
-            roo/tests/test_admin_dispatch.py \
-            roo/tests/test_admin_worker.py \
-            roo/tests/test_unified_admin_routing.py \
-            roo/tests/test_unified_admin_smoke.py \
-            roo/tests/test_admin_pilot_config.py \
-            roo/tests/test_admin_pilot_smoke.py \
-            roo/tests/test_admin_actions.py \
-            roo/tests/test_router_catalog.py \
-            roo/tests/test_linear_inference.py \
-            roo/tests/test_linear_effort_sizing.py \
-            roo/tests/test_linear_meeting_sources.py \
-            roo/tests/test_linear_meeting_actions.py \
-            roo/tests/test_ai_security.py \
-            roo/tests/test_sim_patient.py \
-            roo/tests/test_diagnosis_check.py \
-            roo/tests/test_llm_agent_tools.py \
-            bridge/tests \
+            ../tests/roo/test_slack_security.py \
+            ../tests/roo/test_internal_mentions.py \
+            ../tests/roo/test_coworking_dates.py \
+            ../tests/roo/test_backend_identity.py \
+            ../tests/roo/test_mlai_backend_client.py \
+            ../tests/roo/test_rate_card.py \
+            ../tests/roo/test_founder_account_link.py \
+            ../tests/roo/test_coworking_booking_intents.py \
+            ../tests/roo/test_coworking_admin_batch.py \
+            ../tests/roo/test_replay_failed_coworking.py \
+            ../tests/roo/test_points_requests.py::test_book_coworking_persists_intent_and_queues_backend_timeout \
+            ../tests/roo/test_points_requests.py::test_immediate_coworking_stale_worker_cannot_overwrite_winner \
+            ../tests/roo/test_points_requests.py::test_book_coworking_nudges_founder_when_charged_standard_price \
+            ../tests/roo/test_points_requests.py::test_book_coworking_treats_missing_link_state_as_commit_uncertain \
+            ../tests/roo/test_points_requests.py::test_book_coworking_omits_nudge_when_discount_applied \
+            ../tests/roo/test_points_requests.py::test_book_coworking_omits_link_nudge_when_accounts_are_linked \
+            ../tests/roo/test_jobs_scheduler.py \
+            ../tests/roo/test_private_points_delivery.py \
+            ../tests/roo/test_points_flex.py \
+            ../tests/roo/test_admin_brain.py \
+            ../tests/roo/test_admin_brain_interactions.py \
+            ../tests/roo/test_admin_dispatch.py \
+            ../tests/roo/test_admin_worker.py \
+            ../tests/roo/test_unified_admin_routing.py \
+            ../tests/roo/test_unified_admin_smoke.py \
+            ../tests/roo/test_admin_pilot_config.py \
+            ../tests/roo/test_admin_pilot_smoke.py \
+            ../tests/roo/test_admin_actions.py \
+            ../tests/roo/test_router_catalog.py \
+            ../tests/roo/test_linear_inference.py \
+            ../tests/roo/test_linear_effort_sizing.py \
+            ../tests/roo/test_linear_meeting_sources.py \
+            ../tests/roo/test_linear_meeting_actions.py \
+            ../tests/roo/test_ai_security.py \
+            ../tests/roo/test_sim_patient.py \
+            ../tests/roo/test_diagnosis_check.py \
+            ../tests/roo/test_llm_agent_tools.py \
+            ../tests/bridge \
             -q
           # This legacy module installs an executor stub at import time, so run
           # it in a separate process to keep the security suite isolated.
-          python -m pytest roo/tests/test_start_here_introductions.py -q
-          python -m pytest roo/tests/test_agent_routing.py -q
-          python -m pytest roo/tests/test_event_discounts.py -q
-          python -m pytest roo/tests/test_routing_eval_gate.py -q
+          python -m pytest ../tests/roo/test_start_here_introductions.py -q
+          python -m pytest ../tests/roo/test_agent_routing.py -q
+          python -m pytest ../tests/roo/test_event_discounts.py -q
+          python -m pytest ../tests/roo/test_routing_eval_gate.py -q
           python -m compileall -q roo bridge
           # Isolate these from older tests that install module-level doubles.
           python -m pytest \
-            roo/tests/test_timesheets.py \
-            roo/tests/test_timesheet_linear.py \
-            roo/tests/test_timesheet_plane.py \
-            roo/tests/test_timesheet_deployment.py \
-            roo/tests/test_timesheet_demo.py \
-            roo/tests/test_timesheet_ingress.py \
-            roo/tests/test_studio_invoices.py \
-            roo/tests/test_invoice_worker.py \
-            roo/tests/test_invoice_ingress.py \
-            roo/tests/test_studio_reports.py \
-            roo/tests/test_studio_report_clients.py \
-            roo/tests/test_studio_report_source.py \
-            roo/tests/test_invoice_source.py \
-            roo/tests/test_studio_report_routing.py \
-            roo/tests/test_studio_report_schedule.py \
-            roo/tests/test_studio_report_weeks.py \
-            roo/tests/test_studio_report_charts.py \
-            roo/tests/test_studio_report_refresh.py \
-            roo/tests/test_studio_report_weekly_backfill.py \
-            roo/tests/test_studio_recorded_hours_weekly.py \
-            roo/tests/test_studio_client_balance.py \
-            roo/tests/test_studio_client_balance_source.py \
-            roo/tests/test_studio_client_balance_routing.py \
-            roo/tests/test_studio_client_balance_installer.py -q
+            ../tests/roo/test_timesheets.py \
+            ../tests/roo/test_timesheet_linear.py \
+            ../tests/roo/test_timesheet_plane.py \
+            ../tests/roo/test_timesheet_deployment.py \
+            ../tests/roo/test_timesheet_demo.py \
+            ../tests/roo/test_timesheet_ingress.py \
+            ../tests/roo/test_studio_invoices.py \
+            ../tests/roo/test_invoice_worker.py \
+            ../tests/roo/test_invoice_ingress.py \
+            ../tests/roo/test_studio_reports.py \
+            ../tests/roo/test_studio_report_clients.py \
+            ../tests/roo/test_studio_report_source.py \
+            ../tests/roo/test_invoice_source.py \
+            ../tests/roo/test_studio_report_routing.py \
+            ../tests/roo/test_studio_report_schedule.py \
+            ../tests/roo/test_studio_report_weeks.py \
+            ../tests/roo/test_studio_report_charts.py \
+            ../tests/roo/test_studio_report_refresh.py \
+            ../tests/roo/test_studio_report_weekly_backfill.py \
+            ../tests/roo/test_studio_recorded_hours_weekly.py \
+            ../tests/roo/test_studio_client_balance.py \
+            ../tests/roo/test_studio_client_balance_source.py \
+            ../tests/roo/test_studio_client_balance_routing.py \
+            ../tests/roo/test_studio_client_balance_installer.py -q
 
       - name: Validate production Compose configuration
-        working-directory: roo-standalone
+        working-directory: src
         run: |
           cp .env.example .env
           trap 'rm -f .env' EXIT
-          docker compose config --quiet
-          ADMIN_ROO_ENV_FILE=.env.admin.example \
-            docker compose -f docker-compose.admin.yml config --quiet
-          docker compose -f docker-compose.bridge.yml config --quiet
+          docker compose --env-file .env -f ../infra/docker-compose.yml config --quiet
+          ADMIN_ROO_ENV_FILE=../src/.env.admin.example \
+            docker compose --env-file .env -f ../infra/docker-compose.admin.yml config --quiet
+          docker compose --env-file .env -f ../infra/docker-compose.bridge.yml config --quiet
           docker run --rm \
             --add-host roo:127.0.0.1 \
             --add-host roo-admin:127.0.0.1 \
-            -v "$PWD/nginx/roo.conf:/etc/nginx/conf.d/default.conf:ro" \
-            -v "$PWD/nginx/roo-proxy.conf:/etc/nginx/roo-proxy.conf:ro" \
+            -v "$PWD/../infra/nginx/roo.conf:/etc/nginx/conf.d/default.conf:ro" \
+            -v "$PWD/../infra/nginx/roo-proxy.conf:/etc/nginx/roo-proxy.conf:ro" \
             nginx:1.28.3-alpine nginx -t
 
   deploy:
@@ -258,7 +266,7 @@ jobs:
             fi
             cd "$DEPLOY_DIR"
             previous_release_sha="$(git rev-parse HEAD)"
-            cd "$DEPLOY_DIR/roo-standalone"
+            cd "$DEPLOY_DIR/src"
             previous_env_backup="$(mktemp /root/roo-public-env.XXXXXX)"
             previous_env_present=0
             if [ -f .env ]; then
@@ -266,7 +274,7 @@ jobs:
               chmod 600 "$previous_env_backup"
               previous_env_present=1
             fi
-            previous_container_id="$(docker compose ps -q roo 2>/dev/null || true)"
+            previous_container_id="$(docker compose --env-file .env -f ../infra/docker-compose.yml ps -q roo 2>/dev/null || true)"
             previous_image_id=""
             previous_image_ref=""
             if [ -n "$previous_container_id" ]; then
@@ -277,7 +285,7 @@ jobs:
             if command -v systemctl >/dev/null 2>&1 \
               && systemctl is-active --quiet slack-bridge.service; then
               previous_bridge_mode="systemd"
-            elif docker compose -f docker-compose.bridge.yml ps \
+            elif docker compose --env-file .env -f ../infra/docker-compose.bridge.yml ps \
               --services --status running | grep -qx slack-bridge; then
               previous_bridge_mode="compose"
             fi
@@ -288,7 +296,7 @@ jobs:
                   systemctl restart slack-bridge.service
                   ;;
                 compose)
-                  docker compose -f docker-compose.bridge.yml up -d --build \
+                  docker compose --env-file .env -f ../infra/docker-compose.bridge.yml up -d --build \
                     --force-recreate
                   ;;
                 none)
@@ -296,8 +304,8 @@ jobs:
                   ;;
               esac
               bridge_attempt=0
-              until bridge_container_id="$(docker compose \
-                -f docker-compose.bridge.yml ps -q slack-bridge)" \
+              until bridge_container_id="$(docker compose --env-file .env \
+                -f ../infra/docker-compose.bridge.yml ps -q slack-bridge)" \
                 && [ -n "$bridge_container_id" ] \
                 && [ "$(docker inspect --format \
                   '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' \
@@ -318,23 +326,23 @@ jobs:
               if [ "$status" -ne 0 ]; then
                 if [ "$schema_migration_started" = "1" ]; then
                   echo "Deployment failed after schema advancement; keeping Roo stopped for forward recovery" >&2
-                  docker compose stop roo || true
+                  docker compose --env-file .env -f ../infra/docker-compose.yml stop roo || true
                   rm -f "$previous_env_backup"
                   exit "$status"
                 fi
                 echo "Roo rollout failed; restoring the previous release" >&2
                 if [ "$previous_env_present" -eq 1 ]; then
-                  cp "$previous_env_backup" "$DEPLOY_DIR/roo-standalone/.env"
-                  chmod 600 "$DEPLOY_DIR/roo-standalone/.env"
+                  cp "$previous_env_backup" "$DEPLOY_DIR/src/.env"
+                  chmod 600 "$DEPLOY_DIR/src/.env"
                 else
-                  rm -f "$DEPLOY_DIR/roo-standalone/.env"
+                  rm -f "$DEPLOY_DIR/src/.env"
                 fi
                 cd "$DEPLOY_DIR"
                 git checkout --detach "$previous_release_sha" || true
-                cd "$DEPLOY_DIR/roo-standalone"
+                cd "$DEPLOY_DIR/src"
                 if [ -n "$previous_image_id" ] && [ -n "$previous_image_ref" ]; then
                   docker image tag "$previous_image_id" "$previous_image_ref" || true
-                  docker compose --ansi never up -d --no-build --force-recreate --remove-orphans || true
+                  docker compose --env-file .env -f ../infra/docker-compose.yml --ansi never up -d --no-build --force-recreate --remove-orphans || true
                 fi
                 # The bridge is built from the same checkout but supervised
                 # separately. Restore and verify it after returning to the
@@ -358,7 +366,7 @@ jobs:
             test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
             
             # Go to the sub-project directory
-            cd "$DEPLOY_DIR/roo-standalone"
+            cd "$DEPLOY_DIR/src"
 
             docker network inspect roo-admin-gateway >/dev/null 2>&1 \
               || docker network create roo-admin-gateway
@@ -401,23 +409,23 @@ jobs:
             
             # Build first, then run or validate the explicitly approved schema
             # migration before any new application process can report ready.
-            docker compose build roo
+            docker compose --env-file .env -f ../infra/docker-compose.yml build roo
 
             if [ "$COWORKING_INTENTS_V3_MIGRATION_APPROVED" = "true" ]; then
               # Stop every process that can write the shared SQLite volume
               # before crossing the irreversible privacy/outbox boundary.
-              docker compose stop roo
+              docker compose --env-file .env -f ../infra/docker-compose.yml stop roo
               schema_migration_started=1
-              docker compose run -T --rm --no-deps roo \
+              docker compose --env-file .env -f ../infra/docker-compose.yml run -T --rm --no-deps roo \
                 python scripts/migrate_coworking_booking_intents_v3.py </dev/null
             else
-              docker compose run -T --rm --no-deps roo python -c \
+              docker compose --env-file .env -f ../infra/docker-compose.yml run -T --rm --no-deps roo python -c \
                 'from roo.coworking_booking_intents import get_coworking_intent_store; get_coworking_intent_store().validate_schema()' \
                 </dev/null
             fi
 
             # Restart the app only after schema validation succeeds.
-            docker compose up -d --no-build --remove-orphans
+            docker compose --env-file .env -f ../infra/docker-compose.yml up -d --no-build --remove-orphans
 
             # Bounded readiness check. Never wait forever on a broken release.
             ready_attempt=0
@@ -431,7 +439,7 @@ jobs:
               sleep 5
             done
 
-            docker compose exec -T roo python -c 'from roo.config import get_settings; settings = get_settings(); actions = settings.implicit_action_allowlist; assert ("mlai-points:link_founder_account" in actions) is settings.FOUNDER_ACCOUNT_LINK_ENABLED; assert "mlai-points:link_account" not in actions'
+            docker compose --env-file .env -f ../infra/docker-compose.yml exec -T roo python -c 'from roo.config import get_settings; settings = get_settings(); actions = settings.implicit_action_allowlist; assert ("mlai-points:link_founder_account" in actions) is settings.FOUNDER_ACCOUNT_LINK_ENABLED; assert "mlai-points:link_account" not in actions'
 
             if [ "$FOUNDER_ACCOUNT_LINK_ENABLED" = "true" ]; then
               curl --silent --show-error --fail --max-time 8 \
@@ -449,7 +457,7 @@ jobs:
 
             if [ "$MEETING_ROOM_BOOKING_ENABLED" = "true" ]; then
               echo "Verifying the Meeting Room skill is enabled on Public Roo..."
-              docker compose exec -T roo python -c 'from roo.config import get_settings; settings = get_settings(); assert settings.ROO_SURFACE == "public"; assert settings.MEETING_ROOM_BOOKING_ENABLED is True; assert "meeting-room-booking" in settings.enabled_skill_names'
+              docker compose --env-file .env -f ../infra/docker-compose.yml exec -T roo python -c 'from roo.config import get_settings; settings = get_settings(); assert settings.ROO_SURFACE == "public"; assert settings.MEETING_ROOM_BOOKING_ENABLED is True; assert "meeting-room-booking" in settings.enabled_skill_names'
             fi
 
             # The cross-workspace Slack bridge is a separate Compose project.
@@ -515,10 +523,10 @@ jobs:
           key: ${{ secrets.DO_SSH_KEY }}
           script: |
             set -eu
-            cd /root/roo/roo-standalone
+            cd /root/roo/src
 
-            docker compose ps
-            docker compose exec -T roo python -c '
+            docker compose --env-file .env -f ../infra/docker-compose.yml ps
+            docker compose --env-file .env -f ../infra/docker-compose.yml exec -T roo python -c '
             from roo.config import get_settings
             settings = get_settings()
             print({
@@ -528,7 +536,7 @@ jobs:
             })
             '
 
-            docker compose logs --since=6h --tail=10000 2>&1 \
+            docker compose --env-file .env -f ../infra/docker-compose.yml logs --since=6h --tail=10000 2>&1 \
               | grep -E 'Received Slack event|Slack private|Private message|ROUTING_DECISION|LINEAR_INFERENCE|LINEAR_MEETING_EXTRACTION|LINEAR_PROJECT_RESOLUTION|topup|checkout-options|Traceback|ERROR|Error|Exception|error_type|1785144941' \
               | sed -E 's#https://checkout\.stripe\.com/[^ ]+#https://checkout.stripe.com/[redacted]#g' \
               || true

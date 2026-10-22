@@ -1,0 +1,1488 @@
+import importlib
+import json
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import httpx
+import pytest
+
+sys.path.insert(0, str((Path(__file__).resolve().parents[2] / "src")))
+sys.modules.setdefault("frontmatter", SimpleNamespace(load=lambda *args, **kwargs: None))
+
+backend_module = importlib.import_module("roo.clients.mlai_backend")
+MLAIBackendClient = backend_module.MLAIBackendClient
+MLAIBackendUnavailableError = backend_module.MLAIBackendUnavailableError
+BackendIdentityError = backend_module.BackendIdentityError
+CONTENT_FACTORY_REQUEST_SOURCE = backend_module.CONTENT_FACTORY_REQUEST_SOURCE
+
+
+@pytest.fixture(autouse=True)
+def clear_backend_client_state():
+    MLAIBackendClient._backend_transport_failures.clear()
+    MLAIBackendClient._slack_user_registration_cache.clear()
+    yield
+    MLAIBackendClient._backend_transport_failures.clear()
+    MLAIBackendClient._slack_user_registration_cache.clear()
+
+
+class FakeAsyncClient:
+    def __init__(self, handler):
+        self._handler = handler
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def request(self, method, url, **kwargs):
+        return await self._handler(method, url, **kwargs)
+
+
+RATE_CARD_ROW = {
+    "name": "Newsletter", "alias": "newsletter", "points": 5,
+    "description": "Write a newsletter", "is_active": True,
+}
+INVALID_RATE_CARD_JSON = object()
+
+
+def rate_card_client(monkeypatch, handler):
+    monkeypatch.setattr(
+        backend_module.httpx, "AsyncClient",
+        lambda *args, **kwargs: FakeAsyncClient(handler),
+    )
+    return MLAIBackendClient(
+        base_url="https://backend.test", api_key="roo-test-key",
+        internal_api_key="different-admin-test-key",
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("payload", [
+    [RATE_CARD_ROW], [],
+    [{**RATE_CARD_ROW, "points": 0, "extra": "preserved"}],
+    [{**RATE_CARD_ROW, "points": -1}],
+])
+async def test_rate_card_success_preserves_array_and_empty(monkeypatch, payload):
+    async def handler(method, url, **kwargs):
+        return httpx.Response(200, request=httpx.Request(method, url), json=payload)
+
+    client = rate_card_client(monkeypatch, handler)
+    assert await client.get_rate_card() == payload
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [401, 403, 404, 429, 500, 503])
+async def test_rate_card_http_failure_is_not_empty(monkeypatch, status):
+    async def handler(method, url, **kwargs):
+        return httpx.Response(
+            status, request=httpx.Request(method, url),
+            text="private-response-body roo-test-key",
+        )
+
+    client = rate_card_client(monkeypatch, handler)
+    with pytest.raises(MLAIBackendUnavailableError) as error:
+        await client.get_rate_card()
+    assert error.value.reason_code == "rate_card_unavailable"
+    assert "private-response-body" not in str(error.value)
+    assert "roo-test-key" not in str(error.value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("payload", [
+    INVALID_RATE_CARD_JSON, None, {}, {"results": []}, ["bad"],
+    [{k: v for k, v in RATE_CARD_ROW.items() if k != "name"}],
+    [{k: v for k, v in RATE_CARD_ROW.items() if k != "points"}],
+    [{k: v for k, v in RATE_CARD_ROW.items() if k != "description"}],
+    [{**RATE_CARD_ROW, "name": "  "}],
+    [{**RATE_CARD_ROW, "name": 5}],
+    [{**RATE_CARD_ROW, "points": True}],
+    [{**RATE_CARD_ROW, "points": "5"}],
+    [{**RATE_CARD_ROW, "points": 5.5}],
+    [{**RATE_CARD_ROW, "description": None}],
+    [RATE_CARD_ROW, {**RATE_CARD_ROW, "description": 5}],
+])
+async def test_rate_card_invalid_success_is_rejected(monkeypatch, payload):
+    async def handler(method, url, **kwargs):
+        content = b"invalid-private-body" if payload is INVALID_RATE_CARD_JSON else json.dumps(payload)
+        return httpx.Response(200, request=httpx.Request(method, url), content=content)
+
+    client = rate_card_client(monkeypatch, handler)
+    with pytest.raises(MLAIBackendUnavailableError) as error:
+        await client.get_rate_card()
+    assert error.value.reason_code == "invalid_backend_response"
+    assert "invalid-private-body" not in str(error.value)
+    assert "roo-test-key" not in str(error.value)
+
+
+@pytest.mark.asyncio
+async def test_rate_card_request_contract_and_service_header(monkeypatch):
+    captured = {}
+
+    async def handler(method, url, **kwargs):
+        captured["http_headers"] = kwargs["headers"]
+        return httpx.Response(200, request=httpx.Request(method, url), json=[])
+
+    client = rate_card_client(monkeypatch, handler)
+    request = client._request
+
+    async def spy_request(method, endpoint, **kwargs):
+        captured.update(method=method, endpoint=endpoint, options=kwargs)
+        return await request(method, endpoint, **kwargs)
+
+    monkeypatch.setattr(client, "_request", spy_request)
+    assert await client.get_rate_card() == []
+    assert captured["method"] == "GET"
+    assert captured["endpoint"] == "/api/v1/points/rate-card/"
+    assert captured["options"]["timeout"] == 5.0
+    assert captured["options"]["transport_retries"] == 1
+    assert captured["options"]["retry_backoff_seconds"] == 0.25
+    assert captured["options"]["circuit_breaker"] is True
+    assert captured["http_headers"]["X-API-Key"] == "roo-test-key"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scenario", ["timeout", "open-circuit", "passthrough"])
+async def test_rate_card_transport_failure_and_open_circuit_are_preserved(monkeypatch, scenario):
+    calls = []
+    sleep = AsyncMock()
+    monkeypatch.setattr(backend_module.asyncio, "sleep", sleep)
+
+    async def handler(method, url, **kwargs):
+        request = httpx.Request(method, url)
+        calls.append(request.url.path)
+        if scenario == "open-circuit":
+            assert request.url.path == "/healthz/ready"
+            return httpx.Response(503, request=request, json={"status": "error"})
+        raise httpx.ReadTimeout("test timeout", request=request)
+
+    client = rate_card_client(monkeypatch, handler)
+    original_error = MLAIBackendUnavailableError("test unavailable")
+    if scenario == "open-circuit":
+        MLAIBackendClient._backend_transport_failures[client.base_url] = client._transport_failure_threshold
+    elif scenario == "passthrough":
+        monkeypatch.setattr(client, "_request", AsyncMock(side_effect=original_error))
+
+    with pytest.raises(MLAIBackendUnavailableError) as error:
+        await client.get_rate_card()
+    if scenario == "passthrough":
+        assert error.value is original_error
+        assert calls == []
+    elif scenario == "open-circuit":
+        assert calls == ["/healthz/ready"]
+        sleep.assert_not_awaited()
+    else:
+        assert calls == ["/api/v1/points/rate-card/"] * 2
+        sleep.assert_awaited_once_with(0.25)
+
+
+@pytest.mark.asyncio
+async def test_transport_errors_log_endpoint_and_exception_type(monkeypatch, capsys):
+    async def handler(method, url, **kwargs):
+        request = httpx.Request(method, url)
+        raise httpx.ReadTimeout("backend timed out", request=request)
+
+    monkeypatch.setattr(
+        backend_module.httpx,
+        "AsyncClient",
+        lambda *args, **kwargs: FakeAsyncClient(handler),
+    )
+
+    client = MLAIBackendClient(
+        base_url="https://backend.test",
+        api_key="roo-api-key",
+        internal_api_key="roo-api-key",
+    )
+
+    with pytest.raises(MLAIBackendUnavailableError):
+        await client.get_integration("U123", domain="mlai.au")
+
+    output = capsys.readouterr().out
+    assert "endpoint=/api/v1/integrations/github/U123/" in output
+    assert "exc_type=ReadTimeout" in output
+    assert "request_id=" in output
+
+
+@pytest.mark.asyncio
+async def test_circuit_breaker_probes_readiness_before_main_request(monkeypatch):
+    calls = []
+
+    async def handler(method, url, **kwargs):
+        request = httpx.Request(method, url)
+        calls.append(request.url.path)
+        if request.url.path == "/healthz/ready":
+            return httpx.Response(503, request=request, json={"status": "error"})
+        raise AssertionError("main endpoint should not be called while circuit breaker is open")
+
+    monkeypatch.setattr(
+        backend_module.httpx,
+        "AsyncClient",
+        lambda *args, **kwargs: FakeAsyncClient(handler),
+    )
+
+    client = MLAIBackendClient(
+        base_url="https://backend.test",
+        api_key="roo-api-key",
+        internal_api_key="roo-api-key",
+    )
+    MLAIBackendClient._backend_transport_failures[client.base_url] = (
+        MLAIBackendClient._transport_failure_threshold
+    )
+
+    with pytest.raises(MLAIBackendUnavailableError):
+        await client.get_integration("U123", domain="mlai.au")
+
+    assert calls == ["/healthz/ready"]
+
+
+@pytest.mark.asyncio
+async def test_founder_account_link_health_requires_exact_contract(monkeypatch):
+    captured = {}
+
+    async def fake_request(method, endpoint, **kwargs):
+        captured.update(method=method, endpoint=endpoint, kwargs=kwargs)
+        request = httpx.Request(method, f"https://backend.test{endpoint}")
+        return httpx.Response(
+            200,
+            request=request,
+            json={"status": "ok", "contract": "slack-founder-link-v1"},
+        )
+
+    client = MLAIBackendClient(
+        base_url="https://backend.test",
+        api_key="roo-api-key",
+        internal_api_key="admin-api-key",
+    )
+    monkeypatch.setattr(client, "_request", fake_request)
+
+    result = await client.get_founder_account_link_health()
+
+    assert result == {"status": "ok", "contract": "slack-founder-link-v1"}
+    assert captured["method"] == "GET"
+    assert captured["endpoint"] == "/api/v1/users/slack-founder-link/health/"
+    assert captured["kwargs"]["use_admin_headers"] is False
+
+
+@pytest.mark.asyncio
+async def test_founder_account_link_health_rejects_version_skew(monkeypatch):
+    async def fake_request(method, endpoint, **kwargs):
+        request = httpx.Request(method, f"https://backend.test{endpoint}")
+        return httpx.Response(
+            200,
+            request=request,
+            json={"status": "ok", "contract": "slack-founder-link-v2"},
+        )
+
+    client = MLAIBackendClient(
+        base_url="https://backend.test",
+        api_key="roo-api-key",
+        internal_api_key="admin-api-key",
+    )
+    monkeypatch.setattr(client, "_request", fake_request)
+
+    with pytest.raises(MLAIBackendUnavailableError, match="incompatible"):
+        await client.get_founder_account_link_health()
+
+
+@pytest.mark.asyncio
+async def test_admit_boost_post_uses_strict_roo_key_headers(monkeypatch):
+    captured = {}
+
+    async def fake_request(method, endpoint, **kwargs):
+        captured.update(method=method, endpoint=endpoint, kwargs=kwargs)
+        request = httpx.Request(method, f"https://backend.test{endpoint}")
+        return httpx.Response(
+            201,
+            request=request,
+            json={"status": "approved", "charged_points": 8},
+        )
+
+    client = MLAIBackendClient(
+        base_url="https://backend.test",
+        api_key="roo-api-key",
+        internal_api_key="admin-api-key",
+    )
+    monkeypatch.setattr(client, "_request", fake_request)
+
+    result = await client.admit_boost_post(
+        submission_key="boost-post:TTEAM123:CBOOST123:1800000000.123456",
+        workspace_id="TTEAM123",
+        channel_id="CBOOST123",
+        root_message_ts="1800000000.123456",
+        poster_slack_id="<@UPOSTER1>",
+        root_text="Boost this",
+        social_post_url="https://www.linkedin.com/posts/example-123",
+        recheck_insufficient_points=True,
+    )
+
+    assert result["status"] == "approved"
+    assert captured["method"] == "POST"
+    assert captured["endpoint"] == "/api/v1/points/boost-posts/admissions/"
+    assert captured["kwargs"]["json"]["poster_slack_id"] == "UPOSTER1"
+    assert captured["kwargs"]["json"]["recheck_insufficient_points"] is True
+    assert "use_admin_headers" not in captured["kwargs"]
+
+
+@pytest.mark.asyncio
+async def test_trigger_repo_scan_sends_request_source(monkeypatch):
+    captured = {}
+
+    async def fake_request(method, endpoint, **kwargs):
+        captured["method"] = method
+        captured["endpoint"] = endpoint
+        captured["json"] = kwargs["json"]
+        request = httpx.Request(method, f"https://backend.test{endpoint}")
+        return httpx.Response(
+            202,
+            request=request,
+            json={"status": "scan_initiated", "message": "Scan queued successfully."},
+        )
+
+    client = MLAIBackendClient(
+        base_url="https://backend.test",
+        api_key="roo-api-key",
+        internal_api_key="roo-api-key",
+    )
+    monkeypatch.setattr(client, "_request", fake_request)
+
+    result = await client.trigger_repo_scan(
+        "U123",
+        slack_channel_id="C123",
+        slack_thread_ts="111.222",
+        domain="mlai.au",
+    )
+
+    assert captured["method"] == "POST"
+    assert captured["endpoint"] == "/api/v1/integrations/github/scan"
+    assert captured["json"]["slack_user_id"] == "U123"
+    assert captured["json"]["domain"] == "mlai.au"
+    assert captured["json"]["slack_channel_id"] == "C123"
+    assert captured["json"]["slack_thread_ts"] == "111.222"
+    assert captured["json"]["request_source"] == CONTENT_FACTORY_REQUEST_SOURCE
+    assert result["status"] == "scan_initiated"
+
+
+@pytest.mark.asyncio
+async def test_get_coworking_report_uses_canonical_endpoint(monkeypatch):
+    captured = {}
+
+    async def fake_request(method, endpoint, **kwargs):
+        captured["method"] = method
+        captured["endpoint"] = endpoint
+        captured["params"] = kwargs["params"]
+        request = httpx.Request(method, f"https://backend.test{endpoint}")
+        return httpx.Response(200, request=request, json={"totals": {"booked_user_days": 3}})
+
+    client = MLAIBackendClient(
+        base_url="https://backend.test",
+        api_key="roo-api-key",
+        internal_api_key="roo-api-key",
+    )
+    monkeypatch.setattr(client, "_request", fake_request)
+
+    result = await client.get_coworking_report("<@U123>", "2026-01-01", "2026-01-31")
+
+    assert result == {"totals": {"booked_user_days": 3}}
+    assert captured["method"] == "GET"
+    assert captured["endpoint"] == "/api/v1/points/coworking/report/"
+    assert captured["params"] == {
+        "slack_user_id": "U123",
+        "start_date": "2026-01-01",
+        "end_date": "2026-01-31",
+    }
+
+
+@pytest.mark.asyncio
+async def test_coworking_report_forwards_verified_slack_scope_with_roo_credential(monkeypatch):
+    from roo.backend_identity import BackendActorContext
+
+    captured = []
+
+    async def handler(method, url, **kwargs):
+        captured.append(kwargs)
+        return httpx.Response(200, request=httpx.Request(method, url), json={"totals": {"booked_user_days": 3}})
+
+    monkeypatch.setattr(backend_module.httpx, "AsyncClient", lambda **kwargs: FakeAsyncClient(handler))
+    client = MLAIBackendClient(
+        base_url="https://backend.test", api_key="roo-test-key", internal_api_key="different-admin-test-key",
+        actor_context=BackendActorContext("TSHARED", "USTAFF", "CSHARED", "111.222", "event-report"),
+    )
+    for start, end in [("2026-01-08", "2026-01-14"), ("2026-01-01", "2026-01-07")]:
+        result = await client.get_coworking_report("USTAFF", start, end)
+        assert result == {"totals": {"booked_user_days": 3}}
+    assert len(captured) == 2
+    for request in captured:
+        assert request["headers"]["X-API-Key"] == "roo-test-key"
+        assert request["params"]["slack_user_id"] == "USTAFF"
+        assert request["params"].get("slack_team_id") == "TSHARED"
+        assert request["params"].get("slack_channel_id") == "CSHARED"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("team,actor,channel,event,surface", [
+    ("TSHARED", "UOTHER", "CSHARED", "event-report", "public"),
+    ("", "USTAFF", "CSHARED", "event-report", "public"),
+    ("TSHARED", "USTAFF", "", "event-report", "public"),
+    ("TSHARED", "USTAFF", "DSHARED", "event-report", "public"),
+    ("TSHARED", "USTAFF", "CSHARED", "", "public"),
+    ("TSHARED", "USTAFF", "CSHARED", "event-report", "admin"),
+])
+async def test_coworking_report_does_not_forward_invalid_or_other_actor_context(monkeypatch, team, actor, channel, event, surface):
+    from roo.backend_identity import BackendActorContext
+
+    captured = {}
+
+    async def fake_request(method, endpoint, **kwargs):
+        captured.update(kwargs)
+        return httpx.Response(200, request=httpx.Request(method, "https://backend.test" + endpoint), json={"totals": {}})
+
+    client = MLAIBackendClient(
+        base_url="https://backend.test", api_key="roo-test-key", surface=surface,
+        actor_context=BackendActorContext(team, actor, channel, "111.222", event),
+    )
+    monkeypatch.setattr(client, "_request", fake_request)
+    await client.get_coworking_report("USTAFF", "2026-01-01", "2026-01-31")
+    assert captured["params"] == {"slack_user_id": "USTAFF", "start_date": "2026-01-01", "end_date": "2026-01-31"}
+
+
+@pytest.mark.asyncio
+async def test_book_coworking_many_uses_canonical_endpoint_and_deduped_payload(monkeypatch):
+    captured = {}
+
+    async def fake_request(method, endpoint, **kwargs):
+        captured["method"] = method
+        captured["endpoint"] = endpoint
+        captured["json"] = kwargs["json"]
+        request = httpx.Request(method, f"https://backend.test{endpoint}")
+        return httpx.Response(201, request=request, json=valid_coworking_batch_result())
+
+    client = MLAIBackendClient(
+        base_url="https://backend.test",
+        api_key="roo-api-key",
+        internal_api_key="roo-api-key",
+    )
+    monkeypatch.setattr(client, "_request", fake_request)
+
+    result = await client.book_coworking_many(
+        admin_slack_user_id="<@UADMIN>",
+        target_slack_user_ids=["<@U1>", "U2", "<@U1>"],
+        booking_date="2026-07-04",
+        slack_channel_id="C123",
+        operation_id="00000000-0000-4000-8000-000000000098",
+    )
+
+    assert result == valid_coworking_batch_result()
+    assert captured["method"] == "POST"
+    assert captured["endpoint"] == "/api/v1/points/coworking/book-many/"
+    assert captured["json"]["admin_slack_user_id"] == "UADMIN"
+    assert captured["json"]["target_slack_user_ids"] == ["U1", "U2"]
+    assert captured["json"]["date"] == "2026-07-04"
+    assert captured["json"]["slack_channel_id"] == "C123"
+    assert captured["json"]["current_time"]
+    assert captured["json"]["operation_id"] == "00000000-0000-4000-8000-000000000098"
+
+
+def valid_coworking_batch_result():
+    def row(slack_user_id, booking_id):
+        return {
+            "slack_user_id": slack_user_id,
+            "created": True,
+            "already_booked": False,
+            "booking": {
+                "id": booking_id,
+                "date": "2026-07-04",
+                "status": "booked",
+                "points_cost": 8,
+            },
+            "points_cost": 8,
+            "standard_points_cost": 8,
+            "monthly_update_discount_applied": False,
+            "founder_tools_connection_type": None,
+            "founder_tools_account_linked": False,
+            "founder_tools_explicitly_linked": False,
+        }
+    return {
+        "date": "2026-07-04", "admin_slack_user_id": "UADMIN",
+        "target_count": 2, "created_count": 2, "already_booked_count": 0,
+        "standard_points_cost": 8,
+        "results": [
+            row("U1", "00000000-0000-4000-8000-000000000001"),
+            row("U2", "00000000-0000-4000-8000-000000000002"),
+        ],
+    }
+
+
+def test_batch_replay_requires_current_status_for_every_booking():
+    payload = valid_coworking_batch_result()
+    payload["operation_replayed"] = True
+
+    with pytest.raises(MLAIBackendUnavailableError) as exc_info:
+        backend_module.validate_coworking_booking_batch_result(
+            payload,
+            expected_date="2026-07-04",
+            expected_admin_slack_user_id="UADMIN",
+            expected_target_slack_user_ids=["U1", "U2"],
+        )
+
+    assert exc_info.value.reason_code == "invalid_backend_response"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure_case",
+    ["invalid_json", "empty", "wrong_date", "missing_target",
+     "duplicate_target", "count_mismatch", "cost_mismatch"],
+)
+async def test_book_coworking_many_treats_malformed_2xx_as_commit_uncertain(
+    monkeypatch, failure_case
+):
+    payload = valid_coworking_batch_result()
+    if failure_case == "empty":
+        payload = {}
+    elif failure_case == "wrong_date":
+        payload["date"] = "2026-07-05"
+    elif failure_case == "missing_target":
+        payload["results"] = payload["results"][:1]
+    elif failure_case == "duplicate_target":
+        payload["results"][1]["slack_user_id"] = "U1"
+    elif failure_case == "count_mismatch":
+        payload["created_count"] = 1
+        payload["already_booked_count"] = 1
+    elif failure_case == "cost_mismatch":
+        payload["results"][0]["points_cost"] = 4
+
+    async def fake_request(method, endpoint, **kwargs):
+        request = httpx.Request(method, f"https://backend.test{endpoint}")
+        if failure_case == "invalid_json":
+            return httpx.Response(200, request=request, content=b"not-json")
+        return httpx.Response(200, request=request, json=payload)
+
+    client = MLAIBackendClient(
+        base_url="https://backend.test", api_key="roo-api-key",
+        internal_api_key="roo-api-key",
+    )
+    monkeypatch.setattr(client, "_request", fake_request)
+    with pytest.raises(MLAIBackendUnavailableError) as exc_info:
+        await client.book_coworking_many(
+            admin_slack_user_id="UADMIN", target_slack_user_ids=["U1", "U2"],
+            booking_date="2026-07-04",
+        )
+    assert exc_info.value.reason_code == "invalid_backend_response"
+
+
+def valid_coworking_booking_result():
+    return {
+        "id": "00000000-0000-4000-8000-000000000001",
+        "date": "2026-07-04",
+        "status": "booked",
+        "points_cost": 8,
+        "standard_points_cost": 8,
+        "monthly_update_discount_applied": False,
+        "founder_tools_connection_type": None,
+        "founder_tools_account_linked": False,
+        "founder_tools_explicitly_linked": False,
+    }
+
+
+@pytest.mark.parametrize('replayed', [False, True])
+def test_existing_free_office_manager_booking_and_mixed_batch_are_valid(replayed):
+    booking = {**valid_coworking_booking_result(), 'booking_source': 'office_manager',
+               'points_cost': 0, 'already_booked': True}
+    if replayed:
+        booking.update(operation_replayed=True, operation_booking_current_status='booked')
+    assert backend_module.validate_coworking_booking_result(booking) == booking
+    batch = valid_coworking_batch_result()
+    batch.update(created_count=1, already_booked_count=1)
+    row = batch['results'][0]
+    row.update(created=False, already_booked=True, points_cost=0)
+    row['booking'].update(booking_source='office_manager', points_cost=0)
+    if replayed:
+        batch['operation_replayed'] = True
+        for member in batch['results']:
+            member['booking']['operation_booking_current_status'] = 'booked'
+    assert backend_module.validate_coworking_booking_batch_result(
+        batch, expected_date='2026-07-04', expected_admin_slack_user_id='UADMIN',
+        expected_target_slack_user_ids=['U1', 'U2'],
+    ) == batch
+
+
+@pytest.mark.parametrize('source,cost,discount', [
+    ('office_manager', 4, False), ('office_manager', 0, True),
+    ('points', 4, False), (None, 0, False), ('unknown-benefit', 0, False),
+])
+def test_booking_cost_contract_still_rejects_contradictions(source, cost, discount):
+    payload = {**valid_coworking_booking_result(), 'booking_source': source,
+               'points_cost': cost, 'monthly_update_discount_applied': discount}
+    with pytest.raises(MLAIBackendUnavailableError):
+        backend_module.validate_coworking_booking_result(payload)
+
+
+def test_single_replay_requires_current_booking_status():
+    payload = valid_coworking_booking_result()
+    payload["operation_replayed"] = True
+
+    with pytest.raises(MLAIBackendUnavailableError) as exc_info:
+        backend_module.validate_coworking_booking_result(
+            payload, expected_date="2026-07-04"
+        )
+
+    assert exc_info.value.reason_code == "invalid_backend_response"
+
+
+@pytest.mark.asyncio
+async def test_book_coworking_validates_complete_success_response(monkeypatch):
+    captured = {}
+
+    async def fake_request(method, endpoint, **kwargs):
+        captured["json"] = kwargs["json"]
+        request = httpx.Request(method, f"https://backend.test{endpoint}")
+        return httpx.Response(
+            201,
+            request=request,
+            json=valid_coworking_booking_result(),
+        )
+
+    client = MLAIBackendClient(
+        base_url="https://backend.test",
+        api_key="roo-api-key",
+        internal_api_key="roo-api-key",
+    )
+    monkeypatch.setattr(client, "_request", fake_request)
+
+    operation_id = "00000000-0000-4000-8000-000000000099"
+    result = await client.book_coworking(
+        "U123", "2026-07-04", "C123", operation_id=operation_id
+    )
+
+    assert result["points_cost"] == 8
+    assert captured["json"]["operation_id"] == operation_id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "response_body",
+    [
+        b"not-json",
+        b"[]",
+        b'{"points_cost":8}',
+        b'{"id":"booking-1","date":"2026-07-05","status":"booked",'
+        b'"points_cost":8,"standard_points_cost":8,'
+        b'"monthly_update_discount_applied":false,'
+        b'"founder_tools_explicitly_linked":false}',
+        b'{"id":"00000000-0000-4000-8000-000000000001",'
+        b'"date":"2026-07-04","status":"booked","points_cost":4,'
+        b'"standard_points_cost":8,"monthly_update_discount_applied":false,'
+        b'"founder_tools_connection_type":"explicit",'
+        b'"founder_tools_account_linked":true,'
+        b'"founder_tools_explicitly_linked":true}',
+        b'{"id":"00000000-0000-4000-8000-000000000001",'
+        b'"date":"2026-07-04","status":"booked","points_cost":8,'
+        b'"standard_points_cost":8,"monthly_update_discount_applied":false,'
+        b'"founder_tools_connection_type":null,'
+        b'"founder_tools_account_linked":true,'
+        b'"founder_tools_explicitly_linked":false}',
+    ],
+)
+async def test_book_coworking_treats_malformed_2xx_as_commit_uncertain(
+    monkeypatch,
+    response_body,
+):
+    async def fake_request(method, endpoint, **kwargs):
+        request = httpx.Request(method, f"https://backend.test{endpoint}")
+        return httpx.Response(201, request=request, content=response_body)
+
+    client = MLAIBackendClient(
+        base_url="https://backend.test",
+        api_key="roo-api-key",
+        internal_api_key="roo-api-key",
+    )
+    monkeypatch.setattr(client, "_request", fake_request)
+
+    with pytest.raises(MLAIBackendUnavailableError):
+        await client.book_coworking("U123", "2026-07-04", "C123")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("base_url", "expected_endpoint"),
+    [
+        (
+            "https://backend.test",
+            "/api/v1/users/slack-founder-link/start/",
+        ),
+        (
+            "https://backend.test/api/v1",
+            "/users/slack-founder-link/start/",
+        ),
+    ],
+)
+async def test_start_founder_account_link_uses_current_slack_identity(
+    monkeypatch,
+    base_url,
+    expected_endpoint,
+):
+    captured = {}
+
+    async def fake_request(method, endpoint, **kwargs):
+        captured["method"] = method
+        captured["endpoint"] = endpoint
+        captured["json"] = kwargs["json"]
+        captured["use_admin_headers"] = kwargs["use_admin_headers"]
+        captured["transport_retries"] = kwargs["transport_retries"]
+        request = httpx.Request(method, f"https://backend.test{endpoint}")
+        return httpx.Response(
+            201,
+            request=request,
+            json={
+                "status": "link_required",
+                "link_url": "https://mlai.au/founder-tools/link-roo?token=secret",
+            },
+        )
+
+    client = MLAIBackendClient(
+        base_url=base_url,
+        api_key="roo-api-key",
+        internal_api_key="roo-api-key",
+    )
+    monkeypatch.setattr(client, "_request", fake_request)
+
+    result = await client.start_founder_account_link("<@U123>")
+
+    assert result["status"] == "link_required"
+    assert captured == {
+        "method": "POST",
+        "endpoint": expected_endpoint,
+        "json": {"slack_user_id": "U123"},
+        "use_admin_headers": False,
+        "transport_retries": 0,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(201, json=[]),
+        httpx.Response(201, content=b"not-json"),
+    ],
+)
+async def test_start_founder_account_link_rejects_malformed_success_payloads(
+    monkeypatch,
+    response,
+):
+    async def fake_request(method, endpoint, **kwargs):
+        response.request = httpx.Request(method, f"https://backend.test{endpoint}")
+        return response
+
+    client = MLAIBackendClient(
+        base_url="https://backend.test",
+        api_key="roo-api-key",
+        internal_api_key="roo-api-key",
+    )
+    monkeypatch.setattr(client, "_request", fake_request)
+
+    with pytest.raises(MLAIBackendUnavailableError):
+        await client.start_founder_account_link("U123")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status_code", [500, 502, 503, 504])
+async def test_start_founder_account_link_treats_all_server_errors_as_uncertain(
+    monkeypatch,
+    status_code,
+):
+    async def fake_request(method, endpoint, **kwargs):
+        request = httpx.Request(method, f"https://backend.test{endpoint}")
+        return httpx.Response(
+            status_code,
+            request=request,
+            json={"error": "backend failed"},
+        )
+
+    client = MLAIBackendClient(
+        base_url="https://backend.test",
+        api_key="roo-api-key",
+        internal_api_key="roo-api-key",
+    )
+    monkeypatch.setattr(client, "_request", fake_request)
+
+    with pytest.raises(MLAIBackendUnavailableError):
+        await client.start_founder_account_link("U123")
+
+
+@pytest.mark.asyncio
+async def test_start_founder_account_link_keeps_client_errors_definite(monkeypatch):
+    async def fake_request(method, endpoint, **kwargs):
+        request = httpx.Request(method, f"https://backend.test{endpoint}")
+        return httpx.Response(
+            429,
+            request=request,
+            json={"code": "link_rate_limited"},
+        )
+
+    client = MLAIBackendClient(
+        base_url="https://backend.test",
+        api_key="roo-api-key",
+        internal_api_key="roo-api-key",
+    )
+    monkeypatch.setattr(client, "_request", fake_request)
+
+    with pytest.raises(httpx.HTTPStatusError) as exc_info:
+        await client.start_founder_account_link("U123")
+
+    assert exc_info.value.response.status_code == 429
+
+
+@pytest.mark.asyncio
+async def test_legacy_slack_link_client_only_treats_not_found_as_no_match(monkeypatch):
+    request = httpx.Request("POST", "https://backend.test/api/v1/users/link-slack/")
+    responses = [
+        httpx.Response(404, request=request, json={"error": "not found"}),
+        httpx.Response(500, request=request, json={"error": "backend failed"}),
+    ]
+    request_kwargs = []
+
+    async def fake_request(*args, **kwargs):
+        request_kwargs.append(kwargs)
+        return responses.pop(0)
+
+    client = MLAIBackendClient(
+        base_url="https://backend.test",
+        api_key="roo-key",
+        internal_api_key="internal-key",
+    )
+    monkeypatch.setattr(client, "_request", fake_request)
+
+    assert await client.link_slack_user("UREQUESTER", "member@example.com") is None
+    with pytest.raises(httpx.HTTPStatusError):
+        await client.link_slack_user("UREQUESTER", "member@example.com")
+    assert [kwargs["use_admin_headers"] for kwargs in request_kwargs] == [False, False]
+
+
+@pytest.mark.asyncio
+async def test_get_data_catalog_uses_canonical_endpoint(monkeypatch):
+    captured = {}
+
+    async def fake_request(method, endpoint, **kwargs):
+        captured["method"] = method
+        captured["endpoint"] = endpoint
+        captured["params"] = kwargs["params"]
+        request = httpx.Request(method, f"https://backend.test{endpoint}")
+        return httpx.Response(200, request=request, json={"resources": [{"key": "vibe_raising_companies"}]})
+
+    client = MLAIBackendClient(
+        base_url="https://backend.test",
+        api_key="roo-api-key",
+        internal_api_key="roo-api-key",
+    )
+    monkeypatch.setattr(client, "_request", fake_request)
+
+    result = await client.get_data_catalog("<@U123>")
+
+    assert result == {"resources": [{"key": "vibe_raising_companies"}]}
+    assert captured["method"] == "GET"
+    assert captured["endpoint"] == "/api/v1/data/catalog/"
+    assert captured["params"] == {"requester_slack_id": "U123"}
+
+
+@pytest.mark.asyncio
+async def test_query_data_uses_canonical_endpoint_and_payload(monkeypatch):
+    captured = {}
+    payload = {
+        "requester_slack_id": "U123",
+        "resource": "content_factory_jobs",
+        "operation": "count",
+    }
+
+    async def fake_request(method, endpoint, **kwargs):
+        captured["method"] = method
+        captured["endpoint"] = endpoint
+        captured["json"] = kwargs["json"]
+        request = httpx.Request(method, f"https://backend.test{endpoint}")
+        return httpx.Response(200, request=request, json={"resource": "content_factory_jobs", "rows": [{"count": 2}]})
+
+    client = MLAIBackendClient(
+        base_url="https://backend.test",
+        api_key="roo-api-key",
+        internal_api_key="roo-api-key",
+    )
+    monkeypatch.setattr(client, "_request", fake_request)
+
+    result = await client.query_data(payload)
+
+    assert result == {"resource": "content_factory_jobs", "rows": [{"count": 2}]}
+    assert captured["method"] == "POST"
+    assert captured["endpoint"] == "/api/v1/data/query/"
+    assert captured["json"] == payload
+
+
+@pytest.mark.asyncio
+async def test_list_linear_channel_issues_uses_scoped_endpoint(monkeypatch):
+    captured = {}
+
+    async def fake_request(method, endpoint, **kwargs):
+        captured.update(method=method, endpoint=endpoint, **kwargs)
+        request = httpx.Request(method, f"https://backend.test{endpoint}")
+        return httpx.Response(200, request=request, json={"issues": []})
+
+    client = MLAIBackendClient(
+        base_url="https://backend.test",
+        api_key="roo-api-key",
+        internal_api_key="roo-api-key",
+    )
+    monkeypatch.setattr(client, "_request", fake_request)
+
+    result = await client.list_linear_channel_issues(
+        slack_workspace_id="TMLAI",
+        slack_channel_id="CTECH",
+        requester_slack_id="<@U123>",
+        limit=500,
+        after="cursor-1",
+    )
+
+    assert result == {"issues": []}
+    assert captured["method"] == "POST"
+    assert captured["endpoint"] == "/api/v1/integrations/linear/channel-issues/list"
+    assert captured["json"] == {
+        "slack_workspace_id": "TMLAI",
+        "slack_channel_id": "CTECH",
+        "requester_slack_id": "U123",
+        "limit": 100,
+        "after": "cursor-1",
+    }
+
+
+@pytest.mark.asyncio
+async def test_get_linear_channel_issue_requests_comments(monkeypatch):
+    captured = {}
+
+    async def fake_request(method, endpoint, **kwargs):
+        captured.update(method=method, endpoint=endpoint, **kwargs)
+        request = httpx.Request(method, f"https://backend.test{endpoint}")
+        return httpx.Response(200, request=request, json={"issue": {"identifier": "TECH-16"}})
+
+    client = MLAIBackendClient(
+        base_url="https://backend.test",
+        api_key="roo-api-key",
+        internal_api_key="roo-api-key",
+    )
+    monkeypatch.setattr(client, "_request", fake_request)
+
+    result = await client.get_linear_channel_issue(
+        slack_workspace_id="TMLAI",
+        slack_channel_id="CTECH",
+        requester_slack_id="U123",
+        issue_identifier="tech-16",
+    )
+
+    assert result["issue"]["identifier"] == "TECH-16"
+    assert captured["method"] == "POST"
+    assert captured["endpoint"] == "/api/v1/integrations/linear/channel-issues/detail"
+    assert captured["json"] == {
+        "slack_workspace_id": "TMLAI",
+        "slack_channel_id": "CTECH",
+        "requester_slack_id": "U123",
+        "issue_identifier": "tech-16",
+        "include_comments": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_create_linear_channel_issue_uses_scoped_non_retrying_endpoint(monkeypatch):
+    captured = {}
+
+    async def fake_request(method, endpoint, **kwargs):
+        captured.update(method=method, endpoint=endpoint, **kwargs)
+        request = httpx.Request(method, f"https://backend.test{endpoint}")
+        return httpx.Response(
+            201, request=request,
+            json={"issue": {"identifier": "TECH-30"}},
+        )
+
+    client = MLAIBackendClient(
+        base_url="https://backend.test",
+        api_key="roo-api-key",
+        internal_api_key="roo-api-key",
+    )
+    monkeypatch.setattr(client, "_request", fake_request)
+
+    result = await client.create_linear_channel_issue(
+        slack_workspace_id="TMLAI", slack_channel_id="CTECH",
+        requester_slack_id="<@U123>", request_id="Ev-create-123",
+        title="Fix alerts", description="Add retry logs", status="In Progress",
+    )
+
+    assert result["issue"]["identifier"] == "TECH-30"
+    assert captured["method"] == "POST"
+    assert captured["endpoint"] == "/api/v1/integrations/linear/channel-issues/create"
+    assert captured["transport_retries"] == 0
+    assert captured["json"] == {
+        "slack_workspace_id": "TMLAI", "slack_channel_id": "CTECH",
+        "requester_slack_id": "U123", "request_id": "Ev-create-123",
+        "title": "Fix alerts", "description": "Add retry logs",
+        "status": "In Progress",
+    }
+
+
+@pytest.mark.asyncio
+async def test_list_linear_channel_statuses_uses_scoped_endpoint(monkeypatch):
+    captured = {}
+
+    async def fake_request(method, endpoint, **kwargs):
+        captured.update(method=method, endpoint=endpoint, **kwargs)
+        request = httpx.Request(method, f"https://backend.test{endpoint}")
+        return httpx.Response(200, request=request, json={"statuses": [{"name": "Todo"}]})
+
+    client = MLAIBackendClient(base_url="https://backend.test", api_key="roo-api-key")
+    monkeypatch.setattr(client, "_request", fake_request)
+
+    result = await client.list_linear_channel_statuses(
+        slack_workspace_id="TMLAI",
+        slack_channel_id="CTECH",
+        requester_slack_id="U123",
+    )
+
+    assert result["statuses"] == [{"name": "Todo"}]
+    assert captured["endpoint"] == "/api/v1/integrations/linear/channel-issues/statuses"
+    assert captured["json"]["slack_channel_id"] == "CTECH"
+
+
+@pytest.mark.parametrize(
+    ("base_url", "expected"),
+    [
+        (
+            "https://backend.test",
+            "/api/v1/integrations/linear/channel-issues/statuses",
+        ),
+        (
+            "https://backend.test/api/v1",
+            "/integrations/linear/channel-issues/statuses",
+        ),
+        (
+            "https://backend.test/api/v1/",
+            "/integrations/linear/channel-issues/statuses",
+        ),
+    ],
+)
+def test_linear_channel_endpoint_avoids_duplicate_api_prefix(base_url, expected):
+    client = MLAIBackendClient(base_url=base_url, api_key="roo-api-key")
+
+    assert client._linear_channel_endpoint("statuses") == expected
+
+
+@pytest.mark.asyncio
+async def test_write_linear_channel_issue_disables_transport_retries(monkeypatch):
+    captured = {}
+
+    async def fake_request(method, endpoint, **kwargs):
+        captured.update(method=method, endpoint=endpoint, **kwargs)
+        request = httpx.Request(method, f"https://backend.test{endpoint}")
+        return httpx.Response(200, request=request, json={"issue": {"identifier": "TECH-29"}})
+
+    client = MLAIBackendClient(base_url="https://backend.test", api_key="roo-api-key")
+    monkeypatch.setattr(client, "_request", fake_request)
+
+    await client.write_linear_channel_issue(
+        slack_workspace_id="TMLAI",
+        slack_channel_id="CTECH",
+        requester_slack_id="U123",
+        issue_identifier="TECH-29",
+        operation="set_status",
+        value="In Progress",
+        expected_updated_at="2026-09-01T01:00:00.000Z",
+        request_id="Ev123",
+    )
+
+    assert captured["endpoint"] == "/api/v1/integrations/linear/channel-issues/write"
+    assert captured["transport_retries"] == 0
+    assert captured["json"]["operation"] == "set_status"
+
+
+@pytest.mark.asyncio
+async def test_healthhack_announcement_uses_canonical_endpoint_and_provenance(monkeypatch):
+    captured = {}
+
+    async def fake_request(method, endpoint, **kwargs):
+        captured["method"] = method
+        captured["endpoint"] = endpoint
+        captured["json"] = kwargs["json"]
+        request = httpx.Request(method, f"https://backend.test{endpoint}")
+        return httpx.Response(
+            201,
+            request=request,
+            json={"id": "announcement-1", "created": True},
+        )
+
+    client = MLAIBackendClient(
+        base_url="https://backend.test",
+        api_key="roo-api-key",
+        internal_api_key="roo-api-key",
+    )
+    monkeypatch.setattr(client, "_request", fake_request)
+
+    result = await client.healthhack_create_announcement(
+        title="Doors open",
+        body="Registration opens at 10:30am.",
+        requester_slack_id="U0SUPER123",
+        author_slack_id="U0ROO00000",
+        source_channel_id="C0BHZ9NS21L",
+        source_message_ts="1784286514.495879",
+    )
+
+    assert result == {"id": "announcement-1", "created": True}
+    assert captured == {
+        "method": "POST",
+        "endpoint": "/api/v1/hackathons/hospital/announcements/",
+        "json": {
+            "title": "Doors open",
+            "body": "Registration opens at 10:30am.",
+            "requester_slack_id": "U0SUPER123",
+            "author_slack_id": "U0ROO00000",
+            "source_channel_id": "C0BHZ9NS21L",
+            "source_message_ts": "1784286514.495879",
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_create_points_purchase_sends_slack_origin(monkeypatch):
+    captured = {}
+
+    async def fake_request(method, endpoint, **kwargs):
+        captured["method"] = method
+        captured["endpoint"] = endpoint
+        captured["json"] = kwargs["json"]
+        request = httpx.Request(method, f"https://backend.test{endpoint}")
+        return httpx.Response(
+            201,
+            request=request,
+            json={
+                "id": "purchase-123",
+                "frontend_checkout_page_url": "https://mlai.test/roo/topup/purchase-123",
+            },
+        )
+
+    client = MLAIBackendClient(
+        base_url="https://backend.test",
+        api_key="roo-api-key",
+        internal_api_key="roo-api-key",
+    )
+    monkeypatch.setattr(client, "_request", fake_request)
+
+    result = await client.create_points_purchase(
+        slack_user_id="<@U123>",
+        pack_id="topup_10",
+        purchase_from={
+            "source": "slack",
+            "slack_channel_id": "C123",
+            "slack_thread_ts": "111.222",
+        },
+    )
+
+    assert captured["method"] == "POST"
+    assert captured["endpoint"] == "/api/v1/points/purchases/"
+    assert captured["json"] == {
+        "slack_user_id": "U123",
+        "pack_id": "topup_10",
+        "purchase_from": {
+            "source": "slack",
+            "slack_channel_id": "C123",
+            "slack_thread_ts": "111.222",
+        },
+    }
+    assert result["frontend_checkout_page_url"] == "https://mlai.test/roo/topup/purchase-123"
+
+
+@pytest.mark.asyncio
+async def test_create_points_purchase_503_raises_backend_unavailable(monkeypatch):
+    async def fake_request(method, endpoint, **kwargs):
+        request = httpx.Request(method, f"https://backend.test{endpoint}")
+        return httpx.Response(
+            503,
+            request=request,
+            json={"message": "Points purchase checkout is temporarily unavailable."},
+        )
+
+    client = MLAIBackendClient(
+        base_url="https://backend.test",
+        api_key="roo-api-key",
+        internal_api_key="roo-api-key",
+    )
+    monkeypatch.setattr(client, "_request", fake_request)
+
+    with pytest.raises(MLAIBackendUnavailableError, match="Points purchase checkout is temporarily unavailable"):
+        await client.create_points_purchase("<@U123>", pack_id="topup_10")
+
+
+@pytest.mark.asyncio
+async def test_get_coworking_report_503_raises_backend_unavailable(monkeypatch):
+    async def fake_request(method, endpoint, **kwargs):
+        request = httpx.Request(method, f"https://backend.test{endpoint}")
+        return httpx.Response(
+            503,
+            request=request,
+            json={
+                "status": "error",
+                "message": "Points subsystem is temporarily unavailable",
+                "error_code": "database_connection_interrupted",
+                "retryable": True,
+            },
+        )
+
+    client = MLAIBackendClient(
+        base_url="https://backend.test",
+        api_key="roo-api-key",
+        internal_api_key="roo-api-key",
+    )
+    monkeypatch.setattr(client, "_request", fake_request)
+
+    with pytest.raises(MLAIBackendUnavailableError, match="Points subsystem is temporarily unavailable"):
+        await client.get_coworking_report("U123", "2026-01-01", "2026-01-31")
+
+
+@pytest.mark.asyncio
+async def test_is_admin_excludes_report_only_partner(monkeypatch):
+    client = MLAIBackendClient(
+        base_url="https://backend.test",
+        api_key="roo-api-key",
+        internal_api_key="roo-api-key",
+    )
+
+    async def fake_get_admin_details(slack_user_id):
+        return {"slack_user_id": slack_user_id, "role": "partner"}
+
+    monkeypatch.setattr(client, "get_admin_details", fake_get_admin_details)
+
+    assert await client.is_admin("UPARTNER") is False
+
+
+@pytest.mark.asyncio
+async def test_is_admin_includes_committee_member(monkeypatch):
+    client = MLAIBackendClient(
+        base_url="https://backend.test",
+        api_key="roo-api-key",
+        internal_api_key="roo-api-key",
+    )
+
+    async def fake_get_admin_details(slack_user_id):
+        return {"slack_user_id": slack_user_id, "role": "committee"}
+
+    monkeypatch.setattr(client, "get_admin_details", fake_get_admin_details)
+
+    assert await client.is_admin("UCOMMITTEE") is True
+
+
+@pytest.mark.asyncio
+async def test_trigger_repo_scan_includes_requested_by_when_provided(monkeypatch):
+    captured = {}
+
+    async def fake_request(method, endpoint, **kwargs):
+        captured["json"] = kwargs["json"]
+        request = httpx.Request(method, f"https://backend.test{endpoint}")
+        return httpx.Response(
+            202,
+            request=request,
+            json={"status": "scan_initiated", "message": "Scan queued successfully."},
+        )
+
+    client = MLAIBackendClient(
+        base_url="https://backend.test",
+        api_key="roo-api-key",
+        internal_api_key="roo-api-key",
+    )
+    monkeypatch.setattr(client, "_request", fake_request)
+
+    await client.trigger_repo_scan(
+        "U0AQV5X9G0J",
+        slack_channel_id="C123",
+        slack_thread_ts="111.222",
+        domain="studynash.co",
+        requested_by_slack_user_id="U05QPB483K9",
+    )
+
+    assert captured["json"]["slack_user_id"] == "U0AQV5X9G0J"
+    assert captured["json"]["requested_by_slack_user_id"] == "U05QPB483K9"
+
+
+@pytest.mark.asyncio
+async def test_confirm_article_topic_raises_backend_unavailable_on_503(monkeypatch):
+    async def fake_request(method, endpoint, **kwargs):
+        request = httpx.Request(method, f"https://backend.test{endpoint}")
+        return httpx.Response(
+            503,
+            request=request,
+            json={
+                "status": "backend_unavailable",
+                "error_code": "CONTENT_FACTORY_UNAVAILABLE",
+                "message": "Content Factory is unavailable right now.",
+            },
+        )
+
+    client = MLAIBackendClient(
+        base_url="https://backend.test",
+        api_key="roo-api-key",
+        internal_api_key="roo-api-key",
+    )
+    monkeypatch.setattr(client, "_request", fake_request)
+
+    with pytest.raises(MLAIBackendUnavailableError, match="Content Factory is unavailable right now."):
+        await client.confirm_article_topic(
+            job_id="job-123",
+            slack_user_id="U123",
+            confirmed_keyword="ai agents",
+        )
+
+
+@pytest.mark.asyncio
+async def test_confirm_article_topic_includes_requested_by_when_provided(monkeypatch):
+    captured = {}
+
+    async def fake_request(method, endpoint, **kwargs):
+        captured["json"] = kwargs["json"]
+        request = httpx.Request(method, f"https://backend.test{endpoint}")
+        return httpx.Response(200, request=request, json={"status": "confirmed"})
+
+    client = MLAIBackendClient(
+        base_url="https://backend.test",
+        api_key="roo-api-key",
+        internal_api_key="roo-api-key",
+    )
+    monkeypatch.setattr(client, "_request", fake_request)
+
+    await client.confirm_article_topic(
+        job_id="job-123",
+        slack_user_id="U0AQV5X9G0J",
+        confirmed_keyword="ai agents",
+        requested_by_slack_user_id="U05QPB483K9",
+    )
+
+    assert captured["json"]["slack_user_id"] == "U0AQV5X9G0J"
+    assert captured["json"]["requested_by_slack_user_id"] == "U05QPB483K9"
+
+
+@pytest.mark.asyncio
+async def test_statement_reconciliation_client_uses_run_scoped_guarded_endpoints(monkeypatch):
+    captured = []
+
+    async def fake_request(method, endpoint, **kwargs):
+        captured.append({"method": method, "endpoint": endpoint, **kwargs})
+        request = httpx.Request(method, f"https://backend.test{endpoint}")
+        return httpx.Response(200, request=request, json={"run_id": "run/123"})
+
+    client = MLAIBackendClient(
+        base_url="https://backend.test",
+        api_key="roo-api-key",
+        internal_api_key="roo-api-key",
+    )
+    monkeypatch.setattr(client, "_request", fake_request)
+
+    await client.get_statement_reconciliation_readiness("UADMIN")
+    await client.start_statement_reconciliation_run(
+        "UADMIN",
+        instruction="Use the Aaron AI context.",
+        statement_line_ids=["line-1"],
+    )
+    await client.retry_statement_reconciliation_run("UADMIN", "run/123")
+    await client.get_statement_reconciliation_outcomes("UADMIN", limit=25)
+    await client.decide_statement_reconciliation_learning_candidate(
+        "UADMIN",
+        "candidate/123",
+        candidate_version="version-123",
+        decision="promote",
+    )
+    await client.preview_statement_reconciliation_run("UADMIN", "run/123")
+    await client.approve_ready_statement_reconciliation_run(
+        "UADMIN", "run/123", decision_request_id="roo-decision-1"
+    )
+    await client.reject_statement_reconciliation_suggestions(
+        "UADMIN",
+        "run/123",
+        [12],
+        reason="Wrong project.",
+        decision_request_id="roo-decision-2",
+    )
+    await client.execute_approved_statement_reconciliation_run(
+        "UADMIN", "run/123", suggestion_ids=[10, 11]
+    )
+
+    assert [(item["method"], item["endpoint"]) for item in captured] == [
+        ("GET", "/api/v1/integrations/reconciliation/readiness"),
+        ("POST", "/api/v1/integrations/reconciliation/agent-runs"),
+        ("POST", "/api/v1/integrations/reconciliation/agent-runs/run%2F123/retry"),
+        ("GET", "/api/v1/integrations/reconciliation/outcomes"),
+        ("POST", "/api/v1/integrations/reconciliation/learning-candidates/candidate%2F123"),
+        ("GET", "/api/v1/integrations/reconciliation/agent-runs/run%2F123/preview"),
+        ("POST", "/api/v1/integrations/reconciliation/agent-runs/run%2F123/decisions"),
+        ("POST", "/api/v1/integrations/reconciliation/agent-runs/run%2F123/decisions"),
+        ("POST", "/api/v1/integrations/reconciliation/agent-runs/run%2F123/execute"),
+    ]
+    assert captured[0]["params"] == {
+        "slack_user_id": "UADMIN",
+        "domain": "mlai.au",
+    }
+    assert captured[1]["json"]["statement_line_ids"] == ["line-1"]
+    assert captured[2]["json"] == {
+        "slack_user_id": "UADMIN",
+        "domain": "mlai.au",
+        "confirm": True,
+    }
+    assert captured[3]["params"]["limit"] == 25
+    assert captured[4]["json"] == {
+        "slack_user_id": "UADMIN",
+        "domain": "mlai.au",
+        "candidate_version": "version-123",
+        "decision": "promote",
+        "confirm": True,
+    }
+    assert captured[6]["json"] == {
+        "slack_user_id": "UADMIN",
+        "domain": "mlai.au",
+        "confirm": True,
+        "approve_all_ready": True,
+        "decision_request_id": "roo-decision-1",
+    }
+    assert captured[7]["json"]["decisions"] == [{
+        "suggestion_id": 12,
+        "decision": "reject",
+        "reason": "Wrong project.",
+    }]
+    assert captured[8]["json"]["suggestion_ids"] == [10, 11]
+
+@pytest.mark.asyncio
+async def test_event_finance_audit_uses_read_only_bounded_endpoint(monkeypatch):
+    captured = {}
+
+    async def fake_request(method, endpoint, **kwargs):
+        captured.update(method=method, endpoint=endpoint, kwargs=kwargs)
+        request = httpx.Request(method, f"https://backend.test{endpoint}")
+        return httpx.Response(
+            200,
+            request=request,
+            json={"summary": {"event_count": 3}, "xero_writes": False},
+        )
+
+    client = MLAIBackendClient(
+        base_url="https://backend.test",
+        api_key="roo-api-key",
+        internal_api_key="roo-api-key",
+    )
+    monkeypatch.setattr(client, "_request", fake_request)
+
+    result = await client.get_event_finance_audit(
+        "<@UADMIN>",
+        since="2026-02-02",
+        until="2026-08-02",
+        domain="MLAI.AU",
+    )
+
+    assert captured["method"] == "GET"
+    assert captured["endpoint"] == "/api/v1/integrations/reconciliation/event-finance-audit"
+    assert captured["kwargs"]["params"] == {
+        "slack_user_id": "UADMIN",
+        "domain": "mlai.au",
+        "since": "2026-02-02",
+        "until": "2026-08-02",
+    }
+    assert result["xero_writes"] is False

@@ -1,0 +1,73 @@
+# Repository improvement log
+
+A short record of repository cleanup, testing, security, and delivery changes.
+Each entry states what changed and how it was checked. Findings without fixes
+are labelled as such.
+
+## 2026-10-22
+
+- Moved the coding-agent guide, Roo Code reconciliation rule, and Roo agent
+  setup note into `agents/`. Kept `AGENTS.md` and
+  `.roo/rules/00-mlai-reconciliation.md` as symlinks so agent discovery and Roo
+  Code rule loading still work. Updated the README link.
+- Reviewed `.github/workflows/deploy-admin-production.yml` (findings only; no
+  workflow change): add SSH host fingerprint verification, pin the SSH action,
+  constrain the dispatch secret to a single-line format, and make Public Roo
+  environment updates atomic.
+- Classified the routing, bridge, and Slack-to-Linear plans and routing audit
+  as historical design records rather than coding-agent instructions. The
+  plans now live in `agents/plans/`; the audit lives in `docs/`.
+- Moved the Luma–Stripe–Xero reconciliation plan to `agents/plans/`, updated
+  its references, and instructed coding agents to put new plans there.
+- Removed the unused root `pyproject.toml` and `uv.lock`. They were untracked,
+  had no application dependencies, and specified Python 3.12 while Roo runs on
+  Python 3.11.
+- Moved the historical routing probe to `scripts/`, marked its limitations,
+  and updated references. Its cases remain in the current routing eval set.
+- Scoped the Roo Code reconciliation rule to the reconciliation workspace and
+  updated its setup instructions and file paths.
+- Added an opt-in, localhost-only NGINX proxy for testing the authenticated
+  Public Roo mention endpoint with Postman.
+- Fixed the Postman proxy mount, disabled background automations for local
+  testing, generated a local endpoint key, and applied the approved Roo SQLite
+  v3 migration. Roo readiness and proxy authentication checks pass. Started
+  local backend web/PostgreSQL and applied its 364 migrations after approval;
+  backend readiness and the no-pending-migrations check pass. Verified an
+  authenticated Postman greeting returns HTTP 200 using the development
+  OpenAI key, with no Slack reply.
+- Added an importable local Postman collection with readiness, agent, and
+  authentication checks, parameterized URLs, and an empty API-key variable.
+- Documented Postman startup, import, variables, troubleshooting, and shutdown
+  in `postman/README.md`.
+- Added `src/scripts/run_evals.sh` with offline routing gates and explicit live
+  routing/addressing modes, plus an eval guide describing datasets and limits.
+  Verified shell syntax and all three offline routing gates in Docker.
+- Repaired the root `AGENTS.md` symlink after the instructions folder moved to
+  `.agents/`; updated the README entry point.
+- Consolidated application/bridge tests and routing/addressing evals under
+  `tests/`, with a shared pytest configuration and `tests/run_evals.sh`.
+  Moved Compose and NGINX into `infra/`; updated workflows, operations scripts,
+  documentation, and relative mounts. All 90 test modules pass individually;
+  eight Compose configurations render and production NGINX syntax passes.
+  Deployment caveat: an existing server checkout using `roo-standalone/`
+  needs a transition for local env/data paths and rollback before deployment.
+- Moved quest documentation to `docs/QUESTS.md` and marked its handler as
+  inactive. Verified linked source paths; no runtime changes.
+- Moved the application Dockerfile into `infra/`, preserving the `src/` build
+  context; updated all six Compose builds, the security test reference, and docs.
+  Consolidated application/bridge ignore rules into root `.gitignore`, including
+  local env files, caches, and editor files while retaining env templates.
+  Validated all six rendered build paths, ignore behavior, and diff whitespace.
+- Rebuilt the relocated Dockerfile and restarted local Roo/Postman successfully.
+  Offline evals: 3 passed. Public CI test groups: 2,013 passed; Admin: 213;
+  payment reminders: 85. The Docker-only queue test skipped inside the image
+  passed separately against the host Compose CLI. Python compilation passes.
+  Roo readiness returns 200, missing authentication returns 401, unknown proxy
+  routes return 404, and NGINX syntax passes; backend/database remain healthy.
+  No migrations, live model evals, Slack actions, or production deployment run.
+- Fixed the reported coworking clarification for “Thursday, 22 October from
+  1pm to 5pm”: the parser incorrectly counted weekday and calendar date as
+  separate dates. Matching weekday/date pairs now resolve together; conflicting
+  weekdays, invalid dates, and multiple-date requests still require clarification.
+  All 180 date/booking regression tests pass offline, including the exact report
+  with absent, ISO, and natural-language router dates. No real booking made.

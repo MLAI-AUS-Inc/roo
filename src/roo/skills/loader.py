@@ -1,0 +1,344 @@
+"""
+Skill Loader
+
+Parses skill definitions from SKILL.md files in skill directories.
+Follows Anthropic's Agent Skills pattern with progressive disclosure.
+"""
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import List, Optional, Dict, Any, Set, Literal
+import importlib.util
+import sys
+
+import re
+import frontmatter
+import yaml
+
+
+@dataclass
+class Skill:
+    """
+    A skill definition loaded from a SKILL.md file.
+
+    Skills follow the Anthropic Agent Skills pattern:
+    - Each skill is a directory containing SKILL.md
+    - SKILL.md has YAML frontmatter (name, description) and markdown body
+    - Optional implementation files (*.py) can be co-located
+    """
+    name: str
+    description: str
+    content: str  # Full markdown body with instructions
+    path: Path  # Path to the skill directory
+    requires_auth: bool = False
+    parameters: List[dict] = field(default_factory=list)
+    priority_channels: List[str] = field(default_factory=list)
+    exclusive_channels: List[str] = field(default_factory=list)
+    # Router v2 metadata (single source of truth for LLM routing):
+    # routing: {use_when, avoid_when, examples: [{text, action?}],
+    #           negative_examples: [{text, instead}]}
+    routing: Dict[str, Any] = field(default_factory=dict)
+    # actions: [{name, description, params: {param_name: {type, description}}}]
+    actions: List[Dict[str, Any]] = field(default_factory=list)
+
+    # Loaded implementation module (if any)
+    _module: Optional[Any] = field(default=None, repr=False)
+
+    def action_names(self) -> List[str]:
+        return [str(action.get("name")) for action in self.actions if action.get("name")]
+    
+    def __repr__(self):
+        return f"Skill(name='{self.name}', path='{self.path.name}')"
+    
+    def get_client_class(self, class_name: str = None):
+        """
+        Get a client class from the skill's implementation module.
+        
+        Args:
+            class_name: Name of the class to get. If None, looks for *Client class.
+        
+        Returns:
+            The client class, or None if not found.
+        """
+        if self._module is None:
+            return None
+        
+        if class_name:
+            return getattr(self._module, class_name, None)
+        
+        # Auto-detect *Client class
+        for name in dir(self._module):
+            if name.endswith("Client") and not name.startswith("_"):
+                return getattr(self._module, name)
+        
+        return None
+
+
+@dataclass
+class SkillLoadEntry:
+    path: Path
+    name: Optional[str]
+    status: Literal["loaded", "disabled", "broken", "missing"]
+    skill: Optional[Skill] = None
+    errors: List[str] = field(default_factory=list)
+    warnings: List[str] = field(default_factory=list)
+
+
+@dataclass
+class SkillLoadReport:
+    entries: List[SkillLoadEntry] = field(default_factory=list)
+
+    @property
+    def skills(self) -> List[Skill]:
+        return [entry.skill for entry in self.entries
+                if entry.status == "loaded" and entry.skill is not None]
+
+    def require(self, names: Set[str]) -> None:
+        missing = set(names) - {skill.name for skill in self.skills}
+        if missing:
+            details = [f"{entry.path}: {', '.join(entry.errors)}"
+                       for entry in self.entries if entry.name in missing and entry.errors]
+            raise ValueError("ROO_ENABLED_SKILLS references missing or invalid skills: "
+                             + ", ".join(sorted(missing)) + "; " + "; ".join(details))
+
+
+def load_skill_report(skills_dir: Path, allowed_names: Optional[Set[str]] = None,
+                      *, import_clients: bool = True) -> SkillLoadReport:
+    """Validate before imports; report failures without advertising broken skills."""
+    from .catalogue import inspect_catalogue, REQUIRED_CLIENTS
+    report = SkillLoadReport()
+    for package in inspect_catalogue(skills_dir):
+        if package.name and allowed_names is not None and package.name not in allowed_names:
+            report.entries.append(SkillLoadEntry(package.path, package.name, "disabled"))
+            continue
+        errors = [item.message for item in package.diagnostics if item.severity == "error"]
+        warnings = [item.message for item in package.diagnostics if item.severity == "warning"]
+        if errors:
+            report.entries.append(SkillLoadEntry(package.path, package.name, "broken", errors=errors))
+            continue
+        try:
+            required_client = REQUIRED_CLIENTS.get(package.name)
+            if required_client and (package.path.name != "SKILL.md"
+                                    or not (package.path.parent / "client.py").is_file()):
+                raise ValueError(f"Required client.py providing {required_client} is missing")
+            if package.path.name == "SKILL.md":
+                skill = load_skill_from_directory(package.path.parent, allowed_names,
+                                                  import_client=import_clients)
+            else:
+                skill = load_skill_file(package.path, allowed_names)
+            if skill is None:
+                raise ValueError("Validated package did not produce a skill")
+            if required_client and import_clients and not isinstance(skill.get_client_class(required_client), type):
+                raise ValueError(f"client.py must define class {required_client}")
+            report.entries.append(SkillLoadEntry(package.path, package.name, "loaded", skill,
+                                                 warnings=warnings))
+        except Exception as exc:
+            report.entries.append(SkillLoadEntry(package.path, package.name, "broken",
+                                                 errors=[f"{type(exc).__name__}: {exc}"]))
+    if allowed_names is not None:
+        found = {entry.name for entry in report.entries}
+        for name in sorted(set(allowed_names) - found):
+            report.entries.append(SkillLoadEntry(skills_dir, name, "missing", errors=["Package not found"]))
+    return report
+
+
+def load_skills(skills_dir: Path, allowed_names: Optional[Set[str]] = None) -> List[Skill]:
+    """Compatibility list API; new callers should retain the structured report."""
+    report = load_skill_report(skills_dir, allowed_names)
+    for entry in report.entries:
+        if entry.errors:
+            print(f"Skill {entry.name or entry.path}: {entry.status}: {'; '.join(entry.errors)}")
+    return report.skills
+
+
+def load_skill_from_directory(
+    skill_dir: Path,
+    allowed_names: Optional[Set[str]] = None,
+    *, import_client: bool = True,
+) -> Optional[Skill]:
+    """
+    Load a skill from a directory containing SKILL.md.
+    
+    Also loads any Python implementation files in the directory.
+    """
+    skill_file = skill_dir / "SKILL.md"
+    post = frontmatter.load(skill_file)
+    
+    name = post.metadata.get("name")
+    if not name:
+        print(f"   ⚠️  Skipping {skill_dir.name}: missing 'name' in frontmatter")
+        return None
+    if allowed_names is not None and name not in allowed_names:
+        print(f"   🔒 Skipped skill outside deployment allowlist: {name}")
+        return None
+    
+    # Extract parameters from markdown if not in frontmatter
+    parameters = post.metadata.get("parameters", [])
+    if not parameters and post.content:
+        parameters = _extract_parameters_from_markdown(post.content)
+
+    routing = post.metadata.get("routing")
+    routing_file = skill_dir / "routing.yaml"
+    if routing_file.exists():
+        with routing_file.open("r", encoding="utf-8") as handle:
+            file_routing = yaml.safe_load(handle) or {}
+        if routing:
+            raise ValueError(
+                f"{name}: define routing in either SKILL.md or routing.yaml, not both"
+            )
+        routing = file_routing
+
+    skill = Skill(
+        name=name,
+        description=post.metadata.get("description", ""),
+        content=post.content,
+        path=skill_dir,
+        requires_auth=post.metadata.get("requires_auth", False),
+        parameters=parameters,
+        priority_channels=post.metadata.get("priority_channels", []),
+        exclusive_channels=post.metadata.get("exclusive_channels", []),
+        routing=_validate_routing(name, routing),
+        actions=_validate_actions(name, post.metadata.get("actions")),
+    )
+
+    # Load implementation module if present
+    client_file = skill_dir / "client.py"
+    if import_client and client_file.exists():
+        skill._module = _load_module_from_file(client_file, f"skill_{name}_client")
+
+    return skill
+
+
+def load_skill_file(
+    file_path: Path,
+    allowed_names: Optional[Set[str]] = None,
+) -> Optional[Skill]:
+    """Load a single skill from a legacy flat markdown file."""
+    post = frontmatter.load(file_path)
+    
+    name = post.metadata.get("name")
+    if not name:
+        print(f"   ⚠️  Skipping {file_path.name}: missing 'name' in frontmatter")
+        return None
+    if allowed_names is not None and name not in allowed_names:
+        print(f"   🔒 Skipped skill outside deployment allowlist: {name}")
+        return None
+    
+    # Try to extract parameters from markdown if not in frontmatter
+    parameters = post.metadata.get("parameters", [])
+    if not parameters and post.content:
+        parameters = _extract_parameters_from_markdown(post.content)
+
+    return Skill(
+        name=name,
+        description=post.metadata.get("description", ""),
+        content=post.content,
+        path=file_path.parent,
+        requires_auth=post.metadata.get("requires_auth", False),
+        parameters=parameters,
+        priority_channels=post.metadata.get("priority_channels", []),
+        exclusive_channels=post.metadata.get("exclusive_channels", []),
+        routing=_validate_routing(name, post.metadata.get("routing")),
+        actions=_validate_actions(name, post.metadata.get("actions")),
+    )
+
+
+def _validate_routing(skill_name: str, raw: Any) -> Dict[str, Any]:
+    """Validate the SKILL.md `routing:` block; raise loudly on malformed data."""
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ValueError(f"{skill_name}: routing must be a mapping, got {type(raw).__name__}")
+    for key in ("use_when", "avoid_when"):
+        if key in raw and not isinstance(raw[key], str):
+            raise ValueError(f"{skill_name}: routing.{key} must be a string")
+    for key in ("examples", "negative_examples"):
+        entries = raw.get(key) or []
+        if not isinstance(entries, list):
+            raise ValueError(f"{skill_name}: routing.{key} must be a list")
+        for entry in entries:
+            if not isinstance(entry, dict) or not entry.get("text"):
+                raise ValueError(
+                    f"{skill_name}: every routing.{key} entry needs a 'text' field: {entry!r}"
+                )
+    return raw
+
+
+def _validate_actions(skill_name: str, raw: Any) -> List[Dict[str, Any]]:
+    """Validate the SKILL.md `actions:` block; raise loudly on malformed data."""
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise ValueError(f"{skill_name}: actions must be a list, got {type(raw).__name__}")
+    seen = set()
+    for action in raw:
+        if not isinstance(action, dict) or not action.get("name"):
+            raise ValueError(f"{skill_name}: every action needs a 'name': {action!r}")
+        name = str(action["name"])
+        if name in seen:
+            raise ValueError(f"{skill_name}: duplicate action name '{name}'")
+        seen.add(name)
+        params = action.get("params") or {}
+        if not isinstance(params, dict):
+            raise ValueError(f"{skill_name}: action '{name}' params must be a mapping")
+    return raw
+
+
+def _load_module_from_file(file_path: Path, module_name: str):
+    """Dynamically load a Python module from a file path."""
+    spec = importlib.util.spec_from_file_location(module_name, file_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Cannot load module from {file_path}")
+    
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        sys.modules.pop(module_name, None)
+        raise
+    return module
+
+
+def _extract_parameters_from_markdown(content: str) -> List[dict]:
+    """
+    Extract parameters from '## Parameters' section in markdown.
+    
+    Expected format:
+    - **name**: description
+    """
+    parameters = []
+    
+    # improved regex to capture parameter section
+    # looks for ## Parameters, then captures lines until next heading or end
+    match = re.search(r'##\s+Parameters\s*\n(.*?)(?=\n##|\Z)', content, re.DOTALL | re.IGNORECASE)
+    
+    if not match:
+        return parameters
+        
+    section = match.group(1)
+    
+    # Parse bullet points
+    for line in section.split('\n'):
+        line = line.strip()
+        if not line.startswith(('-', '*')):
+            continue
+            
+        # Extract name and description
+        # - **query**: The expertise...
+        param_match = re.search(r'[-*]\s+\*\*([a-zA-Z0-9_]+)\*\*:\s*(.*)', line)
+        if param_match:
+            name, desc = param_match.groups()
+            parameters.append({
+                "name": name,
+                "description": desc.strip(),
+                "required": "(required)" in desc.lower(),
+                "default": _extract_default(desc)
+            })
+            
+    return parameters
+
+
+def _extract_default(desc: str) -> Optional[str]:
+    """Extract default value from description."""
+    match = re.search(r'\(default:\s*(.*?)\)', desc, re.IGNORECASE)
+    return match.group(1) if match else None
