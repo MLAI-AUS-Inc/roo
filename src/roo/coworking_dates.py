@@ -41,8 +41,16 @@ RELATIVE = (
     r"|in\s+(?:\d+|one|two|three|four|five|six|seven)\s+(?:days?|weeks?)"
 )
 NUMERIC_DATE = re.compile(r"\d{1,2}(?:/\d{1,2}(?:/\d{4})?|-\d{1,2}(?:-\d{4})?)")
+CALENDAR_DATE = (
+    rf"\d{{4}}-\d{{2}}-\d{{2}}|{NUMERIC_DATE.pattern}|{MONTH_FIRST.pattern}|{DAY_FIRST.pattern}"
+)
+# A weekday can describe a calendar date rather than introduce a second date.
+WEEKDAY_DATE = re.compile(
+    rf"(?P<weekday>{WEEKDAY})(?:\s*,\s*|\s+)(?P<calendar_date>{CALENDAR_DATE})",
+    re.IGNORECASE,
+)
 DATE_REFERENCE = re.compile(
-    rf"\b(?:\d{{4}}-\d{{2}}-\d{{2}}|{NUMERIC_DATE.pattern}|{MONTH_FIRST.pattern}|{DAY_FIRST.pattern}"
+    rf"\b(?:{WEEKDAY_DATE.pattern}|{CALENDAR_DATE}"
     rf"|{RELATIVE}|(?:(?:this|next)\s+)?{WEEKDAY})(?!\w)",
     re.IGNORECASE,
 )
@@ -90,6 +98,15 @@ def _parse_numeric_date(phrase: str, today: date) -> date:
 
 def _parse_phrase(phrase: str, today: date) -> date:
     phrase = phrase.lower().strip().rstrip(".")
+    weekday_date = WEEKDAY_DATE.fullmatch(phrase)
+    if weekday_date:
+        resolved = _parse_phrase(weekday_date.group("calendar_date"), today)
+        weekday = WEEKDAYS[weekday_date.group("weekday").rstrip(".")]
+        if resolved.weekday() != weekday:
+            raise CoworkingDateError(
+                "That weekday doesn't match the calendar date. Which date did you mean?"
+            )
+        return resolved
     if NUMERIC_DATE.fullmatch(phrase):
         return _parse_numeric_date(phrase, today)
     try:

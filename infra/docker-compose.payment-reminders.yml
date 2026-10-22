@@ -1,0 +1,17 @@
+# Opt-in worker; uses Roo's bot identity but no public/admin agent runtime.
+name: roo-payment-reminders
+
+services:
+  payment-reminders:
+    build:
+      context: ../src
+      dockerfile: ../infra/Dockerfile
+    command: ["python", "-m", "roo.payment_reminder_worker"]
+    env_file:
+      - ../src/.env.payment-reminders
+    restart: unless-stopped
+    volumes:
+      - payment-reminder-data:/app/data/payment-reminders
+
+volumes:
+  payment-reminder-data:
