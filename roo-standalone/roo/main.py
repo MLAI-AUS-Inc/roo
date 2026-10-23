@@ -32,10 +32,10 @@ from .addressing import (
     decide_addressing,
 )
 from .conversation_sessions import get_contextual_conversation_store
+from .content_factory_pricing import ArticleQuoteUnavailableError
 from .content_factory_progress import (
     CONTENT_FACTORY_REQUEST_SOURCE,
     build_live_status_blocks,
-    get_content_factory_article_cost_points,
     normalize_content_factory_domain,
 )
 from .content_factory_identity import (
@@ -1996,6 +1996,99 @@ async def _maybe_attach_content_factory_progress(
         asyncio.create_task(_watch_content_factory_quiet_run(job_id))
 
 
+def _show_article_price_confirmation(result: dict, *, channel_id: str, message_ts: str | None, thread_ts: str | None) -> bool:
+    if result.get("status") != "awaiting_price_confirmation":
+        return False
+    if not channel_id:
+        raise ValueError("An article price confirmation needs a conversation.")
+    if message_ts:
+        from .slack_client import bind_article_price_message, get_slack_client
+        response = get_slack_client().chat_update(
+            channel=channel_id, ts=message_ts, text=result["message"], blocks=result["blocks"],
+            parse="none", attachments=[],
+        )
+        bind_article_price_message(
+            response, text=result["message"], blocks=result["blocks"], channel=channel_id,
+            thread_ts=thread_ts, message_ts=message_ts,
+        )
+    else:
+        post_message(channel_id, result["message"], thread_ts=thread_ts, blocks=result["blocks"])
+    return True
+
+
+async def _handle_article_price_confirmation(payload: dict, user_id: str) -> JSONResponse:
+    from .content_factory_pricing import get_confirmation, invalidate_confirmation, verify_confirmation_content
+    from .clients.mlai_backend import MLAIBackendClient
+    from .slack_client import get_slack_client, read_article_price_message
+
+    token = str(payload["actions"][0].get("value") or "")
+    message = payload.get("message") or {}
+    origin = {
+        "workspace_id": (payload.get("team") or {}).get("id"),
+        "channel_id": (payload.get("channel") or {}).get("id"),
+        "message_ts": message.get("ts"),
+        "thread_ts": message.get("thread_ts") or message.get("ts"),
+    }
+    container = payload.get("container") or {}
+    if (
+        (container.get("channel_id") and container["channel_id"] != origin["channel_id"])
+        or (container.get("message_ts") and container["message_ts"] != origin["message_ts"])
+        or (container.get("thread_ts") and container["thread_ts"] != origin["thread_ts"])
+    ):
+        return _content_factory_action_denied_response("Reopen the original article price confirmation message.")
+    try:
+        record = get_confirmation(token, user_id, **origin)
+        source_message = await asyncio.to_thread(read_article_price_message, record["origin"])
+        record = verify_confirmation_content(
+            token, user_id, clicked_message=message, source_message=source_message, **origin,
+        )
+    except ValueError as exc:
+        return _content_factory_action_denied_response(str(exc))
+    except Exception:
+        return _content_factory_action_denied_response("I couldn't verify the original article price card. Please try again.")
+    confirmed = record["payload"]
+    channel = record["origin"]["channel_id"]
+    message_ts = record["origin"]["message_ts"]
+    thread_ts = record["origin"]["thread_ts"]
+    settings = get_settings()
+    client = MLAIBackendClient(base_url=settings.MLAI_BACKEND_URL, api_key=settings.ROO_API_KEY or settings.MLAI_API_KEY)
+    try:
+        result = await client.submit_article_request(record["endpoint"], confirmed)
+        if result.get("status") == "awaiting_price_confirmation":
+            # The old click cannot authorize the refreshed price, even if this
+            # card update fails and the user retries the old button.
+            invalidate_confirmation(token)
+            _show_article_price_confirmation(result, channel_id=channel, message_ts=message_ts, thread_ts=thread_ts)
+            return JSONResponse(status_code=200, content={})
+        follow_up = _build_confirm_topic_follow_up(result, default_domain=confirmed.get("domain"))
+        if follow_up.get("requires_delivery_mode"):
+            blocks = _build_article_delivery_mode_blocks(
+                domain=follow_up["domain"], job_id=follow_up["active_job_id"],
+                recommended_delivery_mode=follow_up.get("recommended_delivery_mode"),
+                requested_by_slack_user_id=user_id,
+                effective_slack_user_id=confirmed["slack_user_id"],
+            )
+            text = f"Choose delivery mode for {follow_up['domain']}"
+        else:
+            text = _build_confirm_follow_up_message(follow_up)
+            if follow_up["status"] not in {"blocked", "blocked_verification", "auth_required", "completed"}:
+                text = f"Article request accepted at the confirmed price of {confirmed['expected_cost_points']} Roo points."
+            blocks = [{"type": "section", "text": {"type": "plain_text", "text": text}}]
+        get_slack_client().chat_update(channel=channel, ts=message_ts, text=text, blocks=blocks)
+        _remember_content_thread_context(
+            channel, thread_ts, follow_up["domain"],
+            "awaiting_delivery_mode" if follow_up.get("requires_delivery_mode") else "write",
+            active_job_id=follow_up.get("active_job_id"),
+            requested_by_slack_user_id=user_id, effective_slack_user_id=confirmed["slack_user_id"],
+        )
+        _maybe_schedule_content_factory_watchdog(follow_up.get("active_job_id"), follow_up["status"])
+        # Keep the same confirmed payload for safe retries after ambiguous UI
+        # delivery; the backend owns charge/provider idempotency.
+        return JSONResponse(status_code=200, content={})
+    except Exception:
+        return _content_factory_action_denied_response("I couldn't complete this article request. Retry this confirmation to keep the same request and price.")
+
+
 async def _trigger_article_generation_from_pending(
     pending: dict[str, Any],
     *,
@@ -2073,6 +2166,8 @@ async def _trigger_article_generation_from_pending(
             user_avatar_url=str(slack_info.get("image_192") or "").strip() or None,
             **delegated_backend_kwargs,
         )
+        if _show_article_price_confirmation(result, channel_id=intent_channel, message_ts=progress_message_ts, thread_ts=intent_thread):
+            return True
         print(f"✅ Auto-generation triggered for {domain}")
         if result.get("job_id") or result.get("run_id"):
             _remember_content_thread_context(
@@ -6772,6 +6867,9 @@ async def _handle_slack_action_payload(request: Request, payload: dict):
     message = payload.get("message", {})
     thread_ts = message.get("thread_ts") or message.get("ts")
     
+    if action_id == "confirm_article_price":
+        return await _handle_article_price_confirmation(payload, user_id)
+
     if action_id == "roo_link_founder_account":
         print("FOUNDER_ACCOUNT_LINK_BUTTON_CLICKED")
     else:
@@ -7380,6 +7478,8 @@ async def _handle_slack_action_payload(request: Request, payload: dict):
             if domain:
                 confirm_kwargs["domain"] = domain
             result = await client.confirm_article_topic(**confirm_kwargs)
+            if _show_article_price_confirmation(result, channel_id=action_context.msg_channel, message_ts=action_context.msg_ts, thread_ts=(payload.get("message") or {}).get("thread_ts")):
+                return JSONResponse(status_code=200, content={})
             follow_up = _build_confirm_topic_follow_up(result)
             return _confirm_topic_json_response(
                 keyword,
@@ -7388,6 +7488,8 @@ async def _handle_slack_action_payload(request: Request, payload: dict):
                 effective_slack_user_id=effective_slack_user_id,
             )
         except Exception as e:
+            if isinstance(e, ArticleQuoteUnavailableError):
+                return _content_factory_action_denied_response(str(e))
             print(f"❌ Failed to confirm topic: {e}")
             import traceback
             traceback.print_exc()
@@ -7471,6 +7573,8 @@ async def _handle_slack_action_payload(request: Request, payload: dict):
             if domain:
                 confirm_kwargs["domain"] = domain
             result = await client.confirm_article_topic(**confirm_kwargs)
+            if _show_article_price_confirmation(result, channel_id=action_context.msg_channel, message_ts=action_context.msg_ts, thread_ts=(payload.get("message") or {}).get("thread_ts")):
+                return JSONResponse(status_code=200, content={})
             follow_up = _build_confirm_topic_follow_up(result)
             return _confirm_topic_json_response(
                 keyword,
@@ -7479,6 +7583,8 @@ async def _handle_slack_action_payload(request: Request, payload: dict):
                 effective_slack_user_id=effective_slack_user_id,
             )
         except Exception as e:
+            if isinstance(e, ArticleQuoteUnavailableError):
+                return _content_factory_action_denied_response(str(e))
             print(f"❌ Failed to confirm alternative topic: {e}")
             import traceback
             traceback.print_exc()
@@ -7931,6 +8037,8 @@ async def _handle_slack_action_payload(request: Request, payload: dict):
                     effective_slack_user_id,
                 ),
             )
+            if _show_article_price_confirmation(result, channel_id=msg_channel, message_ts=msg_ts, thread_ts=(payload.get("message") or {}).get("thread_ts")):
+                return JSONResponse(status_code=200, content={})
             print(f"✅ Article generation triggered for {domain}: {result}")
             if result.get("job_id") or result.get("run_id"):
                 _remember_content_thread_context(
@@ -8093,6 +8201,8 @@ async def _handle_slack_action_payload(request: Request, payload: dict):
                     effective_slack_user_id,
                 ),
             )
+            if _show_article_price_confirmation(result, channel_id=msg_channel, message_ts=msg_ts, thread_ts=(payload.get("message") or {}).get("thread_ts")):
+                return JSONResponse(status_code=200, content={})
             print(f"✅ Article discovery triggered for {domain}: {result}")
             if str(result.get("status") or "").strip().lower() == "awaiting_delivery_mode":
                 _remember_content_thread_context(
@@ -8171,13 +8281,7 @@ async def _handle_slack_action_payload(request: Request, payload: dict):
         reply_thread_ts = action_context.reply_thread_ts
 
         is_dm = bool(reply_channel and reply_channel.startswith("D"))
-        normalized_domain = normalize_content_factory_domain(domain) or domain or "this domain"
-        article_cost_points = get_content_factory_article_cost_points(domain)
-        cost_guidance = (
-            f"Articles for {normalized_domain} are free."
-            if article_cost_points == 0
-            else f"Starting the article run deducts {article_cost_points} Roo points."
-        )
+        cost_guidance = "I’ll show your article price for confirmation before generation starts."
         guidance_text = (
             "✅ Reply here with the topic you want me to write about. "
             "I'll still research the best keywords, title, and talking points so it has the best chance to rank. "
@@ -8984,6 +9088,8 @@ async def _handle_slack_action_payload(request: Request, payload: dict):
                 ),
             )
             print(f"✅ Topic confirmed for job {job_id}")
+            if _show_article_price_confirmation(result, channel_id=action_context.msg_channel, message_ts=action_context.msg_ts, thread_ts=(payload.get("message") or {}).get("thread_ts")):
+                return JSONResponse(status_code=200, content={})
             follow_up = _build_confirm_topic_follow_up(result)
             _remember_content_thread_context(
                 action_context.reply_channel,
@@ -9030,6 +9136,8 @@ async def _handle_slack_action_payload(request: Request, payload: dict):
             except Exception as e:
                 print(f"⚠️ Failed to update message: {e}")
         except Exception as e:
+            if isinstance(e, ArticleQuoteUnavailableError):
+                return _content_factory_action_denied_response(str(e))
             print(f"❌ Failed to confirm topic: {e}")
             import traceback
             traceback.print_exc()

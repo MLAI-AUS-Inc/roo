@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-CONTENT_FACTORY_ARTICLE_COST_POINTS = 4
 CONTENT_FACTORY_REQUEST_SOURCE = "roo_slackbot"
-FREE_CONTENT_FACTORY_DOMAINS = {"mlai.au"}
 
 
 def normalize_content_factory_domain(domain: str | None) -> str:
@@ -24,26 +22,10 @@ def normalize_content_factory_domain(domain: str | None) -> str:
     return normalized
 
 
-def get_content_factory_article_cost_points(domain: str | None) -> int:
-    normalized_domain = normalize_content_factory_domain(domain)
-    if normalized_domain in FREE_CONTENT_FACTORY_DOMAINS:
-        return 0
-    return CONTENT_FACTORY_ARTICLE_COST_POINTS
-
-
-def is_free_content_factory_domain(domain: str | None) -> bool:
-    return get_content_factory_article_cost_points(domain) == 0
-
-
-def build_content_factory_live_cost_text(domain: str | None) -> str:
-    if is_free_content_factory_domain(domain):
-        normalized_domain = normalize_content_factory_domain(domain) or "this domain"
-        return f"💳 Articles for {normalized_domain} are free. No Roo points will be deducted for this run."
-
-    return (
-        f"💳 This paid run costs {CONTENT_FACTORY_ARTICLE_COST_POINTS} Roo points. "
-        "They were deducted when the run started."
-    )
+def build_content_factory_live_cost_text(domain: str | None, cost_points: int | None = None) -> str:
+    if type(cost_points) is int and cost_points >= 0:
+        return f"💳 Confirmed article price: {cost_points} Roo points."
+    return "💳 Article pricing is confirmed with you before generation starts."
 
 
 def build_live_status_blocks(

@@ -39,8 +39,13 @@ def fixture():
 
 
 @pytest.mark.asyncio
-async def test_dispatch_uses_current_slack_value_and_verified_actor():
+@pytest.mark.parametrize("action_id", ["confirm_topic_btn_0", "confirm_article_price"])
+async def test_dispatch_uses_current_slack_value_and_verified_actor(action_id):
     payload, message, client, dispatch = fixture()
+    action = message["blocks"][0]["elements"][0]
+    action["action_id"] = action_id
+    payload["action_id"] = action_id
+    payload["action_hash"] = action_digest(message, action)
     payload["value"] = "confirm_topic:attacker-job:9"
     updated = {
         **message,
