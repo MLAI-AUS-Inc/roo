@@ -1,0 +1,9 @@
+{
+  "task_root": "/var/lib/roo-hermes/tasks",
+  "controller_uid": 10000,
+  "controller_gid": 10000,
+  "quota_bytes": 2147483648,
+  "quota_inodes": 50000,
+  "max_filesystem_bytes": 53687091200,
+  "first_project_id": 100000
+}

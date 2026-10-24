@@ -3012,6 +3012,37 @@ async def slack_events(
         print("✅ Slack URL verification challenge")
         return {"challenge": payload.get("challenge")}
 
+    # Signature verification above remains the only external admission path.
+    # Persist enabled wake-up hints before ACK; backend source IDs deduplicate
+    # retries, including retries after the generic Slack receipt was recorded.
+    from .proactive.ingress import admit_slack_event, EventAdmissionError
+    try:
+        await admit_slack_event(_request_settings(request), payload)
+    except EventAdmissionError:
+        await _release_slack_event_receipt(request)
+        raise HTTPException(status_code=503, detail="Agent event could not be saved; retry")
+
+    # Explicit member requests share the existing context allowlist and signed
+    # receipt, but use a separate backend credential from passive event hints.
+    from .proactive.commands import admit_task_command
+    agent_event = payload.get("event") or {}
+    agent_settings = _request_settings(request)
+    if isinstance(agent_event, dict) and _is_slack_context_allowed(
+        agent_settings, channel_id=agent_event.get("channel"),
+        user_id=agent_event.get("user"), channel_type=agent_event.get("channel_type"),
+    ):
+        try:
+            admission = await admit_task_command(agent_settings, payload)
+        except EventAdmissionError:
+            await _release_slack_event_receipt(request)
+            raise HTTPException(status_code=503, detail="Agent task could not be saved; retry")
+        if admission:
+            previously_completed = _slack_event_disposition(request) == "completed"
+            await _complete_slack_event_receipt(request)
+            if not previously_completed and admission.get("new") and admission.get("text"):
+                asyncio.create_task(_timesheet_ack(agent_event, admission["text"]))
+            return JSONResponse(status_code=200, content={})
+
     # Resume this durable handoff even when the generic signature receipt exists:
     # a previous attempt may have failed to persist the command before its 200.
     timesheet_event = payload.get("event") or {}

@@ -1,0 +1,25 @@
+# Separate project: public Roo deployments must not delete task infrastructure.
+name: roo-hermes
+
+services:
+  hermes-image:
+    profiles: [hermes-image]
+    build:
+      context: .
+      dockerfile: hermes/Dockerfile
+    image: roo-hermes-worker:2026.9.24
+    # Offline import/provenance check, not a long-lived Gateway or worker.
+    command: ["--check"]
+    user: "10000:10000"
+    init: true
+    read_only: true
+    network_mode: none
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 128
+    mem_limit: 2g
+    cpus: 1
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=256m,uid=10000,gid=10000,mode=1770
+      - /state:rw,nosuid,nodev,noexec,size=64m,uid=10000,gid=10000,mode=0700
+      - /workspace:rw,nosuid,nodev,size=64m,uid=10000,gid=10000,mode=0700

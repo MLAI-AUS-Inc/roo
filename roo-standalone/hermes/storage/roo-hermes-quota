@@ -1,0 +1,3 @@
+#!/bin/sh
+# Install root:root 0755, never call a script in the writable service checkout.
+exec /usr/bin/python3 -I /usr/local/lib/roo-hermes-storage/quota.py "$@"

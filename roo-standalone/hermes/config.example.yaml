@@ -1,0 +1,40 @@
+# Documentation sample only. HermesRunner writes task-specific config.yaml and
+# the controller mounts that file read-only inside the isolated task container.
+model:
+  provider: custom
+  default: roo-approved-model
+  base_url: http://hermes-broker:8090/v1
+  api_key: task-scoped-placeholder
+  api_mode: chat_completions
+terminal:
+  backend: local
+  cwd: /workspace
+platform_toolsets:
+  acp: [terminal, file, todo]
+agent:
+  max_turns: 20
+approvals:
+  mode: manual
+  cron_mode: deny
+  single_query_mode: deny
+  unattended_mode: deny
+skills:
+  write_approval: true
+memory:
+  memory_enabled: false
+  user_profile_enabled: false
+  write_approval: true
+browser:
+  # "off" selects built-in browser tools instead of browser_exec. The browser
+  # toolset itself is omitted above, so browsing is disabled in this example.
+  backend: off
+  use_real_profile: false
+  auto_local_for_private_urls: false
+  allow_private_urls: false
+  headed: false
+tool_loop_guardrails:
+  hard_stop_enabled: true
+  non_interactive_hard_stop_enabled: true
+auxiliary:
+  background_review:
+    enabled: false
