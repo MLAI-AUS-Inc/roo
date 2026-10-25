@@ -7,6 +7,7 @@ from typing import Any
 import httpx
 
 from .bridge_mentions import VerifiedBridgeContext
+from .markdown_code import mask_markdown_code
 from .slack_client import send_dm
 
 logger = logging.getLogger(__name__)
@@ -25,21 +26,21 @@ def _label(value: str) -> str:
 
 def _source_for_parsing(text: str, context: VerifiedBridgeContext) -> str:
     """Mask signed mention labels and code while retaining source offsets."""
-    labels = {label for target in context.recipient_targets
-              for label in (target.source_labels or (target.display_name,)) if label}
+    labels = context.source_labels
+    if labels is None:
+        labels = tuple({label for target in context.recipient_targets
+                        for label in (target.source_labels or (target.display_name,)) if label})
     visible = text
     for label in sorted(labels, key=len, reverse=True):
         visible = re.sub(
             rf"(?<![\w@])@{re.escape(label)}(?![\w])",
             lambda match: " " * len(match.group()), visible, flags=re.IGNORECASE,
         )
-    return re.sub(
-        r"```[\s\S]*?(?:```|$)|`[^`\n]*(?:`|(?=\n)|$)",
-        lambda match: " " * len(match.group()), visible,
-    )
+    return mask_markdown_code(visible)
 
 
-def _award_details(text: str, context: VerifiedBridgeContext) -> tuple[int | None, str]:
+def bridge_award_details(text: str, context: VerifiedBridgeContext) -> tuple[int | None, str]:
+    """Extract one explicit prose amount and reason from the verified source."""
     # Signed source text takes precedence over model-extracted values. Slack
     # IDs and digits in member names are never interpreted as point amounts.
     visible = _source_for_parsing(text, context)
@@ -76,15 +77,22 @@ def _retryable(exc: Exception) -> bool:
 async def award_bridge_points(
     *, client: Any, context: VerifiedBridgeContext, text: str, params: dict,
     admin_slack_id: str, channel_id: str | None, thread_ts: str | None,
+    bot_user_id: str | None = None,
 ) -> str:
     """Award only backend-verified targets, using source-bound replay protection."""
     if not isinstance(context, VerifiedBridgeContext):
         return "I couldn't verify the Chat recipients. Select the member again using the @ mention picker."
     if not context.recipient_targets:
         return "Who should receive the points? Select the member using the MLAI Chat @ mention picker, then send a new command."
+    actual_slack_mentions = set(re.findall(r"<@([UW][A-Z0-9]+)>", mask_markdown_code(text)))
+    actual_slack_mentions.discard(bot_user_id)
+    known_aliases = {target.slack_user_id for target in context.recipient_targets if target.slack_user_id}
+    if actual_slack_mentions - known_aliases:
+        return ("I couldn't verify every Slack mention alongside the selected Chat members. "
+                "Send separate award commands for the Chat and Slack recipients so everyone receives the right award.")
     # Model parameters are deliberately ignored for both identity and payload;
     # retries of this signed source command must submit the same award.
-    points, reason = _award_details(text, context)
+    points, reason = bridge_award_details(text, context)
     if points is None:
         return "How many points should I award? Include one amount, such as `4 points`."
     if points <= 0:
@@ -95,12 +103,12 @@ async def award_bridge_points(
         return "You can't award points to yourself. Ask another Points Admin to review the award."
 
     outcomes = []
-    for index, target in enumerate(sorted(context.recipient_targets, key=lambda item: item.profile_id)):
+    for target in sorted(context.recipient_targets, key=lambda item: item.profile_id):
         try:
             result = await client.award_points(
                 admin_slack_id, None, points, reason,
                 target_profile_id=target.profile_id,
-                idempotency_key=f"roo-chat-award:{context.source_event_id}:{index}",
+                idempotency_key=f"roo-chat-award:{context.source_event_id}:{target.profile_id}",
             )
             recipient = result.get("recipient") if isinstance(result, dict) else None
             if (not isinstance(recipient, dict)

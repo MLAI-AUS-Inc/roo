@@ -25,6 +25,7 @@ class BridgeRecipient:
     profile_id: str
     display_name: str
     source_labels: tuple[str, ...] = ()
+    slack_user_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -35,12 +36,21 @@ class VerifiedBridgeContext:
     actor_profile_id: str
     posting_mode: str
     recipient_targets: tuple[BridgeRecipient, ...]
+    source_labels: tuple[str, ...] | None = None
 
 
 def _profile_id(value: Any) -> str:
     if not isinstance(value, str) or str(UUID(value)) != value:
         raise ValueError("Invalid canonical profile ID")
     return value
+
+
+def _source_labels(value: Any) -> tuple[str, ...]:
+    if (not isinstance(value, list) or len(value) > 20
+            or any(not isinstance(label, str) or not label or len(label) > 80
+                   or re.search(r"[\x00-\x1f\x7f-\x9f`<>@]", label) for label in value)):
+        raise ValueError("Invalid bridge source labels")
+    return tuple(dict.fromkeys(value))
 
 
 def _verified_context(actor: dict[str, Any]) -> VerifiedBridgeContext | None:
@@ -58,21 +68,24 @@ def _verified_context(actor: dict[str, Any]) -> VerifiedBridgeContext | None:
                 or len(target["display_name"]) > 200):
             raise ValueError("Invalid bridge recipient")
         profile_id = _profile_id(target.get("profile_id"))
-        labels = target.get("source_labels", [])
-        if (not isinstance(labels, list) or len(labels) > 20
-                or any(not isinstance(label, str) or not label or len(label) > 80
-                       or re.search(r"[\x00-\x1f\x7f-\x9f`<>@]", label) for label in labels)):
-            raise ValueError("Invalid bridge source labels")
+        labels = _source_labels(target.get("source_labels", []))
+        slack_user_id = target.get("slack_user_id")
+        if slack_user_id is not None and (not isinstance(slack_user_id, str)
+                or not re.fullmatch(r"[UW][A-Z0-9]{1,63}", slack_user_id)):
+            raise ValueError("Invalid canonical Slack alias")
         previous = recipients.get(profile_id)
+        if previous and previous.slack_user_id != slack_user_id:
+            raise ValueError("Conflicting canonical Slack aliases")
         combined_labels = tuple(dict.fromkeys((previous.source_labels if previous else ()) + tuple(labels)))
         if len(combined_labels) > 20:
             raise ValueError("Too many bridge source labels")
-        recipients[profile_id] = BridgeRecipient(profile_id, target["display_name"], combined_labels)
+        recipients[profile_id] = BridgeRecipient(profile_id, target["display_name"], combined_labels, slack_user_id)
     return VerifiedBridgeContext(
         source_event_id=actor["source_event_id"],
         actor_profile_id=_profile_id(actor.get("actor_profile_id")),
         posting_mode=actor["posting_mode"],
         recipient_targets=tuple(recipients.values()),
+        source_labels=_source_labels(actor["source_labels"]) if "source_labels" in actor else None,
     )
 
 
@@ -85,7 +98,7 @@ async def resolve_bridge_mention(
     Resolution happens before agent execution. Transient failures propagate to
     the Slack delivery wrapper, which releases its receipt for a safe retry.
     """
-    if not event.get("bot_id") and event.get("subtype") != "bot_message":
+    if not event.get("bot_id") and not event.get("app_id") and event.get("subtype") != "bot_message":
         return event
     if surface != "public":
         return None

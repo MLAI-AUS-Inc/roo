@@ -959,7 +959,7 @@ async def _handle_app_mention_with_room_choice(
     slack_team_id: str,
 ) -> Optional[dict[str, Any]]:
     settings = get_settings()
-    if event.get("bot_id") or event.get("subtype") == "bot_message":
+    if event.get("bot_id") or event.get("app_id") or event.get("subtype") == "bot_message":
         from .bridge_mentions import resolve_bridge_mention
 
         event = await resolve_bridge_mention(

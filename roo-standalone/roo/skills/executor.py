@@ -16231,7 +16231,7 @@ Chunk {index} source: {label}
 
             if verified_bridge_context is not None:
                 from ..bridge_mentions import VerifiedBridgeContext
-                from ..points_awards import award_bridge_points
+                from ..points_awards import award_bridge_points, bridge_award_details
 
                 explicit_slack_recipients = re.findall(r"<@([UW][A-Z0-9]+)>", text)
                 legacy_slack_targets = (
@@ -16245,10 +16245,19 @@ Chunk {index} source: {label}
                         client=client, context=verified_bridge_context,
                         text=text, params=params, admin_slack_id=user_id,
                         channel_id=channel_id, thread_ts=thread_ts,
+                        bot_user_id=bot_id,
                     )
                 # Older clients preserve actual Slack mentions. Keep that
                 # verified source path compatible without letting model IDs
                 # replace an absent native recipient (including revoked keys).
+                points, reason = bridge_award_details(text, verified_bridge_context)
+                if points is None:
+                    return "How many points should I award? Include one amount, such as `4 points`."
+                if points <= 0:
+                    return "Points awards need a positive number of points."
+                if not reason:
+                    return "What are the points for? Include a reason after `for`."
+                params = {**params, "points": points, "reason": reason}
                 request_id = f"mlai-chat:{verified_bridge_context.source_event_id}"
 
             admin_details = await client.get_admin_details(user_id)
@@ -16367,7 +16376,7 @@ Chunk {index} source: {label}
             # Award points to each target user
             results = []
             errors = []
-            for target_index, target_id in enumerate(sorted(set(target_slack_ids))):
+            for target_id in sorted(set(target_slack_ids)):
                 try:
                     # Deduplication: Link Slack ID to existing email user if needed
                     try:
@@ -16390,7 +16399,7 @@ Chunk {index} source: {label}
                     award_kwargs = {}
                     if request_id:
                         operation = hashlib.sha256(str(request_id).encode()).hexdigest()
-                        award_kwargs["idempotency_key"] = f"roo-slack-award:{operation}:{target_index}"
+                        award_kwargs["idempotency_key"] = f"roo-slack-award:{operation}:{target_id}"
                     result = await client.award_points(user_id, target_id, int(points), reason, **award_kwargs)
                     new_balance = result.get("new_balance")
                     results.append({"user": target_id})

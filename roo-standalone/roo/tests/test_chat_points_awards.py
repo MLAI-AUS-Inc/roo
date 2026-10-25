@@ -31,6 +31,7 @@ async def award(client, *, context=CONTEXT, text=TEXT, params=None):
     return await points_awards.award_bridge_points(
         client=client, context=context, text=text, params=params or {},
         admin_slack_id="UADMIN", channel_id="CSTART", thread_ts="111.222",
+        bot_user_id="UROO",
     )
 
 
@@ -45,7 +46,7 @@ async def test_chat_only_award_uses_verified_profile_and_stable_source_not_model
     result = await award(client, params={"target_profile_id": OTHER, "target_user": "UFABRICATED", "points": 900})
     client.award_points.assert_awaited_once_with(
         "UADMIN", None, 4, "self intro", target_profile_id=TARGET,
-        idempotency_key=f"roo-chat-award:{CONTEXT.source_event_id}:0",
+        idempotency_key=f"roo-chat-award:{CONTEXT.source_event_id}:{TARGET}",
     )
     assert "Awarded 4 points to Chat member" in result
     assert "88" not in result and "balance" not in result.lower()
@@ -58,6 +59,32 @@ async def test_missing_explicit_target_never_falls_back_to_names_or_model_params
     result = await award(client, context=replace(CONTEXT, recipient_targets=()), params={"target_profile_id": TARGET})
     assert "mention picker" in result
     client.award_points.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_distinct_mixed_chat_and_slack_recipients_ask_for_separate_commands_before_credit():
+    client = SimpleNamespace(award_points=AsyncMock())
+    result = await award(client, text="<@UROO> give @Chat member and <@USLACK> 4 points for helping")
+    assert "separate award commands" in result
+    client.award_points.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_same_canonical_recipient_native_and_slack_alias_tags_award_once():
+    client = SimpleNamespace(award_points=AsyncMock(return_value=confirmation()))
+    context = replace(CONTEXT, recipient_targets=(BridgeRecipient(TARGET, "Member", ("Member",), "UMEMBER"),))
+    result = await award(client, context=context, text="<@UROO> give <@UMEMBER> 4 points for helping")
+    assert "Awarded 4 points to Member" in result
+    client.award_points.assert_awaited_once()
+    assert client.award_points.call_args.kwargs["target_profile_id"] == TARGET
+
+
+@pytest.mark.asyncio
+async def test_slack_mentions_in_code_do_not_create_a_mixed_recipient_command():
+    client = SimpleNamespace(award_points=AsyncMock(return_value=confirmation()))
+    result = await award(client, text=TEXT + " using `give <@USLACK> 4 points` as an example")
+    assert "Awarded 4 points to Chat member" in result
+    client.award_points.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -130,6 +157,58 @@ async def test_signed_label_masking_matches_backend_case_insensitive_binding():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("omit_revoked", [False, True])
+async def test_revoked_digit_label_stays_masked_independently_of_recipient_eligibility(omit_revoked):
+    client = SimpleNamespace(award_points=AsyncMock())
+    targets = (BridgeRecipient(TARGET, "Renamed member", ("4 points",)), BridgeRecipient(OTHER, "Second", ("Second",)))
+    context = replace(CONTEXT, recipient_targets=targets[1:] if omit_revoked else targets,
+                      source_labels=("4 Points", "Second"))
+    result = await award(client, context=context, text="give @4 points @Second points for helping")
+    assert "one amount" in result
+    client.award_points.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("example", [
+    "\n~~~\n4 points for an example\n~~~",
+    "\n   ~~~~python\n4 points for an example\n~~~~",
+    "\n~~~\n4 points for an example",
+    "\n    4 points for an example",
+    "\n\t4 points for an example",
+    "\n````python\n4 points for an example\n```\n5 points for another example\n````",
+    "\n~~~~\n4 points for an example\n~~~\n5 points for another example\n~~~~",
+    " example ``4 points for an example``",
+    " example ``4 points `for` an example``",
+    " example ``\n4 points for an example\n``",
+])
+async def test_markdown_code_examples_cannot_supply_missing_prose_amount(example):
+    client = SimpleNamespace(award_points=AsyncMock())
+    result = await award(client, text="give @Chat member points for helping" + example)
+    assert "one amount" in result
+    client.award_points.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_prose_award_amount_survives_fenced_example_and_keeps_reason():
+    client = SimpleNamespace(award_points=AsyncMock(return_value=confirmation()))
+    reason = "helping with the docs\n~~~\n9 points for an example\n~~~"
+    result = await award(client, text="give @Chat member 4 points for " + reason)
+    assert "Awarded 4 points" in result
+    assert client.award_points.call_args.args[2:] == (4, reason)
+
+
+def test_markdown_mask_preserves_offsets_and_fence_delimiter_lengths():
+    from roo.markdown_code import mask_markdown_code
+
+    source = "before\n````python\n4 points\n```\n5 points\n````\nafter 3 points\n"
+    masked = mask_markdown_code(source)
+    assert len(masked) == len(source)
+    assert masked.index("after") == source.index("after")
+    assert "4 points" not in masked and "5 points" not in masked
+    assert "after 3 points" in masked
+
+
+@pytest.mark.asyncio
 async def test_self_awards_block_canonical_aliases_before_calling_backend():
     client = SimpleNamespace(award_points=AsyncMock())
     result = await award(client, context=replace(CONTEXT, actor_profile_id=TARGET))
@@ -141,7 +220,7 @@ async def test_self_awards_block_canonical_aliases_before_calling_backend():
 async def test_labels_and_reason_cannot_inject_slack_mentions_or_markup():
     client = SimpleNamespace(award_points=AsyncMock(return_value=confirmation()))
     context = replace(CONTEXT, recipient_targets=(BridgeRecipient(TARGET, "<@UATTACK> *name*\n<!channel>"),))
-    result = await award(client, context=context, text="give 4 points for <@UATTACK> & help")
+    result = await award(client, context=context, text="give 4 points for <!channel> & help")
     assert "<@UATTACK>" not in result and "<!channel>" not in result
     assert "&lt;@UATTACK&gt;" in result and "&amp; help" in result
 
@@ -194,8 +273,8 @@ async def test_multi_recipient_keys_are_stable_under_alias_order():
     calls = client.award_points.await_args_list
     assert calls[0].kwargs["target_profile_id"] == TARGET
     assert calls[1].kwargs["target_profile_id"] == OTHER
-    assert calls[0].kwargs["idempotency_key"].endswith(":0")
-    assert calls[1].kwargs["idempotency_key"].endswith(":1")
+    assert calls[0].kwargs["idempotency_key"].endswith(":" + TARGET)
+    assert calls[1].kwargs["idempotency_key"].endswith(":" + OTHER)
 
 
 @pytest.mark.asyncio
@@ -279,6 +358,21 @@ async def test_verified_legacy_slack_recipient_uses_actual_mention_and_source_ke
 
 
 @pytest.mark.asyncio
+async def test_verified_legacy_slack_fallback_masks_all_original_native_labels(monkeypatch):
+    client = SimpleNamespace(get_admin_details=AsyncMock(), award_points=AsyncMock())
+    monkeypatch.setattr("roo.slack_client.get_bot_user_id", lambda: "UROO")
+    context = replace(CONTEXT, recipient_targets=(), source_labels=("4 Points",))
+    result = await SkillExecutor()._handle_points_action(
+        client=client, action="award_points", params={"points": 4, "reason": "helping"},
+        text="<@UROO> give @4 points <@UMEMBER> points for helping", user_id="UADMIN",
+        channel_id="CSTART", thread_ts="111.222", skill=SimpleNamespace(name="mlai-points"),
+        verified_bridge_context=context,
+    )
+    assert "one amount" in result
+    client.award_points.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_agent_keeps_verified_context_outside_routed_parameters(monkeypatch):
     from pathlib import Path
     from roo import agent as agent_module
@@ -330,6 +424,48 @@ async def test_public_notification_failure_retries_same_award_and_message_id(mon
 
 
 @pytest.mark.asyncio
+async def test_omitted_rejected_target_cannot_shift_committed_recipients_retry_key(monkeypatch):
+    from roo import main
+
+    entries = {}
+    earned = {OTHER: 0}
+    async def backend_award(admin_id, slack_id, points, reason, *, target_profile_id, idempotency_key):
+        if target_profile_id == TARGET:
+            response = httpx.Response(404, request=httpx.Request("POST", "https://backend.test"))
+            raise httpx.HTTPStatusError("recipient unavailable", request=response.request, response=response)
+        created = idempotency_key not in entries
+        if created:
+            entries[idempotency_key] = target_profile_id
+            earned[target_profile_id] += points
+        return confirmation(profile_id=target_profile_id, created=created)
+
+    client = SimpleNamespace(award_points=AsyncMock(side_effect=backend_award))
+    async def handle(**kwargs):
+        return {"message": await award(client, context=kwargs["verified_bridge_context"], text=kwargs["text"]),
+                "skill_used": "mlai-points", "data": {"action": "award_points"}}
+
+    post = Mock(side_effect=[RuntimeError("notification unavailable"), {"ok": True, "ts": "112.333"}])
+    monkeypatch.setattr(main, "post_message", post)
+    monkeypatch.setattr(main, "get_settings", lambda: SimpleNamespace(ROO_SURFACE="public"))
+    monkeypatch.setattr(main, "_maybe_handle_manual_jobs_trigger", AsyncMock(return_value=False))
+    monkeypatch.setattr(main, "get_agent", lambda: SimpleNamespace(handle_mention=handle))
+    first = replace(CONTEXT, recipient_targets=(BridgeRecipient(TARGET, "First"), BridgeRecipient(OTHER, "Second")))
+    event = {"user": "UADMIN", "text": "give @First @Second 4 points for helping", "channel": "CSTART", "ts": "111.222",
+             "_slack_team_id": "TTEST", "_slack_event_id": "mlai-chat:" + CONTEXT.source_event_id,
+             "_verified_bridge_context": first}
+    with pytest.raises(RuntimeError):
+        await main._handle_mention(event)
+    # The rejected first account is now revoked and omitted by the resolver.
+    retry = {**event, "_verified_bridge_context": replace(first, recipient_targets=(BridgeRecipient(OTHER, "Second"),))}
+    outcome = await main._handle_mention(retry)
+    calls_for_committed_member = [call for call in client.award_points.await_args_list
+                                 if call.kwargs["target_profile_id"] == OTHER]
+    assert calls_for_committed_member[0].kwargs["idempotency_key"] == calls_for_committed_member[1].kwargs["idempotency_key"]
+    assert earned == {OTHER: 4} and len(entries) == 1
+    assert "Awarded 4 points to Second" in outcome["result"]["message"]
+
+
+@pytest.mark.asyncio
 async def test_timeout_after_possible_commit_preserves_source_and_pending_ack(monkeypatch):
     from roo import main
     from roo.clients import mlai_backend
@@ -369,8 +505,10 @@ async def test_timeout_after_possible_commit_preserves_source_and_pending_ack(mo
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("posting_mode,sender", [("member", "UADMIN"), ("bot", "UBRIDGE")])
-async def test_complete_verified_bridge_dispatch_awards_chat_only_member(monkeypatch, posting_mode, sender):
+@pytest.mark.parametrize("posting_mode,sender,marker", [
+    ("member", "UADMIN", "bot_id"), ("bot", "UBRIDGE", "bot_id"), ("member", "UADMIN", "app_id"),
+])
+async def test_complete_verified_bridge_dispatch_awards_chat_only_member(monkeypatch, posting_mode, sender, marker):
     from pathlib import Path
     from roo import main, agent as agent_module
     from roo.agent import RooAgent
@@ -381,12 +519,13 @@ async def test_complete_verified_bridge_dispatch_awards_chat_only_member(monkeyp
 
     settings = SimpleNamespace(ROO_SURFACE="public", MLAI_BACKEND_URL="https://backend.test",
                                ROO_API_KEY="test", MLAI_API_KEY="", INTERNAL_API_KEY="test")
-    event = {"type": "app_mention", "user": sender, "bot_id": "BPOST", "channel": "CSTART",
+    event = {"type": "app_mention", "user": sender, marker: "APOST", "channel": "CSTART",
              "ts": "111.222", "text": "transport text", "_slack_team_id": "TTEST"}
     actor = {"version": 2, "posting_mode": posting_mode, "actor_profile_id": ACTOR,
              "workspace_id": "TTEST", "channel_id": "CSTART", "message_id": "111.222",
              "thread_ts": "111.222", "bridge_user_id": sender, "user_id": "UADMIN",
              "source_event_id": CONTEXT.source_event_id, "text": TEXT,
+             "source_labels": ["Chat member"],
              "recipient_targets": [{"kind": "mlai_profile", "profile_id": TARGET, "display_name": "Chat member"}]}
     resolver = SimpleNamespace(resolve_chat_bridge_actor=AsyncMock(return_value=httpx.Response(200, json=actor)))
     client = SimpleNamespace(get_admin_details=AsyncMock(return_value={"role": "admin"}),
@@ -414,7 +553,7 @@ async def test_complete_verified_bridge_dispatch_awards_chat_only_member(monkeyp
     outcome = await main._handle_app_mention_with_room_choice(event, slack_team_id="TTEST")
     assert "Awarded 4 points to Chat member" in outcome["result"]["message"]
     client.award_points.assert_awaited_once_with("UADMIN", None, 4, "self intro", target_profile_id=TARGET,
-        idempotency_key=f"roo-chat-award:{CONTEXT.source_event_id}:0")
+        idempotency_key=f"roo-chat-award:{CONTEXT.source_event_id}:{TARGET}")
     assert post.call_args.kwargs["thread_ts"] == "111.222"
     assert "88" not in post.call_args.kwargs["text"]
     points_awards.send_dm.assert_not_called()

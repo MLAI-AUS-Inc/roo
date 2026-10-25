@@ -66,6 +66,7 @@ async def test_member_posting_accepts_same_human_sender_only_with_verified_v2_co
     {"recipient_targets": [{**V2_ACTOR["recipient_targets"][0], "source_labels": ["x"] * 21}]},
     {"recipient_targets": [{**V2_ACTOR["recipient_targets"][0], "source_labels": ["<@UFAKE>"]}]},
     {"recipient_targets": [{**V2_ACTOR["recipient_targets"][0], "source_labels": [None]}]},
+    {"source_labels": [None]}, {"source_labels": ["x"] * 21}, {"source_labels": "bad"},
 ])
 async def test_v2_recipient_authority_is_validated_before_dispatch(override):
     backend = AsyncMock()
@@ -88,13 +89,15 @@ async def test_recipient_aliases_are_deduplicated_by_profile():
 async def test_original_signed_labels_are_preserved_separately_from_renamed_display_name():
     backend = AsyncMock()
     backend.resolve_chat_bridge_actor.return_value = httpx.Response(200, json={
-        **V2_ACTOR, "recipient_targets": [{**V2_ACTOR["recipient_targets"][0],
+        **V2_ACTOR, "source_labels": ["4 points", "Old name", "Revoked member"],
+        "recipient_targets": [{**V2_ACTOR["recipient_targets"][0],
             "display_name": "Renamed member", "source_labels": ["4 points", "Old name"]}],
     })
     event = await resolve(backend)
     recipient = event["_verified_bridge_context"].recipient_targets[0]
     assert recipient.display_name == "Renamed member"
     assert recipient.source_labels == ("4 points", "Old name")
+    assert event["_verified_bridge_context"].source_labels == ("4 points", "Old name", "Revoked member")
 
 
 @pytest.mark.asyncio

@@ -26,12 +26,14 @@ The authenticated backend bridge actor endpoint returns version 2:
   "bridge_user_id": "UADMIN",
   "source_event_id": "64 lowercase hex characters",
   "text": "<@UROO> give @Member 4 points for helping",
+  "source_labels": ["Member"],
   "recipient_targets": [
     {
       "kind": "mlai_profile",
       "profile_id": "00000000-0000-4000-8000-000000000002",
       "display_name": "Member",
-      "source_labels": ["Member"]
+      "source_labels": ["Member"],
+      "slack_user_id": null
     }
   ]
 }
@@ -44,13 +46,17 @@ require a different human actor. Unsupported versions, altered scope, malformed
 UUIDs and malformed recipient lists fail closed. Legacy bot responses without
 the version field remain compatible during rollout.
 
-Native clients supply signed `mlai-mention` tags for explicitly selected people.
+API-posted member mentions with only an `app_id` marker use the same verified
+resolver; ordinary human Slack mentions without app markers keep their direct
+path. Native clients supply signed `mlai-mention` tags for explicitly selected people.
 Broadcast-expanded `p` tags and reply participants cannot authorize awards.
 Roo converts the response into an immutable context that travels separately
 from model parameters through agent and skill dispatch. The source text fixes
 the amount and reason; the model cannot supply recipient IDs or substitute an
 award payload. Original signed mention labels are preserved separately from
-the member's current display name. Labels and code examples are masked when
+the member's current display name. The top-level label list includes unavailable
+selected members, so revocation or target omission cannot turn their names into
+an amount on retry. Labels and code examples are masked when
 parsing amounts, so renaming a member or mentioning someone called `4 points`
 cannot create an unintended award amount. Actors still need a linked Slack identity and full Points Admin
 permission. This change supports Chat-only recipients.
@@ -59,8 +65,10 @@ permission. This change supports Chat-only recipients.
 
 Roo calls the existing `/api/v1/points/admin/award/` endpoint with exactly one of
 `target_profile_id` and `target_slack_id`. Canonical profile calls require an
-`idempotency_key`. For Chat awards Roo derives one operation per sorted target
-position from the verified source event. The backend checks canonical identity,
+`idempotency_key`. For Chat awards Roo derives one operation from the verified
+source event and canonical recipient profile UUID. Each recipient keeps the same
+operation if another selected account becomes unavailable or targets reorder
+between retries. The backend checks canonical identity,
 permission, self-awards, allowance and changed-payload replays atomically.
 
 Roo checks the returned canonical recipient and ledger confirmation before
@@ -68,6 +76,14 @@ claiming success. Public outcomes contain the award and escaped member name,
 without a wallet balance. Slack DMs are sent only to a real Slack identity in a
 newly created award response. Chat-only recipients never trigger Slack linking,
 email matching or Slack DMs.
+
+Commands mixing canonical Chat targets with distinct Slack mentions ask for
+separate award commands before crediting anyone. A canonical member's native
+selection and matching verified Slack alias are recognized as the same person.
+Code masking covers top-level backtick/tilde fences, space/tab indented code
+lines and matching-length inline spans, including multiline spans. Unclosed
+fences consume the remaining source; unmatched backtick runs hide the rest of
+their line. Code examples cannot supply a missing prose award amount.
 
 Public replies use a deterministic Slack `client_msg_id`. Failed or unconfirmed
 posting releases the durable Slack event receipt. A retry submits the same
