@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Any, Optional
 from urllib.parse import urljoin, urlparse
-from uuid import UUID, uuid4
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 import httpx
 
 from fastapi import FastAPI, Request, HTTPException, Depends
@@ -3325,6 +3325,7 @@ async def _handle_mention(event: dict):
 
 async def _handle_mention_with_context(event: dict):
     """Handle one Slack message that has passed the addressing gate."""
+    retry_bridge_award = False
     try:
         user_id = event.get("user")
         text = event.get("text", "")
@@ -3365,6 +3366,15 @@ async def _handle_mention_with_context(event: dict):
             ),
             slack_team_id=get_backend_actor_context().slack_team_id,
             event_id=get_backend_actor_context().event_id,
+            verified_bridge_context=event.get("_verified_bridge_context"),
+        )
+
+        result_data = result.get("data") or {}
+        retry_bridge_award = (
+            event.get("_verified_bridge_context") is not None
+            and result.get("skill_used") == "mlai-points"
+            and isinstance(result_data, dict)
+            and result_data.get("action") in {"award", "award_points"}
         )
 
         response = None
@@ -3376,7 +3386,23 @@ async def _handle_mention_with_context(event: dict):
             }
             if result.get("blocks"):
                 post_kwargs["blocks"] = result["blocks"]
-            response = post_message(**post_kwargs)
+            bridge_context = event.get("_verified_bridge_context") if retry_bridge_award else None
+            if bridge_context is not None:
+                post_kwargs["client_msg_id"] = str(uuid5(
+                    NAMESPACE_URL,
+                    f"roo-chat-outcome:{bridge_context.source_event_id}",
+                ))
+            try:
+                response = post_message(**post_kwargs)
+            except Exception as exc:
+                slack_error = getattr(exc, "response", None)
+                if bridge_context is None or slack_error is None or slack_error.get("error") != "duplicate_message":
+                    raise
+                response = {"error": "duplicate_message"}
+            if bridge_context is not None and (not response or not (
+                response.get("ok") or response.get("error") == "duplicate_message"
+            )):
+                raise RuntimeError("Chat outcome notification was not confirmed")
             await _maybe_attach_content_factory_progress(
                 result.get("data"),
                 response,
@@ -3393,6 +3419,28 @@ async def _handle_mention_with_context(event: dict):
         
     except Exception as e:
         print(f"❌ Error handling mention error_type={e.__class__.__name__}")
+        from .points_awards import ChatAwardRetryableError
+
+        if event.get("_verified_bridge_context") is not None and (
+            retry_bridge_award or isinstance(e, ChatAwardRetryableError)
+        ):
+            # Release the durable Slack receipt on notification failure. The
+            # source-bound award key makes the next execution an award replay.
+            if isinstance(e, ChatAwardRetryableError):
+                try:
+                    post_message(
+                        channel=event.get("channel"),
+                        thread_ts=event.get("thread_ts") or event.get("ts"),
+                        text=("I couldn't confirm this award yet. Please wait for a "
+                              "confirmed outcome before sending another award."),
+                        client_msg_id=str(uuid5(
+                            NAMESPACE_URL,
+                            f"roo-chat-pending:{event['_verified_bridge_context'].source_event_id}",
+                        )),
+                    )
+                except Exception:
+                    pass  # The original command remains retryable either way.
+            raise
         
         try:
             post_message(

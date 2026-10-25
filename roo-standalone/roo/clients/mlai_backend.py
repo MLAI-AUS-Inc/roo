@@ -3463,27 +3463,40 @@ class MLAIBackendClient:
     async def award_points(
         self,
         admin_slack_id: str,
-        target_slack_id: str,
+        target_slack_id: Optional[str],
         points: int,
-        reason: str
+        reason: str,
+        *,
+        target_profile_id: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
     ) -> dict:
-        """Manually award or deduct points (admin only)."""
+        """Award one canonical recipient; stable operations are checked atomically by the backend."""
+        if bool(target_slack_id) == bool(target_profile_id):
+            raise ValueError("Select exactly one points recipient.")
+        cleaned_target = self._clean_slack_id(target_slack_id) if target_slack_id else None
+        if cleaned_target and not re.fullmatch(r"[UW][A-Z0-9]+", cleaned_target):
+            raise ValueError("Select a real Slack member mention.")
+        if target_profile_id:
+            if str(UUID(target_profile_id)) != target_profile_id or not idempotency_key:
+                raise ValueError("A canonical recipient and stable operation key are required.")
+        if idempotency_key is not None and (not isinstance(idempotency_key, str) or not idempotency_key.strip() or len(idempotency_key) > 200):
+            raise ValueError("Invalid points award operation key.")
         # 1. Pre-flight Admin Check
-        is_admin = await self.is_admin(admin_slack_id)
-        if not is_admin:
-            raise PermissionError(f"User {admin_slack_id} is not a Points Admin.")
+        if not idempotency_key:
+            is_admin = await self.is_admin(admin_slack_id)
+            if not is_admin:
+                raise PermissionError(f"User {admin_slack_id} is not a Points Admin.")
 
         # 2. Pre-flight Self-Award Check
-        cleaned_target = self._clean_slack_id(target_slack_id)
         if admin_slack_id == cleaned_target and points > 0:
             raise ValueError("Nice try! You can't award points to yourself. 😉")
 
         # 3. Pre-flight Negative Check
-        if points < 0:
-            raise ValueError("Point deductions are disabled. Only positive awards are allowed.")
+        if not isinstance(points, int) or isinstance(points, bool) or points <= 0:
+            raise ValueError("Only positive whole-point awards are allowed.")
 
         # 4. Pre-flight Weekly Allowance Check
-        if points > 0:
+        if points > 0 and not idempotency_key:
             allowance = await self.get_admin_allowance(admin_slack_id)
             if 'error' in allowance:
                 raise PermissionError(allowance['error'])
@@ -3499,10 +3512,12 @@ class MLAIBackendClient:
 
         payload = {
             "admin_slack_id": admin_slack_id,
-            "target_slack_id": cleaned_target,
             "points": points,
             "reason": reason,
         }
+        payload["target_profile_id" if target_profile_id else "target_slack_id"] = target_profile_id or cleaned_target
+        if idempotency_key:
+            payload["idempotency_key"] = idempotency_key
         response = await self._request(
             "POST",
             f"{self._points_base}/admin/award/",

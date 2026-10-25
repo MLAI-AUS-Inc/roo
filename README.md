@@ -249,6 +249,9 @@ Member event discounts bought with Roo Points, private confirmation and recovery
 are described in [the event discount guide](roo-standalone/docs/event-discounts.md).
 The capability is disabled by default and requires the matching backend feature.
 
+Manual awards to MLAI Chat members without Slack, verified mention context and
+safe retries are described in [the Chat points guide](roo-standalone/docs/chat-points.md).
+
 ## Skills
 
 Runtime skills are directories under `roo-standalone/skills`. Inspect the

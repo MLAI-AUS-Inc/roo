@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, patch
 import httpx
 import pytest
 
-from roo.bridge_mentions import resolve_bridge_mention
+from roo.bridge_mentions import resolve_bridge_mention, VerifiedBridgeContext
 from roo.clients.mlai_backend import MLAIBackendClient, MLAIBackendUnavailableError
 
 EVENT = {"type": "app_mention", "user": "UBRIDGE", "bot_id": "BBRIDGE",
@@ -14,6 +14,11 @@ CONTEXT = {"workspace_id": "TMLAI", "channel_id": EVENT["channel"], "message_id"
            "thread_ts": EVENT["thread_ts"], "bridge_user_id": "UBRIDGE"}
 ACTOR = {**CONTEXT, "user_id": "USAM", "source_event_id": "e6" * 32,
          "text": "this is gold <@UROO> please give <@UBEER> 3 points for being a meme lord"}
+ACTOR_PROFILE = "00000000-0000-4000-8000-000000000001"
+RECIPIENT_PROFILE = "00000000-0000-4000-8000-000000000002"
+V2_ACTOR = {**ACTOR, "version": 2, "posting_mode": "bot", "actor_profile_id": ACTOR_PROFILE,
+            "recipient_targets": [{"kind": "mlai_profile", "profile_id": RECIPIENT_PROFILE,
+                                   "display_name": "Chat member"}]}
 
 
 async def resolve(backend, event=EVENT, surface="public"):
@@ -32,6 +37,64 @@ async def test_uses_verified_actor_and_original_text_preserving_reply_location()
     assert event["ts"] == EVENT["ts"]
     assert event["_slack_event_id"] == "mlai-chat:" + "e6" * 32
     assert EVENT["user"] == "UBRIDGE"
+
+
+@pytest.mark.asyncio
+async def test_member_posting_accepts_same_human_sender_only_with_verified_v2_context():
+    backend = AsyncMock()
+    member_event = {**EVENT, "user": "USAM"}
+    backend.resolve_chat_bridge_actor.return_value = httpx.Response(200, json={
+        **V2_ACTOR, "posting_mode": "member", "bridge_user_id": "USAM",
+    })
+    event = await resolve(backend, member_event)
+    assert event["user"] == "USAM"
+    context = event["_verified_bridge_context"]
+    assert isinstance(context, VerifiedBridgeContext)
+    assert context.actor_profile_id == ACTOR_PROFILE
+    assert context.recipient_targets[0].profile_id == RECIPIENT_PROFILE
+    assert context.posting_mode == "member"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("override", [
+    {"version": 3}, {"posting_mode": "unknown"}, {"actor_profile_id": "bad"},
+    {"recipient_targets": [{"kind": "slack", "profile_id": RECIPIENT_PROFILE, "display_name": "x"}]},
+    {"recipient_targets": [{"kind": "mlai_profile", "profile_id": "bad", "display_name": "x"}]},
+    {"recipient_targets": [{"kind": "mlai_profile", "profile_id": RECIPIENT_PROFILE, "display_name": None}]},
+    {"recipient_targets": "bad"}, {"recipient_targets": V2_ACTOR["recipient_targets"] * 21},
+    {"recipient_targets": [{**V2_ACTOR["recipient_targets"][0], "source_labels": ["x" * 81]}]},
+    {"recipient_targets": [{**V2_ACTOR["recipient_targets"][0], "source_labels": ["x"] * 21}]},
+    {"recipient_targets": [{**V2_ACTOR["recipient_targets"][0], "source_labels": ["<@UFAKE>"]}]},
+    {"recipient_targets": [{**V2_ACTOR["recipient_targets"][0], "source_labels": [None]}]},
+])
+async def test_v2_recipient_authority_is_validated_before_dispatch(override):
+    backend = AsyncMock()
+    backend.resolve_chat_bridge_actor.return_value = httpx.Response(200, json={**V2_ACTOR, **override})
+    with pytest.raises(MLAIBackendUnavailableError):
+        await resolve(backend)
+
+
+@pytest.mark.asyncio
+async def test_recipient_aliases_are_deduplicated_by_profile():
+    backend = AsyncMock()
+    backend.resolve_chat_bridge_actor.return_value = httpx.Response(200, json={
+        **V2_ACTOR, "recipient_targets": V2_ACTOR["recipient_targets"] * 2,
+    })
+    event = await resolve(backend)
+    assert len(event["_verified_bridge_context"].recipient_targets) == 1
+
+
+@pytest.mark.asyncio
+async def test_original_signed_labels_are_preserved_separately_from_renamed_display_name():
+    backend = AsyncMock()
+    backend.resolve_chat_bridge_actor.return_value = httpx.Response(200, json={
+        **V2_ACTOR, "recipient_targets": [{**V2_ACTOR["recipient_targets"][0],
+            "display_name": "Renamed member", "source_labels": ["4 points", "Old name"]}],
+    })
+    event = await resolve(backend)
+    recipient = event["_verified_bridge_context"].recipient_targets[0]
+    assert recipient.display_name == "Renamed member"
+    assert recipient.source_labels == ("4 points", "Old name")
 
 
 @pytest.mark.asyncio
@@ -79,7 +142,7 @@ async def test_pending_and_misconfigured_lookup_remain_retryable(status, body):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status,error", [(404, "unknown_bridge_sender"), (403, "bridge_actor_unverified"),
-    (403, "bridge_actor_consent_required"), (403, "roo_not_explicitly_mentioned")])
+    (403, "bridge_actor_consent_required"), (403, "roo_not_explicitly_mentioned"), (403, "invalid_native_mentions")])
 async def test_unauthorized_bridge_mentions_do_not_invoke_roo(status, error):
     backend = AsyncMock()
     backend.resolve_chat_bridge_actor.return_value = httpx.Response(status, json={"error": error})
