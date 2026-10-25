@@ -368,7 +368,7 @@ async def test_verified_legacy_slack_fallback_masks_all_original_native_labels(m
         channel_id="CSTART", thread_ts="111.222", skill=SimpleNamespace(name="mlai-points"),
         verified_bridge_context=context,
     )
-    assert "mention picker" in result
+    assert "one amount" in result
     client.award_points.assert_not_awaited()
 
 
@@ -472,6 +472,71 @@ async def test_revoked_native_slack_alias_cannot_switch_to_a_second_operation_ki
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("command", [
+    "give @A @B 4 points for helping",
+    "give 4 points to @A and @B for helping",
+])
+async def test_signed_missing_beneficiary_has_explicit_unresolved_outcome(command):
+    client = SimpleNamespace(award_points=AsyncMock(return_value=confirmation()))
+    context = replace(CONTEXT, source_labels=("A", "B"), recipient_targets=(BridgeRecipient(TARGET, "A", ("A",)),))
+    result = await award(client, context=context, text=command)
+    assert "Awarded 4 points to A" in result
+    assert "couldn't resolve these beneficiary selections: B" in result
+    assert "Check any earlier outcome" in result
+    client.award_points.assert_awaited_once()
+    assert client.award_points.call_args.kwargs["target_profile_id"] == TARGET
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("command", [
+    "give @A 4 points for helping @B",
+    "give @A 4 points `@B` for helping @B",
+])
+async def test_signed_missing_reason_person_does_not_create_an_unresolved_beneficiary(command):
+    client = SimpleNamespace(award_points=AsyncMock(return_value=confirmation()))
+    context = replace(CONTEXT, source_labels=("A", "B"), recipient_targets=(BridgeRecipient(TARGET, "A", ("A",)),))
+    result = await award(client, context=context, text=command)
+    assert "Awarded 4 points to A" in result
+    assert "beneficiary selections" not in result
+    client.award_points.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_longer_selected_label_consumes_span_before_shorter_reason_only_name():
+    client = SimpleNamespace(award_points=AsyncMock(return_value=confirmation()))
+    context = replace(CONTEXT, source_labels=("Sam", "Sam Donegan"), recipient_targets=(
+        BridgeRecipient(TARGET, "Sam Donegan", ("Sam Donegan",)), BridgeRecipient(OTHER, "Sam", ("Sam",)),
+    ))
+    result = await award(client, context=context, text="give @Sam Donegan 4 points for helping @Sam")
+    assert "Awarded 4 points to Sam Donegan" in result
+    assert "beneficiary selections" not in result
+    client.award_points.assert_awaited_once()
+    assert client.award_points.call_args.kwargs["target_profile_id"] == TARGET
+
+
+@pytest.mark.asyncio
+async def test_missing_longer_label_cannot_resolve_to_shorter_reason_only_name():
+    client = SimpleNamespace(award_points=AsyncMock())
+    context = replace(CONTEXT, source_labels=("Sam", "Sam Donegan"),
+                      recipient_targets=(BridgeRecipient(OTHER, "Sam", ("Sam",)),))
+    result = await award(client, context=context, text="give @Sam Donegan 4 points for helping @Sam")
+    assert "couldn't resolve these beneficiary selections: Sam Donegan" in result
+    client.award_points.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_overlapping_names_with_distinct_beneficiary_spans_both_receive_awards():
+    client = SimpleNamespace(award_points=AsyncMock(side_effect=lambda *args, **kwargs:
+        confirmation(profile_id=kwargs["target_profile_id"])))
+    context = replace(CONTEXT, source_labels=("Sam", "Sam Donegan"), recipient_targets=(
+        BridgeRecipient(TARGET, "Sam Donegan", ("Sam Donegan",)), BridgeRecipient(OTHER, "Sam", ("Sam",)),
+    ))
+    await award(client, context=context, text="give @Sam Donegan and @Sam 4 points for helping")
+    assert {call.kwargs["target_profile_id"] for call in client.award_points.await_args_list} == {TARGET, OTHER}
+    assert client.award_points.await_count == 2
+
+
+@pytest.mark.asyncio
 async def test_agent_keeps_verified_context_outside_routed_parameters(monkeypatch):
     from pathlib import Path
     from roo import agent as agent_module
@@ -548,7 +613,8 @@ async def test_omitted_rejected_target_cannot_shift_committed_recipients_retry_k
     monkeypatch.setattr(main, "get_settings", lambda: SimpleNamespace(ROO_SURFACE="public"))
     monkeypatch.setattr(main, "_maybe_handle_manual_jobs_trigger", AsyncMock(return_value=False))
     monkeypatch.setattr(main, "get_agent", lambda: SimpleNamespace(handle_mention=handle))
-    first = replace(CONTEXT, recipient_targets=(BridgeRecipient(TARGET, "First"), BridgeRecipient(OTHER, "Second")))
+    first = replace(CONTEXT, source_labels=("First", "Second"),
+                    recipient_targets=(BridgeRecipient(TARGET, "First"), BridgeRecipient(OTHER, "Second")))
     event = {"user": "UADMIN", "text": "give @First @Second 4 points for helping", "channel": "CSTART", "ts": "111.222",
              "_slack_team_id": "TTEST", "_slack_event_id": "mlai-chat:" + CONTEXT.source_event_id,
              "_verified_bridge_context": first}
@@ -562,6 +628,7 @@ async def test_omitted_rejected_target_cannot_shift_committed_recipients_retry_k
     assert calls_for_committed_member[0].kwargs["idempotency_key"] == calls_for_committed_member[1].kwargs["idempotency_key"]
     assert earned == {OTHER: 4} and len(entries) == 1
     assert "Awarded 4 points to Second" in outcome["result"]["message"]
+    assert "couldn't resolve these beneficiary selections: First" in outcome["result"]["message"]
 
 
 @pytest.mark.asyncio

@@ -24,19 +24,25 @@ def _label(value: str) -> str:
     return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
-def _source_for_parsing(text: str, context: VerifiedBridgeContext) -> str:
-    """Mask signed mention labels and code while retaining source offsets."""
+def _mask_labels(text: str, context: VerifiedBridgeContext):
+    """Consume longest signed labels once, so a shorter name cannot share a span."""
     labels = context.source_labels
     if labels is None:
         labels = tuple({label for target in context.recipient_targets
                         for label in (target.source_labels or (target.display_name,)) if label})
     visible = text
+    selected = {}
     for label in sorted(labels, key=len, reverse=True):
-        visible = re.sub(
-            rf"(?<![\w@])@{re.escape(label)}(?![\w])",
-            lambda match: " " * len(match.group()), visible, flags=re.IGNORECASE,
-        )
-    return mask_markdown_code(visible)
+        pattern = re.compile(rf"(?<![\w@])@{re.escape(label)}(?![\w])", re.IGNORECASE)
+        if pattern.search(visible):
+            selected.setdefault(label.casefold(), label)
+            visible = pattern.sub(lambda match: " " * len(match.group()), visible)
+    return visible, selected
+
+
+def _source_for_parsing(text: str, context: VerifiedBridgeContext) -> str:
+    """Mask signed mention labels and code while retaining source offsets."""
+    return mask_markdown_code(_mask_labels(text, context)[0])
 
 
 def bridge_award_details(text: str, context: VerifiedBridgeContext) -> tuple[int | None, str, str]:
@@ -58,11 +64,16 @@ def bridge_award_details(text: str, context: VerifiedBridgeContext) -> tuple[int
 def _beneficiaries(context: VerifiedBridgeContext, segment: str, bot_user_id: str | None):
     mentions = set(re.findall(r"<@([UW][A-Z0-9]+)>", segment))
     mentions.discard(bot_user_id)
-    return tuple(target for target in context.recipient_targets if (
+    selected_labels = _mask_labels(segment, context)[1]
+    targets = tuple(target for target in context.recipient_targets if (
         target.slack_user_id in mentions
-        or any(re.search(rf"(?<![\w@])@{re.escape(label)}(?![\w])", segment, re.IGNORECASE)
-               for label in (target.source_labels or (target.display_name,)) if label)
+        or any(label.casefold() in selected_labels
+               for label in (target.source_labels or (target.display_name,)))
     ))
+    resolved_labels = {label.casefold() for target in targets
+                       for label in (target.source_labels or (target.display_name,))}
+    unresolved = tuple(label for key, label in selected_labels.items() if key not in resolved_labels)
+    return targets, unresolved
 
 
 def _failure_message(exc: Exception) -> str:
@@ -93,8 +104,6 @@ async def award_bridge_points(
     """Award only backend-verified targets, using source-bound replay protection."""
     if not isinstance(context, VerifiedBridgeContext):
         return "I couldn't verify the Chat recipients. Select the member again using the @ mention picker."
-    if not context.recipient_targets:
-        return "Who should receive the points? Select the member using the MLAI Chat @ mention picker, then send a new command."
     # Model parameters are deliberately ignored for both identity and payload;
     # retries of this signed source command must submit the same award.
     points, reason, beneficiary_text = bridge_award_details(text, context)
@@ -104,9 +113,14 @@ async def award_bridge_points(
         return "Points awards need a positive number of points."
     if not reason:
         return "What are the points for? Include a reason, such as `for helping at the event`."
-    targets = _beneficiaries(context, beneficiary_text, bot_user_id)
+    targets, unresolved = _beneficiaries(context, beneficiary_text, bot_user_id)
     if not targets:
-        return "Who should receive the points? Select the beneficiary before the `for` reason, then send a new command."
+        if unresolved:
+            names = ", ".join(_label(label) for label in unresolved)
+            return (f"I couldn't resolve these beneficiary selections: {names}. "
+                    "Check any earlier outcome before selecting them again with the MLAI Chat @ mention picker.")
+        return ("Who should receive the points? Select the beneficiary using the MLAI Chat @ mention picker "
+                "before the `for` reason. Check any earlier outcome before sending another award.")
     actual_slack_mentions = set(re.findall(r"<@([UW][A-Z0-9]+)>", beneficiary_text))
     actual_slack_mentions.discard(bot_user_id)
     known_aliases = {target.slack_user_id for target in targets if target.slack_user_id}
@@ -150,4 +164,8 @@ async def award_bridge_points(
                 # for a fresh command, which would have a different source key.
                 raise ChatAwardRetryableError("Chat award outcome is pending") from exc
             outcomes.append(f"❌ {_label(target.display_name) or 'The selected member'}: {_failure_message(exc)}")
+    if unresolved:
+        names = ", ".join(_label(label) for label in unresolved)
+        outcomes.append(f"⚠️ I couldn't resolve these beneficiary selections: {names}. "
+                        "Check any earlier outcome before requesting another award for them.")
     return "\n".join(outcomes) + f"\n\nReason: {_label(reason)}"

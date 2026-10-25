@@ -14,6 +14,12 @@ Both `give @Member 4 points for helping` and `give 4 points to @Member for
 helping` work. People mentioned in the reason describe the work and receive no
 award. A `for` inside a bound member name or code example does not end the
 beneficiary segment. Ambiguous beneficiary selections ask for clarification.
+Overlapping names use the longest selected label once; selecting `Sam Donegan`
+before the reason does not also select someone called `Sam` mentioned in the
+reason. If a signed beneficiary selection is unavailable, Roo names that
+unresolved selection alongside confirmed awards and asks the admin to check any
+earlier outcome before another award. Unavailable people mentioned only in the
+reason do not appear as unresolved beneficiaries.
 
 ## Trusted command context
 
