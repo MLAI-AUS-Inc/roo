@@ -39,19 +39,30 @@ def _source_for_parsing(text: str, context: VerifiedBridgeContext) -> str:
     return mask_markdown_code(visible)
 
 
-def bridge_award_details(text: str, context: VerifiedBridgeContext) -> tuple[int | None, str]:
-    """Extract one explicit prose amount and reason from the verified source."""
+def bridge_award_details(text: str, context: VerifiedBridgeContext) -> tuple[int | None, str, str]:
+    """Extract an amount, reason and code-masked segment naming beneficiaries."""
     # Signed source text takes precedence over model-extracted values. Slack
     # IDs and digits in member names are never interpreted as point amounts.
     visible = _source_for_parsing(text, context)
     amounts = list(re.finditer(r"(?<![\w.,+-])([+-]?\d+)\s*(?:points?|pts?)\b", visible, re.IGNORECASE))
     if any(re.search(r"\d\s+$", visible[:amount.start()]) for amount in amounts):
-        return None, ""  # Unsupported spaced thousands cannot become a smaller award.
+        return None, "", ""  # Unsupported spaced thousands cannot become a smaller award.
     points = int(amounts[0].group(1)) if len(amounts) == 1 else None
     trailing_text = visible[amounts[0].end():] if len(amounts) == 1 else ""
     reason_match = re.search(r"\bfor(?=\s)", trailing_text, re.IGNORECASE)
     reason = text[amounts[0].end() + reason_match.end():].strip() if reason_match else ""
-    return points, reason
+    boundary = amounts[0].end() + reason_match.start() if reason_match else 0
+    return points, reason, mask_markdown_code(text)[:boundary]
+
+
+def _beneficiaries(context: VerifiedBridgeContext, segment: str, bot_user_id: str | None):
+    mentions = set(re.findall(r"<@([UW][A-Z0-9]+)>", segment))
+    mentions.discard(bot_user_id)
+    return tuple(target for target in context.recipient_targets if (
+        target.slack_user_id in mentions
+        or any(re.search(rf"(?<![\w@])@{re.escape(label)}(?![\w])", segment, re.IGNORECASE)
+               for label in (target.source_labels or (target.display_name,)) if label)
+    ))
 
 
 def _failure_message(exc: Exception) -> str:
@@ -84,26 +95,29 @@ async def award_bridge_points(
         return "I couldn't verify the Chat recipients. Select the member again using the @ mention picker."
     if not context.recipient_targets:
         return "Who should receive the points? Select the member using the MLAI Chat @ mention picker, then send a new command."
-    actual_slack_mentions = set(re.findall(r"<@([UW][A-Z0-9]+)>", mask_markdown_code(text)))
-    actual_slack_mentions.discard(bot_user_id)
-    known_aliases = {target.slack_user_id for target in context.recipient_targets if target.slack_user_id}
-    if actual_slack_mentions - known_aliases:
-        return ("I couldn't verify every Slack mention alongside the selected Chat members. "
-                "Send separate award commands for the Chat and Slack recipients so everyone receives the right award.")
     # Model parameters are deliberately ignored for both identity and payload;
     # retries of this signed source command must submit the same award.
-    points, reason = bridge_award_details(text, context)
+    points, reason, beneficiary_text = bridge_award_details(text, context)
     if points is None:
         return "How many points should I award? Include one amount, such as `4 points`."
     if points <= 0:
         return "Points awards need a positive number of points."
     if not reason:
         return "What are the points for? Include a reason, such as `for helping at the event`."
-    if any(target.profile_id == context.actor_profile_id for target in context.recipient_targets):
+    targets = _beneficiaries(context, beneficiary_text, bot_user_id)
+    if not targets:
+        return "Who should receive the points? Select the beneficiary before the `for` reason, then send a new command."
+    actual_slack_mentions = set(re.findall(r"<@([UW][A-Z0-9]+)>", beneficiary_text))
+    actual_slack_mentions.discard(bot_user_id)
+    known_aliases = {target.slack_user_id for target in targets if target.slack_user_id}
+    if actual_slack_mentions - known_aliases:
+        return ("I couldn't verify every Slack mention alongside the selected Chat members. "
+                "Send separate award commands for the Chat and Slack recipients so everyone receives the right award.")
+    if any(target.profile_id == context.actor_profile_id for target in targets):
         return "You can't award points to yourself. Ask another Points Admin to review the award."
 
     outcomes = []
-    for target in sorted(context.recipient_targets, key=lambda item: item.profile_id):
+    for target in sorted(targets, key=lambda item: item.profile_id):
         try:
             result = await client.award_points(
                 admin_slack_id, None, points, reason,

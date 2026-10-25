@@ -16200,6 +16200,7 @@ Chunk {index} source: {label}
                 bot_id = get_bot_user_id()
             except Exception:
                 bot_id = None
+            award_target_text = text
 
             management_action = self._resolve_points_admin_management_action(
                 text,
@@ -16237,6 +16238,7 @@ Chunk {index} source: {label}
                 legacy_slack_targets = (
                     isinstance(verified_bridge_context, VerifiedBridgeContext)
                     and not verified_bridge_context.recipient_targets
+                    and not verified_bridge_context.source_labels
                     and bot_id
                     and any(target != bot_id for target in explicit_slack_recipients)
                 )
@@ -16250,13 +16252,16 @@ Chunk {index} source: {label}
                 # Older clients preserve actual Slack mentions. Keep that
                 # verified source path compatible without letting model IDs
                 # replace an absent native recipient (including revoked keys).
-                points, reason = bridge_award_details(text, verified_bridge_context)
+                points, reason, beneficiary_text = bridge_award_details(text, verified_bridge_context)
                 if points is None:
                     return "How many points should I award? Include one amount, such as `4 points`."
                 if points <= 0:
                     return "Points awards need a positive number of points."
                 if not reason:
                     return "What are the points for? Include a reason after `for`."
+                if not any(target != bot_id for target in re.findall(r"<@([UW][A-Z0-9]+)>", beneficiary_text)):
+                    return "Who should receive the points? Select the beneficiary before the `for` reason, then send a new command."
+                award_target_text = beneficiary_text
                 params = {**params, "points": points, "reason": reason}
                 request_id = f"mlai-chat:{verified_bridge_context.source_event_id}"
 
@@ -16290,7 +16295,7 @@ Chunk {index} source: {label}
             
             # Get Roo's bot ID to filter it from target users
             # Extract ALL user mentions from the text (excluding Roo)
-            all_mentions = re.findall(r'<@([A-Z0-9]+)>', text)
+            all_mentions = re.findall(r'<@([A-Z0-9]+)>', award_target_text)
             target_slack_ids = [uid for uid in all_mentions if uid != bot_id]
             
             # Fallback to params if no mentions found in text

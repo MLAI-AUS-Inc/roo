@@ -9,6 +9,12 @@ The command needs one positive whole-number amount followed by `points` or
 historical command contains only a display name. It never searches for a
 recipient by name or creates a placeholder Slack account.
 
+Beneficiaries must be selected before the first prose `for` after the amount.
+Both `give @Member 4 points for helping` and `give 4 points to @Member for
+helping` work. People mentioned in the reason describe the work and receive no
+award. A `for` inside a bound member name or code example does not end the
+beneficiary segment. Ambiguous beneficiary selections ask for clarification.
+
 ## Trusted command context
 
 The authenticated backend bridge actor endpoint returns version 2:
@@ -80,6 +86,10 @@ email matching or Slack DMs.
 Commands mixing canonical Chat targets with distinct Slack mentions ask for
 separate award commands before crediting anyone. A canonical member's native
 selection and matching verified Slack alias are recognized as the same person.
+Only mentions in the beneficiary segment participate in this check. If an
+original native selection becomes unavailable, its rendered Slack alias cannot
+switch the same source command to a second kind of award operation; Roo asks
+for a fresh explicit selection instead.
 Code masking covers top-level backtick/tilde fences, space/tab indented code
 lines and matching-length inline spans, including multiline spans. Unclosed
 fences consume the remaining source; unmatched backtick runs hide the rest of
