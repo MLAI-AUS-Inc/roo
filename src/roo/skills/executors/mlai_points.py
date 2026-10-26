@@ -15,6 +15,8 @@ from .constants import ROO_TOPUP_PACK_BY_POINTS
 from difflib import SequenceMatcher
 from ..loader import Skill
 import asyncio
+import hashlib
+from ...points_awards import ChatAwardRetryableError
 from ...coworking_booking_intents import build_coworking_operation_id, coworking_failure_code, deliver_coworking_booking_notification, get_coworking_intent_store, is_retryable_coworking_exception
 from ...points_flex import build_points_flex_delete_blocks, build_points_flex_preview_blocks, get_points_flex_store, issue_points_flex_confirmation, issue_points_flex_deletion, parse_lifetime_earned
 from ...points_request_approval import build_points_request_metadata, build_points_request_record, remember_points_request_summary
@@ -49,6 +51,7 @@ class MlaiPointsExecutor(BackendErrors, PromptExecutor):
                 kwargs.get("event_id")
                 or kwargs.get("current_message_ts")
             ),
+            verified_bridge_context=kwargs.get("verified_bridge_context"),
         )
         return result
 
@@ -143,6 +146,7 @@ class MlaiPointsExecutor(BackendErrors, PromptExecutor):
         channel_id: Optional[str],
         thread_ts: Optional[str],
         request_id: Optional[str] = None,
+        verified_bridge_context=None,
     ) -> Any:
         """Execute the MLAI Points skill."""
         import httpx
@@ -192,10 +196,14 @@ class MlaiPointsExecutor(BackendErrors, PromptExecutor):
             }
             if request_id:
                 handle_kwargs["request_id"] = request_id
+            if verified_bridge_context is not None:
+                handle_kwargs["verified_bridge_context"] = verified_bridge_context
             return await self._handle_points_action(
                 **handle_kwargs
             )
             
+        except ChatAwardRetryableError:
+            raise
         except MLAIBackendUnavailableError:
             return self._points_backend_unavailable_message(action)
         except PermissionError:
@@ -3165,6 +3173,7 @@ class MlaiPointsExecutor(BackendErrors, PromptExecutor):
         thread_ts: Optional[str],
         skill,
         request_id: Optional[str] = None,
+        verified_bridge_context=None,
     ) -> Any:
         """Handle individual points actions."""
         if action in {
@@ -4496,6 +4505,7 @@ class MlaiPointsExecutor(BackendErrors, PromptExecutor):
                 bot_id = get_bot_user_id()
             except Exception:
                 bot_id = None
+            award_target_text = text
 
             management_action = self._resolve_points_admin_management_action(
                 text,
@@ -4513,7 +4523,7 @@ class MlaiPointsExecutor(BackendErrors, PromptExecutor):
                     skill=skill,
                 )
 
-            if self._is_self_directed_points_award(text, params, user_id, bot_id=bot_id):
+            if verified_bridge_context is None and self._is_self_directed_points_award(text, params, user_id, bot_id=bot_id):
                 return await self._handle_points_action(
                     client=client,
                     action="request_points",
@@ -4525,12 +4535,47 @@ class MlaiPointsExecutor(BackendErrors, PromptExecutor):
                     skill=skill,
                 )
 
+            if verified_bridge_context is not None:
+                from ...bridge_mentions import VerifiedBridgeContext
+                from ...points_awards import award_bridge_points, bridge_award_details
+
+                explicit_slack_recipients = re.findall(r"<@([UW][A-Z0-9]+)>", text)
+                legacy_slack_targets = (
+                    isinstance(verified_bridge_context, VerifiedBridgeContext)
+                    and not verified_bridge_context.recipient_targets
+                    and not verified_bridge_context.source_labels
+                    and bot_id
+                    and any(target != bot_id for target in explicit_slack_recipients)
+                )
+                if not legacy_slack_targets:
+                    return await award_bridge_points(
+                        client=client, context=verified_bridge_context,
+                        text=text, params=params, admin_slack_id=user_id,
+                        channel_id=channel_id, thread_ts=thread_ts,
+                        bot_user_id=bot_id,
+                    )
+                # Older clients preserve actual Slack mentions. Keep that
+                # verified source path compatible without letting model IDs
+                # replace an absent native recipient (including revoked keys).
+                points, reason, beneficiary_text = bridge_award_details(text, verified_bridge_context)
+                if points is None:
+                    return "How many points should I award? Include one amount, such as `4 points`."
+                if points <= 0:
+                    return "Points awards need a positive number of points."
+                if not reason:
+                    return "What are the points for? Include a reason after `for`."
+                if not any(target != bot_id for target in re.findall(r"<@([UW][A-Z0-9]+)>", beneficiary_text)):
+                    return "Who should receive the points? Select the beneficiary before the `for` reason, then send a new command."
+                award_target_text = beneficiary_text
+                params = {**params, "points": points, "reason": reason}
+                request_id = f"mlai-chat:{verified_bridge_context.source_event_id}"
+
             admin_details = await client.get_admin_details(user_id)
             if not self._is_full_points_admin_details(admin_details):
                 return self._full_points_admin_denial(admin_details, "award points")
 
             # Early allowance check for award actions (before LLM/rate card lookup)
-            if action in ["award_points", "award"]:
+            if action in ["award_points", "award"] and not request_id:
                 try:
                     allowance_status = await client.get_admin_allowance(user_id)
                     if 'error' in allowance_status:
@@ -4555,7 +4600,7 @@ class MlaiPointsExecutor(BackendErrors, PromptExecutor):
             
             # Get Roo's bot ID to filter it from target users
             # Extract ALL user mentions from the text (excluding Roo)
-            all_mentions = re.findall(r'<@([A-Z0-9]+)>', text)
+            all_mentions = re.findall(r'<@([A-Z0-9]+)>', award_target_text)
             target_slack_ids = [uid for uid in all_mentions if uid != bot_id]
             
             # Fallback to params if no mentions found in text
@@ -4641,7 +4686,7 @@ class MlaiPointsExecutor(BackendErrors, PromptExecutor):
             # Award points to each target user
             results = []
             errors = []
-            for target_id in target_slack_ids:
+            for target_id in sorted(set(target_slack_ids)):
                 try:
                     # Deduplication: Link Slack ID to existing email user if needed
                     try:
@@ -4661,7 +4706,11 @@ class MlaiPointsExecutor(BackendErrors, PromptExecutor):
                     except Exception as e:
                         print(f"⚠️ User linking failed (continuing to award): {e}")
 
-                    result = await client.award_points(user_id, target_id, int(points), reason)
+                    award_kwargs = {}
+                    if request_id:
+                        operation = hashlib.sha256(str(request_id).encode()).hexdigest()
+                        award_kwargs["idempotency_key"] = f"roo-slack-award:{operation}:{target_id}"
+                    result = await client.award_points(user_id, target_id, int(points), reason, **award_kwargs)
                     new_balance = result.get("new_balance")
                     results.append({"user": target_id})
                     balance_line = (
@@ -4670,6 +4719,8 @@ class MlaiPointsExecutor(BackendErrors, PromptExecutor):
                         else ""
                     )
                     try:
+                        if result.get("replayed"):
+                            continue
                         send_dm(
                             target_id,
                             (

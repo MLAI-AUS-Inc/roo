@@ -4,6 +4,7 @@ from typing import Optional, List
 from .loader import Skill
 from .contracts import SkillRequest, SkillResult
 from .registry import EXECUTORS
+from ..points_awards import ChatAwardRetryableError
 
 class SkillExecutor:
     def __init__(self, executors=None):
@@ -95,6 +96,8 @@ class SkillExecutor:
                 suppress_post=suppress_post
             )
             
+        except ChatAwardRetryableError:
+            raise
         except Exception as e:
             print(f"❌ Skill execution failed: {e}")
             import traceback

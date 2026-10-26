@@ -56,6 +56,7 @@ jobs:
           python -m pytest ../tests/roo/test_surface_security.py -q
           python -m pytest ../tests/roo/test_deployment_checks.py -q
           python -m pytest ../tests/roo/test_bridge_mentions.py -q
+          python -m pytest ../tests/roo/test_chat_points_awards.py -q
           # Chart rendering and binary uploads run offline, isolated from legacy stubs.
           python -m pytest ../tests/roo/test_coworking_charts.py ../tests/roo/test_slack_file_upload.py -q
           python -m pytest ../tests/roo/test_points_requests.py -k coworking -q
