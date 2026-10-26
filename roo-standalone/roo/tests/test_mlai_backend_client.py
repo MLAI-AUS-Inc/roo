@@ -1486,3 +1486,92 @@ async def test_event_finance_audit_uses_read_only_bounded_endpoint(monkeypatch):
         "until": "2026-08-02",
     }
     assert result["xero_writes"] is False
+
+
+def agenda_client(monkeypatch, handler):
+    monkeypatch.setattr(
+        backend_module.httpx, "AsyncClient",
+        lambda *args, **kwargs: FakeAsyncClient(handler),
+    )
+    return MLAIBackendClient(
+        base_url="https://backend.test", api_key="roo-test-key",
+        internal_api_key="different-admin-test-key",
+    )
+
+
+AGENDA_REQUEST = dict(
+    idempotency_key="a" * 64, requester_slack_id="<@U123>", owner_name="Sam",
+    meeting_date="2026-10-23", item="Monthly check-ins",
+)
+
+
+@pytest.mark.asyncio
+async def test_add_notion_agenda_item_uses_strict_roo_key_and_no_retries(monkeypatch):
+    calls = []
+
+    async def handler(method, url, **kwargs):
+        calls.append((method, url, kwargs))
+        return httpx.Response(
+            201, request=httpx.Request(method, url),
+            json={"status": "added", "page_url": "https://notion.so/p", "replayed": False},
+        )
+
+    client = agenda_client(monkeypatch, handler)
+    result = await client.add_notion_agenda_item(**AGENDA_REQUEST, page_id="page-1")
+
+    method, url, kwargs = calls[0]
+    assert (method, url) == ("POST", "https://backend.test/api/v1/integrations/notion/agenda-items")
+    assert kwargs["headers"]["X-API-Key"] == "roo-test-key"
+    assert kwargs["json"]["requester_slack_id"] == "U123"
+    assert kwargs["json"]["page_id"] == "page-1"
+    assert result["status"] == "added" and result["http_status"] == 201
+
+
+@pytest.mark.asyncio
+async def test_add_notion_agenda_item_returns_error_codes_instead_of_raising(monkeypatch):
+    async def handler(method, url, **kwargs):
+        return httpx.Response(
+            503, request=httpx.Request(method, url), headers={"Retry-After": "7"},
+            json={"code": "notion_rate_limited", "detail": "Slow down.", "uncertain": False},
+        )
+
+    result = await agenda_client(monkeypatch, handler).add_notion_agenda_item(**AGENDA_REQUEST)
+
+    assert result["code"] == "notion_rate_limited"
+    assert result["retry_after"] == 7
+
+
+@pytest.mark.asyncio
+async def test_add_notion_agenda_item_timeout_is_not_retried(monkeypatch):
+    attempts = []
+
+    async def handler(method, url, **kwargs):
+        attempts.append(url)
+        raise httpx.ReadTimeout("slow", request=httpx.Request(method, url))
+
+    with pytest.raises(MLAIBackendUnavailableError):
+        await agenda_client(monkeypatch, handler).add_notion_agenda_item(**AGENDA_REQUEST)
+    assert len(attempts) == 1
+
+
+@pytest.mark.asyncio
+async def test_notion_agenda_non_contract_response_means_backend_unavailable(monkeypatch):
+    async def handler(method, url, **kwargs):
+        return httpx.Response(502, request=httpx.Request(method, url), text="<html>Bad gateway</html>")
+
+    with pytest.raises(MLAIBackendUnavailableError):
+        await agenda_client(monkeypatch, handler).add_notion_agenda_item(**AGENDA_REQUEST)
+
+
+@pytest.mark.asyncio
+async def test_get_notion_agenda_receipt_reads_not_found_body(monkeypatch):
+    calls = []
+
+    async def handler(method, url, **kwargs):
+        calls.append((method, url))
+        return httpx.Response(404, request=httpx.Request(method, url), json={"state": "not_found"})
+
+    result = await agenda_client(monkeypatch, handler).get_notion_agenda_receipt("a" * 64)
+
+    assert calls[0] == ("GET", f"https://backend.test/api/v1/integrations/notion/agenda-items/receipts/{'a' * 64}")
+    assert result == {"state": "not_found", "http_status": 404, "retry_after": None}

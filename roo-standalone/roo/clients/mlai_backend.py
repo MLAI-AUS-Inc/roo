@@ -662,6 +662,40 @@ class MLAIBackendClient:
         prefix = "" if base_path.endswith("/api/v1") else "/api/v1"
         return f"{prefix}/integrations/linear/channel-issues/{suffix}"
 
+    def _notion_agenda_endpoint(self, suffix: str = "") -> str:
+        """Support backend base URLs with or without an /api/v1 suffix."""
+
+        suffix = str(suffix or "").strip("/")
+        base_path = urlparse(self.base_url).path.rstrip("/")
+        prefix = "" if base_path.endswith("/api/v1") else "/api/v1"
+        path = f"{prefix}/integrations/notion/agenda-items"
+        return f"{path}/{suffix}" if suffix else path
+
+    @staticmethod
+    def _notion_agenda_payload(response: httpx.Response) -> dict:
+        """Return the agenda contract body for successes and our own error codes.
+
+        The backend answers errors with {"code", "detail", "uncertain"}, so the
+        handler maps codes to replies instead of raising on every 4xx/5xx.
+        Anything else (proxy pages, non-JSON) means the backend wasn't reached.
+        """
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = None
+        if not isinstance(payload, dict) or not (
+            payload.get("status") or payload.get("code") or payload.get("state")
+        ):
+            raise MLAIBackendUnavailableError(
+                f"Unexpected agenda response with status {response.status_code}."
+            )
+        retry_after = response.headers.get("Retry-After")
+        return {
+            **payload,
+            "http_status": response.status_code,
+            "retry_after": int(retry_after) if str(retry_after or "").isdigit() else None,
+        }
+
 
     async def get_org_memory_actor_context(self) -> dict:
         """Validate the scoped service identity without retrieving memory data."""
@@ -2417,6 +2451,51 @@ class MLAIBackendClient:
         )
         self._raise_for_status_or_backend_unavailable(response)
         return response.json()
+
+    async def add_notion_agenda_item(
+        self,
+        *,
+        idempotency_key: str,
+        requester_slack_id: str,
+        owner_name: str,
+        meeting_date: str,
+        item: str,
+        page_id: Optional[str] = None,
+    ) -> dict:
+        """Add one agenda bullet. Strict ROO_API_KEY endpoint: never admin headers."""
+        payload: Dict[str, Any] = {
+            "idempotency_key": str(idempotency_key or "").strip(),
+            "requester_slack_id": self._clean_slack_id(requester_slack_id),
+            "owner_name": str(owner_name or "").strip(),
+            "meeting_date": str(meeting_date or "").strip(),
+            "item": str(item or "").strip(),
+        }
+        if page_id:
+            payload["page_id"] = str(page_id).strip()
+        # The backend may create a page and poll its template, so allow time.
+        # No transport retries: a timed-out write may have landed, and the
+        # handler retries with the same key, which the backend deduplicates.
+        response = await self._request(
+            "POST",
+            self._notion_agenda_endpoint(),
+            json=payload,
+            timeout=60.0,
+            transport_retries=0,
+            circuit_breaker=True,
+        )
+        return self._notion_agenda_payload(response)
+
+    async def get_notion_agenda_receipt(self, idempotency_key: str) -> dict:
+        """Read a stored agenda result: state is completed, processing or not_found."""
+        key = quote(str(idempotency_key or "").strip(), safe="")
+        response = await self._request(
+            "GET",
+            self._notion_agenda_endpoint(f"receipts/{key}"),
+            timeout=10.0,
+            transport_retries=1,
+            circuit_breaker=True,
+        )
+        return self._notion_agenda_payload(response)
 
     async def get_linear_channel_issue(
         self,
