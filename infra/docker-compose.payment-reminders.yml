@@ -4,11 +4,11 @@ name: roo-payment-reminders
 services:
   payment-reminders:
     build:
-      context: ../src
+      context: ../roo-standalone
       dockerfile: ../infra/Dockerfile
     command: ["python", "-m", "roo.payment_reminder_worker"]
     env_file:
-      - ../src/.env.payment-reminders
+      - ../roo-standalone/.env.payment-reminders
     restart: unless-stopped
     volumes:
       - payment-reminder-data:/app/data/payment-reminders

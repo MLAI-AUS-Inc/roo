@@ -3,7 +3,7 @@
 set -euo pipefail
 
 repo_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-app_dir="$repo_dir/src"
+app_dir="$repo_dir/roo-standalone"
 usage() {
   cat <<'EOF'
 Usage: run_evals.sh [offline|routing|addressing|live] [arguments]
@@ -18,9 +18,9 @@ Examples:
   ./tests/run_evals.sh routing --filter blessed --json /tmp/routing.json
   ./tests/run_evals.sh addressing --min-confidence 0.90
 
-Uses src/.venv/bin/python when available, otherwise python3 on PATH.
+Uses roo-standalone/.venv/bin/python when available, otherwise python3 on PATH.
 Set EVAL_PYTHON to override the interpreter. Live modes use development model
-credentials from the environment or src/.env and incur API usage charges.
+credentials from the environment or roo-standalone/.env and incur API usage charges.
 EOF
 }
 

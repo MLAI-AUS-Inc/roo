@@ -31,7 +31,7 @@ def test_registered_skill_owns_an_executor_object(name):
 
 
 def test_executors_never_depend_on_central_executor():
-    folder = Path(__file__).resolve().parents[2] / 'src/roo/skills/executors'
+    folder = Path(__file__).resolve().parents[2] / 'roo-standalone/roo/skills/executors'
     for path in folder.glob('*.py'):
         tree = ast.parse(path.read_text())
         for node in ast.walk(tree):

@@ -34,17 +34,17 @@ Execution: Native approved on 12 October 2026; all implementation tasks and the 
 
 ## Workspace, dependencies and file map
 
-Workspace: `/Users/alanphilip/Projects/roo-studio-invoices`; application: `src`. Current planning baseline is `codex/roo-invoice-public-ack` at `9583026` (PR 297), following merged PR 296. At execution, inspect status and incorporate the acknowledgement work before creating an independent `codex/` follow-up branch. These two planning files are currently untracked. Do not start a server or call production to execute offline tests.
+Workspace: `/Users/alanphilip/Projects/roo-studio-invoices`; application: `roo-standalone`. Current planning baseline is `codex/roo-invoice-public-ack` at `9583026` (PR 297), following merged PR 296. At execution, inspect status and incorporate the acknowledgement work before creating an independent `codex/` follow-up branch. These two planning files are currently untracked. Do not start a server or call production to execute offline tests.
 
-- Modify `../../../src/roo/studio_report_source.py`: existing batching/evidence reader; shared source binding, cooldown and resumable attempt budget.
-- Create `../../../src/roo/invoice_source.py`: verified Linear scope, bounded discovery, compact project-move checks, durable source generations, preparation and period collection.
-- Modify `../../../src/roo/timesheet_linear.py`: backwards-compatible report-collection adapter; do not change client report or Plane discovery.
-- Modify `../../../src/roo/timesheet_worker.py`: pass accounting coverage requirements, explicit report-batch context, private preparation CLI and invoice reader composition.
-- Modify `../../../src/roo/invoice_worker.py`: surround command/scheduled processing with the shared-report batch context; keep per-member ownership checks and delivery rules.
-- Modify `../../../src/roo/tests/test_studio_report_source.py`; create `../../../src/roo/tests/test_invoice_source.py`; extend `../../../src/roo/tests/test_invoice_worker.py` and `../../../src/roo/tests/test_timesheets.py` for integration boundaries.
-- Modify `../../../src/docs/studio-invoices.md` and `../../../src/docs/studio-timesheets.md`: preparation, source scope, cost and recovery.
+- Modify `../../../roo-standalone/roo/studio_report_source.py`: existing batching/evidence reader; shared source binding, cooldown and resumable attempt budget.
+- Create `../../../roo-standalone/roo/invoice_source.py`: verified Linear scope, bounded discovery, compact project-move checks, durable source generations, preparation and period collection.
+- Modify `../../../roo-standalone/roo/timesheet_linear.py`: backwards-compatible report-collection adapter; do not change client report or Plane discovery.
+- Modify `../../../roo-standalone/roo/timesheet_worker.py`: pass accounting coverage requirements, explicit report-batch context, private preparation CLI and invoice reader composition.
+- Modify `../../../roo-standalone/roo/invoice_worker.py`: surround command/scheduled processing with the shared-report batch context; keep per-member ownership checks and delivery rules.
+- Modify `../../../roo-standalone/roo/tests/test_studio_report_source.py`; create `../../../roo-standalone/roo/tests/test_invoice_source.py`; extend `../../../roo-standalone/roo/tests/test_invoice_worker.py` and `../../../roo-standalone/roo/tests/test_timesheets.py` for integration boundaries.
+- Modify `../../../roo-standalone/docs/studio-invoices.md` and `../../../roo-standalone/docs/studio-timesheets.md`: preparation, source scope, cost and recovery.
 
-Run all commands from `src` using `SLACK_BOT_TOKEN=test SLACK_SIGNING_SECRET=test OPENAI_API_KEY=test FOUNDER_TOOLS_LINK_ORIGINS=https://mlai.au .venv/bin/python -m pytest`. Use temporary private directories and synthetic credentials; unexpected HTTP must fail the test. Each task runs its named module(s), first observing the new assertions fail, then passing after implementation, and commits only its owned files.
+Run all commands from `roo-standalone` using `SLACK_BOT_TOKEN=test SLACK_SIGNING_SECRET=test OPENAI_API_KEY=test FOUNDER_TOOLS_LINK_ORIGINS=https://mlai.au .venv/bin/python -m pytest`. Use temporary private directories and synthetic credentials; unexpected HTTP must fail the test. Each task runs its named module(s), first observing the new assertions fail, then passing after implementation, and commits only its owned files.
 
 ### Task 1: Durable source gate and bounded resumable attempts
 

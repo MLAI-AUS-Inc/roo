@@ -85,7 +85,7 @@ def agenda_agent(monkeypatch):
     agent._thread_skill_context = {}
     agent.skills = []
     # Read metadata only; load_skills also imports executable client modules.
-    for path in sorted((Path(__file__).resolve().parents[2] / "src/skills").glob("*/SKILL.md")):
+    for path in sorted((Path(__file__).resolve().parents[2] / "roo-standalone/skills").glob("*/SKILL.md")):
         post = frontmatter.load(path)
         if post.metadata.get("name") in Settings.PUBLIC_DEFAULT_SKILLS:
             agent.skills.append(Skill(

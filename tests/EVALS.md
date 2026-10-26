@@ -2,7 +2,7 @@
 
 ## Booking and Roo Points smoke tests
 
-From `src` with the application Python environment:
+From `roo-standalone` with the application Python environment:
 
 ```bash
 python ../tests/run_skill_smoke.py
@@ -49,10 +49,10 @@ From the repository root (or use the script's absolute path from anywhere):
 ./tests/run_evals.sh live            # Both live suites
 ```
 
-Install `src/requirements.txt` in a Python 3.11 environment first. The runner
-uses `src/.venv/bin/python` if present, or `python3` from PATH. Override with
+Install `roo-standalone/requirements.txt` in a Python 3.11 environment first. The runner
+uses `roo-standalone/.venv/bin/python` if present, or `python3` from PATH. Override with
 `EVAL_PYTHON=/path/to/python`. Live modes require development model credentials
-in the environment or `src/.env`; they incur model API usage. They evaluate
+in the environment or `roo-standalone/.env`; they incur model API usage. They evaluate
 decisions without executing skills or posting Slack replies.
 
 | Suite | Cases | Implementation |
@@ -84,7 +84,7 @@ underlying Python CLI.
 
 Run `tests/roo/test_capability_honesty.py` in its own pytest process.
 It covers adding an agenda item, a same-channel correction, and checking whether
-the item was saved. From `src`, with the Python 3.11 test environment active:
+the item was saved. From `roo-standalone`, with the Python 3.11 test environment active:
 
 ```bash
 SLACK_BOT_TOKEN=test SLACK_SIGNING_SECRET=test OPENAI_API_KEY=test \

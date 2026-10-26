@@ -1,4 +1,4 @@
-"""Run from src: python -m roo.skills.lint [--required name ...]."""
+"""Run from roo-standalone: python -m roo.skills.lint [--required name ...]."""
 import argparse
 from pathlib import Path
 from .catalogue import inspect_catalogue, REQUIRED_CLIENTS

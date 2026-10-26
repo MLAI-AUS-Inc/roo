@@ -28,7 +28,7 @@ jobs:
       RELEASE_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.release_sha || github.event.workflow_run.head_sha }}
     defaults:
       run:
-        working-directory: src
+        working-directory: roo-standalone
     steps:
       - uses: actions/checkout@v4
         with:
@@ -136,8 +136,8 @@ jobs:
             ADMIN_DEPLOY_DIR="/root/roo-admin"
             PUBLIC_DEPLOY_DIR="/root/roo"
             OPERATIONS_DIR="/root/roo-admin-operations"
-            ADMIN_ENV="$ADMIN_DEPLOY_DIR/src/.env.admin"
-            PUBLIC_ENV="$PUBLIC_DEPLOY_DIR/src/.env"
+            ADMIN_ENV="$ADMIN_DEPLOY_DIR/roo-standalone/.env.admin"
+            PUBLIC_ENV="$PUBLIC_DEPLOY_DIR/roo-standalone/.env"
             APPROVAL_MANIFEST="$OPERATIONS_DIR/pilot-approval.json"
 
             if ! printf '%s' "$RELEASE_SHA" | grep -Eq '^[0-9a-f]{40}$'; then
@@ -170,7 +170,7 @@ jobs:
             checkout_release "$ADMIN_DEPLOY_DIR"
             # Admin must never advance Public Roo across an unapproved schema
             # boundary. This also guards manual dispatch and recovery runs.
-            python3 "$ADMIN_DEPLOY_DIR/src/roo/deployment_checks.py" \
+            python3 "$ADMIN_DEPLOY_DIR/roo-standalone/roo/deployment_checks.py" \
               --release-sha "$RELEASE_SHA" --public-directory "$PUBLIC_DEPLOY_DIR"
             test -f "$PUBLIC_ENV"
 
@@ -191,7 +191,7 @@ jobs:
             chmod 600 "$approval_tmp"
             mv "$approval_tmp" "$APPROVAL_MANIFEST"
 
-            admin_env_tmp="$(mktemp "$ADMIN_DEPLOY_DIR/src/.env.admin.XXXXXX")"
+            admin_env_tmp="$(mktemp "$ADMIN_DEPLOY_DIR/roo-standalone/.env.admin.XXXXXX")"
             {
               printf 'ROO_ENVIRONMENT=production\n'
               printf 'ROO_RELEASE_SHA=%s\n' "$RELEASE_SHA"
@@ -223,7 +223,7 @@ jobs:
 
             # Remove the legacy Admin Slack ingress before the internal worker
             # starts, regardless of which serialized main workflow runs first.
-            cd "$PUBLIC_DEPLOY_DIR/src"
+            cd "$PUBLIC_DEPLOY_DIR/roo-standalone"
             docker compose --env-file .env -f ../infra/docker-compose.yml up -d --no-deps --force-recreate nginx
             nginx_ready=0
             for attempt in $(seq 1 18); do
@@ -242,7 +242,7 @@ jobs:
               test "$status" = "404"
             done
 
-            cd "$ADMIN_DEPLOY_DIR/src"
+            cd "$ADMIN_DEPLOY_DIR/roo-standalone"
             docker compose --env-file .env.admin -f ../infra/docker-compose.admin.yml build roo-admin
             docker compose --env-file .env.admin -f ../infra/docker-compose.admin.yml run \
               -T --rm --no-deps \
@@ -273,7 +273,7 @@ jobs:
               --organization-domain mlai.au \
               --slack-team-id "$ADMIN_ROO_SLACK_TEAM_ID"
 
-            public_env_backup="$(mktemp "$PUBLIC_DEPLOY_DIR/src/.env.backup.XXXXXX")"
+            public_env_backup="$(mktemp "$PUBLIC_DEPLOY_DIR/roo-standalone/.env.backup.XXXXXX")"
             cp "$PUBLIC_ENV" "$public_env_backup"
             public_changed=0
             admin_started=0
@@ -281,11 +281,11 @@ jobs:
               echo "Unified Admin rollout failed; restoring Public Roo routing configuration" >&2
               if [ "$public_changed" = "1" ]; then
                 cp "$public_env_backup" "$PUBLIC_ENV"
-                cd "$PUBLIC_DEPLOY_DIR/src"
+                cd "$PUBLIC_DEPLOY_DIR/roo-standalone"
                 docker compose --env-file .env -f ../infra/docker-compose.yml up -d --build --no-deps roo || true
               fi
               if [ "$admin_started" = "1" ]; then
-                cd "$ADMIN_DEPLOY_DIR/src"
+                cd "$ADMIN_DEPLOY_DIR/roo-standalone"
                 docker compose --env-file .env.admin -f ../infra/docker-compose.admin.yml stop roo-admin || true
               fi
             }
@@ -308,7 +308,7 @@ jobs:
             upsert_public_env() {
               key="$1"
               value="$2"
-              tmp_file="$(mktemp "$PUBLIC_DEPLOY_DIR/src/.env.tmp.XXXXXX")"
+              tmp_file="$(mktemp "$PUBLIC_DEPLOY_DIR/roo-standalone/.env.tmp.XXXXXX")"
               grep -v "^${key}=" "$PUBLIC_ENV" > "$tmp_file" || true
               printf '%s=%s\n' "$key" "$value" >> "$tmp_file"
               chmod 600 "$tmp_file"
@@ -320,7 +320,7 @@ jobs:
             upsert_public_env "ROO_ADMIN_DISPATCH_SECRET" "$ROO_ADMIN_DISPATCH_SECRET"
             public_changed=1
 
-            cd "$PUBLIC_DEPLOY_DIR/src"
+            cd "$PUBLIC_DEPLOY_DIR/roo-standalone"
             docker compose --env-file .env -f ../infra/docker-compose.yml up -d --build --no-deps roo
             ready=0
             for attempt in $(seq 1 18); do

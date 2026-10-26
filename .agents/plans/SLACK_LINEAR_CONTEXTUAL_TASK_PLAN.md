@@ -40,7 +40,7 @@ If two Linear projects are plausible, Roo should present the top choices instead
 
 ## Current implementation and gaps
 
-Roo already has most of the write path in `../../src/skills/linear_meeting_actions` and `../../src/roo/skills/executor.py`:
+Roo already has most of the write path in `../../roo-standalone/skills/linear_meeting_actions` and `../../roo-standalone/roo/skills/executor.py`:
 
 - It routes direct Linear task commands to `linear-meeting-actions`.
 - It reads teams, users, active projects, labels, and open issues before writing.
@@ -145,7 +145,7 @@ This is intentionally not “read the whole channel”. It is an on-demand, curr
 
 ### Slack API and caching
 
-Add helpers alongside `get_thread_messages()` in `../../src/roo/slack_client.py`:
+Add helpers alongside `get_thread_messages()` in `../../roo-standalone/roo/slack_client.py`:
 
 - `get_recent_channel_messages(channel, before_ts, limit, oldest_ts)`
 - `get_channel_context(channel)` returning name/topic/purpose
@@ -298,14 +298,14 @@ Drafts should expire, and only the original requester should be able to approve 
 
 | File | Change |
 | --- | --- |
-| `../../src/roo/slack_client.py` | Add bounded channel-history, richer channel metadata, permalink, pagination/rate-limit handling, and author enrichment helpers |
-| `../../src/roo/agent.py` | Request a `ContextPack` for contextual Linear commands and pass it through routing/execution |
-| `../../src/roo/router.py` | Include a small sanitized context summary so “add this” routes reliably without putting metadata in the system trust boundary |
-| `../../src/roo/linear_context.py` (new) | Select, normalize, enrich, and cap Slack context |
-| `../../src/roo/skills/executor.py` | Fix contextual/direct precedence; extract explicit action candidates; use deterministic assignee rules, project ranking evidence, source timestamps, and idempotency keys |
-| `../../src/skills/linear_meeting_actions/SKILL.md` | Document recent-channel context, high-confidence auto-create rules, and ambiguity behaviour |
-| `../../src/skills/linear_meeting_actions/client.py` | Send source/idempotency metadata and use draft/binding endpoints |
-| `../../src/roo/main.py` | Handle project/assignee selection actions and durable draft approval |
+| `../../roo-standalone/roo/slack_client.py` | Add bounded channel-history, richer channel metadata, permalink, pagination/rate-limit handling, and author enrichment helpers |
+| `../../roo-standalone/roo/agent.py` | Request a `ContextPack` for contextual Linear commands and pass it through routing/execution |
+| `../../roo-standalone/roo/router.py` | Include a small sanitized context summary so “add this” routes reliably without putting metadata in the system trust boundary |
+| `../../roo-standalone/roo/linear_context.py` (new) | Select, normalize, enrich, and cap Slack context |
+| `../../roo-standalone/roo/skills/executor.py` | Fix contextual/direct precedence; extract explicit action candidates; use deterministic assignee rules, project ranking evidence, source timestamps, and idempotency keys |
+| `../../roo-standalone/skills/linear_meeting_actions/SKILL.md` | Document recent-channel context, high-confidence auto-create rules, and ambiguity behaviour |
+| `../../roo-standalone/skills/linear_meeting_actions/client.py` | Send source/idempotency metadata and use draft/binding endpoints |
+| `../../roo-standalone/roo/main.py` | Handle project/assignee selection actions and durable draft approval |
 | Roo Slack app manifest/source of truth | Add only the read scopes required for supported conversation types and user email matching; reinstall the app |
 
 ### `mlai-backend` repository

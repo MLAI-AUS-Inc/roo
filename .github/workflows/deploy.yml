@@ -30,17 +30,17 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-          cache-dependency-path: src/requirements.txt
+          cache-dependency-path: roo-standalone/requirements.txt
 
       - name: Install Roo dependencies
-        run: python -m pip install -r src/requirements.txt
+        run: python -m pip install -r roo-standalone/requirements.txt
 
       - name: Validate skill configuration without importing clients
-        working-directory: src
+        working-directory: roo-standalone
         run: python -m roo.skills.lint --public-defaults
 
       - name: Run Health Hack security and AI regressions
-        working-directory: src
+        working-directory: roo-standalone
         env:
           SLACK_BOT_TOKEN: test
           SLACK_SIGNING_SECRET: test
@@ -142,12 +142,12 @@ jobs:
             ../tests/roo/test_studio_client_balance_installer.py -q
 
       - name: Validate production Compose configuration
-        working-directory: src
+        working-directory: roo-standalone
         run: |
           cp .env.example .env
           trap 'rm -f .env' EXIT
           docker compose --env-file .env -f ../infra/docker-compose.yml config --quiet
-          ADMIN_ROO_ENV_FILE=../src/.env.admin.example \
+          ADMIN_ROO_ENV_FILE=../roo-standalone/.env.admin.example \
             docker compose --env-file .env -f ../infra/docker-compose.admin.yml config --quiet
           docker compose --env-file .env -f ../infra/docker-compose.bridge.yml config --quiet
           docker run --rm \
@@ -267,7 +267,7 @@ jobs:
             fi
             cd "$DEPLOY_DIR"
             previous_release_sha="$(git rev-parse HEAD)"
-            cd "$DEPLOY_DIR/src"
+            cd "$DEPLOY_DIR/roo-standalone"
             previous_env_backup="$(mktemp /root/roo-public-env.XXXXXX)"
             previous_env_present=0
             if [ -f .env ]; then
@@ -275,7 +275,12 @@ jobs:
               chmod 600 "$previous_env_backup"
               previous_env_present=1
             fi
-            previous_container_id="$(docker compose --env-file .env -f ../infra/docker-compose.yml ps -q roo 2>/dev/null || true)"
+            # The previous release may predate the infra/ directory move.
+            previous_compose_dir="../infra"
+            if [ -f docker-compose.yml ]; then
+              previous_compose_dir="."
+            fi
+            previous_container_id="$(docker compose --env-file .env -f "$previous_compose_dir/docker-compose.yml" ps -q roo 2>/dev/null || true)"
             previous_image_id=""
             previous_image_ref=""
             if [ -n "$previous_container_id" ]; then
@@ -286,18 +291,22 @@ jobs:
             if command -v systemctl >/dev/null 2>&1 \
               && systemctl is-active --quiet slack-bridge.service; then
               previous_bridge_mode="systemd"
-            elif docker compose --env-file .env -f ../infra/docker-compose.bridge.yml ps \
+            elif docker compose --env-file .env -f "$previous_compose_dir/docker-compose.bridge.yml" ps \
               --services --status running | grep -qx slack-bridge; then
               previous_bridge_mode="compose"
             fi
 
             restart_bridge_for_checkout() {
+              bridge_compose_file="../infra/docker-compose.bridge.yml"
+              if [ -f docker-compose.bridge.yml ]; then
+                bridge_compose_file="docker-compose.bridge.yml"
+              fi
               case "$previous_bridge_mode" in
                 systemd)
                   systemctl restart slack-bridge.service
                   ;;
                 compose)
-                  docker compose --env-file .env -f ../infra/docker-compose.bridge.yml up -d --build \
+                  docker compose --env-file .env -f "$bridge_compose_file" up -d --build \
                     --force-recreate
                   ;;
                 none)
@@ -306,7 +315,7 @@ jobs:
               esac
               bridge_attempt=0
               until bridge_container_id="$(docker compose --env-file .env \
-                -f ../infra/docker-compose.bridge.yml ps -q slack-bridge)" \
+                -f "$bridge_compose_file" ps -q slack-bridge)" \
                 && [ -n "$bridge_container_id" ] \
                 && [ "$(docker inspect --format \
                   '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' \
@@ -333,17 +342,17 @@ jobs:
                 fi
                 echo "Roo rollout failed; restoring the previous release" >&2
                 if [ "$previous_env_present" -eq 1 ]; then
-                  cp "$previous_env_backup" "$DEPLOY_DIR/src/.env"
-                  chmod 600 "$DEPLOY_DIR/src/.env"
+                  cp "$previous_env_backup" "$DEPLOY_DIR/roo-standalone/.env"
+                  chmod 600 "$DEPLOY_DIR/roo-standalone/.env"
                 else
-                  rm -f "$DEPLOY_DIR/src/.env"
+                  rm -f "$DEPLOY_DIR/roo-standalone/.env"
                 fi
                 cd "$DEPLOY_DIR"
                 git checkout --detach "$previous_release_sha" || true
-                cd "$DEPLOY_DIR/src"
+                cd "$DEPLOY_DIR/roo-standalone"
                 if [ -n "$previous_image_id" ] && [ -n "$previous_image_ref" ]; then
                   docker image tag "$previous_image_id" "$previous_image_ref" || true
-                  docker compose --env-file .env -f ../infra/docker-compose.yml --ansi never up -d --no-build --force-recreate --remove-orphans || true
+                  docker compose --env-file .env -f "$previous_compose_dir/docker-compose.yml" --ansi never up -d --no-build --force-recreate --remove-orphans || true
                 fi
                 # The bridge is built from the same checkout but supervised
                 # separately. Restore and verify it after returning to the
@@ -367,7 +376,7 @@ jobs:
             test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
             
             # Go to the sub-project directory
-            cd "$DEPLOY_DIR/src"
+            cd "$DEPLOY_DIR/roo-standalone"
 
             docker network inspect roo-admin-gateway >/dev/null 2>&1 \
               || docker network create roo-admin-gateway
@@ -524,7 +533,7 @@ jobs:
           key: ${{ secrets.DO_SSH_KEY }}
           script: |
             set -eu
-            cd /root/roo/src
+            cd /root/roo/roo-standalone
 
             docker compose --env-file .env -f ../infra/docker-compose.yml ps
             docker compose --env-file .env -f ../infra/docker-compose.yml exec -T roo python -c '

@@ -3,12 +3,12 @@ name: roo-admin
 services:
   roo-admin:
     build:
-      context: ../src
+      context: ../roo-standalone
       dockerfile: ../infra/Dockerfile
     expose:
       - "8000"
     env_file:
-      - ${ADMIN_ROO_ENV_FILE:-../src/.env.admin}
+      - ${ADMIN_ROO_ENV_FILE:-../roo-standalone/.env.admin}
     environment:
       ROO_SURFACE: admin
       ROO_ADMIN_INTERNAL_ONLY: "true"

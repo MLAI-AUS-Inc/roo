@@ -123,7 +123,7 @@ def test_extracted_tone_handler_preserves_prompt_and_model(monkeypatch):
 
 def test_every_current_package_has_explicit_handler_or_event_binding():
     from roo.skills.registry import EVENT_ONLY_SKILLS
-    root = Path(__file__).resolve().parents[2] / 'src/skills'
+    root = Path(__file__).resolve().parents[2] / 'roo-standalone/skills'
     for item in inspect_catalogue(root):
         assert not item.diagnostics
         assert item.name in EXECUTORS or item.name in EVENT_ONLY_SKILLS
@@ -147,7 +147,7 @@ def test_agent_requires_default_packages_and_rejects_unbound_packages(tmp_path, 
 def test_default_catalogue_loads_with_real_clients_offline(monkeypatch):
     from roo.agent import RooAgent
     from roo.config import Settings
-    settings = Settings(_env_file=None, SKILLS_DIR=str(Path(__file__).resolve().parents[2] / 'src/skills'),
+    settings = Settings(_env_file=None, SKILLS_DIR=str(Path(__file__).resolve().parents[2] / 'roo-standalone/skills'),
                         OPENAI_API_KEY='test', SLACK_BOT_TOKEN='test', SLACK_SIGNING_SECRET='test')
     monkeypatch.setattr('roo.agent.get_settings', lambda: settings)
     agent = RooAgent()
@@ -229,5 +229,5 @@ assert len(report.skills) == 20
 assert all(entry.status == 'loaded' for entry in report.entries)
 '''
     result = subprocess.run([sys.executable, '-c', code], capture_output=True, text=True,
-                            cwd=Path(__file__).resolve().parents[2] / 'src')
+                            cwd=Path(__file__).resolve().parents[2] / 'roo-standalone')
     assert result.returncode == 0, result.stdout + result.stderr

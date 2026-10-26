@@ -9,7 +9,7 @@ import pytest
 from openai import APITimeoutError
 from pydantic import BaseModel, ConfigDict, Field
 
-sys.path.insert(0, str((Path(__file__).resolve().parents[2] / "src")))
+sys.path.insert(0, str((Path(__file__).resolve().parents[2] / "roo-standalone")))
 
 import roo.linear_inference as inference_module
 from roo.linear_inference import (

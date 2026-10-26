@@ -9,7 +9,7 @@ import httpx
 import pytest
 
 
-sys.path.insert(0, str((Path(__file__).resolve().parents[2] / "src")))
+sys.path.insert(0, str((Path(__file__).resolve().parents[2] / "roo-standalone")))
 sys.modules.setdefault("frontmatter", SimpleNamespace(load=lambda *args, **kwargs: None))
 
 executor_module = importlib.import_module("roo.skills.executor")

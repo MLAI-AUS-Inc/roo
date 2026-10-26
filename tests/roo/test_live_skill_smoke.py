@@ -98,7 +98,7 @@ async def live_router(monkeypatch,sandbox,smoke_results):
     async def bounded_tools(messages,tools,**kwargs):
         return await client.chat_tools(messages,tools,**{**kwargs,'timeout':45,'max_retries':0})
     monkeypatch.setattr('roo.router.chat_tools',bounded_tools)
-    report=load_skill_report(Path(__file__).resolve().parents[2]/'src/skills',
+    report=load_skill_report(Path(__file__).resolve().parents[2]/'roo-standalone/skills',
                              sandbox.settings.enabled_skill_names,import_clients=False)
     report.require(sandbox.settings.enabled_skill_names)
     skills=report.skills

@@ -15,7 +15,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi.testclient import TestClient
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "roo-standalone"))
 
 from roo import config, sim_patient, ward_agents
 from roo.ai_security import make_safety_identifier
@@ -236,7 +236,7 @@ def test_public_slack_route_requires_a_valid_fresh_signature(monkeypatch):
 def test_production_dotenv_does_not_mount_docs_or_schema(tmp_path):
     env = os.environ.copy()
     env.pop("ROO_ENVIRONMENT", None)
-    env["PYTHONPATH"] = str(REPO_ROOT / "src")
+    env["PYTHONPATH"] = str(REPO_ROOT / "roo-standalone")
     (tmp_path / ".env").write_text(
         "ROO_ENVIRONMENT=production\n"
         "SLACK_BOT_TOKEN=test\n"

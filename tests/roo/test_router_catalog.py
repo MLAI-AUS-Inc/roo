@@ -5,7 +5,7 @@ Hermetic: loads the real skills/*/SKILL.md and the eval dataset, no LLM calls.
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str((Path(__file__).resolve().parents[2] / "src")))
+sys.path.insert(0, str((Path(__file__).resolve().parents[2] / "roo-standalone")))
 
 from tests.evals.routing import runner
 from roo import router

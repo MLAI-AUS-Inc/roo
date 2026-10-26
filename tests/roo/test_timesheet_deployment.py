@@ -12,7 +12,7 @@ import pytest
 def test_base_public_restart_keeps_worker_queue(tmp_path):
     root = Path(__file__).resolve().parents[2] / "infra"
     infra = tmp_path / 'infra'
-    source = tmp_path / 'src'
+    source = tmp_path / 'roo-standalone'
     infra.mkdir()
     source.mkdir()
     # Compose v2 still checks env_file existence with --no-env-resolution.

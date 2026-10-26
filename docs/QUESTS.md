@@ -1,8 +1,8 @@
 # 🎯 MLAI Quests
 
 > **Status: inactive quest handler.** This document describes the quests in
-> [`src/roo/quests.py`](../src/roo/quests.py). Its invocation in
-> [`src/roo/main.py`](../src/roo/main.py) is commented out. The app does not load
+> [`roo-standalone/roo/quests.py`](../roo-standalone/roo/quests.py). Its invocation in
+> [`roo-standalone/roo/main.py`](../roo-standalone/roo/main.py) is commented out. The app does not load
 > this Markdown file.
 
 Welcome to MLAI Quests! Complete these activities to earn points and level up in the community.

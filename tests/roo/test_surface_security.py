@@ -7,7 +7,7 @@ import pytest
 from pydantic import ValidationError
 from fastapi.testclient import TestClient
 
-sys.path.insert(0, str((Path(__file__).resolve().parents[2] / "src")))
+sys.path.insert(0, str((Path(__file__).resolve().parents[2] / "roo-standalone")))
 
 from roo.config import Settings
 from roo.config import get_settings

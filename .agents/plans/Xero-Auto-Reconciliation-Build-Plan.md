@@ -7,7 +7,7 @@
 > - `mlai-backend` — Django + DRF, at `/Users/samdonegan/Documents/Code/mlai-backend`.
 >   Holds ALL secrets (Luma, Stripe, and the new Xero keys). All external API calls
 >   happen here.
-> - `src` — FastAPI Slack agent, in THIS repo under `../../src`.
+> - `roo-standalone` — FastAPI Slack agent, in THIS repo under `../../roo-standalone`.
 >   Holds no secrets; talks to mlai-backend via `roo/clients/mlai_backend.py`.
 
 ---
@@ -74,8 +74,8 @@ Scopes needed: `accounting.transactions`, `accounting.settings.read`,
 |---|---|---|
 | Merge/report engine (standalone) | `../../scripts/Luma-Stripe-Reconcile/luma_stripe_merge.py` (this repo) | ✅ Working, payout-driven, produces `brief.md` + 2-tab `xlsx`; mock verified. **Port this logic to mlai-backend in Phase 1** |
 | Cowork brief format | `../../scripts/Luma-Stripe-Reconcile/sample_reconciliation_cowork_brief.md` | ✅ Maps to Xero Create-tab fields (Who/What/Why/Event Name/Project Name/Tax Rate) |
-| Skill pipeline (LLM tool-calling router) | `../../src/roo/router.py` (`route()` L327, `build_tools()` L203), `roo/skills/loader.py` (`load_skills()` L75) | ✅ Skills auto-discovered from `skills/<dir>/SKILL.md`; no manual registration |
-| Points-admin check (Roo side) | `../../src/roo/clients/mlai_backend.py:1654` `is_admin()`; executor helpers `_is_full_points_admin_details` / `_full_points_admin_denial` (`executor.py` ~L6916–6933) | ✅ Roles `{admin, committee, portfolio_lead}`; copy the `create_task` gating pattern (executor.py ~L8729) |
+| Skill pipeline (LLM tool-calling router) | `../../roo-standalone/roo/router.py` (`route()` L327, `build_tools()` L203), `roo/skills/loader.py` (`load_skills()` L75) | ✅ Skills auto-discovered from `skills/<dir>/SKILL.md`; no manual registration |
+| Points-admin check (Roo side) | `../../roo-standalone/roo/clients/mlai_backend.py:1654` `is_admin()`; executor helpers `_is_full_points_admin_details` / `_full_points_admin_denial` (`executor.py` ~L6916–6933) | ✅ Roles `{admin, committee, portfolio_lead}`; copy the `create_task` gating pattern (executor.py ~L8729) |
 | Points-admin check (backend side) | `mlai-backend/roo/permissions.py:34–53` `is_points_admin()` | ✅ Reuse as-is |
 | Role-gated integration endpoint template | `mlai-backend/integrations/api_views_luma.py:18–97` `LumaAttendeeReportView` + URL at `integrations/api_urls.py:19` | ✅ Copy this shape exactly (HasRooApiKey, `slack_user_id` query param, permission gate, base64 file payload) |
 | Luma service (no pricing yet) | `mlai-backend/integrations/services/luma.py:31–102` | ⚠️ Pulls guests/tickets/check-ins only — **no order amounts** |
@@ -282,7 +282,7 @@ bank rec screen shows the green Match for that deposit).
 
 ## Phase 3 — roo-standalone: client methods
 
-> Branch in THIS repo, `../../src/roo/clients/mlai_backend.py`. Mirror
+> Branch in THIS repo, `../../roo-standalone/roo/clients/mlai_backend.py`. Mirror
 > `get_luma_attendee_report` (L1097–1126).
 
 ```python

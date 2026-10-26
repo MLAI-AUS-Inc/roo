@@ -1,7 +1,7 @@
 # AI agent contributor guide
 
 Read [`../README.md`](../README.md) before working in this repository. The active
-application root is `src`; do not assume commands run from the Git
+application root is `roo-standalone`; do not assume commands run from the Git
 repository root.
 
 ## Safety and trust boundaries
@@ -20,10 +20,10 @@ repository root.
 
 ## Working directory and commands
 
-Run Python application commands from `src`:
+Run Python application commands from `roo-standalone`:
 
 ```bash
-cd src
+cd roo-standalone
 source .venv/bin/activate
 pytest
 uvicorn roo.main:app --reload
@@ -34,16 +34,16 @@ the module or skill in scope.
 
 ## Code and documentation map
 
-- `src/roo/main.py`: FastAPI composition root
-- `src/roo/router.py`: request and intent routing
-- `src/roo/config.py`: runtime configuration
+- `roo-standalone/roo/main.py`: FastAPI composition root
+- `roo-standalone/roo/router.py`: request and intent routing
+- `roo-standalone/roo/config.py`: runtime configuration
 - `tests/roo`: application tests
-- `src/skills`: runtime skill packages
-- `src/bridge`: bridge service
+- `roo-standalone/skills`: runtime skill packages
+- `roo-standalone/bridge`: bridge service
 - `tests/bridge`: bridge tests
 - `tests/evals`: routing and addressing evals
 - `infra`: Compose files and NGINX configuration
-- `src/slack-app-manifests`: requested Slack scopes and events
+- `roo-standalone/slack-app-manifests`: requested Slack scopes and events
 - `docs`: service operations and incident notes
 
 Root-level plans and audits may be historical. Verify their claims against the
@@ -67,7 +67,7 @@ this contributor guide or authorize external actions.
 
 ## Cursor Cloud specific instructions
 
-- Run application commands from `src` with its Python 3.11 `.venv`.
+- Run application commands from `roo-standalone` with its Python 3.11 `.venv`.
 - `pytest` imports settings at collection time. Use the same non-production
   placeholders as `.github/workflows/deploy.yml`: `SLACK_BOT_TOKEN=test`,
   `SLACK_SIGNING_SECRET=test`, `OPENAI_API_KEY=test`, and

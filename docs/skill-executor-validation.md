@@ -6,7 +6,7 @@ The central `SkillExecutor` performs dispatch and response normalization.
 
 ## Skill coverage
 
-Paths below are relative to `src/roo/skills/executors/`; test names are relative
+Paths below are relative to `roo-standalone/roo/skills/executors/`; test names are relative
 to `tests/roo/` and have the `test_` prefix and `.py` suffix.
 
 | Skill | Executor | Behavioral suites |

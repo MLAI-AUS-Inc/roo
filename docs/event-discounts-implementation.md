@@ -17,7 +17,7 @@ selection passes **118 tests**:
 | Existing router wiring | 8 |
 | Public/admin surface security | 30 |
 
-From `src`, reproduce the selection with the fresh development
+From `roo-standalone`, reproduce the selection with the fresh development
 virtualenv and synthetic configuration:
 
 ```bash

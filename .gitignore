@@ -18,10 +18,10 @@ env/
 
 # Runtime data and local previews
 *.db
-/src/data/
-/src/studio-report-preview/
-/src/timesheet-preview/
-/src/output/pdf/
+/roo-standalone/data/
+/roo-standalone/studio-report-preview/
+/roo-standalone/timesheet-preview/
+/roo-standalone/output/pdf/
 *.log
 
 # Editors and OS

@@ -8,7 +8,7 @@ import httpx
 import pytest
 
 
-sys.path.insert(0, str((Path(__file__).resolve().parents[2] / "src")))
+sys.path.insert(0, str((Path(__file__).resolve().parents[2] / "roo-standalone")))
 os.environ.setdefault("SLACK_BOT_TOKEN", "xoxb-committee-test")
 os.environ.setdefault("SLACK_SIGNING_SECRET", "committee-signing-test")
 os.environ.setdefault("OPENAI_API_KEY", "committee-openai-test")

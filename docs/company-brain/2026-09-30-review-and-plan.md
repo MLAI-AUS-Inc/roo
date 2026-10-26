@@ -61,7 +61,7 @@ Those protections do not satisfy the new requirement for independent knowledge a
 5. **Public and private backend tables share the default database.** The public table has its own text/vector fields and no foreign keys to private evidence, and its retrieval has no private fallback. That is valuable logical isolation, but not independent database authority.
 6. **“Public Roo” currently describes an operational runtime, not a purely public dataset.** It also hosts some role-filtered business skills. Those tools need an audience and permission audit before the name can imply that everything the runtime can access is public.
 
-Code evidence: [runtime routing and thread handling](https://github.com/MLAI-AUS-Inc/roo/blob/c105c6e12fc577d972856f4f18f8b83e587eb480/roo-standalone/roo/agent.py), [logging redaction](https://github.com/MLAI-AUS-Inc/roo/blob/c105c6e12fc577d972856f4f18f8b83e587eb480/roo-standalone/roo/logging_safety.py), [deployment contract](../../src/docs/admin-roo-deployment.md), and [public publication design](https://github.com/MLAI-AUS-Inc/mlai-backend/blob/bf6a7cf0c8b3a2698626556b6da8d419a87a4eb6/docs/org-memory-publication.md).
+Code evidence: [runtime routing and thread handling](https://github.com/MLAI-AUS-Inc/roo/blob/c105c6e12fc577d972856f4f18f8b83e587eb480/roo-standalone/roo/agent.py), [logging redaction](https://github.com/MLAI-AUS-Inc/roo/blob/c105c6e12fc577d972856f4f18f8b83e587eb480/roo-standalone/roo/logging_safety.py), [deployment contract](../../roo-standalone/docs/admin-roo-deployment.md), and [public publication design](https://github.com/MLAI-AUS-Inc/mlai-backend/blob/bf6a7cf0c8b3a2698626556b6da8d419a87a4eb6/docs/org-memory-publication.md).
 
 **What other companies are converging on**
 

@@ -1,7 +1,7 @@
 {
   "info": {
     "name": "Roo \u2014 Local Development",
-    "description": "Local Roo via the Postman NGINX proxy (port 8088), plus backend readiness (port 8001). Set mention_api_key to INTERNAL_MENTION_API_KEY from src/.env. No credentials are included. Agent requests return replies over HTTP with post_reply=false; skills can still invoke external services. Slack-dependent skills require valid development identities and credentials.",
+    "description": "Local Roo via the Postman NGINX proxy (port 8088), plus backend readiness (port 8001). Set mention_api_key to INTERNAL_MENTION_API_KEY from roo-standalone/.env. No credentials are included. Agent requests return replies over HTTP with post_reply=false; skills can still invoke external services. Slack-dependent skills require valid development identities and credentials.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [

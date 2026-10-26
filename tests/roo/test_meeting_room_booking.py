@@ -16,7 +16,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 
-sys.path.insert(0, str((Path(__file__).resolve().parents[2] / "src")))
+sys.path.insert(0, str((Path(__file__).resolve().parents[2] / "roo-standalone")))
 
 from roo import main as main_module
 from roo import meeting_room_booking as room_module
@@ -361,7 +361,7 @@ def test_interval_parser_preserves_explicit_end_times_without_from(text, params)
 
 def test_skill_schema_exposes_end_time_for_availability_and_booking():
     skill = load_skill_from_directory(
-        (Path(__file__).resolve().parents[2] / "src") / "skills" / "meeting_room_booking"
+        (Path(__file__).resolve().parents[2] / "roo-standalone") / "skills" / "meeting_room_booking"
     )
     actions = {action["name"]: action for action in skill.actions}
 
@@ -2194,7 +2194,7 @@ def test_conference_is_not_accepted_as_a_default_room_choice():
 
 def test_router_catalog_includes_explicit_conference_room_request():
     from roo.router import _tool_description
-    skill = load_skill_from_directory((Path(__file__).resolve().parents[2] / "src") / 'skills' / 'meeting_room_booking')
+    skill = load_skill_from_directory((Path(__file__).resolve().parents[2] / "roo-standalone") / 'skills' / 'meeting_room_booking')
     assert 'Conference Room requests' in _tool_description(skill)
 
 

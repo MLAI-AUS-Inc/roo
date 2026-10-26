@@ -35,8 +35,8 @@ def main():
     os.environ.update(SLACK_BOT_TOKEN='test',SLACK_SIGNING_SECRET='test',OPENAI_API_KEY='test',
                       ROO_API_KEY='test',MLAI_BACKEND_URL='https://backend.test',
                       FOUNDER_TOOLS_LINK_ORIGINS='https://mlai.au')
-    sys.path[:0]=[str(ROOT/'src'),str(ROOT)]
-    os.chdir(ROOT/'src')
+    sys.path[:0]=[str(ROOT/'roo-standalone'),str(ROOT)]
+    os.chdir(ROOT/'roo-standalone')
     import pytest
     class Results:
         def __init__(self):

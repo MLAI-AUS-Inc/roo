@@ -134,3 +134,35 @@ def test_admin_workflow_depends_on_successful_public_deployment():
     script = workflow['jobs']['deploy']['steps'][-1]['with']['script']
     assert 'checkout_release "$PUBLIC_DEPLOY_DIR"' not in script
     assert script.index('roo/deployment_checks.py') < script.index('docker compose --env-file .env -f ../infra/docker-compose.yml up')
+
+
+@pytest.mark.parametrize('legacy', [True, False])
+def test_deploy_captures_previous_image_with_either_compose_layout(tmp_path, legacy):
+    """Exercise the real pre-checkout script against old and reorganized releases."""
+    root = Path(__file__).resolve().parents[2]
+    workflow = yaml.load((root / '.github/workflows/deploy.yml').read_text(), Loader=yaml.BaseLoader)
+    script = next(step['with']['script'] for step in workflow['jobs']['deploy']['steps']
+                  if 'with' in step and 'script' in step['with'])
+    start = script.index('previous_compose_dir=')
+    end = script.index('previous_image_id=', start)
+    app = tmp_path / 'roo-standalone'
+    app.mkdir()
+    compose = app if legacy else tmp_path / 'infra'
+    compose.mkdir(exist_ok=True)
+    (compose / 'docker-compose.yml').touch()
+    # A fake Docker command rejects missing -f paths, just like Compose.
+    shell = '''docker() {
+      while [ "$#" -gt 0 ]; do
+        if [ "$1" = "-f" ]; then
+          shift
+          test -f "$1" || return 1
+        fi
+        shift
+      done
+      printf 'previous-container'
+    }
+    ''' + script[start:end] + '\nprintf "%s" "$previous_container_id"\n'
+    result = subprocess.run(['bash', '-e', '-c', shell], cwd=app,
+                            check=True, capture_output=True, text=True)
+    assert result.stdout == 'previous-container'
+    assert '-f "$previous_compose_dir/docker-compose.yml" --ansi never up' in script
