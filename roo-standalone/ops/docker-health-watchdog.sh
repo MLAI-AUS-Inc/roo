@@ -3,7 +3,7 @@ set -euo pipefail
 
 SERVICE_NAME="${WATCHDOG_SERVICE_NAME:?WATCHDOG_SERVICE_NAME is required}"
 CHECK_INTERVAL_SECONDS="${WATCHDOG_INTERVAL_SECONDS:-60}"
-COMPOSE_CMD="${DOCKER_COMPOSE_CMD:-docker compose}"
+COMPOSE_CMD="${DOCKER_COMPOSE_CMD:-docker compose --env-file .env -f ../infra/docker-compose.yml}"
 
 while true; do
   container_id="$(${COMPOSE_CMD} ps -q "${SERVICE_NAME}" 2>/dev/null | head -n 1 || true)"

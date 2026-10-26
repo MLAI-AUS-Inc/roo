@@ -27,7 +27,7 @@ def check_public_release(release_sha, public_directory, *, run=subprocess.run):
                   check=True, text=True, capture_output=True).stdout.strip()
     if current != release_sha:
         raise RuntimeError('Deploy and verify this Public Roo release before deploying Admin')
-    run(['docker', 'compose', '-p', 'roo-standalone', 'exec', '-T',
+    run(['docker', 'compose', '-p', 'roo-standalone', '-f', '../infra/docker-compose.yml', 'exec', '-T',
          '-e', 'EXPECTED_RELEASE_SHA=' + release_sha, 'roo', 'python', '-c', PUBLIC_PROBE],
         cwd=public_directory / 'roo-standalone', check=True, timeout=30)
 

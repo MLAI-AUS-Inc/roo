@@ -872,7 +872,11 @@ def _rejection_from_code(code: str, payload: dict[str, Any]) -> tuple[str, str] 
 def _approval_notice(admission: dict[str, Any]) -> str:
     charged = int(admission.get("charged_points") or 0)
     discount = bool(admission.get("discount_applied"))
-    discount_text = " Your Australian startup monthly-update discount was applied." if discount else ""
+    discount_text = (
+        " Your Australian startup monthly-update discount was applied. "
+        "New discounts require an approved update shared publicly or with the MLAI community."
+        if discount else ""
+    )
     return f":white_check_mark: Approved — {charged} Roo points deducted.{discount_text}"
 
 
@@ -894,6 +898,7 @@ def _rejection_notice(admission: dict[str, Any]) -> str:
             balance_detail = "Your Roo points balance is below the price of this boost. "
         discount_detail = (
             "Your 50% Australian-startup monthly-update discount was included in that price. "
+            "New discounts require an approved update shared publicly or with the MLAI community. "
             if bool(result.get("discount_applied"))
             else ""
         )

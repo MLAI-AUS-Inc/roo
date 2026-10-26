@@ -3,7 +3,7 @@
 Mirrors channels between the **MLAI** workspace (the hub) and one or more partner
 Slack workspaces, relayed by this service on the droplet. Members of each org
 read and write entirely in their own workspace. Full design + rationale:
-[`../../SLACK_BRIDGE_PLAN.md`](../../SLACK_BRIDGE_PLAN.md).
+[`../../agents/plans/SLACK_BRIDGE_PLAN.md`](../../agents/plans/SLACK_BRIDGE_PLAN.md).
 
 ## Design
 
@@ -102,7 +102,7 @@ pair:
 ### 4. Run / deploy
 ```bash
 cd roo-standalone
-docker compose -f docker-compose.bridge.yml up -d --build
+docker compose --env-file .env -f ../infra/docker-compose.bridge.yml up -d --build
 ```
 …or install `ops/slack-bridge.service.example` as a systemd unit. Health:
 `GET /healthz`. A pair whose channel doesn't exist yet (or the bot isn't invited

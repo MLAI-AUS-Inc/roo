@@ -1,0 +1,144 @@
+{
+  "model": "gpt-5.4",
+  "fixed_local_date": "2026-10-23",
+  "live": true,
+  "boundaries": "Real model; fake backend/Slack; no database",
+  "cases": [
+    {
+      "query": "Book me into the coworking space today.",
+      "expected": "mlai-points/book_coworking",
+      "skill": "mlai-points",
+      "action": "book_coworking",
+      "params": {
+        "date": "today"
+      },
+      "source": "router",
+      "clarification": null,
+      "passed": true,
+      "reply": "Simulated booking confirmed",
+      "resolved_date": "2026-10-23"
+    },
+    {
+      "query": "Can you book me in for coworking tomorrow?",
+      "expected": "mlai-points/book_coworking",
+      "skill": "mlai-points",
+      "action": "book_coworking",
+      "params": {
+        "date": "tomorrow"
+      },
+      "source": "router",
+      "clarification": null,
+      "passed": true,
+      "reply": "Simulated booking confirmed",
+      "resolved_date": "2026-10-24"
+    },
+    {
+      "query": "Book me into coworking on 29 October 2026 from 1pm to 5pm.",
+      "expected": "mlai-points/book_coworking",
+      "skill": "mlai-points",
+      "action": "book_coworking",
+      "params": {
+        "date": "29 October 2026 from 1pm to 5pm"
+      },
+      "source": "router",
+      "clarification": null,
+      "passed": false,
+      "reply": "Which date do you mean? Try a date like `18 September`, `tomorrow`, or `next Friday`."
+    },
+    {
+      "query": "Request 5 Roo Points for helping at the event.",
+      "expected": "mlai-points/request_points",
+      "skill": "mlai-points",
+      "action": "request_points",
+      "params": {
+        "points": 5,
+        "reason": "helping at the event"
+      },
+      "source": "router",
+      "clarification": null,
+      "passed": true,
+      "reply": "\ud83d\udcdd *Points request pending*\n\n<@USMOKEMEMBER> requested *5 points* for: helping at the event\n\nPoints Admins can approve this by reacting with a green tick (\u2705 or \u2714\ufe0f) to this message."
+    },
+    {
+      "query": "Can I request 8 Roo Points for writing documentation?",
+      "expected": "mlai-points/request_points",
+      "skill": "mlai-points",
+      "action": "request_points",
+      "params": {
+        "points": 8,
+        "reason": "writing documentation"
+      },
+      "source": "router",
+      "clarification": null,
+      "passed": true,
+      "reply": "\ud83d\udcdd *Points request pending*\n\n<@USMOKEMEMBER> requested *8 points* for: writing documentation\n\nPoints Admins can approve this by reacting with a green tick (\u2705 or \u2714\ufe0f) to this message."
+    },
+    {
+      "query": "Approve Roo Points request #7.",
+      "expected": "clarify/respond; approval uses Slack reaction",
+      "skill": "mlai-points",
+      "action": "approve_task",
+      "params": {
+        "task_id": "#7"
+      },
+      "source": "router",
+      "clarification": null,
+      "passed": false
+    },
+    {
+      "query": "Please approve <@USMOKEMEMBER>'s pending request for 5 Roo Points for helping at the event.",
+      "expected": "clarify/respond; approval uses Slack reaction",
+      "skill": "mlai-points",
+      "action": "request_points",
+      "params": {
+        "points": 5,
+        "target_users": [
+          "<@USMOKEMEMBER>"
+        ],
+        "reason": "helping at the event"
+      },
+      "source": "router",
+      "clarification": null,
+      "passed": false
+    }
+  ],
+  "exit_code": 1,
+  "tests": [
+    {
+      "test": "tests/roo/test_live_skill_smoke.py::test_live_coworking_booking[Book me into the coworking space today.-2026-10-23]",
+      "outcome": "passed"
+    },
+    {
+      "test": "tests/roo/test_live_skill_smoke.py::test_live_coworking_booking[Can you book me in for coworking tomorrow?-2026-10-24]",
+      "outcome": "passed"
+    },
+    {
+      "test": "tests/roo/test_live_skill_smoke.py::test_live_coworking_booking[Book me into coworking on 29 October 2026 from 1pm to 5pm.-2026-10-29]",
+      "outcome": "failed"
+    },
+    {
+      "test": "tests/roo/test_live_skill_smoke.py::test_live_request_roo_points[Request 5 Roo Points for helping at the event.-5-helping at the event]",
+      "outcome": "passed"
+    },
+    {
+      "test": "tests/roo/test_live_skill_smoke.py::test_live_request_roo_points[Can I request 8 Roo Points for writing documentation?-8-writing documentation]",
+      "outcome": "passed"
+    },
+    {
+      "test": "tests/roo/test_live_skill_smoke.py::test_live_points_approval_does_not_become_a_direct_award[Approve Roo Points request #7.]",
+      "outcome": "failed"
+    },
+    {
+      "test": "tests/roo/test_live_skill_smoke.py::test_live_points_approval_does_not_become_a_direct_award[Please approve <@USMOKEMEMBER>'s pending request for 5 Roo Points for helping at the event.]",
+      "outcome": "failed"
+    },
+    {
+      "test": "tests/roo/test_live_skill_smoke.py::test_reaction_approval_uses_event_actor_and_backend_result[authorized]",
+      "outcome": "passed"
+    },
+    {
+      "test": "tests/roo/test_live_skill_smoke.py::test_reaction_approval_uses_event_actor_and_backend_result[denied]",
+      "outcome": "passed"
+    }
+  ]
+}
