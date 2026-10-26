@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-sys.path.insert(0, str((Path(__file__).resolve().parents[2] / "src")))
+sys.path.insert(0, str((Path(__file__).resolve().parents[2] / "roo-standalone")))
 
 from roo import linear_meeting_sources as sources
 from roo import slack_client

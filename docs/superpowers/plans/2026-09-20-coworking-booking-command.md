@@ -37,10 +37,10 @@ Planning inspected these local snapshots, which are evidence of interfaces, not 
 
 - Roo: `/Users/alanphilip/Documents/MLAI/roo-pr225-plan`, whose HEAD names `codex/meeting-room-booking`.
 - Backend: `/Users/alanphilip/Documents/MLAI/backend-pr710-hardening` (`roo/views.py`); the booking model was also read in `mlai-backend/roo/models.py`.
-- Roo `../../../src/roo/main.py:2956` owns `/slack/commands`; it verifies signatures, deduplicates requests, checks allowed contexts, then rejects all commands on the admin surface.
+- Roo `../../../roo-standalone/roo/main.py:2956` owns `/slack/commands`; it verifies signatures, deduplicates requests, checks allowed contexts, then rejects all commands on the admin surface.
 - Backend `roo/views.py:1508` owns `CoworkingViewSet`; its `report` action starts around line 1560. `get_permissions` already narrows `book_many` to `HasStrictRooApiKey`.
-- Roo client `../../../src/roo/clients/mlai_backend.py` has `_request`, `_points_base = "/api/v1/points"`, and a separate `get_coworking_report` method. Do not use or change the report method.
-- Roo `../../../src/roo/tests/test_slack_security.py` contains signed-request helpers, test settings, replay tests, and admin-context tests.
+- Roo client `../../../roo-standalone/roo/clients/mlai_backend.py` has `_request`, `_points_base = "/api/v1/points"`, and a separate `get_coworking_report` method. Do not use or change the report method.
+- Roo `../../../roo-standalone/roo/tests/test_slack_security.py` contains signed-request helpers, test settings, replay tests, and admin-context tests.
 
 Start implementation from fresh branches based on the current intended base of each repository, using the worktrees skill if isolation is needed. Read applicable AGENTS.md files and compare these interfaces before editing. Some local file reads stalled during planning; current branch ancestry, URL composition, and CI test setup are not asserted verified. Do not implement on an unrelated existing feature branch merely because it was inspected.
 
@@ -54,12 +54,12 @@ All paths below are relative to the indicated repository root.
 | Backend: modify `roo/views.py` | Authorised read action |
 | Backend: modify `mlai/urls.py` | Explicit canonical URL, if not already supplied by the existing router |
 | Backend: create `tests/test_coworking_snapshot.py` | Permission, filter, and wire-contract tests |
-| Roo: modify `../../../src/roo/clients/mlai_backend.py` | Dedicated bounded API call |
-| Roo: create `../../../src/roo/coworking_snapshot.py` | Date parsing, response validation, formatting and errors |
-| Roo: modify `../../../src/roo/main.py` | Exact command dispatch only |
-| Roo: create `../../../src/roo/tests/test_coworking_snapshot.py` | Client and command unit tests |
-| Roo: modify `../../../src/roo/tests/test_slack_security.py` | Signed route integration tests |
-| Roo: create `../../../src/docs/coworking-today-command.md` | Slack registration and operational smoke test |
+| Roo: modify `../../../roo-standalone/roo/clients/mlai_backend.py` | Dedicated bounded API call |
+| Roo: create `../../../roo-standalone/roo/coworking_snapshot.py` | Date parsing, response validation, formatting and errors |
+| Roo: modify `../../../roo-standalone/roo/main.py` | Exact command dispatch only |
+| Roo: create `../../../roo-standalone/roo/tests/test_coworking_snapshot.py` | Client and command unit tests |
+| Roo: modify `../../../roo-standalone/roo/tests/test_slack_security.py` | Signed route integration tests |
+| Roo: create `../../../roo-standalone/docs/coworking-today-command.md` | Slack registration and operational smoke test |
 
 ## Task 1: Authorised booking-list API
 
@@ -198,7 +198,7 @@ def test_bad_arguments_never_call_backend(text):
     client.get_coworking_snapshot.assert_not_awaited()
 ```
 
-- [ ] **Step 2: Run `python -m pytest roo/tests/test_coworking_snapshot.py -q` from `src`; expect import failure.**
+- [ ] **Step 2: Run `python -m pytest roo/tests/test_coworking_snapshot.py -q` from `roo-standalone`; expect import failure.**
 
 - [ ] **Step 3: Add the dedicated client method.** Use the existing client error normalisation:
 
@@ -358,7 +358,7 @@ def test_coworking_command_uses_deterministic_handler(tmp_path, monkeypatch):
     assert handler.await_count == 1
 ```
 
-- [ ] **Step 2: Run the single test; expect the missing handler attribute failure.** Run `python -m pytest roo/tests/test_slack_security.py::test_coworking_command_uses_deterministic_handler -q` from `src`.
+- [ ] **Step 2: Run the single test; expect the missing handler attribute failure.** Run `python -m pytest roo/tests/test_slack_security.py::test_coworking_command_uses_deterministic_handler -q` from `roo-standalone`.
 
 - [ ] **Step 3: Add the narrow dispatcher.** Import `handle_command as handle_coworking_command` from `.coworking_snapshot`. Immediately after the existing `_is_slack_context_allowed` rejection and before `if settings.ROO_SURFACE == "admin"`, insert:
 

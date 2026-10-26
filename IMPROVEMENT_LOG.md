@@ -39,7 +39,7 @@ are labelled as such.
   authentication checks, parameterized URLs, and an empty API-key variable.
 - Documented Postman startup, import, variables, troubleshooting, and shutdown
   in `postman/README.md`.
-- Added `src/scripts/run_evals.sh` with offline routing gates and explicit live
+- Added `roo-standalone/scripts/run_evals.sh` with offline routing gates and explicit live
   routing/addressing modes, plus an eval guide describing datasets and limits.
   Verified shell syntax and all three offline routing gates in Docker.
 - Repaired the root `AGENTS.md` symlink after the instructions folder moved to
@@ -53,7 +53,7 @@ are labelled as such.
   needs a transition for local env/data paths and rollback before deployment.
 - Moved quest documentation to `docs/QUESTS.md` and marked its handler as
   inactive. Verified linked source paths; no runtime changes.
-- Moved the application Dockerfile into `infra/`, preserving the `src/` build
+- Moved the application Dockerfile into `infra/`, preserving the `roo-standalone/` build
   context; updated all six Compose builds, the security test reference, and docs.
   Consolidated application/bridge ignore rules into root `.gitignore`, including
   local env files, caches, and editor files while retaining env templates.
@@ -71,3 +71,11 @@ are labelled as such.
   weekdays, invalid dates, and multiple-date requests still require clarification.
   All 180 date/booking regression tests pass offline, including the exact report
   with absent, ISO, and natural-language router dates. No real booking made.
+
+- Restored the application directory name to `roo-standalone` and updated CI,
+  Compose, test imports, scripts, and documentation. Kept tests and infrastructure
+  in their dedicated folders. Deployment now discovers the previous Compose
+  layout when capturing rollback state and restarting the bridge.
+  Validation: 41 targeted deployment/skill tests passed; all Compose profiles
+  rendered with empty test environments; workflow YAML and SSH shell syntax
+  checks passed. No deployment or live service calls performed.

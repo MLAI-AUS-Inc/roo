@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-sys.path.insert(0, str((Path(__file__).resolve().parents[2] / "src")))
+sys.path.insert(0, str((Path(__file__).resolve().parents[2] / "roo-standalone")))
 sys.modules.setdefault("frontmatter", SimpleNamespace(load=lambda *args, **kwargs: None))
 
 link_love = importlib.import_module("roo.link_love")

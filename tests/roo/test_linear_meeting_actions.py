@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-sys.path.insert(0, str((Path(__file__).resolve().parents[2] / "src")))
+sys.path.insert(0, str((Path(__file__).resolve().parents[2] / "roo-standalone")))
 sys.modules.setdefault("frontmatter", SimpleNamespace(load=lambda *args, **kwargs: None))
 sys.modules.pop("roo.skills.executor", None)
 
@@ -448,7 +448,7 @@ def test_linear_meeting_team_match_uses_accessible_project_team_not_default():
 @pytest.mark.asyncio
 async def test_linear_client_reads_context_from_backend(monkeypatch):
     module_path = (
-        (Path(__file__).resolve().parents[2] / "src")
+        (Path(__file__).resolve().parents[2] / "roo-standalone")
         / "skills"
         / "linear_meeting_actions"
         / "client.py"
@@ -505,7 +505,7 @@ async def test_linear_client_reads_context_from_backend(monkeypatch):
 @pytest.mark.asyncio
 async def test_linear_client_resolves_explicit_project_from_full_catalog(monkeypatch):
     module_path = (
-        (Path(__file__).resolve().parents[2] / "src")
+        (Path(__file__).resolve().parents[2] / "roo-standalone")
         / "skills"
         / "linear_meeting_actions"
         / "client.py"
@@ -565,7 +565,7 @@ async def test_linear_client_resolves_explicit_project_from_full_catalog(monkeyp
 @pytest.mark.asyncio
 async def test_linear_client_create_issue_calls_backend(monkeypatch):
     module_path = (
-        (Path(__file__).resolve().parents[2] / "src")
+        (Path(__file__).resolve().parents[2] / "roo-standalone")
         / "skills"
         / "linear_meeting_actions"
         / "client.py"
@@ -624,7 +624,7 @@ async def test_linear_client_create_issue_calls_backend(monkeypatch):
 @pytest.mark.asyncio
 async def test_linear_client_persists_and_decides_action_batch(monkeypatch):
     module_path = (
-        (Path(__file__).resolve().parents[2] / "src")
+        (Path(__file__).resolve().parents[2] / "roo-standalone")
         / "skills"
         / "linear_meeting_actions"
         / "client.py"
@@ -681,7 +681,7 @@ async def test_linear_client_persists_and_decides_action_batch(monkeypatch):
 @pytest.mark.asyncio
 async def test_linear_client_reads_project_sizing_context(monkeypatch):
     module_path = (
-        (Path(__file__).resolve().parents[2] / "src")
+        (Path(__file__).resolve().parents[2] / "roo-standalone")
         / "skills"
         / "linear_meeting_actions"
         / "client.py"
@@ -720,7 +720,7 @@ async def test_linear_client_reads_project_sizing_context(monkeypatch):
 @pytest.mark.asyncio
 async def test_linear_client_pages_complete_project_issue_inventory(monkeypatch):
     module_path = (
-        (Path(__file__).resolve().parents[2] / "src")
+        (Path(__file__).resolve().parents[2] / "roo-standalone")
         / "skills"
         / "linear_meeting_actions"
         / "client.py"
@@ -782,7 +782,7 @@ async def test_linear_client_pages_complete_project_issue_inventory(monkeypatch)
 @pytest.mark.asyncio
 async def test_linear_client_resolves_concurrent_create_from_receipt(monkeypatch):
     module_path = (
-        (Path(__file__).resolve().parents[2] / "src")
+        (Path(__file__).resolve().parents[2] / "roo-standalone")
         / "skills"
         / "linear_meeting_actions"
         / "client.py"
@@ -855,7 +855,7 @@ async def test_linear_client_resolves_concurrent_create_from_receipt(monkeypatch
 @pytest.mark.asyncio
 async def test_linear_client_create_project_update_calls_backend(monkeypatch):
     module_path = (
-        (Path(__file__).resolve().parents[2] / "src")
+        (Path(__file__).resolve().parents[2] / "roo-standalone")
         / "skills"
         / "linear_meeting_actions"
         / "client.py"
@@ -903,7 +903,7 @@ async def test_linear_client_create_project_update_calls_backend(monkeypatch):
 @pytest.mark.asyncio
 async def test_linear_client_backend_error_surfaces_detail(monkeypatch, capsys):
     module_path = (
-        (Path(__file__).resolve().parents[2] / "src")
+        (Path(__file__).resolve().parents[2] / "roo-standalone")
         / "skills"
         / "linear_meeting_actions"
         / "client.py"
@@ -943,7 +943,7 @@ async def test_linear_client_backend_error_surfaces_detail(monkeypatch, capsys):
 @pytest.mark.asyncio
 async def test_linear_client_raises_specific_incomplete_team_access_error(monkeypatch):
     module_path = (
-        (Path(__file__).resolve().parents[2] / "src")
+        (Path(__file__).resolve().parents[2] / "roo-standalone")
         / "skills"
         / "linear_meeting_actions"
         / "client.py"

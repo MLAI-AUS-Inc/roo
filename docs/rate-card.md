@@ -55,7 +55,7 @@ existing award flow.
 
 ## Local verification
 
-With development-only values and dotenv disabled, from `src`:
+With development-only values and dotenv disabled, from `roo-standalone`:
 
 ```bash
 python -m pytest roo/tests/test_mlai_backend_client.py \

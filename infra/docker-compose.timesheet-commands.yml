@@ -6,5 +6,5 @@ services:
       TIMESHEET_QUEUE_DIR: /app/timesheets/queue
       STUDIO_INVOICE_QUEUE_DIR: /app/timesheets/invoice-queue
     volumes:
-      - ../src/data/timesheet-queue:/app/timesheets/queue
-      - ../src/data/invoice-queue:/app/timesheets/invoice-queue
+      - ../roo-standalone/data/timesheet-queue:/app/timesheets/queue
+      - ../roo-standalone/data/invoice-queue:/app/timesheets/invoice-queue

@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 
-sys.path.insert(0, str((Path(__file__).resolve().parents[2] / "src")))
+sys.path.insert(0, str((Path(__file__).resolve().parents[2] / "roo-standalone")))
 
 from roo import main as main_module
 from roo.backend_identity import get_backend_actor_context

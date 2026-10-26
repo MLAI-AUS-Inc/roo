@@ -68,7 +68,7 @@ a TLS hostname. This change has not deployed or updated any live Slack app.
 
 ## Validation
 
-From `src`, with synthetic credentials only:
+From `roo-standalone`, with synthetic credentials only:
 
 ```sh
 SLACK_BOT_TOKEN=xoxb-test SLACK_SIGNING_SECRET=test OPENAI_API_KEY=test \

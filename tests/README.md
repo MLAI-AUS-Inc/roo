@@ -6,7 +6,7 @@
 - `evals/addressing/`: respond/ignore cases and runner.
 - `run_evals.sh`: entry point for offline and live evaluations; see [EVALS.md](EVALS.md).
 
-Use Python 3.11 with `src/requirements.txt` installed. From the repository root:
+Use Python 3.11 with `roo-standalone/requirements.txt` installed. From the repository root:
 
 ```bash
 SLACK_BOT_TOKEN=test SLACK_SIGNING_SECRET=test OPENAI_API_KEY=test \
@@ -16,8 +16,8 @@ python -m pytest tests/roo/test_routing_eval_gate.py -q
 ./tests/run_evals.sh offline
 ```
 
-The root `pytest.ini` adds `src/` and the repository root to the import path.
-Tests can also run from `src/` using `../tests/...` paths.
+The root `pytest.ini` adds `roo-standalone/` and the repository root to the import path.
+Tests can also run from `roo-standalone/` using `../tests/...` paths.
 
 Some legacy modules install process-wide import stubs. Keep the groups in
 `.github/workflows/deploy.yml` separate when reproducing CI; a single combined

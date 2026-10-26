@@ -9,12 +9,12 @@ name: slack-bridge
 services:
   slack-bridge:
     build:
-      context: ../src
+      context: ../roo-standalone
       dockerfile: ../infra/Dockerfile
     image: roo-slack-bridge:local
     command: ["uvicorn", "bridge.main:app", "--host", "0.0.0.0", "--port", "8100"]
     env_file:
-      - ../src/.env
+      - ../roo-standalone/.env
     restart: unless-stopped
     # No published ports: both sides poll, so there are no inbound webhooks.
     healthcheck:

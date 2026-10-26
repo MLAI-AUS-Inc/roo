@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str((Path(__file__).resolve().parents[2] / "src")))
+sys.path.insert(0, str((Path(__file__).resolve().parents[2] / "roo-standalone")))
 
 from roo.admin_pilot_smoke import admin_pilot_signed_smoke_report
 from roo.config import Settings

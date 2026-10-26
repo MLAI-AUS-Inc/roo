@@ -2,7 +2,7 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-sys.path.insert(0, str((Path(__file__).resolve().parents[2] / "src")))
+sys.path.insert(0, str((Path(__file__).resolve().parents[2] / "roo-standalone")))
 
 from roo.admin_pilot_config import admin_pilot_config_report
 from roo.config import Settings

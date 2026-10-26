@@ -1,6 +1,6 @@
 # Developing and validating Roo skills
 
-Run tooling from `src` with the application's Python environment:
+Run tooling from `roo-standalone` with the application's Python environment:
 
 ```bash
 python -m roo.skills.lint --public-defaults
@@ -28,7 +28,7 @@ and registry tests; metadata lint never imports the runtime registry.
 
 ## Adding a capability
 
-1. Add `src/skills/<package>/SKILL.md` with a unique `name`, `description`,
+1. Add `roo-standalone/skills/<package>/SKILL.md` with a unique `name`, `description`,
    routing rules, and declared actions/parameters. Use actual YAML booleans for
    `requires_auth`. It is descriptive metadata, not an authorization grant.
 2. Implement a class under `roo/skills/executors/` inheriting

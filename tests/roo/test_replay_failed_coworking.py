@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 
-SCRIPT_PATH = (Path(__file__).resolve().parents[2] / "src") / "ops" / "replay_failed_coworking.py"
+SCRIPT_PATH = (Path(__file__).resolve().parents[2] / "roo-standalone") / "ops" / "replay_failed_coworking.py"
 spec = importlib.util.spec_from_file_location("replay_failed_coworking", SCRIPT_PATH)
 replay = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = replay

@@ -5,10 +5,10 @@ Requires=docker.service
 
 [Service]
 Type=simple
-WorkingDirectory=/srv/roo/src
+WorkingDirectory=/srv/roo/roo-standalone
 Environment=WATCHDOG_SERVICE_NAME=roo
 Environment=WATCHDOG_INTERVAL_SECONDS=60
-ExecStart=/srv/roo/src/ops/docker-health-watchdog.sh
+ExecStart=/srv/roo/roo-standalone/ops/docker-health-watchdog.sh
 Restart=always
 RestartSec=5
 

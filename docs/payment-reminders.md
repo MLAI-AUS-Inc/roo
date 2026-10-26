@@ -64,7 +64,7 @@ API references: [Linear queries and archived resources](https://linear.app/devel
 
 ## Configure and preview
 
-From `src`, copy `.env.payment-reminders.example` to the ignored
+From `roo-standalone`, copy `.env.payment-reminders.example` to the ignored
 `.env.payment-reminders`. Fill in the dedicated credentials, Slack workspace ID,
 Linear organization UUID, `PAYMENT_SLACK_CHANNEL_ID=C0C02S608LU`, and verified
 `PAYMENT_BUILDERS_JSON` mappings. No credentials or member identities are committed.

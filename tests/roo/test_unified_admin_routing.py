@@ -3,7 +3,7 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
-sys.path.insert(0, str((Path(__file__).resolve().parents[2] / "src")))
+sys.path.insert(0, str((Path(__file__).resolve().parents[2] / "roo-standalone")))
 
 from roo.agent import RooAgent
 from roo.backend_identity import BackendActorContext, use_backend_actor_context

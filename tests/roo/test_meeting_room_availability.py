@@ -6,7 +6,7 @@ import sys
 
 import pytest
 
-sys.path.insert(0, str((Path(__file__).resolve().parents[2] / "src")))
+sys.path.insert(0, str((Path(__file__).resolve().parents[2] / "roo-standalone")))
 
 from roo.meeting_room_availability import (
     available_start_ranges, format_day_availability, resolve_search_duration,

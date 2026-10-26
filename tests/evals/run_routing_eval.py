@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run the routing eval.
 
-Usage (from src/):
+Usage (from roo-standalone/):
     .venv/bin/python scripts/run_routing_eval.py                      # deterministic, report
     .venv/bin/python scripts/run_routing_eval.py --verbose            # + fallthrough list
     .venv/bin/python scripts/run_routing_eval.py --check              # fail on baseline regression
@@ -22,7 +22,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "roo-standalone"))
 
 from tests.evals.routing import runner
 

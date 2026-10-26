@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-sys.path.insert(0, str((Path(__file__).resolve().parents[2] / "src")))
+sys.path.insert(0, str((Path(__file__).resolve().parents[2] / "roo-standalone")))
 
 from roo import boost_moderation as module
 from roo import link_love

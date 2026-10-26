@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str((Path(__file__).resolve().parents[2] / "src")))
+sys.path.insert(0, str((Path(__file__).resolve().parents[2] / "roo-standalone")))
 
 from roo import router
 from roo.llm import ToolCall, ToolCallParseError

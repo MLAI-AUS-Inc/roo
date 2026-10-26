@@ -3,7 +3,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-sys.path.insert(0, str((Path(__file__).resolve().parents[2] / "src")))
+sys.path.insert(0, str((Path(__file__).resolve().parents[2] / "roo-standalone")))
 
 from roo import admin_worker
 from roo.admin_dispatch import build_admin_dispatch

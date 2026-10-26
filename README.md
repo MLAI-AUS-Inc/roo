@@ -2,7 +2,7 @@
 
 Roo is MLAI's Slack-facing AI agent service. The active FastAPI application,
 tests, skills, runtime configuration, and Docker files live under
-[`src/`](src/).
+[`roo-standalone/`](roo-standalone/).
 
 Roo integrates with Slack, `mlai-backend`, Linear, content services, and
 configured AI providers. It supports separate public and administrative
@@ -19,7 +19,7 @@ quality work is recorded in the [improvement log](IMPROVEMENT_LOG.md).
 roo/
 ├── tests/                   # Application tests, bridge tests, and evals
 ├── infra/                   # Dockerfile, Compose files, and NGINX
-├── src/
+├── roo-standalone/
 │   ├── roo/                  # FastAPI application
 │   ├── skills/               # Runtime skill packages
 │   ├── bridge/               # Bridge adapter
@@ -64,10 +64,10 @@ The [30 September company-brain review](docs/company-brain/2026-09-30-review-and
 
 ## Local setup
 
-Run application commands from `src`, not the repository root:
+Run application commands from `roo-standalone`, not the repository root:
 
 ```bash
-cd src
+cd roo-standalone
 python3.11 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
@@ -93,11 +93,11 @@ and run `./tests/run_evals.sh --help` from the repository root.
 
 Import [the local Postman collection](postman/Roo-Local.postman_collection.json).
 Set its `mention_api_key` variable locally to `INTERNAL_MENTION_API_KEY` from
-`src/.env`. It includes readiness, greeting, custom prompt, and authentication
+`roo-standalone/.env`. It includes readiness, greeting, custom prompt, and authentication
 checks; the collection contains no credentials.
 
 To reach Public Roo through a localhost-only NGINX proxy, configure a random
-development `INTERNAL_MENTION_API_KEY` in `src/.env`, then from `src/` run:
+development `INTERNAL_MENTION_API_KEY` in `roo-standalone/.env`, then from `roo-standalone/` run:
 
 ```bash
 docker network inspect roo-admin-gateway >/dev/null 2>&1 || docker network create roo-admin-gateway
@@ -141,7 +141,7 @@ editing or authorize the reader in other channels. Production's
 ### Configure the local services
 
 Complete the local setup above, then populate the untracked
-`src/.env` in the checkout or worktree you will actually run:
+`roo-standalone/.env` in the checkout or worktree you will actually run:
 
 ```dotenv
 SLACK_BOT_TOKEN=xoxb-replace-with-roo-dev-bot-token
@@ -172,7 +172,7 @@ explicit approval for the specific migration. The backend's local Compose web
 service enables migrations on startup, so use the direct command above for
 this workflow.
 
-In another terminal, from `src` with its virtual environment active:
+In another terminal, from `roo-standalone` with its virtual environment active:
 
 ```bash
 uvicorn roo.main:app --reload --host 127.0.0.1 --port 8000
@@ -220,7 +220,7 @@ token belongs to a user and workspace and can manage multiple apps; it is not
 limited to Roo Dev.
 
 Store the returned values in the running worktree's untracked
-`src/.env`:
+`roo-standalone/.env`:
 
 ```dotenv
 SLACK_CONFIG_TOKEN=replace-with-configuration-access-token
@@ -278,7 +278,7 @@ channel; a successful chat reply alone does not verify the backend integration.
 
 ## Tests
 
-From `src`:
+From `roo-standalone`:
 
 ```bash
 pytest
@@ -300,13 +300,13 @@ See [skill development and validation](docs/skill-development.md) for the
 metadata-only linter, structured load reports, and explicit executor registry.
 
 The general chat fallback system prompt lives in
-[`src/roo/prompts/system_prompt.md`](src/roo/prompts/system_prompt.md).
+[`roo-standalone/roo/prompts/system_prompt.md`](roo-standalone/roo/prompts/system_prompt.md).
 Roo fills `{skill_list}` and `{history_context}` at request time. Preserve these
 placeholders when editing; escape any other literal braces as `{{` and `}}`.
 
-Runtime skills are directories under `src/skills`. Inspect the
+Runtime skills are directories under `roo-standalone/skills`. Inspect the
 selected skill package and its tests before changing routing or permissions.
-The similarly named Python modules under `src/roo/skills` implement
+The similarly named Python modules under `roo-standalone/roo/skills` implement
 application-side behavior and are not Markdown-only skill definitions.
 
 Skill availability is constrained by the runtime surface and configuration.
@@ -345,7 +345,7 @@ it. Compose startup may contact external services when credentials are present.
 
 ## Slack configuration
 
-Slack manifests live in `src/slack-app-manifests`. Required scopes
+Slack manifests live in `roo-standalone/slack-app-manifests`. Required scopes
 depend on the enabled features. File handling requires `files:read`; contextual
 Linear features require the appropriate channel history/read scopes plus
 `users:read` and `users:read.email` for identity matching. Reinstalling a Slack

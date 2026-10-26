@@ -8,7 +8,7 @@ import pytest
 from pydantic import ValidationError
 import yaml
 
-sys.path.insert(0, str((Path(__file__).resolve().parents[2] / "src")))
+sys.path.insert(0, str((Path(__file__).resolve().parents[2] / "roo-standalone")))
 
 from roo import addressing
 from roo import agent as agent_module

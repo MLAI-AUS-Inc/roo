@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str((Path(__file__).resolve().parents[2] / "src")))
+sys.path.insert(0, str((Path(__file__).resolve().parents[2] / "roo-standalone")))
 
 from roo.sim_patient import check_guess
 from roo.ward_agents import parse_final_diagnosis

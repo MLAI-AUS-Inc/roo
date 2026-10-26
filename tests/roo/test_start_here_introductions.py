@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-sys.path.insert(0, str((Path(__file__).resolve().parents[2] / "src")))
+sys.path.insert(0, str((Path(__file__).resolve().parents[2] / "roo-standalone")))
 sys.modules.setdefault("frontmatter", SimpleNamespace(load=lambda *args, **kwargs: None))
 
 intro = importlib.import_module("roo.start_here_introductions")

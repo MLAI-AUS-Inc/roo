@@ -44,7 +44,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
 
-REPO_ROOT = Path(__file__).resolve().parents[3] / "src"
+REPO_ROOT = Path(__file__).resolve().parents[3] / "roo-standalone"
 CASES_DIR = Path(__file__).resolve().parent / "cases"
 BASELINE_PATH = Path(__file__).resolve().parent / "baseline.json"
 

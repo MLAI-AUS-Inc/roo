@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-sys.path.insert(0, str((Path(__file__).resolve().parents[2] / "src")))
+sys.path.insert(0, str((Path(__file__).resolve().parents[2] / "roo-standalone")))
 sys.modules.pop("roo.skills.executor", None)
 sys.modules.pop("roo.main", None)
 

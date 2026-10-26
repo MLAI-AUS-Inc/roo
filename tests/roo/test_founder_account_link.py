@@ -9,7 +9,7 @@ import httpx
 import pytest
 from slack_sdk.web.slack_response import SlackResponse
 
-sys.path.insert(0, str((Path(__file__).resolve().parents[2] / "src")))
+sys.path.insert(0, str((Path(__file__).resolve().parents[2] / "roo-standalone")))
 
 backend_module = importlib.import_module("roo.clients.mlai_backend")
 executor_module = importlib.import_module("roo.skills.executor")

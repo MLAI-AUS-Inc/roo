@@ -32,7 +32,7 @@ execution into the Public Roo process.
 
 ## Classes and ownership
 
-Proposed paths are relative to `../../src/roo`.
+Proposed paths are relative to `../../roo-standalone/roo`.
 
 | Class | Proposed module | Owns | Does not own |
 | --- | --- | --- | --- |

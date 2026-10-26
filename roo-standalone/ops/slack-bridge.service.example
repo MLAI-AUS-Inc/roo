@@ -16,7 +16,7 @@ Requires=docker.service
 
 [Service]
 Type=simple
-WorkingDirectory=/root/roo/src
+WorkingDirectory=/root/roo/roo-standalone
 # Build then run the bridge Compose project in the foreground so systemd
 # supervises it and its logs land in journald.
 ExecStartPre=/usr/bin/docker compose --env-file .env -f ../infra/docker-compose.bridge.yml build

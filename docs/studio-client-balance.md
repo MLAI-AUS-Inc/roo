@@ -176,7 +176,7 @@ a chargeable shortfall, an amount owed or a monthly contractual allowance.
 ## Snapshot version 1
 
 The complete schema is enforced by
-[`validate_balance_snapshot`](../src/roo/studio_client_balance_source.py). Client money
+[`validate_balance_snapshot`](../roo-standalone/roo/studio_client_balance_source.py). Client money
 and purchase rates use positive integer cents; `paid_cents` may be zero. Work uses
 integer `hour_units` at **1,000,000 units per hour**; `excluded_hour_units` and
 `unresolved_hour_units` may be zero. Credits must be exactly representable at this
@@ -273,7 +273,7 @@ STUDIO_CLIENT_BALANCE_MAX_AGE_DAYS=7
 workspace, organization, builder/project mappings and client grants are reused.
 Public Roo holds no Xero token, invoice attachment directory or financial snapshot.
 
-From `src`, validate the operator-reviewed source offline:
+From `roo-standalone`, validate the operator-reviewed source offline:
 
 ```bash
 python scripts/install_studio_client_balance.py \

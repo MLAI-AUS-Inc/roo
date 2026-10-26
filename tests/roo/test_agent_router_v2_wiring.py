@@ -6,7 +6,7 @@ from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
 
-sys.path.insert(0, str((Path(__file__).resolve().parents[2] / "src")))
+sys.path.insert(0, str((Path(__file__).resolve().parents[2] / "roo-standalone")))
 sys.modules.setdefault("frontmatter", SimpleNamespace(load=lambda *args, **kwargs: None))
 fake_executor_module = types.ModuleType("roo.skills.executor")
 fake_executor_module.SkillExecutor = type("SkillExecutor", (), {})

@@ -64,7 +64,7 @@ def test_real_skill_exposes_only_safe_selectors_and_distinct_actions():
     from tests.evals.routing.runner import _ensure_real_frontmatter
     _ensure_real_frontmatter()
     from roo import router
-    skill = load_skill_from_directory((Path(__file__).resolve().parents[2] / "src") / 'skills' / 'studio-client-balance')
+    skill = load_skill_from_directory((Path(__file__).resolve().parents[2] / "roo-standalone") / 'skills' / 'studio-client-balance')
     assert skill.requires_auth
     assert not router.lint_catalog([skill])
     tool = router.build_tools([skill])[0][0]['function']

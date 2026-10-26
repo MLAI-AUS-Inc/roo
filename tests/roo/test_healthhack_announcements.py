@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-sys.path.insert(0, str((Path(__file__).resolve().parents[2] / "src")))
+sys.path.insert(0, str((Path(__file__).resolve().parents[2] / "roo-standalone")))
 sys.modules.setdefault("frontmatter", SimpleNamespace(load=lambda *args, **kwargs: None))
 
 from roo.clients.mlai_backend import MLAIBackendClient
