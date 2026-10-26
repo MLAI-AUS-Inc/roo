@@ -478,7 +478,7 @@ def test_deploy_workflow_requires_and_secretly_upserts_security_values():
     assert 'git checkout --detach "$previous_release_sha"' in workflow
     assert 'docker image tag "$previous_image_id" "$previous_image_ref"' in workflow
     assert (
-        "docker compose --env-file .env -f ../infra/docker-compose.yml --ansi never up -d --no-build --force-recreate "
+        'docker compose --env-file .env -f "$previous_compose_dir/docker-compose.yml" --ansi never up -d --no-build --force-recreate '
         "--remove-orphans"
     ) in workflow
     assert workflow.index("previous_image_id=") < workflow.index("docker compose --env-file .env -f ../infra/docker-compose.yml build roo")
@@ -486,7 +486,7 @@ def test_deploy_workflow_requires_and_secretly_upserts_security_values():
         "docker compose --env-file .env -f ../infra/docker-compose.yml up -d --no-build --remove-orphans"
     )
     assert "systemctl restart slack-bridge.service" in workflow
-    assert "docker compose --env-file .env -f ../infra/docker-compose.bridge.yml up -d --build" in workflow
+    assert 'docker compose --env-file .env -f "$bridge_compose_file" up -d --build' in workflow
     assert "Slack bridge readiness check timed out" in workflow
     assert workflow.index("previous_bridge_mode=") < workflow.index(
         "rollback_release()"
