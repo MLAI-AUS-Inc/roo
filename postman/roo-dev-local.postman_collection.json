@@ -1,0 +1,266 @@
+{
+  "info": {
+    "name": "Roo \u2014 Local Development",
+    "description": "Local Roo via the Postman NGINX proxy (port 8088), plus backend readiness (port 8001). Set mention_api_key to INTERNAL_MENTION_API_KEY from src/.env. No credentials are included. Agent requests return replies over HTTP with post_reply=false; skills can still invoke external services. Slack-dependent skills require valid development identities and credentials.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "roo_base_url",
+      "value": "http://127.0.0.1:8088",
+      "type": "string"
+    },
+    {
+      "key": "backend_base_url",
+      "value": "http://127.0.0.1:8001",
+      "type": "string"
+    },
+    {
+      "key": "mention_api_key",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "slack_user_id",
+      "value": "U_TEST",
+      "type": "string"
+    },
+    {
+      "key": "prompt",
+      "value": "Hello! Please reply with a short greeting only.",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "Roo readiness",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{roo_base_url}}/healthz/ready",
+        "description": "Checks Public Roo startup and readiness.",
+        "auth": {
+          "type": "noauth"
+        }
+      },
+      "response": [],
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test(\"HTTP 200\", function () { pm.response.to.have.status(200); });"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Backend readiness",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{backend_base_url}}/healthz/ready",
+        "description": "Checks backend readiness, including pending migrations.",
+        "auth": {
+          "type": "noauth"
+        }
+      },
+      "response": [],
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test(\"HTTP 200\", function () { pm.response.to.have.status(200); });"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Agent \u2014 greeting",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": "{{roo_base_url}}/api/mention",
+        "description": "Runs a harmless greeting through the normal agent. Requires a working model key. Does not post the response to Slack.",
+        "auth": {
+          "type": "bearer",
+          "bearer": [
+            {
+              "key": "token",
+              "value": "{{mention_api_key}}",
+              "type": "string"
+            }
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"text\": \"Hello! Please reply with a short greeting only.\",\n  \"user_id\": \"{{slack_user_id}}\",\n  \"post_reply\": false\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "response": [],
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test(\"HTTP 200\", function () { pm.response.to.have.status(200); });"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Agent \u2014 custom prompt",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": "{{roo_base_url}}/api/mention",
+        "description": "Set the prompt variable first. Skills can perform external actions even with post_reply=false. Add channel_id and thread_ts only when needed, using development Slack context.",
+        "auth": {
+          "type": "bearer",
+          "bearer": [
+            {
+              "key": "token",
+              "value": "{{mention_api_key}}",
+              "type": "string"
+            }
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{{mention_body}}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "response": [],
+      "event": [
+        {
+          "listen": "prerequest",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.variables.set(\"mention_body\", JSON.stringify({text: pm.variables.get(\"prompt\"), user_id: pm.variables.get(\"slack_user_id\"), post_reply: false}));"
+            ]
+          }
+        },
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test(\"HTTP 200\", function () { pm.response.to.have.status(200); });"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Auth check \u2014 missing token",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": "{{roo_base_url}}/api/mention",
+        "description": "Confirms unauthenticated requests are rejected before running the agent.",
+        "auth": {
+          "type": "noauth"
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "response": [],
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test(\"HTTP 401\", function () { pm.response.to.have.status(401); });"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Validation check \u2014 invalid body",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": "{{roo_base_url}}/api/mention",
+        "description": "Confirms authenticated requests reach Roo; an array is rejected without invoking the agent.",
+        "auth": {
+          "type": "bearer",
+          "bearer": [
+            {
+              "key": "token",
+              "value": "{{mention_api_key}}",
+              "type": "string"
+            }
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "[]",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "response": [],
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test(\"HTTP 400\", function () { pm.response.to.have.status(400); });"
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}
