@@ -449,20 +449,21 @@ jobs:
               sleep 5
             done
 
-            docker compose --env-file .env -f ../infra/docker-compose.yml exec -T roo python -c 'from roo.config import get_settings; settings = get_settings(); actions = settings.implicit_action_allowlist; assert ("mlai-points:link_founder_account" in actions) is settings.FOUNDER_ACCOUNT_LINK_ENABLED; assert "mlai-points:link_account" not in actions'
+            docker compose --env-file .env -f ../infra/docker-compose.yml exec -T -e EXPECTED_RELEASE_SHA="$RELEASE_SHA" -e EXPECTED_FOUNDER_ACCOUNT_LINK_ENABLED="$FOUNDER_ACCOUNT_LINK_ENABLED" roo python -c 'import os; from roo.config import get_settings; settings = get_settings(); actions = settings.implicit_action_allowlist; assert os.environ.get("ROO_RELEASE_SHA") == os.environ["EXPECTED_RELEASE_SHA"]; assert settings.FOUNDER_ACCOUNT_LINK_ENABLED is (os.environ["EXPECTED_FOUNDER_ACCOUNT_LINK_ENABLED"] == "true"); assert ("mlai-points:link_founder_account" in actions) is settings.FOUNDER_ACCOUNT_LINK_ENABLED; assert "mlai-points:link_account" not in actions; print({"release_sha": os.environ["ROO_RELEASE_SHA"], "founder_account_link_enabled": settings.FOUNDER_ACCOUNT_LINK_ENABLED, "link_action_enabled": "mlai-points:link_founder_account" in actions})'
 
             if [ "$FOUNDER_ACCOUNT_LINK_ENABLED" = "true" ]; then
-              curl --silent --show-error --fail --max-time 8 \
-                http://127.0.0.1/healthz/dependencies | python -c '
-              import json, sys
-              payload = json.load(sys.stdin)
-              dependency = payload.get("dependencies", {}).get("mlai_backend", {})
-              assert payload.get("status") == "ok", payload
-              assert dependency.get("founder_account_link") == {
-                  "status": "ok",
-                  "contract": "slack-founder-link-v1",
-              }, payload
-              '
+              docker compose --env-file .env -f ../infra/docker-compose.yml exec -T roo python -c '
+            import json
+            import urllib.request
+            with urllib.request.urlopen("http://127.0.0.1:8000/healthz/dependencies", timeout=8) as response:
+                payload = json.load(response)
+            dependency = payload.get("dependencies", {}).get("mlai_backend", {})
+            assert payload.get("status") == "ok", payload
+            assert dependency.get("founder_account_link") == {
+                "status": "ok",
+                "contract": "slack-founder-link-v1",
+            }, payload
+            '
             fi
 
             if [ "$MEETING_ROOM_BOOKING_ENABLED" = "true" ]; then
@@ -513,6 +514,7 @@ jobs:
               fi
             }
             expect_public_status 200 GET /healthz/ready
+            expect_public_status 404 GET /healthz/dependencies
             expect_public_status 404 GET /docs
             expect_public_status 404 POST /api/mention
             expect_public_status 403 POST /api/sim-patient

@@ -4,6 +4,18 @@ A short record of repository cleanup, testing, security, and delivery changes.
 Each entry states what changed and how it was checked. Findings without fixes
 are labelled as such.
 
+## 2026-10-28
+
+- Fixed the Roo account-link rollout gate to query dependency health inside
+  the running container with an eight-second timeout. It no longer relies on
+  host Python or a private health route being exposed by NGINX. Preserved
+  capability validation and rollback, checked the running release and flag,
+  and added a public dependency-health 404 check.
+- Verified the deployment probe with offline shell/HTTP boundary tests,
+  including disabled flags, transport and contract failures, and mismatched
+  runtime release/flag values: 26 deployment tests and 45 account-link tests
+  passed. Full isolated regression checks run in the release workflow.
+
 ## 2026-10-22
 
 - Moved the coding-agent guide, Roo Code reconciliation rule, and Roo agent
