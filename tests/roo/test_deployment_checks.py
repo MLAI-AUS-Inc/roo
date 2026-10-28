@@ -166,3 +166,155 @@ def test_deploy_captures_previous_image_with_either_compose_layout(tmp_path, leg
                             check=True, capture_output=True, text=True)
     assert result.stdout == 'previous-container'
     assert '-f "$previous_compose_dir/docker-compose.yml" --ansi never up' in script
+
+
+def _public_deploy_script():
+    root = Path(__file__).resolve().parents[2]
+    workflow = yaml.load(
+        (root / '.github/workflows/deploy.yml').read_text(), Loader=yaml.BaseLoader
+    )
+    return next(step['with']['script'] for step in workflow['jobs']['deploy']['steps']
+                if 'script' in step.get('with', {}))
+
+
+def _founder_link_probe():
+    script = _public_deploy_script()
+    start = script.rindex('if [ "$FOUNDER_ACCOUNT_LINK_ENABLED" = "true" ]; then')
+    return script[start:script.index('\nfi', start) + len('\nfi')]
+
+
+def _run_founder_link_probe(tmp_path, enabled, docker_status=0):
+    import json
+    import os
+    import shutil
+    import sys
+
+    # Docker is an external boundary. Record its real arguments while the shell
+    # has no host Python or curl available, reproducing the deployment host.
+    capture = tmp_path / 'docker-args.json'
+    fake = tmp_path / 'docker.py'
+    fake.write_text(
+        'import json, pathlib, sys\n'
+        f'pathlib.Path({str(capture)!r}).write_text(json.dumps(sys.argv[1:]))\n'
+        f'sys.exit({docker_status})\n'
+    )
+    shell = f'docker() {{ "{sys.executable}" "{fake}" "$@"; }}\n' + _founder_link_probe()
+    result = subprocess.run(
+        [shutil.which('bash'), '-e', '-c', shell],
+        env={**os.environ, 'PATH': '', 'FOUNDER_ACCOUNT_LINK_ENABLED': enabled},
+        capture_output=True, text=True,
+    )
+    return result, json.loads(capture.read_text()) if capture.exists() else None
+
+
+def _probe_python():
+    import shlex
+    words = shlex.split(_founder_link_probe())
+    command = words[words.index('then') + 1:words.index('fi')]
+    assert command[:-1] == [
+        'docker', 'compose', '--env-file', '.env', '-f',
+        '../infra/docker-compose.yml', 'exec', '-T', 'roo', 'python', '-c',
+    ]
+    return command[-1]
+
+
+def test_founder_link_probe_uses_container_python(tmp_path, monkeypatch):
+    import urllib.request
+    result, arguments = _run_founder_link_probe(tmp_path, 'true')
+    assert result.returncode == 0, result.stderr
+    assert arguments[:-1] == [
+        'compose', '--env-file', '.env', '-f', '../infra/docker-compose.yml',
+        'exec', '-T', 'roo', 'python', '-c',
+    ]
+    calls = []
+
+    def healthy_backend(url, *, timeout):
+        calls.append((url, timeout))
+        return io.BytesIO(
+            b'{"status":"ok","dependencies":{"mlai_backend":'
+            b'{"founder_account_link":{"status":"ok","contract":"slack-founder-link-v1"}}}}'
+        )
+
+    monkeypatch.setattr(urllib.request, 'urlopen', healthy_backend)
+    exec(arguments[-1], {})
+    assert calls == [('http://127.0.0.1:8000/healthz/dependencies', 8)]
+
+
+def test_disabled_founder_link_skips_dependency_probe(tmp_path):
+    result, arguments = _run_founder_link_probe(tmp_path, 'false')
+    assert result.returncode == 0, result.stderr
+    assert arguments is None
+
+
+@pytest.mark.parametrize('failure', [
+    'timeout', 'http-error', 'invalid-json', 'missing-capability',
+    'wrong-contract', 'unhealthy',
+])
+def test_founder_link_probe_rejects_invalid_dependency(monkeypatch, failure):
+    import urllib.error
+    import urllib.request
+    responses = {
+        'invalid-json': b'not json',
+        'missing-capability': b'{"status":"ok","dependencies":{"mlai_backend":{}}}',
+        'wrong-contract': b'{"status":"ok","dependencies":{"mlai_backend":'
+                          b'{"founder_account_link":{"status":"ok","contract":"wrong"}}}}',
+        'unhealthy': b'{"status":"degraded","dependencies":{"mlai_backend":'
+                     b'{"founder_account_link":{"status":"ok","contract":"slack-founder-link-v1"}}}}',
+    }
+
+    def failed_backend(url, *, timeout):
+        if failure == 'timeout':
+            raise TimeoutError('synthetic timeout')
+        if failure == 'http-error':
+            raise urllib.error.HTTPError(url, 503, 'unavailable', {}, None)
+        return io.BytesIO(responses[failure])
+
+    monkeypatch.setattr(urllib.request, 'urlopen', failed_backend)
+    probe = _probe_python()
+    with pytest.raises((TimeoutError, urllib.error.HTTPError, ValueError, AssertionError)):
+        exec(probe, {})
+
+
+def test_failed_founder_link_probe_fails_deployment(tmp_path):
+    result, arguments = _run_founder_link_probe(tmp_path, 'true', docker_status=9)
+    assert arguments is not None
+    assert result.returncode == 9
+
+
+def test_dependency_health_remains_private():
+    root = Path(__file__).resolve().parents[2]
+    nginx = (root / 'infra/nginx/roo.conf').read_text()
+    assert '/healthz/dependencies' not in nginx
+    assert 'location / { return 404; }' in nginx
+    assert 'expect_public_status 404 GET /healthz/dependencies' in _public_deploy_script()
+
+
+def test_runtime_account_link_check_rejects_wrong_release_or_flag(monkeypatch):
+    import os
+    import shlex
+    from roo import config
+
+    script = _public_deploy_script()
+    line = next(line for line in script.splitlines()
+                if 'actions = settings.implicit_action_allowlist' in line)
+    words = shlex.split(line)
+    assert 'EXPECTED_RELEASE_SHA=$RELEASE_SHA' in words
+    assert 'EXPECTED_FOUNDER_ACCOUNT_LINK_ENABLED=$FOUNDER_ACCOUNT_LINK_ENABLED' in words
+    code = words[words.index('-c') + 1]
+    monkeypatch.setenv('EXPECTED_RELEASE_SHA', 'a' * 40)
+    monkeypatch.setenv('ROO_RELEASE_SHA', 'a' * 40)
+    monkeypatch.setenv('EXPECTED_FOUNDER_ACCOUNT_LINK_ENABLED', 'true')
+    settings = SimpleNamespace(
+        FOUNDER_ACCOUNT_LINK_ENABLED=True,
+        implicit_action_allowlist={'mlai-points:link_founder_account'},
+    )
+    monkeypatch.setattr(config, 'get_settings', lambda: settings)
+    exec(code, {})
+    monkeypatch.setenv('ROO_RELEASE_SHA', 'b' * 40)
+    with pytest.raises(AssertionError):
+        exec(code, {})
+    monkeypatch.setenv('ROO_RELEASE_SHA', os.environ['EXPECTED_RELEASE_SHA'])
+    settings.FOUNDER_ACCOUNT_LINK_ENABLED = False
+    settings.implicit_action_allowlist = set()
+    with pytest.raises(AssertionError):
+        exec(code, {})
