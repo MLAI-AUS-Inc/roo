@@ -2,6 +2,14 @@
   text: "Show Mark Ghiasy's used hours minus purchased hours as a burn down chart"
   expect: {skill: studio-client-balance, action: summary, params_subset: {client: "Mark Ghiasy"}}
   tags: [studio-client-balance, client-scope]
+- id: studio-client-balance-devashi-study-nash
+  text: "Show Devashi Desai's Study Nash hours used minus purchased-hour credits as a burndown chart"
+  expect: {skill: studio-client-balance, action: summary, params_subset: {client: "Devashi Desai"}}
+  tags: [studio-client-balance, client-scope]
+- id: studio-client-balance-devashi-last-three-months
+  text: "Chart Devarshi Desai's used hours and paid-hour credits for Study Nash over the last three months"
+  expect: {skill: studio-client-balance, action: summary, params_subset: {client: "Devarshi Desai", month: recent, months: 3}}
+  tags: [studio-client-balance, client-scope]
 - id: studio-client-balance-project-to-date
   text: "Show my project-to-date hours used minus purchased-hour credits"
   expect: {skill: studio-client-balance, action: summary, params_subset: {month: all}}

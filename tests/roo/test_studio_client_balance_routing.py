@@ -81,6 +81,9 @@ def test_real_skill_exposes_only_safe_selectors_and_distinct_actions():
 @pytest.mark.parametrize('params', [
     {'action': 'summary'},
     {'action': 'summary', 'month': 'recent', 'months': 3, 'client': 'Mark Ghiasy'},
+    {'action': 'summary', 'month': 'all', 'client': 'Devashi Desai'},
+    {'action': 'summary', 'month': 'all', 'client': 'Devarshi Desai'},
+    {'action': 'summary', 'month': 'recent', 'months': 3, 'client': 'Devashi Desai'},
     {'action': 'detailed', 'month': 'last_complete', 'months': 3, 'client': 'self'},
 ])
 async def test_real_executor_queues_fixed_kind_and_authenticated_actor(setup, monkeypatch, params):

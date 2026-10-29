@@ -4,6 +4,16 @@ A short record of repository cleanup, testing, security, and delivery changes.
 Each entry states what changed and how it was checked. Findings without fixes
 are labelled as such.
 
+## 2026-10-30
+
+- Added an explicit, private Linear source policy and project-history boundary
+  for Study Nash usage reports, with monthly base-allowance task burndowns.
+  Preserved other clients' reviewed sources, private delivery and access checks;
+  missing task evidence remains partial or blocks the report.
+- Adapted the new reporting tests and documentation to the consolidated
+  repository layout. Checked 183 targeted reporting, chart, balance and routing
+  regressions with synthetic credentials and validated local documentation links.
+
 ## 2026-10-28
 
 - Fixed the Roo account-link rollout gate to query dependency health inside

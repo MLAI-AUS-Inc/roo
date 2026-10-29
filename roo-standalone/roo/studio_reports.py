@@ -283,12 +283,32 @@ def client_breakdown(report):
     return parts
 
 
+def mixed_source_projects(report):
+    """Return reviewed/task project labels only when both source types are used."""
+    if not report.get('recorded_snapshot') or not report.get('linear_project_ids'):
+        return None
+    projects = report['projects']
+    tasks = set(report['linear_project_ids']) & set(projects)
+    reviewed = (set(report.get('invoice_first_projects', [])) & set(projects)) - tasks
+    names = lambda keys: ', '.join(projects[key] for key in sorted(keys, key=lambda key: (projects[key].casefold(), key)))
+    return names(reviewed), names(tasks)
+
+
+def task_source_timestamp(report):
+    return timestamp(report['generated_at']).astimezone(TZ).strftime('%d %b %Y, %I:%M %p %Z')
+
+
 def reviewed_cutoff_notice(report):
     """Keep the review cutoff visible when a historical fallback is rendered."""
     if not report.get('source_stale'):
         return ''
     source = report.get('source_as_of', report.get('as_of'))
     reviewed = timestamp(source).astimezone(TZ).strftime('%d %b %Y')
+    mixed = mixed_source_projects(report)
+    if mixed:
+        return (f"Historical reviewed projects · {_escape(mixed[0])} · reviewed through {report['coverage_through']}. "
+                f"Last review: {reviewed} (Melbourne). Later activity for these reviewed projects is unavailable. "
+                f"Linear task projects ({_escape(mixed[1])}) were read fresh through {task_source_timestamp(report)}.")
     return (f"Historical snapshot · reviewed through {report['coverage_through']}. "
             f"Last review: {reviewed} (Melbourne). Later activity is unavailable.")
 
@@ -299,8 +319,10 @@ def summary(report):
     if report['selector'].get('period') == 'month_to_date':
         return month_to_date_summary(report)
     hours = lambda units: display_hours(units, report.get('unit_scale', 4))
+    mixed = mixed_source_projects(report)
     invoice_first = report['basis'] == 'invoice_first_recorded_hours'
-    quantity_label = 'invoice/recorded hour-units' if report.get('recorded_snapshot') else 'recorded hours'
+    quantity_label = ('reviewed hour-units and ticket-size estimates' if mixed else
+                      'invoice/recorded hour-units' if report.get('recorded_snapshot') else 'recorded hours')
     detailed = report['selector']['action'] == 'detailed'
     heading = 'Studio hours' if report['selector'].get('client') else 'Your Studio hours'
     parts = [f"*{heading} · {_escape(report['client'])}*"]
@@ -316,8 +338,8 @@ def summary(report):
         monthly = report['monthly']
         parts.append(f"{month_label(monthly[0]['month'])} – {month_label(monthly[-1]['month'])}")
         total = hours(total_units(report))
-        parts.append(f"*{total} {quantity_label if invoice_first else 'hours used'} across {len(monthly)} months*"
-                     + (' · invoice-first total; qualifications below' if invoice_first else
+        parts.append(f"*{total} {quantity_label if invoice_first or mixed else 'hours used'} across {len(monthly)} months*"
+                     + (' · invoice-first total; qualifications below' if invoice_first and not mixed else
                         ' · partial total' if not report['complete'] else ''))
         if invoice_first and not report.get('client_groups'):
             parts.append('\n*Projects · total for this period*')
@@ -335,11 +357,13 @@ def summary(report):
         used, allowance = month['units'], month['allowance_units']
         usage = (f'{hours(used)} hours used' if allowance is None else
                  f'{hours(used)} of {hours(allowance)} hours used')
-        if report['basis'] == 'invoice_first_recorded_hours':
+        if mixed:
+            usage = f'{hours(used)}h reviewed hour-units and ticket-size estimates'
+        elif report['basis'] == 'invoice_first_recorded_hours':
             usage = f'{hours(used)}h ' + ('allocated total' if month.get('estimated_units') else 'dated subtotal')
             usage += f' · {hours(allowance)}h allowance' if allowance is not None else ''
         parts.append(f"\n*{month_label(month['month'])} — {usage}*"
-                     + (f" · through {report['coverage_through']}" if report.get('recorded_snapshot')
+                     + (f" · through {report['coverage_through']}" if report.get('recorded_snapshot') and not mixed
                         and month['month'] == report['coverage_through'][:7] and report.get('partial') else
                         ' · month to date' if many and month['month'] == current else ''))
         if month.get('estimated_units'):
@@ -370,12 +394,21 @@ def summary(report):
     if report.get('client_groups'):
         parts.extend(client_breakdown(report))
     if report.get('recorded_snapshot'):
-        parts.append('\nThis view uses the same reviewed work records as the paid-credit chart. '
-                     'Amounts are invoice/recorded hour-units, not verified clock time or confirmed billable entitlement.')
-        parts.append('Source review: ' + report['source_as_of'][:10] +
-                     ' · coverage through ' + report['coverage_through'] + '.')
+        if mixed:
+            parts.append(f'\nReviewed projects ({_escape(mixed[0])}) use the same reviewed work records as the paid-credit chart. '
+                         'These amounts are invoice/recorded hour-units, not verified clock time or confirmed billable entitlement.')
+            parts.append('Reviewed project source: ' + report['source_as_of'][:10] +
+                         ' · coverage through ' + report['coverage_through'] + '.')
+            parts.append(f'Linear task projects ({_escape(mixed[1])}) use completed-ticket size estimates read fresh through '
+                         + task_source_timestamp(report) + '.')
+        else:
+            parts.append('\nThis view uses the same reviewed work records as the paid-credit chart. '
+                         'Amounts are invoice/recorded hour-units, not verified clock time or confirmed billable entitlement.')
+            parts.append('Source review: ' + report['source_as_of'][:10] +
+                         ' · coverage through ' + report['coverage_through'] + '.')
         if report.get('partial'):
-            parts.append('Requested activity outside reviewed coverage is unavailable; it is not counted as zero.')
+            parts.append('Activity for the reviewed projects outside their coverage is unavailable; it is not counted as zero.' if mixed else
+                         'Requested activity outside reviewed coverage is unavailable; it is not counted as zero.')
         if report.get('pending_work_count'):
             parts.append(str(report['pending_work_count']) + ' work sources remain unquantified and excluded.')
     if report['basis'] == 'completed_ticket_size_hours':
@@ -391,7 +424,9 @@ def summary(report):
             components.append(f'{hours(estimated)}h from completed-ticket estimates')
         parts.append('\nIncludes ' + ' and '.join(components) + '. Matched work is counted once.')
         if report.get('invoice_first_projects'):
-            parts.append('Ticket estimates are excluded for invoice-first projects, including later ticket completions. Recorded totals are not a complete clock-time total through today.')
+            parts.append((f'Ticket estimates are excluded for the reviewed projects ({_escape(mixed[0])}), including later ticket completions. '
+                          'Their recorded totals are not a complete clock-time total through today.') if mixed else
+                         'Ticket estimates are excluded for invoice-first projects, including later ticket completions. Recorded totals are not a complete clock-time total through today.')
         else:
             parts.append('Invoice hours use the work period; unresolved dates or allocations are excluded from the backfill.')
     for note in report.get('qualifications', []):
@@ -564,6 +599,7 @@ def render_chart(report, breakdown=None):
     bounded = weekly or month_to_date
     if bounded and breakdown is None:
         breakdown = 'projects'
+    mixed = mixed_source_projects(report)
 
     with _chart_lock:
         scale = report.get('unit_scale', 4)
@@ -582,7 +618,16 @@ def render_chart(report, breakdown=None):
         bottom = (1.15 + .3 * legend_rows) / height if monthly_view else .22
         figure.subplots_adjust(left=.10 if monthly_view else .34, right=.92, top=.76, bottom=bottom)
         warning = reviewed_cutoff_notice(report)
-        if warning:
+        if mixed:
+            figure.subplots_adjust(top=.66)
+            figure.text(.06, .765,
+                        ('Historical reviewed projects: ' if warning else 'Reviewed projects: ')
+                        + textwrap.shorten(mixed[0], width=65, placeholder='…') + '\n'
+                        + f"Review coverage through {report['coverage_through']}; later reviewed activity unavailable.\n"
+                        + 'Linear task projects fresh through ' + task_source_timestamp(report) + '.',
+                        fontsize=9, weight='bold' if warning else 'normal', color='#9a4a00' if warning else '#334b58',
+                        parse_math=False, va='top')
+        elif warning:
             figure.subplots_adjust(top=.66)
             figure.text(.06, .745, f"Historical snapshot · reviewed through {report['coverage_through']}\n"
                         'Later activity unavailable · source refresh required for a current report',
@@ -598,9 +643,9 @@ def render_chart(report, breakdown=None):
             current = timestamp(report['generated_at']).astimezone(TZ).strftime('%Y-%m')
             axis_labels = [label + ('*' if month.get('estimated_units') else '')
                            + (f"\n(through {report['coverage_through'][8:10]} {month_offset(month['month'], 0):%b})"
-                              if report.get('recorded_snapshot') and report.get('partial')
+                              if report.get('recorded_snapshot') and report.get('partial') and not mixed
                               and month['month'] == report['coverage_through'][:7] else
-                              '\n(to date)' if month['month'] == current and not warning else '')
+                              '\n(to date)' if month['month'] == current and (not warning or mixed) else '')
                            for label, month in zip(labels, monthly)]
             values = [m['units'] / scale for m in monthly]
             allowances = [m['allowance_units'] / scale if m['allowance_units'] is not None else None for m in monthly]
@@ -631,7 +676,8 @@ def render_chart(report, breakdown=None):
                           bbox_to_anchor=(.09, (.6 + .3 * legend_rows) / height),
                           ncol=2, frameon=False, fontsize=9)
             axes.set_xlabel('Month')
-            axes.set_ylabel('Invoice/recorded hour-units' if report.get('recorded_snapshot') else
+            axes.set_ylabel('Reviewed hour-units and ticket-size estimates' if mixed else
+                            'Invoice/recorded hour-units' if report.get('recorded_snapshot') else
                             'Hours recorded' if report['basis'] == 'invoice_first_recorded_hours' else 'Hours used')
             axes.tick_params(axis='x', labelrotation=30 if len(monthly) > 6 else 0)
             for index, value in enumerate(values):
@@ -649,7 +695,7 @@ def render_chart(report, breakdown=None):
             if len(monthly) > 1 and not bounded:
                 period += ' – ' + month_offset(monthly[-1]['month'], 0).strftime('%b %Y')
             subtitle = f'{period} · total hours by {"client" if breakdown == "clients" else "project"}'
-            if not bounded and report.get('recorded_snapshot') and report.get('partial'):
+            if not bounded and report.get('recorded_snapshot') and report.get('partial') and not mixed:
                 subtitle += ' · through ' + report['coverage_through']
             elif not bounded and monthly[-1]['month'] == timestamp(report['generated_at']).astimezone(TZ).strftime('%Y-%m'):
                 subtitle += ' · to date'
@@ -668,7 +714,9 @@ def render_chart(report, breakdown=None):
             axes.set_yticks(range(len(names)), names)
             axes.invert_yaxis()
             axes.set_xlabel('Hours used by client' if breakdown == 'clients' else 'Hours used by project')
-            if report['basis'] == 'invoice_first_recorded_hours':
+            if mixed:
+                axes.set_xlabel('Reviewed hour-units and ticket-size estimates')
+            elif report['basis'] == 'invoice_first_recorded_hours':
                 axes.set_xlabel('Invoice/recorded hour-units by project' if report.get('recorded_snapshot') else 'Recorded hours by project')
             axes.set_xlim(0, max([1, *values]) * 1.23)
             for index, value in enumerate(values):
@@ -694,7 +742,9 @@ def render_chart(report, breakdown=None):
                  else 'Completed-ticket size hours · excludes work in progress')
         if report['basis'] == 'invoice_first_recorded_hours':
             basis = f"{display_hours(total_units(report), scale)}h supported total · invoice hour-units + additional recorded work"
-        if report.get('recorded_snapshot'):
+        if mixed:
+            basis = f"{display_hours(total_units(report), scale)}h · reviewed hour-units and ticket-size estimates · clock time unverified"
+        elif report.get('recorded_snapshot'):
             basis = f"{display_hours(total_units(report), scale)} invoice/recorded hour-units · clock time and billable entitlement unverified"
         caution = ('\nMonthly allocation incomplete; see report qualifications.' if report.get('unallocated_units') else
                    '\nPartial totals: some completed work needs review.' if not report['complete'] else '')

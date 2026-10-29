@@ -7,7 +7,7 @@ routing:
   avoid_when: Hours-only, bank reconciliation, Roo Points.
   examples:
     - {text: "Chart Mark Ghiasy's used vs purchased hours", action: summary}
-    - {text: "My prepaid Studio hours balance", action: summary}
+    - {text: "Chart Devashi Desai's Study Nash hours used vs purchased", action: summary}
     - {text: "Detail the hours/payment chart", action: detailed}
   negative_examples:
     - {text: "Show my Studio hours this month", instead: studio-hours}
@@ -48,6 +48,10 @@ Default to summary and month=all for project-to-date. For a named client, copy t
 requested name into client, such as client="Mark Ghiasy". Use self or omit client
 for the requester's own client. This report selects one client at a time;
 client="all" is unsupported.
+For Devashi Desai's Study Nash burndown, set client="Devashi Desai". The same
+private ownership and finance-source checks apply to a single-project client.
+Never reuse another client's rate, hours, payments or coverage.
+If requested as Devarshi Desai, copy that spelling; the worker resolves aliases.
 For “last three months”, use month=recent and months=3, including this month to
 date. For “last three full months”, use month=last_complete and months=3.
 The backend resolves relative dates in Melbourne. Explicit ranges use a starting

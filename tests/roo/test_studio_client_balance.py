@@ -71,6 +71,35 @@ def test_exact_actual_payment_to_purchased_hours(cents, units):
     assert report['balance_hour_units'] == -units
 
 
+@pytest.mark.parametrize('rate,cents,rate_text', [(13750, 550000, 'A$137.50'),
+                                                (12500, 500000, 'A$125.00')])
+def test_summary_uses_reviewed_rate_and_actual_receipt_credits(rate, cents, rate_text):
+    source = dataset(hours=[], payments=[payment(amount=cents)],
+        invoices=[{'id': 'client-invoice-1', 'number': 'INV-101', 'date': '2026-06-01',
+                   'amount_cents': cents, 'status': 'paid', 'paid_cents': cents}],
+        allocation_rate_cents_per_hour=rate)
+    report = build(source)
+    text = summary(report)
+    assert report['credited_hour_units'] == 40_000_000
+    assert report['balance_hour_units'] == -40_000_000
+    assert f'{money(cents)} → 40h' in text
+    assert f'Purchased hours use {rate_text}/h from actual receipts.' in text
+
+
+def test_summary_without_receipts_does_not_convert_an_example_payment():
+    report = build(dataset(hours=[], payments=[], invoices=[], allocation_rate_cents_per_hour=13750))
+    text = summary(report)
+    assert report['credited_hour_units'] == report['payment_cents'] == 0
+    assert 'No payments received in the covered selected period.' in text
+    assert 'Purchased hours use A$137.50/h from actual receipts.' in text
+    assert 'A$5,000' not in text
+
+
+def test_actual_receipt_still_requires_exact_hour_credit_conversion():
+    with pytest.raises(TimesheetError, match='inexact_client_balance_credit'):
+        build(dataset(payments=[payment(amount=500000)], allocation_rate_cents_per_hour=13750))
+
+
 def test_payment_is_single_hour_credit_drop_even_with_multiple_invoice_references():
     report = build(dataset(payments=[payment(invoice_ids=['client-invoice-1', 'client-invoice-2'])]))
     assert report['payment_cents'] == 62500
@@ -362,7 +391,7 @@ def test_overview_is_concise_and_detailed_preserves_full_source_limitations():
     assert 'Client invoices · issue date' in detailed
     assert '10h have estimated daily timing' in overview
     assert 'Source snapshot: 2026-10-11 · coverage through 2026-10-11' in overview
-    assert 'A$5,000 = 40h' in overview
+    assert 'Purchased hours use A$125.00/h from actual receipts.' in overview
     assert 'Ask for a detailed report' in overview
 
 

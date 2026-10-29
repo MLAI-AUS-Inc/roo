@@ -151,6 +151,9 @@ be reconstructed from evidence the source no longer exposes.
 
 ## Configure and preview
 
+For the single-project Devashi Desai / Study Nash setup, follow the
+[private Linear source and history mapping](studio-devashi-reports.md).
+
 ### Reviewed invoice backfills
 
 `STUDIO_REPORTS_BACKFILL_FILE` optionally points to a reviewed JSON manifest in
@@ -448,10 +451,10 @@ From `roo-standalone`, with synthetic credentials only:
 
 ```bash
 SLACK_BOT_TOKEN=synthetic SLACK_SIGNING_SECRET=synthetic OPENAI_API_KEY=synthetic \
-.venv/bin/python -m pytest roo/tests/test_studio_reports.py \
-  roo/tests/test_studio_report_source.py \
-  roo/tests/test_timesheets.py roo/tests/test_timesheet_linear.py \
-  roo/tests/test_studio_report_routing.py roo/tests/test_router_catalog.py -q
+.venv/bin/python -m pytest ../tests/roo/test_studio_reports.py \
+  ../tests/roo/test_studio_report_source.py \
+  ../tests/roo/test_timesheets.py ../tests/roo/test_timesheet_linear.py \
+  ../tests/roo/test_studio_report_routing.py ../tests/roo/test_router_catalog.py -q
 ```
 
 Tests exercise shared budgets, monthly/DST boundaries, historical ownership,
