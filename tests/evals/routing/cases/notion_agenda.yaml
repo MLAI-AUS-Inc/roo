@@ -1,0 +1,19 @@
+- id: notion-agenda-tomorrow
+  text: "add monthly check-ins between presidents and committee members to the agenda for tomorrow's meeting"
+  expect: {skill: notion-agenda, action: add_agenda_item}
+
+- id: notion-agenda-weekday
+  text: "can you put Luiz merch on Monday's meeting agenda"
+  expect: {skill: notion-agenda, action: add_agenda_item}
+
+- id: notion-agenda-explicit-date
+  text: "agenda item for the 27 October meeting: partner with AI Enthusiasts Melbourne"
+  expect: {skill: notion-agenda, action: add_agenda_item}
+
+- id: notion-agenda-no-date
+  text: "add sponsorship update to the agenda"
+  expect: {skill: notion-agenda, action: add_agenda_item}
+
+- id: notion-agenda-room-booking-tomorrow-meeting
+  text: "book a meeting room tomorrow 2pm-3pm for the committee meeting"
+  expect: {skill: meeting-room-booking, action: book_meeting_room}

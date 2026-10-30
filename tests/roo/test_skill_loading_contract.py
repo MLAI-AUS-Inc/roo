@@ -225,7 +225,7 @@ from roo.skills.lint import main
 from roo.skills.loader import load_skill_report
 assert main(['--public-defaults']) == 0
 report = load_skill_report(Path('skills'), import_clients=False)
-assert len(report.skills) == 20
+assert len(report.skills) == 21
 assert all(entry.status == 'loaded' for entry in report.entries)
 '''
     result = subprocess.run([sys.executable, '-c', code], capture_output=True, text=True,

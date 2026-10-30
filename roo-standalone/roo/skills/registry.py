@@ -19,6 +19,7 @@ from .executors.healthhack import HealthhackExecutor
 from .executors.watt_the_hack import WattTheHackExecutor
 from .executors.luma_events import LumaEventsExecutor
 from .executors.reconciliation_report import ReconciliationReportExecutor
+from .executors.notion_agenda import NotionAgendaExecutor
 from roo.start_here_introductions import StartHereIntroductionsExecutor
 
 EXECUTORS: dict[str, type[SkillExecutorInterface]] = {
@@ -34,6 +35,7 @@ EXECUTORS: dict[str, type[SkillExecutorInterface]] = {
     'studio-client-balance': StudioClientBalanceExecutor,
     'mlai-data-query': MlaiDataQueryExecutor,
     'linear-channel-issues': LinearChannelIssuesExecutor,
+    'notion-agenda': NotionAgendaExecutor,
     'github-integration': GithubIntegrationExecutor,
     'linear-meeting-actions': LinearMeetingActionsExecutor,
     'tone-of-voice': ToneOfVoiceExecutor,
