@@ -1,0 +1,3517 @@
+from tests.roo.skill_test_support import patch_skill_dependency
+import asyncio
+import importlib.util
+import json
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+sys.path.insert(0, str((Path(__file__).resolve().parents[2] / "roo-standalone")))
+sys.modules.setdefault("frontmatter", SimpleNamespace(load=lambda *args, **kwargs: None))
+sys.modules.pop("roo.skills.executor", None)
+
+import roo.skills.executor as executor_module
+from roo.linear_inference import (
+    LinearCandidate,
+    LinearDirectIssueBatch,
+    LinearInferenceTimeoutError,
+    LinearProjectSourceSummary,
+    LinearProjectUpdateResult,
+    LinearReasoningSignals,
+    choose_linear_reasoning,
+)
+from roo.linear_meeting_sources import ParsedSource, SourceParseResult
+from roo.skills.executor import SkillExecutor
+
+
+def _meeting_timeout_error(
+    *,
+    source_chars: int,
+    batch_chunk_index: int = 1,
+    batch_chunk_count: int = 1,
+    recovery_depth: int = 0,
+) -> LinearInferenceTimeoutError:
+    signals = LinearReasoningSignals(
+        stage="meeting_actions",
+        source_chars=source_chars,
+        source_count=1,
+        batch_chunk_index=batch_chunk_index,
+        batch_chunk_count=batch_chunk_count,
+        recovery_depth=recovery_depth,
+        explicit_project=True,
+        explicit_owner=True,
+    )
+    return LinearInferenceTimeoutError(
+        decision=choose_linear_reasoning(signals),
+        signals=signals,
+        attempt=1,
+        duration_ms=45_000,
+    )
+
+
+def test_linear_meeting_transcript_uses_thread_history_and_message():
+    executor = SkillExecutor()
+
+    transcript = executor._build_linear_meeting_transcript(
+        "turn this meeting summary into Linear tasks",
+        {},
+        [
+            {"user": "U1", "text": "Sam will update onboarding docs by Friday.", "is_bot": False},
+            {"user": "B1", "text": "Bot message", "is_bot": True},
+        ],
+    )
+
+    assert "U1: Sam will update onboarding docs by Friday." in transcript
+    assert "Bot message" not in transcript
+    assert "turn this meeting summary into Linear tasks" in transcript
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        (
+            "For the Linear project [Studio] Aaron AI, extract the to-do items "
+            "from these meeting notes. Don't write a project update."
+        ),
+        "Create the Linear tasks, but do not create a project update.",
+        "Add the to-dos to Linear without a project update.",
+        "Extract the meeting actions in Linear; skip the project update.",
+        "Create Linear issues from the transcript, not a project update.",
+    ],
+)
+def test_linear_meeting_project_update_request_honors_explicit_negation(text):
+    executor = SkillExecutor()
+
+    assert executor._linear_meeting_project_update_requested(text, {}) is False
+
+
+def test_linear_meeting_project_update_request_keeps_positive_and_explicit_actions():
+    executor = SkillExecutor()
+
+    assert executor._linear_meeting_project_update_requested(
+        "Please write a project update in Linear from these meeting notes.",
+        {},
+    )
+    assert executor._linear_meeting_project_update_requested(
+        "Don't forget to create a project update in Linear.",
+        {},
+    )
+    assert executor._linear_meeting_project_update_requested(
+        "Extract the meeting actions only.",
+        {"action": "project_update"},
+    )
+
+
+def test_linear_meeting_owner_matches_slack_mention_email(monkeypatch):
+    executor = SkillExecutor()
+
+    monkeypatch.setattr(
+        "roo.slack_client.get_user_info",
+        lambda user_id: {"email": "sam@example.com"},
+    )
+
+    match = executor._match_linear_meeting_owner(
+        "<@U123>",
+        [
+            {"id": "lin-user-1", "name": "Sam", "displayName": "Sam", "email": "sam@example.com"},
+        ],
+    )
+
+    assert match["user"]["id"] == "lin-user-1"
+    assert match["confidence"] == pytest.approx(0.98)
+
+
+def test_linear_meeting_owner_matches_name_fallback():
+    executor = SkillExecutor()
+
+    match = executor._match_linear_meeting_owner(
+        "Jane Doe",
+        [
+            {"id": "lin-user-1", "name": "Jane Doe", "displayName": "Jane", "email": "jane@example.com"},
+        ],
+    )
+
+    assert match["user"]["id"] == "lin-user-1"
+    assert match["confidence"] >= 0.9
+
+
+def test_linear_meeting_owner_matches_unique_plain_first_name():
+    executor = SkillExecutor()
+
+    match = executor._match_linear_meeting_owner(
+        "Sonia",
+        [
+            {"id": "lin-user-1", "name": "Sonia Kaurah", "displayName": "sonia1", "email": "sonia@example.com"},
+            {"id": "lin-user-2", "name": "Sam Donegan", "displayName": "Sam", "email": "sam@example.com"},
+        ],
+    )
+
+    assert match["user"]["id"] == "lin-user-1"
+    assert match["confidence"] >= 0.9
+
+
+def test_linear_meeting_owner_reports_ambiguous_plain_name():
+    executor = SkillExecutor()
+
+    match = executor._match_linear_meeting_owner(
+        "Sonia",
+        [
+            {"id": "lin-user-1", "name": "Sonia Kaurah", "displayName": "sonia1", "email": "sonia@example.com"},
+            {"id": "lin-user-2", "name": "Sonia Lee", "displayName": "sonia2", "email": "sonia.lee@example.com"},
+        ],
+    )
+
+    assert match["user"] is None
+    assert "Ambiguous" in match["reason"]
+
+
+def test_linear_meeting_project_matches_explicit_hint():
+    executor = SkillExecutor()
+
+    match = executor._match_linear_meeting_project(
+        {"project_hint": "Alpha Launch"},
+        [
+            {"id": "proj-1", "name": "Alpha Launch", "slugId": "alpha-launch"},
+        ],
+        owner_user=None,
+    )
+
+    assert match["project"]["id"] == "proj-1"
+    assert match["confidence"] >= 0.9
+
+
+def test_linear_meeting_project_matches_semantic_context_and_linked_channel():
+    executor = SkillExecutor()
+    project = {
+        "id": "proj-founder-program",
+        "name": "Founder Program 2026",
+        "description": "Applications, operations, and support for Founder Games.",
+        "content": "Run sheets and participant experience for the Founder Games event.",
+        "slackChannelId": "CFOUNDERS",
+    }
+
+    match = executor._match_linear_meeting_project(
+        {"project_hint": "Founder Games"},
+        [project, {"id": "proj-other", "name": "Website Refresh"}],
+        owner_user=None,
+        channel_id="CFOUNDERS",
+    )
+
+    assert match["project"]["id"] == "proj-founder-program"
+    assert match["confidence"] >= 0.9
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ('@Roo add this to the Linear project called “BITGET EVENT”', "BITGET EVENT"),
+        ("create a to do item in the linear project 'venture studio' assign to Sonia", "venture studio"),
+        ('create an issue in Linear project "Venture Studio" assigned to <@U123>', "Venture Studio"),
+        ("add a Linear task to Linear project Venture Studio for Sonia", "Venture Studio"),
+        ("sync this to project called BITGET EVENT please", "BITGET EVENT"),
+    ],
+)
+def test_linear_meeting_project_hint_prepass_extracts_project_forms(text, expected):
+    executor = SkillExecutor()
+
+    params = executor._apply_linear_meeting_project_hint_prepass(text, {})
+
+    assert params["project_hint"] == expected
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("create a Linear issue in project Alpha assign to Sonia", "Sonia"),
+        ("create a Linear issue in project Alpha assigned to Sonia Kaurah", "Sonia Kaurah"),
+        ("create an issue in Linear project Alpha assigned to <@U123>", "<@U123>"),
+        ("add a Linear task to project Alpha for Sonia", "Sonia"),
+    ],
+)
+def test_linear_meeting_owner_hint_prepass_extracts_assignment_forms(text, expected):
+    executor = SkillExecutor()
+
+    params = executor._apply_linear_meeting_owner_hint_prepass(text, {})
+
+    assert params["owner_hint"] == expected
+
+
+def test_linear_direct_issue_body_uses_command_work_not_linear_meta_instruction():
+    executor = SkillExecutor()
+
+    body = executor._extract_linear_direct_issue_body(
+        "create a to do item in the linear project 'venture studio' to rebrand and change the name of this project. assign to Sonia",
+        {"project_hint": "venture studio", "owner_hint": "Sonia"},
+    )
+
+    assert body == "rebrand and change the name of this project"
+
+
+def test_linear_direct_issue_project_hint_can_be_inferred_from_known_project():
+    executor = SkillExecutor()
+
+    project_hint = executor._infer_linear_direct_project_hint_from_known_projects(
+        "add a Linear task to Venture Studio to rename it for Sonia",
+        [{"id": "project-1", "name": "Venture Studio", "slugId": "venture-studio"}],
+    )
+    body = executor._extract_linear_direct_issue_body(
+        "add a Linear task to Venture Studio to rename it for Sonia",
+        {"project_hint": project_hint, "owner_hint": "Sonia"},
+    )
+
+    assert project_hint == "Venture Studio"
+    assert body == "rename it"
+
+
+@pytest.mark.asyncio
+async def test_linear_thread_reference_source_excludes_current_command():
+    executor = SkillExecutor()
+
+    result = await executor._build_linear_meeting_source_result(
+        text='@Roo add this to the Linear project called "BITGET EVENT"',
+        params={},
+        thread_history=[
+            {
+                "user": "U1",
+                "text": "<@UYANA> should decide whether the event name leans into finance bro stereotypes.",
+                "ts": "1.1",
+                "is_bot": False,
+            },
+            {"user": "B1", "text": "Bot message", "ts": "1.2", "is_bot": True},
+            {
+                "user": "U2",
+                "text": '@Roo add this to the Linear project called "BITGET EVENT"',
+                "ts": "1.3",
+                "is_bot": False,
+            },
+        ],
+        event_files=[],
+        settings=SimpleNamespace(OPENAI_API_KEY=None),
+        current_message_ts="1.3",
+        exclude_current_message=True,
+    )
+
+    combined = result.combined_text()
+    assert "finance bro stereotypes" in combined
+    assert "Bot message" not in combined
+    assert "@Roo add this" not in combined
+
+
+def test_linear_meeting_duplicate_detection_uses_similar_open_issue_title():
+    executor = SkillExecutor()
+
+    duplicate = executor._find_linear_meeting_duplicate(
+        {"title": "Update onboarding documentation"},
+        [
+            {
+                "id": "issue-1",
+                "identifier": "ENG-12",
+                "title": "Update onboarding docs",
+                "url": "https://linear.app/acme/issue/ENG-12",
+                "project": {"id": "proj-1"},
+            }
+        ],
+        {"id": "proj-1"},
+    )
+
+    assert duplicate["identifier"] == "ENG-12"
+
+
+def test_linear_meeting_candidate_dedupe_merges_semantic_duplicates():
+    executor = SkillExecutor()
+
+    candidates = executor._dedupe_linear_meeting_candidates(
+        [
+            {
+                "title": "Recruit technical talent for the bounty pool",
+                "owner_hint": "Sonia",
+                "confidence": 0.72,
+                "source_label": "notes.pdf",
+            },
+            {
+                "title": "Start building the vetted tech talent pool",
+                "owner_hint": "Sonia",
+                "confidence": 0.8,
+                "source_label": "notes.pdf page 4",
+            },
+            {
+                "title": "Post a project update in Linear",
+                "confidence": 0.9,
+            },
+        ]
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0]["confidence"] == pytest.approx(0.8)
+    assert "notes.pdf" in candidates[0]["source_label"]
+
+
+def test_linear_meeting_decision_thresholds():
+    executor = SkillExecutor()
+    candidate = {"confidence": 0.9}
+    owner = {"confidence": 0.9}
+    project = {"confidence": 0.88}
+    team = {"confidence": 0.96}
+
+    decision, confidence = executor._linear_meeting_candidate_decision(
+        candidate=candidate,
+        owner_match=owner,
+        project_match=project,
+        team_match=team,
+        duplicate=None,
+        auto_threshold=0.85,
+        uncertain_threshold=0.65,
+    )
+    assert decision == "create"
+    assert confidence == pytest.approx(0.88)
+
+    decision, confidence = executor._linear_meeting_candidate_decision(
+        candidate={"confidence": 0.75},
+        owner_match=owner,
+        project_match=project,
+        team_match=team,
+        duplicate=None,
+        auto_threshold=0.85,
+        uncertain_threshold=0.65,
+    )
+    assert decision == "review"
+    assert confidence == pytest.approx(0.75)
+
+    decision, _ = executor._linear_meeting_candidate_decision(
+        candidate={"confidence": 0.6},
+        owner_match=owner,
+        project_match=project,
+        team_match=team,
+        duplicate=None,
+        auto_threshold=0.85,
+        uncertain_threshold=0.65,
+    )
+    assert decision == "skip"
+
+
+def test_linear_meeting_team_match_fails_closed_when_project_team_is_inaccessible():
+    executor = SkillExecutor()
+
+    team_match = executor._match_linear_meeting_team(
+        {
+            "id": "project-studio",
+            "name": "Studio project",
+            "teams": {
+                "nodes": [
+                    {"id": "team-studio", "key": "STU", "name": "Studio"}
+                ]
+            },
+        },
+        [{"id": "team-mlai", "key": "MLA", "name": "MLAI"}],
+        None,
+        "MLAI",
+    )
+
+    assert team_match["team"] is None
+    assert team_match["confidence"] == 0.0
+    assert "API key cannot access" in team_match["reason"]
+
+
+def test_linear_meeting_team_match_uses_accessible_project_team_not_default():
+    executor = SkillExecutor()
+    studio_team = {
+        "id": "team-studio",
+        "key": "STU",
+        "name": "Studio",
+        "members": {"nodes": [{"id": "user-1"}]},
+    }
+
+    team_match = executor._match_linear_meeting_team(
+        {
+            "id": "project-studio",
+            "name": "Studio project",
+            "teams": {
+                "nodes": [
+                    {"id": "team-studio", "key": "STU", "name": "Studio"}
+                ]
+            },
+        },
+        [
+            {"id": "team-mlai", "key": "MLA", "name": "MLAI"},
+            studio_team,
+        ],
+        None,
+        "MLAI",
+    )
+
+    assert team_match["team"] is studio_team
+    assert team_match["confidence"] == 0.96
+
+
+@pytest.mark.asyncio
+async def test_linear_client_reads_context_from_backend(monkeypatch):
+    module_path = (
+        (Path(__file__).resolve().parents[2] / "roo-standalone")
+        / "skills"
+        / "linear_meeting_actions"
+        / "client.py"
+    )
+    spec = importlib.util.spec_from_file_location("linear_meeting_actions_client_test", module_path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self):
+            return {
+                "teams": [{"id": "team-1"}],
+                "users": [{"id": "user-1"}],
+                "projects": [{"id": "project-1"}],
+                "labels": [{"id": "label-1"}],
+                "recentIssues": [{"id": "issue-1"}],
+            }
+
+    calls = []
+
+    class FakeBackend:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        async def _request(self, method, endpoint, **kwargs):
+            calls.append((method, endpoint, kwargs))
+            return FakeResponse()
+
+    monkeypatch.setattr(module, "MLAIBackendClient", FakeBackend)
+
+    client = module.LinearMeetingActionsClient(base_url="https://backend.test", api_key="roo-key")
+    teams, users, projects, labels, recent_issues = await asyncio.gather(
+        client.list_teams(),
+        client.list_users(),
+        client.list_active_projects(),
+        client.list_issue_labels(),
+        client.list_recent_open_issues(),
+    )
+
+    assert teams == [{"id": "team-1"}]
+    assert users == [{"id": "user-1"}]
+    assert projects == [{"id": "project-1"}]
+    assert labels == [{"id": "label-1"}]
+    assert recent_issues == [{"id": "issue-1"}]
+    assert len(calls) == 1
+    assert calls[0][0] == "GET"
+    assert calls[0][1] == "/api/v1/integrations/linear/meeting-context"
+    assert calls[0][2]["use_admin_headers"] is True
+
+
+@pytest.mark.asyncio
+async def test_linear_client_resolves_explicit_project_from_full_catalog(monkeypatch):
+    module_path = (
+        (Path(__file__).resolve().parents[2] / "roo-standalone")
+        / "skills"
+        / "linear_meeting_actions"
+        / "client.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "linear_meeting_actions_client_resolve_test",
+        module_path,
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    calls = []
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self):
+            return {
+                "status": "matched",
+                "project": {
+                    "id": "project-study-nash",
+                    "name": "[Studio] Study Nash",
+                },
+                "confidence": 1.0,
+                "isInactive": True,
+            }
+
+    class FakeBackend:
+        def __init__(self, **kwargs):
+            pass
+
+        async def _request(self, method, endpoint, **kwargs):
+            calls.append((method, endpoint, kwargs))
+            return FakeResponse()
+
+    monkeypatch.setattr(module, "MLAIBackendClient", FakeBackend)
+    client = module.LinearMeetingActionsClient()
+
+    result = await client.resolve_project("[Studio] Studynash")
+
+    assert result["project"]["id"] == "project-study-nash"
+    assert calls == [
+        (
+            "GET",
+            "/api/v1/integrations/linear/projects/resolve",
+            {
+                "params": {"query": "[Studio] Studynash"},
+                "json": None,
+                "timeout": 45.0,
+                "circuit_breaker": True,
+                "use_admin_headers": True,
+            },
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_linear_client_create_issue_calls_backend(monkeypatch):
+    module_path = (
+        (Path(__file__).resolve().parents[2] / "roo-standalone")
+        / "skills"
+        / "linear_meeting_actions"
+        / "client.py"
+    )
+    spec = importlib.util.spec_from_file_location("linear_meeting_actions_client_create_test", module_path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+
+    class FakeResponse:
+        status_code = 201
+
+        def json(self):
+            return {"identifier": "ENG-123", "title": "Update onboarding docs"}
+
+    calls = []
+
+    class FakeBackend:
+        def __init__(self, **kwargs):
+            pass
+
+        async def _request(self, method, endpoint, **kwargs):
+            calls.append((method, endpoint, kwargs))
+            return FakeResponse()
+
+    monkeypatch.setattr(module, "MLAIBackendClient", FakeBackend)
+
+    client = module.LinearMeetingActionsClient(base_url="https://backend.test", api_key="roo-key")
+    issue = await client.create_issue(
+        title="Update onboarding docs",
+        team_id="team-1",
+        description="Meeting task",
+        assignee_id="user-1",
+        project_id="project-1",
+        priority=2,
+        due_date="2026-05-08",
+        label_ids=["label-1"],
+    )
+
+    assert issue["identifier"] == "ENG-123"
+    assert calls[0][0] == "POST"
+    assert calls[0][1] == "/api/v1/integrations/linear/issues"
+    assert calls[0][2]["use_admin_headers"] is True
+    assert calls[0][2]["json"] == {
+        "title": "Update onboarding docs",
+        "team_id": "team-1",
+        "description": "Meeting task",
+        "assignee_id": "user-1",
+        "project_id": "project-1",
+        "priority": 2,
+        "due_date": "2026-05-08",
+        "label_ids": ["label-1"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_linear_client_persists_and_decides_action_batch(monkeypatch):
+    module_path = (
+        (Path(__file__).resolve().parents[2] / "roo-standalone")
+        / "skills"
+        / "linear_meeting_actions"
+        / "client.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "linear_meeting_actions_client_batch_test",
+        module_path,
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    calls = []
+
+    class FakeResponse:
+        status_code = 201
+
+        def json(self):
+            return {"id": "batch-1", "items": [{"id": "item-1"}]}
+
+    class FakeBackend:
+        def __init__(self, **kwargs):
+            pass
+
+        async def _request(self, method, endpoint, **kwargs):
+            calls.append((method, endpoint, kwargs))
+            return FakeResponse()
+
+    monkeypatch.setattr(module, "MLAIBackendClient", FakeBackend)
+    client = module.LinearMeetingActionsClient()
+    await client.create_action_batch(
+        requested_by_slack_user_id="USAM",
+        slack_channel_id="C1",
+        slack_thread_ts="1.1",
+        source_fingerprint="a" * 64,
+        items=[{"issue_input": {"title": "Task", "team_id": "team-1"}}],
+    )
+    await client.decide_action_batch(
+        batch_id="batch-1",
+        requested_by_slack_user_id="USAM",
+        decision="approve",
+        item_ids=["item-1"],
+    )
+
+    assert calls[0][1] == "/api/v1/integrations/linear/action-batches"
+    assert calls[0][2]["json"]["source_fingerprint"] == "a" * 64
+    assert calls[1][1] == "/api/v1/integrations/linear/action-batches/batch-1/decisions"
+    assert calls[1][2]["json"] == {
+        "requested_by_slack_user_id": "USAM",
+        "decision": "approve",
+        "item_ids": ["item-1"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_linear_client_reads_project_sizing_context(monkeypatch):
+    module_path = (
+        (Path(__file__).resolve().parents[2] / "roo-standalone")
+        / "skills"
+        / "linear_meeting_actions"
+        / "client.py"
+    )
+    spec = importlib.util.spec_from_file_location("linear_sizing_context_client_test", module_path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    calls = []
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self):
+            return {"project": {"id": "project-1", "name": "[Studio] Founder Games"}}
+
+    class FakeBackend:
+        def __init__(self, **kwargs):
+            pass
+
+        async def _request(self, method, endpoint, **kwargs):
+            calls.append((method, endpoint, kwargs))
+            return FakeResponse()
+
+    monkeypatch.setattr(module, "MLAIBackendClient", FakeBackend)
+    client = module.LinearMeetingActionsClient()
+
+    context = await client.get_project_sizing_context("project-1")
+
+    assert context["project"]["name"] == "[Studio] Founder Games"
+    assert calls[0][1] == (
+        "/api/v1/integrations/linear/projects/project-1/sizing-context"
+    )
+
+
+@pytest.mark.asyncio
+async def test_linear_client_pages_complete_project_issue_inventory(monkeypatch):
+    module_path = (
+        (Path(__file__).resolve().parents[2] / "roo-standalone")
+        / "skills"
+        / "linear_meeting_actions"
+        / "client.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "linear_issue_inventory_client_test",
+        module_path,
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    calls = []
+    pages = [
+        {
+            "project": {"id": "project-1", "name": "Aaron AI"},
+            "nodes": [{"id": f"issue-{index}"} for index in range(100)],
+            "pageInfo": {"hasNextPage": True, "endCursor": "cursor-1"},
+            "snapshotAt": "2026-08-23T01:00:00Z",
+            "terminalStateTypes": ["completed", "canceled", "duplicate"],
+        },
+        {
+            "project": {"id": "project-1", "name": "Aaron AI"},
+            "nodes": [{"id": f"issue-{index}"} for index in range(100, 130)],
+            "pageInfo": {"hasNextPage": False, "endCursor": None},
+            "snapshotAt": "2026-08-23T01:00:01Z",
+        },
+    ]
+
+    class FakeResponse:
+        status_code = 200
+
+        def __init__(self, payload):
+            self.payload = payload
+
+        def json(self):
+            return self.payload
+
+    class FakeBackend:
+        def __init__(self, **kwargs):
+            pass
+
+        async def _request(self, method, endpoint, **kwargs):
+            calls.append((method, endpoint, kwargs))
+            return FakeResponse(pages.pop(0))
+
+    monkeypatch.setattr(module, "MLAIBackendClient", FakeBackend)
+    result = await module.LinearMeetingActionsClient().list_project_issues(
+        "project-1",
+        page_size=100,
+        max_issues=500,
+    )
+
+    assert len(result["nodes"]) == 130
+    assert result["truncated"] is False
+    assert calls[0][2]["params"] == {"limit": 100}
+    assert calls[1][2]["params"] == {"limit": 100, "after": "cursor-1"}
+
+
+@pytest.mark.asyncio
+async def test_linear_client_resolves_concurrent_create_from_receipt(monkeypatch):
+    module_path = (
+        (Path(__file__).resolve().parents[2] / "roo-standalone")
+        / "skills"
+        / "linear_meeting_actions"
+        / "client.py"
+    )
+    spec = importlib.util.spec_from_file_location("linear_receipt_client_test", module_path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    calls = []
+
+    class FakeResponse:
+        def __init__(self, status_code, payload):
+            self.status_code = status_code
+            self.payload = payload
+
+        def json(self):
+            return self.payload
+
+    responses = [
+        FakeResponse(
+            409,
+            {
+                "detail": "An identical creation is in progress.",
+                "code": "linear_issue_creation_in_progress",
+            },
+        ),
+        FakeResponse(
+            200,
+            {
+                "status": "completed",
+                "issue": {
+                    "identifier": "STU-1",
+                    "title": "Send the run sheet",
+                    "sizingMetadata": {"effortLabel": "Small (S)"},
+                },
+            },
+        ),
+    ]
+
+    class FakeBackend:
+        def __init__(self, **kwargs):
+            pass
+
+        async def _request(self, method, endpoint, **kwargs):
+            calls.append((method, endpoint, kwargs))
+            return responses.pop(0)
+
+    async def no_sleep(_delay):
+        return None
+
+    monkeypatch.setattr(module, "MLAIBackendClient", FakeBackend)
+    monkeypatch.setattr(module.asyncio, "sleep", no_sleep)
+    client = module.LinearMeetingActionsClient()
+
+    issue = await client.create_issue(
+        title="Send the run sheet",
+        team_id="team-1",
+        project_id="project-1",
+        label_ids=["effort-small"],
+        idempotency_key="a" * 64,
+        sizing_metadata={"effortLabel": "Small (S)"},
+    )
+
+    assert issue["identifier"] == "STU-1"
+    assert issue["idempotentReplay"] is True
+    assert calls[0][1] == "/api/v1/integrations/linear/issues"
+    assert calls[1][1].endswith("/" + ("a" * 64))
+
+
+@pytest.mark.asyncio
+async def test_linear_client_create_project_update_calls_backend(monkeypatch):
+    module_path = (
+        (Path(__file__).resolve().parents[2] / "roo-standalone")
+        / "skills"
+        / "linear_meeting_actions"
+        / "client.py"
+    )
+    spec = importlib.util.spec_from_file_location("linear_meeting_actions_client_project_update_test", module_path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+
+    class FakeResponse:
+        status_code = 201
+
+        def json(self):
+            return {"id": "update-1", "url": "https://linear.test/update-1"}
+
+    calls = []
+
+    class FakeBackend:
+        def __init__(self, **kwargs):
+            pass
+
+        async def _request(self, method, endpoint, **kwargs):
+            calls.append((method, endpoint, kwargs))
+            return FakeResponse()
+
+    monkeypatch.setattr(module, "MLAIBackendClient", FakeBackend)
+
+    client = module.LinearMeetingActionsClient(base_url="https://backend.test", api_key="roo-key")
+    project_update = await client.create_project_update(
+        project_id="project-1",
+        body="Meeting update",
+        health="onTrack",
+    )
+
+    assert project_update["id"] == "update-1"
+    assert calls[0][0] == "POST"
+    assert calls[0][1] == "/api/v1/integrations/linear/project-updates"
+    assert calls[0][2]["json"] == {
+        "project_id": "project-1",
+        "body": "Meeting update",
+        "health": "onTrack",
+    }
+
+
+@pytest.mark.asyncio
+async def test_linear_client_backend_error_surfaces_detail(monkeypatch, capsys):
+    module_path = (
+        (Path(__file__).resolve().parents[2] / "roo-standalone")
+        / "skills"
+        / "linear_meeting_actions"
+        / "client.py"
+    )
+    spec = importlib.util.spec_from_file_location("linear_meeting_actions_client_error_test", module_path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+
+    class FakeResponse:
+        status_code = 502
+
+        def json(self):
+            return {
+                "detail": 'Cannot query field "state" on type "Project".',
+                "code": "linear_graphql_error",
+                "operation": "LinearProjects",
+            }
+
+    class FakeBackend:
+        def __init__(self, **kwargs):
+            pass
+
+        async def _request(self, method, endpoint, **kwargs):
+            return FakeResponse()
+
+    monkeypatch.setattr(module, "MLAIBackendClient", FakeBackend)
+
+    client = module.LinearMeetingActionsClient(base_url="https://backend.test", api_key="roo-key")
+    with pytest.raises(RuntimeError, match="LinearProjects"):
+        await client.list_teams()
+    captured = capsys.readouterr()
+    assert "Linear meeting backend error" in captured.out
+    assert 'Cannot query field "state"' in captured.out
+
+
+@pytest.mark.asyncio
+async def test_linear_client_raises_specific_incomplete_team_access_error(monkeypatch):
+    module_path = (
+        (Path(__file__).resolve().parents[2] / "roo-standalone")
+        / "skills"
+        / "linear_meeting_actions"
+        / "client.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "linear_meeting_actions_client_access_error_test",
+        module_path,
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+
+    class FakeResponse:
+        status_code = 503
+
+        def json(self):
+            return {
+                "detail": (
+                    "Roo's Linear credential has incomplete workspace access. "
+                    "Missing required team keys: MLA, STU; currently visible: MLAI_TECH."
+                ),
+                "code": "linear_team_access_incomplete",
+            }
+
+    class FakeBackend:
+        def __init__(self, **kwargs):
+            pass
+
+        async def _request(self, method, endpoint, **kwargs):
+            return FakeResponse()
+
+    monkeypatch.setattr(module, "MLAIBackendClient", FakeBackend)
+
+    client = module.LinearMeetingActionsClient()
+    with pytest.raises(
+        module.LinearMeetingTeamAccessError,
+        match="Missing required team keys: MLA, STU",
+    ):
+        await client.list_teams()
+
+
+@pytest.mark.asyncio
+async def test_linear_meeting_executor_surfaces_backend_context_detail(monkeypatch):
+    executor = SkillExecutor()
+
+    async def fake_source_result(**kwargs):
+        return SourceParseResult(
+            sources=[
+                ParsedSource(
+                    label="Slack thread",
+                    text="Sam will update onboarding docs in Alpha after the meeting.",
+                    kind="slack",
+                )
+            ]
+        )
+
+    class FailingClient:
+        async def list_teams(self):
+            raise RuntimeError(
+                'Cannot query field "state" on type "Project". '
+                "(linear_graphql_error; LinearProjects)"
+            )
+
+        async def list_users(self):
+            return []
+
+        async def list_active_projects(self):
+            return []
+
+        async def list_issue_labels(self):
+            return []
+
+        async def list_recent_open_issues(self):
+            return []
+
+    class FakeSkill:
+        def get_client_class(self, name):
+            assert name == "LinearMeetingActionsClient"
+            return FailingClient
+
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: SimpleNamespace(
+            LINEAR_DEFAULT_TEAM=None,
+            LINEAR_MEETING_AUTO_CREATE_MIN_CONFIDENCE=0.85,
+            LINEAR_MEETING_UNCERTAIN_MIN_CONFIDENCE=0.65,
+        ))
+    monkeypatch.setattr(executor.owner_of('_build_linear_meeting_source_result'), '_build_linear_meeting_source_result', fake_source_result)
+
+    result = await executor._execute_linear_meeting_actions(
+        skill=FakeSkill(),
+        text="turn this meeting summary into Linear tasks",
+        params={},
+        user_id="U1",
+        channel_id="C1",
+        thread_ts="1.1",
+        thread_history=[],
+        event_files=[],
+    )
+
+    assert 'Cannot query field "state"' in result["message"]
+    assert "LinearProjects" in result["message"]
+    assert "RuntimeError:" not in result["message"]
+
+
+def test_linear_project_resolution_reports_access_failure_not_not_found():
+    message = SkillExecutor().owner_of("_linear_explicit_project_resolution_error_message")._linear_explicit_project_resolution_error_message(
+        "[Studio] Sansoni Master App",
+        {
+            "status": "unavailable",
+            "lookupDetail": (
+                "Roo's Linear credential has incomplete workspace access "
+                "(linear_team_access_incomplete)"
+            ),
+        },
+    )
+
+    assert "cannot access every required workspace team" in message
+    assert "Linear admin" in message
+    assert "not find" not in message
+    assert "Nothing was changed" in message
+
+
+@pytest.mark.asyncio
+async def test_linear_meeting_candidate_extraction_chunks_sources(monkeypatch):
+    executor = SkillExecutor()
+    calls = []
+
+    async def fake_extract(
+        *,
+        transcript,
+        params,
+        users,
+        projects,
+        source_label=None,
+        source_count=1,
+        batch_chunk_index=1,
+        batch_chunk_count=1,
+        recovery_depth=0,
+    ):
+        calls.append(
+            {
+                "transcript": transcript,
+                "source_count": source_count,
+                "batch_chunk_index": batch_chunk_index,
+                "batch_chunk_count": batch_chunk_count,
+                "recovery_depth": recovery_depth,
+            }
+        )
+        return [
+            {
+                "title": "Update onboarding docs",
+                "owner_hint": "Sam",
+                "source_label": source_label,
+                "confidence": 0.8,
+            }
+        ]
+
+    monkeypatch.setattr(executor.owner_of('_extract_linear_meeting_candidates'), '_extract_linear_meeting_candidates', fake_extract)
+    long_text = ("Sam will update onboarding docs after the meeting.\n\n" * 350).strip()
+
+    candidates = await executor._extract_linear_meeting_candidates_from_sources(
+        sources=[ParsedSource(label="notes.pdf", text=long_text, kind="pdf")],
+        params={},
+        users=[],
+        projects=[],
+    )
+
+    assert len(calls) > 1
+    assert all(call["transcript"].startswith("Source: notes.pdf") for call in calls)
+    assert all(len(call["transcript"]) <= 8100 for call in calls)
+    assert all(call["source_count"] == 1 for call in calls)
+    assert {call["batch_chunk_count"] for call in calls} == {len(calls)}
+    assert {call["batch_chunk_index"] for call in calls} == set(
+        range(1, len(calls) + 1)
+    )
+    assert len(candidates) == 1
+    assert candidates[0]["source_label"] == "notes.pdf"
+
+
+@pytest.mark.asyncio
+async def test_linear_meeting_timeout_retries_only_failed_chunk_at_smaller_scope(
+    monkeypatch,
+):
+    executor = SkillExecutor()
+    calls = []
+    body = ("Sam will update the onboarding checklist after the meeting. " * 100).strip()
+    assert 4_000 < len(body) < 8_000
+
+    async def fake_extract(
+        *,
+        transcript,
+        params,
+        users,
+        projects,
+        source_label=None,
+        source_count=1,
+        batch_chunk_index=1,
+        batch_chunk_count=1,
+        recovery_depth=0,
+    ):
+        calls.append(
+            {
+                "chars": len(transcript),
+                "source_count": source_count,
+                "batch_chunk_index": batch_chunk_index,
+                "batch_chunk_count": batch_chunk_count,
+                "recovery_depth": recovery_depth,
+            }
+        )
+        if recovery_depth == 0:
+            raise _meeting_timeout_error(
+                source_chars=len(transcript),
+                batch_chunk_index=batch_chunk_index,
+                batch_chunk_count=batch_chunk_count,
+            )
+        return [
+            {
+                "title": "Update the onboarding checklist",
+                "owner_hint": "Sam",
+                "source_label": source_label,
+                "confidence": 0.9,
+            }
+        ]
+
+    monkeypatch.setattr(executor.owner_of('_extract_linear_meeting_candidates'), '_extract_linear_meeting_candidates', fake_extract)
+
+    candidates = await executor._extract_linear_meeting_candidates_from_sources(
+        sources=[ParsedSource(label="notes.pdf", text=body, kind="pdf")],
+        params={"project_hint": "[Studio] Aaron AI", "default_assignee_hint": "Sam"},
+        users=[],
+        projects=[],
+    )
+
+    initial_calls = [call for call in calls if call["recovery_depth"] == 0]
+    recovery_calls = [call for call in calls if call["recovery_depth"] == 1]
+    assert len(initial_calls) == 1
+    assert len(recovery_calls) == 2
+    assert all(call["chars"] < initial_calls[0]["chars"] for call in recovery_calls)
+    assert all(call["source_count"] == 1 for call in calls)
+    assert {call["batch_chunk_index"] for call in calls} == {1}
+    assert {call["batch_chunk_count"] for call in calls} == {1}
+    assert len(candidates) == 1
+    assert candidates[0]["title"] == "Update the onboarding checklist"
+
+
+@pytest.mark.asyncio
+async def test_linear_meeting_chunk_extraction_uses_bounded_concurrency(monkeypatch):
+    executor = SkillExecutor()
+    active = 0
+    peak_active = 0
+    total_calls = 0
+
+    async def fake_extract(
+        *,
+        transcript,
+        params,
+        users,
+        projects,
+        source_label=None,
+        source_count=1,
+        batch_chunk_index=1,
+        batch_chunk_count=1,
+        recovery_depth=0,
+    ):
+        nonlocal active, peak_active, total_calls
+        total_calls += 1
+        active += 1
+        peak_active = max(peak_active, active)
+        await asyncio.sleep(0.01)
+        active -= 1
+        return [
+            {
+                "title": f"Complete action {batch_chunk_index}",
+                "owner_hint": "Sam",
+                "source_label": source_label,
+                "confidence": 0.9,
+            }
+        ]
+
+    monkeypatch.setattr(executor.owner_of('_extract_linear_meeting_candidates'), '_extract_linear_meeting_candidates', fake_extract)
+    paragraphs = [
+        f"Sam will complete action {index}. " + ("context " * 550)
+        for index in range(1, 6)
+    ]
+
+    candidates = await executor._extract_linear_meeting_candidates_from_sources(
+        sources=[
+            ParsedSource(
+                label="notes.pdf",
+                text="\n\n".join(paragraphs),
+                kind="pdf",
+            )
+        ],
+        params={},
+        users=[],
+        projects=[],
+    )
+
+    assert peak_active == 3
+    assert total_calls >= 3
+    assert candidates
+
+
+@pytest.mark.asyncio
+async def test_linear_meeting_production_sized_batch_recovers_failed_chunk_twice(
+    monkeypatch,
+):
+    executor = SkillExecutor()
+    calls = []
+    titles = [
+        "Prepare project budget",
+        "Schedule user interviews",
+        "Review CRM schema",
+        "Draft onboarding guide",
+        "Configure API credentials",
+        "Publish launch announcement",
+        "Audit workflow permissions",
+        "Design feedback survey",
+        "Reconcile customer records",
+        "Book stakeholder workshop",
+        "Document release checklist",
+    ]
+    paragraphs = [
+        f"Sam will complete action {index}. " + (f"context-{index} " * 580)
+        for index in range(1, 12)
+    ]
+
+    async def fake_extract(
+        *,
+        transcript,
+        params,
+        users,
+        projects,
+        source_label=None,
+        source_count=1,
+        batch_chunk_index=1,
+        batch_chunk_count=1,
+        recovery_depth=0,
+    ):
+        calls.append(
+            {
+                "batch_chunk_index": batch_chunk_index,
+                "batch_chunk_count": batch_chunk_count,
+                "recovery_depth": recovery_depth,
+                "chars": len(transcript),
+            }
+        )
+        if batch_chunk_index == 3 and recovery_depth < 2:
+            raise _meeting_timeout_error(
+                source_chars=len(transcript),
+                batch_chunk_index=batch_chunk_index,
+                batch_chunk_count=batch_chunk_count,
+                recovery_depth=recovery_depth,
+            )
+        return [
+            {
+                "title": titles[batch_chunk_index - 1],
+                "owner_hint": "Sam",
+                "source_label": source_label,
+                "confidence": 0.9,
+            }
+        ]
+
+    monkeypatch.setattr(executor.owner_of('_extract_linear_meeting_candidates'), '_extract_linear_meeting_candidates', fake_extract)
+
+    candidates = await executor._extract_linear_meeting_candidates_from_sources(
+        sources=[
+            ParsedSource(
+                label="Study Nash project brief.pdf",
+                text="\n\n".join(paragraphs),
+                kind="pdf",
+            )
+        ],
+        params={
+            "project_hint": "[Studio] Studynash",
+            "default_assignee_hint": "Dr Sam",
+        },
+        users=[],
+        projects=[],
+    )
+
+    assert {call["batch_chunk_count"] for call in calls} == {11}
+    chunk_three_depths = {
+        call["recovery_depth"]
+        for call in calls
+        if call["batch_chunk_index"] == 3
+    }
+    assert chunk_three_depths == {0, 1, 2}
+    assert {candidate["title"] for candidate in candidates} == set(titles)
+
+
+@pytest.mark.asyncio
+async def test_linear_meeting_terminal_chunk_failure_cancels_siblings(
+    monkeypatch,
+):
+    executor = SkillExecutor()
+    second_started = asyncio.Event()
+    second_cancelled = asyncio.Event()
+    calls = []
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: SimpleNamespace(
+            LINEAR_MEETING_EXTRACTION_CONCURRENCY=2,
+            LINEAR_MEETING_EXTRACTION_TOTAL_TIMEOUT_SECONDS=360,
+            LINEAR_MEETING_EXTRACTION_CHUNK_MAX_CHARS=8_000,
+            LINEAR_MEETING_EXTRACTION_RECOVERY_MAX_CHARS=4_000,
+            LINEAR_MEETING_EXTRACTION_RECOVERY_DEPTH=0,
+        ))
+
+    async def fake_extract(
+        *,
+        transcript,
+        params,
+        users,
+        projects,
+        source_label=None,
+        source_count=1,
+        batch_chunk_index=1,
+        batch_chunk_count=1,
+        recovery_depth=0,
+    ):
+        calls.append(batch_chunk_index)
+        if batch_chunk_index == 1:
+            await second_started.wait()
+            raise _meeting_timeout_error(
+                source_chars=len(transcript),
+                batch_chunk_index=batch_chunk_index,
+                batch_chunk_count=batch_chunk_count,
+            )
+        if batch_chunk_index == 2:
+            second_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                second_cancelled.set()
+                raise
+        return []
+
+    monkeypatch.setattr(executor.owner_of('_extract_linear_meeting_candidates'), '_extract_linear_meeting_candidates', fake_extract)
+
+    with pytest.raises(LinearInferenceTimeoutError):
+        await asyncio.wait_for(
+            executor._extract_linear_meeting_candidates_from_sources(
+                sources=[
+                    ParsedSource(label=f"notes-{index}.pdf", text="action", kind="pdf")
+                    for index in range(1, 4)
+                ],
+                params={},
+                users=[],
+                projects=[],
+            ),
+            timeout=0.5,
+        )
+
+    assert second_cancelled.is_set()
+    assert calls[:2] == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_linear_meeting_repeated_timeout_aborts_before_any_linear_write(
+    monkeypatch,
+):
+    executor = SkillExecutor()
+    write_calls = []
+
+    async def fake_source_result(**kwargs):
+        return SourceParseResult(
+            sources=[
+                ParsedSource(
+                    label="notes.pdf",
+                    text="Sam will update the Aaron AI onboarding checklist.",
+                    kind="pdf",
+                )
+            ],
+            files_seen=1,
+            files_parsed=1,
+        )
+
+    async def timed_out_extraction(**kwargs):
+        raise _meeting_timeout_error(source_chars=8_000)
+
+    class FakeClient:
+        async def list_teams(self):
+            return []
+
+        async def list_users(self):
+            return []
+
+        async def list_active_projects(self):
+            return [{"id": "project-1", "name": "[Studio] Aaron AI"}]
+
+        async def list_issue_labels(self):
+            return []
+
+        async def list_recent_open_issues(self):
+            return []
+
+        async def create_issue(self, **kwargs):
+            write_calls.append(kwargs)
+            raise AssertionError("create_issue must not be called after extraction timeout")
+
+    class FakeSkill:
+        def get_client_class(self, name):
+            assert name == "LinearMeetingActionsClient"
+            return FakeClient
+
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: SimpleNamespace())
+    monkeypatch.setattr(executor.owner_of('_build_linear_meeting_source_result'), '_build_linear_meeting_source_result', fake_source_result)
+    monkeypatch.setattr(executor.owner_of('_extract_linear_meeting_candidates_from_sources'), '_extract_linear_meeting_candidates_from_sources', timed_out_extraction)
+
+    result = await executor._execute_linear_meeting_actions(
+        skill=FakeSkill(),
+        text=(
+            "For Linear project [Studio] Aaron AI, extract the action items from "
+            "this transcript and assign them."
+        ),
+        params={"project_hint": "[Studio] Aaron AI"},
+        user_id="U1",
+        channel_id="C1",
+        thread_ts="1.1",
+        thread_history=[],
+        event_files=[{"id": "F1", "name": "notes.pdf"}],
+    )
+
+    assert result["data"]["timed_out"] is True
+    assert result["data"]["created_count"] == 0
+    assert result["data"]["review_count"] == 0
+    assert "before creating any Linear tasks" in result["message"]
+    assert "Nothing was changed" in result["message"]
+    assert write_calls == []
+
+
+@pytest.mark.asyncio
+async def test_linear_meeting_missing_explicit_project_stops_before_extraction(
+    monkeypatch,
+):
+    executor = SkillExecutor()
+
+    async def fake_source_result(**kwargs):
+        return SourceParseResult(
+            sources=[
+                ParsedSource(
+                    label="Study Nash notes.pdf",
+                    text="Sam will configure the CRM workflow.",
+                    kind="pdf",
+                )
+            ],
+            files_seen=1,
+            files_parsed=1,
+        )
+
+    async def unexpected_extraction(**kwargs):
+        raise AssertionError("extraction must not run without a verified project")
+
+    class FakeClient:
+        async def list_teams(self):
+            return []
+
+        async def list_users(self):
+            return []
+
+        async def list_active_projects(self):
+            return []
+
+        async def list_issue_labels(self):
+            return []
+
+        async def list_recent_open_issues(self):
+            return []
+
+        async def resolve_project(self, query):
+            assert query == "[Studio] Studynash"
+            return {
+                "status": "not_found",
+                "project": None,
+                "confidence": 0.0,
+                "reason": "No Linear project matched the explicit query.",
+            }
+
+    class FakeSkill:
+        def get_client_class(self, name):
+            assert name == "LinearMeetingActionsClient"
+            return FakeClient
+
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: SimpleNamespace())
+    monkeypatch.setattr(executor.owner_of('_build_linear_meeting_source_result'), '_build_linear_meeting_source_result', fake_source_result)
+    monkeypatch.setattr(executor.owner_of('_extract_linear_meeting_candidates_from_sources'), '_extract_linear_meeting_candidates_from_sources', unexpected_extraction)
+
+    result = await executor._execute_linear_meeting_actions(
+        skill=FakeSkill(),
+        text=(
+            "Use this PDF for a project update and tasks in the Linear project "
+            "'[Studio] Studynash'."
+        ),
+        params={"project_hint": "[Studio] Studynash"},
+        user_id="U1",
+        channel_id="C1",
+        thread_ts="1.1",
+        event_files=[{"id": "F1", "name": "Study Nash notes.pdf"}],
+    )
+
+    assert result["data"]["project_resolution_status"] == "not_found"
+    assert "full workspace" in result["message"]
+    assert "Nothing was changed" in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_linear_meeting_executor_queues_review_from_parsed_file_source(monkeypatch):
+    executor = SkillExecutor()
+    created_inputs = []
+    staged_batches = []
+
+    async def fake_source_result(**kwargs):
+        return SourceParseResult(
+            sources=[
+                ParsedSource(
+                    label="meeting.pdf page 3",
+                    text="Sam will update onboarding docs in Alpha.",
+                    kind="pdf",
+                )
+            ],
+            files_seen=1,
+            files_parsed=1,
+        )
+
+    async def fake_candidates_from_sources(**kwargs):
+        assert kwargs["sources"][0].label == "meeting.pdf page 3"
+        return [
+            {
+                "title": "Update onboarding docs",
+                "description": "Update the onboarding docs from the meeting.",
+                "owner_hint": "Sam",
+                "project_hint": "Alpha",
+                "team_hint": "ENG",
+                "evidence": "Sam will update onboarding docs in Alpha.",
+                "source_label": "meeting.pdf page 3",
+                "confidence": 0.95,
+            }
+        ]
+
+    team = {"id": "team-1", "key": "ENG", "name": "Engineering"}
+    user = {"id": "user-1", "name": "Sam", "displayName": "Sam", "email": "sam@example.com"}
+    project = {
+        "id": "project-1",
+        "name": "Alpha",
+        "teams": {"nodes": [team]},
+        "members": {"nodes": [user]},
+    }
+
+    class FakeClient:
+        def __init__(self):
+            pass
+
+        async def list_teams(self):
+            return [team]
+
+        async def list_users(self):
+            return [user]
+
+        async def list_active_projects(self):
+            return [project]
+
+        async def list_issue_labels(self):
+            return [{"id": "label-1", "name": "meeting-action"}]
+
+        async def list_recent_open_issues(self):
+            return []
+
+        async def create_issue(self, **kwargs):
+            created_inputs.append(kwargs)
+            return {
+                "identifier": "ENG-123",
+                "title": kwargs["title"],
+                "url": "https://linear.app/acme/issue/ENG-123",
+            }
+
+        async def create_action_batch(self, **kwargs):
+            staged_batches.append(kwargs)
+            return {
+                "id": "batch-1",
+                "items": [
+                    {"id": f"item-{position}", "position": position}
+                    for position, _ in enumerate(kwargs["items"])
+                ],
+            }
+
+    class FakeSkill:
+        def get_client_class(self, name):
+            assert name == "LinearMeetingActionsClient"
+            return FakeClient
+
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: SimpleNamespace(
+            LINEAR_DEFAULT_TEAM=None,
+            LINEAR_MEETING_AUTO_CREATE_MIN_CONFIDENCE=0.85,
+            LINEAR_MEETING_UNCERTAIN_MIN_CONFIDENCE=0.65,
+        ))
+    monkeypatch.setattr(executor.owner_of('_build_linear_meeting_source_result'), '_build_linear_meeting_source_result', fake_source_result)
+    monkeypatch.setattr(executor.owner_of('_extract_linear_meeting_candidates_from_sources'), '_extract_linear_meeting_candidates_from_sources', fake_candidates_from_sources)
+
+    result = await executor._execute_linear_meeting_actions(
+        skill=FakeSkill(),
+        text="send this PDF to Linear as tasks",
+        params={},
+        user_id="U1",
+        channel_id="C1",
+        thread_ts="1.1",
+        thread_history=[],
+        event_files=[{"id": "F1", "name": "meeting.pdf"}],
+    )
+
+    # Extraction without an explicit commitment is saved as a durable review batch.
+    assert "data" in result, result
+    assert result["data"]["created_count"] == 0
+    assert result["data"]["review_count"] == 1
+    assert created_inputs == []
+
+    assert result["data"]["review_batch_id"] == "batch-1"
+    assert len(staged_batches) == 1
+    issue_input = staged_batches[0]["items"][0]["issue_input"]
+    assert issue_input["title"] == "Update onboarding docs"
+    assert issue_input["assignee_id"] == "user-1"
+    assert issue_input["project_id"] == "project-1"
+    assert issue_input["label_ids"] == ["label-1"]
+    assert "meeting.pdf page 3" in issue_input["description"]
+
+
+@pytest.mark.asyncio
+async def test_explicit_bulk_create_writes_committed_resolved_file_item(monkeypatch):
+    executor = SkillExecutor()
+    created_inputs = []
+
+    async def fake_source_result(**kwargs):
+        return SourceParseResult(
+            sources=[
+                ParsedSource(
+                    label="meeting.pdf",
+                    text="Sam will update the Alpha onboarding guide.",
+                    kind="pdf",
+                )
+            ],
+            files_seen=1,
+            files_parsed=1,
+        )
+
+    async def fake_candidates_from_sources(**kwargs):
+        return [{
+            "title": "Update the Alpha onboarding guide",
+            "owner_hint": "Sam",
+            "project_hint": "Alpha",
+            "explicit_commitment": True,
+            "confidence": 0.96,
+            "source_label": "meeting.pdf",
+        }]
+
+    team = {"id": "team-1", "key": "ENG", "name": "Engineering"}
+    user = {"id": "user-1", "name": "Sam", "email": "sam@example.com"}
+    project = {
+        "id": "project-1",
+        "name": "Alpha",
+        "teams": {"nodes": [team]},
+        "members": {"nodes": [user]},
+    }
+
+    class FakeClient:
+        async def list_teams(self):
+            return [team]
+
+        async def list_users(self):
+            return [user]
+
+        async def list_active_projects(self):
+            return [project]
+
+        async def list_issue_labels(self):
+            return []
+
+        async def list_recent_open_issues(self):
+            return []
+
+        async def create_issue(self, **kwargs):
+            created_inputs.append(kwargs)
+            return {"identifier": "ENG-9", "title": kwargs["title"]}
+
+    class FakeSkill:
+        def get_client_class(self, name):
+            return FakeClient
+
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: SimpleNamespace(
+            LINEAR_DEFAULT_TEAM=None,
+            LINEAR_MEETING_AUTO_CREATE_MIN_CONFIDENCE=0.85,
+            LINEAR_MEETING_UNCERTAIN_MIN_CONFIDENCE=0.65,
+        ))
+    monkeypatch.setattr(executor.owner_of('_build_linear_meeting_source_result'), '_build_linear_meeting_source_result', fake_source_result)
+    monkeypatch.setattr(executor.owner_of('_extract_linear_meeting_candidates_from_sources'), '_extract_linear_meeting_candidates_from_sources', fake_candidates_from_sources)
+
+    result = await executor._execute_linear_meeting_actions(
+        skill=FakeSkill(),
+        text="Use this PDF to create these tasks in Linear project Alpha",
+        params={"project_hint": "Alpha"},
+        user_id="U1",
+        channel_id="C1",
+        thread_ts="1.1",
+        event_files=[{"id": "F1", "name": "meeting.pdf"}],
+    )
+
+    assert result["data"]["created_count"] == 1
+    assert result["data"]["review_count"] == 0
+    assert created_inputs[0]["project_id"] == "project-1"
+    assert created_inputs[0]["assignee_id"] == "user-1"
+
+
+@pytest.mark.asyncio
+async def test_linear_direct_issue_command_creates_immediately(monkeypatch):
+    executor = SkillExecutor()
+    created_inputs = []
+
+    async def fake_inference(*, messages, response_format, **kwargs):
+        prompt = messages[-1]["content"]
+        assert "directly asking Roo to create Linear issue" in prompt
+        assert response_format is LinearDirectIssueBatch
+        return SimpleNamespace(
+            value=LinearDirectIssueBatch(
+                issues=[
+                    LinearCandidate(
+                        title="Rebrand and rename the Venture Studio project",
+                        description="Rebrand and rename the project because Venture Studio is confusing and does not describe the offering.",
+                        owner_hint="Sonia",
+                        project_hint="venture studio",
+                        evidence="rebrand and change the name",
+                        source_label="Slack command",
+                        confidence=0.96,
+                    )
+                ]
+            )
+        )
+
+    async def fail_meeting_extraction(**kwargs):
+        raise AssertionError("direct issue commands should not use meeting transcript extraction")
+
+    team = {"id": "team-1", "key": "MLA", "name": "MLAI"}
+    user = {"id": "user-1", "name": "Sonia Kaurah", "displayName": "sonia1", "email": "sonia@example.com"}
+    project = {
+        "id": "project-1",
+        "name": "Venture Studio",
+        "slugId": "venture-studio",
+        "teams": {"nodes": [team]},
+        "members": {"nodes": [user]},
+    }
+
+    class FakeClient:
+        async def list_teams(self):
+            return [team]
+
+        async def list_users(self):
+            return [user]
+
+        async def list_active_projects(self):
+            return [project]
+
+        async def list_issue_labels(self):
+            return []
+
+        async def list_recent_open_issues(self):
+            return []
+
+        async def create_issue(self, **kwargs):
+            created_inputs.append(kwargs)
+            return {"identifier": "MLA-123", "title": kwargs["title"], "url": "https://linear.test/MLA-123"}
+
+    class FakeSkill:
+        def get_client_class(self, name):
+            assert name == "LinearMeetingActionsClient"
+            return FakeClient
+
+    patch_skill_dependency(monkeypatch, 'run_linear_structured_inference', fake_inference)
+    monkeypatch.setattr(executor.owner_of('_extract_linear_meeting_candidates_from_sources'), '_extract_linear_meeting_candidates_from_sources', fail_meeting_extraction)
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: SimpleNamespace(
+            OPENAI_API_KEY=None,
+            LINEAR_DEFAULT_TEAM=None,
+            LINEAR_MEETING_AUTO_CREATE_MIN_CONFIDENCE=0.85,
+            LINEAR_MEETING_UNCERTAIN_MIN_CONFIDENCE=0.65,
+        ))
+
+    result = await executor._execute_linear_meeting_actions(
+        skill=FakeSkill(),
+        text=(
+            "create a to do item in the linear project 'venture studio' to rebrand and change "
+            "the name of this project as the name 'venture studio' is confusing and doesnt "
+            "describe the offering. assign to Sonia"
+        ),
+        params={},
+        user_id="U1",
+        channel_id="C1",
+        thread_ts="1.1",
+        thread_history=[],
+    )
+
+    assert result["data"]["created_count"] == 1
+    assert created_inputs[0]["title"] == "Rebrand and rename the Venture Studio project"
+    assert created_inputs[0]["assignee_id"] == "user-1"
+    assert created_inputs[0]["project_id"] == "project-1"
+    assert created_inputs[0]["team_id"] == "team-1"
+    assert "Slack command" in created_inputs[0]["description"]
+
+
+@pytest.mark.asyncio
+async def test_linear_direct_issue_command_reports_ambiguous_project(monkeypatch):
+    executor = SkillExecutor()
+    created_inputs = []
+
+    async def fake_chat(messages, **kwargs):
+        return SimpleNamespace(
+            content=json.dumps(
+                {
+                    "issues": [
+                        {
+                            "title": "Rename Venture Studio",
+                            "description": "Rename the Venture Studio project.",
+                            "owner_hint": "Sonia",
+                            "project_hint": "venture studio",
+                            "confidence": 0.96,
+                        }
+                    ]
+                }
+            )
+        )
+
+    team = {"id": "team-1", "key": "MLA", "name": "MLAI"}
+    user = {"id": "user-1", "name": "Sonia Kaurah", "displayName": "sonia1", "email": "sonia@example.com"}
+    projects = [
+        {"id": "project-1", "name": "Venture Studio", "slugId": "venture-studio-a", "teams": {"nodes": [team]}},
+        {"id": "project-2", "name": "Venture Studio", "slugId": "venture-studio-b", "teams": {"nodes": [team]}},
+    ]
+
+    class FakeClient:
+        async def list_teams(self):
+            return [team]
+
+        async def list_users(self):
+            return [user]
+
+        async def list_active_projects(self):
+            return projects
+
+        async def list_issue_labels(self):
+            return []
+
+        async def list_recent_open_issues(self):
+            return []
+
+        async def create_issue(self, **kwargs):
+            created_inputs.append(kwargs)
+            return {"identifier": "MLA-123"}
+
+    class FakeSkill:
+        def get_client_class(self, name):
+            return FakeClient
+
+    patch_skill_dependency(monkeypatch, 'chat', fake_chat)
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: SimpleNamespace(
+            OPENAI_API_KEY=None,
+            LINEAR_DEFAULT_TEAM=None,
+            LINEAR_MEETING_AUTO_CREATE_MIN_CONFIDENCE=0.85,
+            LINEAR_MEETING_UNCERTAIN_MIN_CONFIDENCE=0.65,
+        ))
+
+    result = await executor._execute_linear_meeting_actions(
+        skill=FakeSkill(),
+        text="create a to do item in the linear project 'venture studio' to rename it. assign to Sonia",
+        params={},
+        user_id="U1",
+        channel_id="C1",
+        thread_ts="1.1",
+        thread_history=[],
+    )
+
+    assert created_inputs == []
+    assert "Project unclear: multiple Linear projects matched" in result["message"]
+    assert "project: Unresolved; assignee: sonia1" in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_linear_direct_issue_command_reports_ambiguous_assignee(monkeypatch):
+    executor = SkillExecutor()
+    created_inputs = []
+
+    async def fake_chat(messages, **kwargs):
+        return SimpleNamespace(
+            content=json.dumps(
+                {
+                    "issues": [
+                        {
+                            "title": "Rename Venture Studio",
+                            "description": "Rename the Venture Studio project.",
+                            "owner_hint": "Sonia",
+                            "project_hint": "venture studio",
+                            "confidence": 0.96,
+                        }
+                    ]
+                }
+            )
+        )
+
+    team = {"id": "team-1", "key": "MLA", "name": "MLAI"}
+    users = [
+        {"id": "user-1", "name": "Sonia Kaurah", "displayName": "sonia1", "email": "sonia@example.com"},
+        {"id": "user-2", "name": "Sonia Lee", "displayName": "sonia2", "email": "sonia.lee@example.com"},
+    ]
+    project = {"id": "project-1", "name": "Venture Studio", "slugId": "venture-studio", "teams": {"nodes": [team]}}
+
+    class FakeClient:
+        async def list_teams(self):
+            return [team]
+
+        async def list_users(self):
+            return users
+
+        async def list_active_projects(self):
+            return [project]
+
+        async def list_issue_labels(self):
+            return []
+
+        async def list_recent_open_issues(self):
+            return []
+
+        async def create_issue(self, **kwargs):
+            created_inputs.append(kwargs)
+            return {"identifier": "MLA-123"}
+
+    class FakeSkill:
+        def get_client_class(self, name):
+            return FakeClient
+
+    patch_skill_dependency(monkeypatch, 'chat', fake_chat)
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: SimpleNamespace(
+            OPENAI_API_KEY=None,
+            LINEAR_DEFAULT_TEAM=None,
+            LINEAR_MEETING_AUTO_CREATE_MIN_CONFIDENCE=0.85,
+            LINEAR_MEETING_UNCERTAIN_MIN_CONFIDENCE=0.65,
+        ))
+
+    result = await executor._execute_linear_meeting_actions(
+        skill=FakeSkill(),
+        text="create a to do item in the linear project 'venture studio' to rename it. assign to Sonia",
+        params={},
+        user_id="U1",
+        channel_id="C1",
+        thread_ts="1.1",
+        thread_history=[],
+    )
+
+    assert created_inputs == []
+    assert "Assignee unclear: multiple Linear users matched" in result["message"]
+    assert "project: Venture Studio; assignee: Unresolved" in result["message"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target", ["inaccessible_project", "unmatched_team"])
+async def test_linear_direct_command_preserves_team_selection_failures(monkeypatch, target):
+    executor = SkillExecutor()
+    created_inputs = []
+    team = {"id": "team-mlai", "key": "MLA", "name": "MLAI"}
+    project = {
+        "id": "project-widget",
+        "name": "Widget",
+        "slackChannelId": "C1",
+        "teams": {"nodes": [{"id": "team-studio", "key": "STU", "name": "Studio"}]},
+    }
+
+    class FakeClient:
+        async def list_teams(self):
+            return [team]
+
+        async def list_users(self):
+            return []
+
+        async def list_active_projects(self):
+            return [project] if target == "inaccessible_project" else []
+
+        async def list_issue_labels(self):
+            return []
+
+        async def list_recent_open_issues(self):
+            return []
+
+        async def create_issue(self, **kwargs):
+            created_inputs.append(kwargs)
+            return {"identifier": "MLA-1", "title": kwargs["title"]}
+
+    class FakeSkill:
+        def get_client_class(self, name):
+            return FakeClient
+
+    async def fake_inference(**kwargs):
+        return SimpleNamespace(value=LinearDirectIssueBatch(issues=[
+            LinearCandidate(title="Fix login flow", description="Fix login flow", confidence=0.96)
+        ]))
+
+    patch_skill_dependency(monkeypatch, 'run_linear_structured_inference', fake_inference)
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: SimpleNamespace(
+        OPENAI_API_KEY=None,
+        LINEAR_DEFAULT_TEAM=None,
+        LINEAR_MEETING_AUTO_CREATE_MIN_CONFIDENCE=0.85,
+        LINEAR_MEETING_UNCERTAIN_MIN_CONFIDENCE=0.65,
+    ))
+
+    result = await executor._execute_linear_meeting_actions(
+        skill=FakeSkill(),
+        text="create a task in linear to fix the login flow",
+        params={"team_hint": "STU"} if target == "unmatched_team" else {},
+        user_id="U1",
+        channel_id="C1",
+        thread_ts="1.1",
+        thread_history=[],
+    )
+
+    assert created_inputs == []
+    assert result["data"]["created_count"] == 0
+    assert result["data"]["review_count"] == 0
+    assert result["data"]["skipped_count"] == 1
+    if target == "inaccessible_project":
+        assert "API key cannot access" in result["message"]
+    else:
+        assert "Linear team unclear" in result["message"]
+
+
+def test_linear_direct_issue_request_accepts_prd_command():
+    executor = SkillExecutor()
+
+    assert executor._is_linear_direct_issue_request(
+        "create a PRD for the following task and add to linear/plane",
+        {},
+    )
+    assert executor._is_linear_direct_issue_request(
+        "create a PRD and add it to linear",
+        {},
+    )
+    assert not executor._is_linear_direct_issue_request(
+        "add these meeting notes to linear",
+        {},
+    )
+
+
+@pytest.mark.asyncio
+async def test_linear_direct_prd_command_creates_without_assignee_or_project(monkeypatch):
+    executor = SkillExecutor()
+    created_inputs = []
+
+    async def fake_inference(*, messages, response_format, **kwargs):
+        assert response_format is LinearDirectIssueBatch
+        return SimpleNamespace(
+            value=LinearDirectIssueBatch(
+                issues=[
+                    LinearCandidate(
+                        title="Create PRD for Roo committee agenda-request skill and add it to Linear/Plane",
+                        description="Write the PRD for a committee-admin agenda request skill.",
+                        owner_hint="Dr Sam",
+                        project_hint="Committee",
+                        evidence="create a PRD",
+                        source_label="Slack command",
+                        confidence=0.96,
+                    )
+                ]
+            )
+        )
+
+    team = {"id": "team-1", "key": "MLA", "name": "MLAI"}
+
+    class FakeClient:
+        async def list_teams(self):
+            return [team]
+
+        async def list_users(self):
+            return [{"id": "user-1", "name": "Dr Sam", "displayName": "Dr Sam", "email": "sam@example.com"}]
+
+        async def list_active_projects(self):
+            return [{
+                "id": "project-1",
+                "name": "Venture Studio",
+                "slugId": "venture-studio",
+                "teams": {"nodes": [team]},
+            }]
+
+        async def list_issue_labels(self):
+            return []
+
+        async def list_recent_open_issues(self):
+            return []
+
+        async def create_issue(self, **kwargs):
+            created_inputs.append(kwargs)
+            return {
+                "identifier": "MLA-124",
+                "title": kwargs["title"],
+                "url": "https://linear.test/MLA-124",
+            }
+
+    class FakeSkill:
+        def get_client_class(self, name):
+            assert name == "LinearMeetingActionsClient"
+            return FakeClient
+
+    patch_skill_dependency(monkeypatch, 'run_linear_structured_inference', fake_inference)
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: SimpleNamespace(
+            OPENAI_API_KEY=None,
+            LINEAR_DEFAULT_TEAM=None,
+            LINEAR_MEETING_AUTO_CREATE_MIN_CONFIDENCE=0.85,
+            LINEAR_MEETING_UNCERTAIN_MIN_CONFIDENCE=0.65,
+        ))
+
+    result = await executor._execute_linear_meeting_actions(
+        skill=FakeSkill(),
+        text=(
+            "create a PRD for the following task and add to linear/plane: "
+            "Add a Roo skill so a committee admin can request an agenda item"
+        ),
+        params={},
+        user_id="U1",
+        channel_id="C1",
+        thread_ts="1.1",
+        thread_history=[],
+    )
+
+    assert result["data"]["created_count"] == 1
+    assert result["data"]["skipped_count"] == 0
+    assert "Assignee unclear" not in result["message"]
+    assert created_inputs[0]["title"] == (
+        "Create PRD for Roo committee agenda-request skill and add it to Linear/Plane"
+    )
+    assert created_inputs[0]["assignee_id"] is None
+    assert created_inputs[0]["project_id"] is None
+    assert created_inputs[0]["team_id"] == "team-1"
+    assert "Unassigned" in result["message"]
+    assert "No project" in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_linear_direct_prd_command_uses_configured_default_team(monkeypatch):
+    executor = SkillExecutor()
+    created_inputs = []
+
+    async def fake_inference(*, messages, response_format, **kwargs):
+        return SimpleNamespace(
+            value=LinearDirectIssueBatch(
+                issues=[
+                    LinearCandidate(
+                        title="Create PRD for the committee agenda skill",
+                        description="Write the PRD.",
+                        confidence=0.96,
+                    )
+                ]
+            )
+        )
+
+    teams = [
+        {"id": "team-1", "key": "MLA", "name": "MLAI"},
+        {"id": "team-2", "key": "MKT", "name": "Marketing"},
+    ]
+
+    class FakeClient:
+        async def list_teams(self):
+            return teams
+
+        async def list_users(self):
+            return []
+
+        async def list_active_projects(self):
+            return []
+
+        async def list_issue_labels(self):
+            return []
+
+        async def list_recent_open_issues(self):
+            return []
+
+        async def create_issue(self, **kwargs):
+            created_inputs.append(kwargs)
+            return {"identifier": "MLA-125", "title": kwargs["title"], "url": "https://linear.test/MLA-125"}
+
+    class FakeSkill:
+        def get_client_class(self, name):
+            return FakeClient
+
+    patch_skill_dependency(monkeypatch, 'run_linear_structured_inference', fake_inference)
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: SimpleNamespace(
+            OPENAI_API_KEY=None,
+            LINEAR_DEFAULT_TEAM="MLA",
+            LINEAR_MEETING_AUTO_CREATE_MIN_CONFIDENCE=0.85,
+            LINEAR_MEETING_UNCERTAIN_MIN_CONFIDENCE=0.65,
+        ))
+
+    result = await executor._execute_linear_meeting_actions(
+        skill=FakeSkill(),
+        text="create a PRD for the committee agenda skill and add it to linear",
+        params={},
+        user_id="U1",
+        channel_id="C1",
+        thread_ts="1.1",
+        thread_history=[],
+    )
+
+    assert result["data"]["created_count"] == 1
+    assert created_inputs[0]["team_id"] == "team-1"
+    assert created_inputs[0]["assignee_id"] is None
+    assert created_inputs[0]["project_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_linear_direct_prd_command_asks_for_team_when_several_exist(monkeypatch):
+    executor = SkillExecutor()
+
+    async def fake_inference(*, messages, response_format, **kwargs):
+        return SimpleNamespace(
+            value=LinearDirectIssueBatch(
+                issues=[
+                    LinearCandidate(
+                        title="Create PRD for the committee agenda skill",
+                        description="Write the PRD.",
+                        owner_hint="Someone",
+                        confidence=0.96,
+                    )
+                ]
+            )
+        )
+
+    teams = [
+        {"id": "team-1", "key": "MLA", "name": "MLAI"},
+        {"id": "team-2", "key": "MKT", "name": "Marketing"},
+    ]
+
+    class FakeClient:
+        async def list_teams(self):
+            return teams
+
+        async def list_users(self):
+            return []
+
+        async def list_active_projects(self):
+            return []
+
+        async def list_issue_labels(self):
+            return []
+
+        async def list_recent_open_issues(self):
+            return []
+
+        async def create_issue(self, **kwargs):
+            raise AssertionError("unscoped direct command must not guess a team")
+
+    class FakeSkill:
+        def get_client_class(self, name):
+            return FakeClient
+
+    patch_skill_dependency(monkeypatch, 'run_linear_structured_inference', fake_inference)
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: SimpleNamespace(
+            OPENAI_API_KEY=None,
+            LINEAR_DEFAULT_TEAM=None,
+            LINEAR_MEETING_AUTO_CREATE_MIN_CONFIDENCE=0.85,
+            LINEAR_MEETING_UNCERTAIN_MIN_CONFIDENCE=0.65,
+        ))
+
+    result = await executor._execute_linear_meeting_actions(
+        skill=FakeSkill(),
+        text="create a PRD for the committee agenda skill and add it to linear",
+        params={},
+        user_id="U1",
+        channel_id="C1",
+        thread_ts="1.1",
+        thread_history=[],
+    )
+
+    assert result["data"]["created_count"] == 0
+    assert result["data"]["skipped_count"] == 1
+    assert "Assignee unclear" not in result["message"]
+    assert "Linear team unclear" in result["message"]
+    assert "MLA" in result["message"]
+    assert "MKT" in result["message"]
+    assert "assignee: Unassigned" in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_linear_meeting_executor_creates_project_update_when_requested(monkeypatch):
+    executor = SkillExecutor()
+    created_updates = []
+    created_issues = []
+    staged_batches = []
+
+    async def fake_source_result(**kwargs):
+        return SourceParseResult(
+            sources=[
+                ParsedSource(
+                    label="Bounty_Venture Studio kick off call - notes.pdf",
+                    text="Sonia will validate the bounty model with VCs. Sam will share the recording.",
+                    kind="pdf",
+                )
+            ],
+            files_seen=1,
+            files_parsed=1,
+        )
+
+    async def fake_candidates_from_sources(**kwargs):
+        return [
+            {
+                "title": "Validate the bounty model with VCs",
+                "owner_hint": "Sonia",
+                "project_hint": "Bounties / Venture Studio",
+                "confidence": 0.95,
+            }
+        ]
+
+    team = {"id": "team-1", "key": "MLA", "name": "MLAI"}
+    user = {"id": "user-1", "name": "Sonia", "displayName": "sonia1", "email": "sonia@example.com"}
+    project = {
+        "id": "project-1",
+        "name": "Bounties / Venture Studio",
+        "lastUpdate": {
+            "id": "update-0",
+            "body": "Previous update",
+            "health": "atRisk",
+            "createdAt": "2026-05-01T00:00:00Z",
+        },
+        "teams": {"nodes": [team]},
+        "members": {"nodes": [user]},
+    }
+
+    class FakeClient:
+        async def list_teams(self):
+            return [team]
+
+        async def list_users(self):
+            return [user]
+
+        async def list_active_projects(self):
+            return []
+
+        async def resolve_project(self, query):
+            assert query == "Bounties / Venture Studio"
+            return {
+                "status": "matched",
+                "project": project,
+                "confidence": 1.0,
+                "reason": "Matched project by exact normalized name",
+                "isInactive": True,
+            }
+
+        async def list_issue_labels(self):
+            return []
+
+        async def list_recent_open_issues(self):
+            return [{"id": "issue-1", "identifier": "MLA-1", "title": "Existing project issue", "project": {"id": "project-1"}}]
+
+        async def create_project_update(self, **kwargs):
+            created_updates.append(kwargs)
+            return {
+                "id": "update-1",
+                "url": "https://linear.app/acme/project-update/update-1",
+                "project": {"name": "Bounties / Venture Studio"},
+            }
+
+        async def create_issue(self, **kwargs):
+            created_issues.append(kwargs)
+            return {"identifier": "MLA-1", "title": kwargs["title"]}
+
+        async def create_action_batch(self, **kwargs):
+            staged_batches.append(kwargs)
+            return {
+                "id": "batch-update",
+                "items": [{"id": "item-update", "position": 0}],
+            }
+
+    class FakeSkill:
+        def get_client_class(self, name):
+            assert name == "LinearMeetingActionsClient"
+            return FakeClient
+
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: SimpleNamespace(
+            LINEAR_DEFAULT_TEAM=None,
+            LINEAR_MEETING_AUTO_CREATE_MIN_CONFIDENCE=0.85,
+            LINEAR_MEETING_UNCERTAIN_MIN_CONFIDENCE=0.65,
+        ))
+    monkeypatch.setattr(executor.owner_of('_build_linear_meeting_source_result'), '_build_linear_meeting_source_result', fake_source_result)
+    monkeypatch.setattr(executor.owner_of('_extract_linear_meeting_candidates_from_sources'), '_extract_linear_meeting_candidates_from_sources', fake_candidates_from_sources)
+    async def fake_project_update_input(**kwargs):
+        assert kwargs["recent_issues"][0]["identifier"] == "MLA-1"
+        assert kwargs["project"]["lastUpdate"]["id"] == "update-0"
+        return {
+            "project_id": "project-1",
+            "body": "Meeting update",
+            "health": "onTrack",
+        }
+
+    monkeypatch.setattr(executor.owner_of('_build_linear_meeting_project_update_input'), '_build_linear_meeting_project_update_input', fake_project_update_input)
+
+    result = await executor._execute_linear_meeting_actions(
+        skill=FakeSkill(),
+        text=(
+            "Please do a project update in Linear for project "
+            "'Bounties / Venture Studio' and extract to-dos"
+        ),
+        params={"project_hint": "Bounties / Venture Studio"},
+        user_id="U1",
+        channel_id="C1",
+        thread_ts="1.1",
+        thread_history=[],
+        event_files=[{"id": "F1", "name": "Bounty_Venture Studio kick off call - notes.pdf"}],
+    )
+
+    assert created_updates == [{"project_id": "project-1", "body": "Meeting update", "health": "onTrack"}]
+    # Project updates are still posted immediately when explicitly requested, but the
+    # extracted action item is queued for review rather than auto-created.
+    assert created_issues == []
+    assert result["data"]["review_count"] == 1
+    assert staged_batches[0]["items"][0]["issue_input"]["title"] == "Validate the bounty model with VCs"
+    assert "Created Linear project update" in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_linear_project_update_writer_uses_chunk_summaries_last_update_and_recent_issues(monkeypatch):
+    executor = SkillExecutor()
+    prompts = []
+
+    async def fake_inference(*, messages, response_format, **kwargs):
+        prompt = messages[-1]["content"]
+        prompts.append(prompt)
+        if response_format is LinearProjectSourceSummary:
+            if "page 1" in prompt:
+                value = LinearProjectSourceSummary(
+                    work_done=["Finished partner outreach."]
+                )
+            else:
+                value = LinearProjectSourceSummary(
+                    decisions=["Keep launch scope tight."]
+                )
+            return SimpleNamespace(value=value)
+        assert response_format is LinearProjectUpdateResult
+        return SimpleNamespace(
+            value=LinearProjectUpdateResult(
+                body="## Summary\nPartner outreach moved forward.\n\n## Work done since last update\nFinished outreach.\n\n## Decisions made\nKeep launch scope tight.\n\n## Risks / open questions\nNone noted.\n\n## Next steps\nConfirm launch comms.",
+                health="atRisk",
+            )
+        )
+
+    patch_skill_dependency(monkeypatch, 'run_linear_structured_inference', fake_inference)
+
+    project = {
+        "id": "project-1",
+        "name": "BITGET EVENT",
+        "lastUpdate": {
+            "id": "update-1",
+            "body": "Previous update body: venue was still open.",
+            "health": "onTrack",
+            "createdAt": "2026-05-01T00:00:00Z",
+            "user": {"displayName": "Yana"},
+        },
+    }
+    result = await executor._build_linear_meeting_project_update_input(
+        sources=[
+            ParsedSource(label="meeting.pdf page 1", text="The team finished partner outreach.", kind="pdf"),
+            ParsedSource(label="meeting.pdf page 2", text="Decision: keep launch scope tight.", kind="pdf"),
+        ],
+        params={},
+        project=project,
+        candidates=[{"title": "Confirm launch comms", "owner_hint": "Yana"}],
+        recent_issues=[
+            {
+                "identifier": "MKT-7",
+                "title": "Prepare launch comms",
+                "project": {"id": "project-1"},
+                "state": {"name": "In Progress"},
+                "assignee": {"displayName": "Yana"},
+            }
+        ],
+        settings=SimpleNamespace(),
+    )
+
+    assert result["project_id"] == "project-1"
+    assert result["health"] == "atRisk"
+    assert result["body"].endswith("_Generated by Roo from Slack meeting notes._")
+    assert len(prompts) == 3
+    final_prompt = prompts[-1]
+    assert "Previous update body" in final_prompt
+    assert "MKT-7: Prepare launch comms" in final_prompt
+    assert "Finished partner outreach" in final_prompt
+    assert "Confirm launch comms" in final_prompt
+
+
+@pytest.mark.asyncio
+async def test_linear_project_update_skips_when_project_match_low_confidence(monkeypatch):
+    executor = SkillExecutor()
+    created_updates = []
+
+    async def fake_source_result(**kwargs):
+        return SourceParseResult(
+            sources=[
+                ParsedSource(
+                    label="meeting.pdf",
+                    text="The team discussed event positioning and follow-up work.",
+                    kind="pdf",
+                )
+            ],
+            files_seen=1,
+            files_parsed=1,
+        )
+
+    async def no_candidates(**kwargs):
+        return []
+
+    class FakeClient:
+        async def list_teams(self):
+            return [{"id": "team-1", "key": "MKT", "name": "Marketing"}]
+
+        async def list_users(self):
+            return []
+
+        async def list_active_projects(self):
+            return [{"id": "project-1", "name": "Unrelated Product", "teams": {"nodes": [{"id": "team-1"}]}}]
+
+        async def list_issue_labels(self):
+            return []
+
+        async def list_recent_open_issues(self):
+            return []
+
+        async def create_project_update(self, **kwargs):
+            created_updates.append(kwargs)
+            return {"id": "update-1"}
+
+    class FakeSkill:
+        def get_client_class(self, name):
+            assert name == "LinearMeetingActionsClient"
+            return FakeClient
+
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: SimpleNamespace(
+            LINEAR_DEFAULT_TEAM=None,
+            LINEAR_MEETING_AUTO_CREATE_MIN_CONFIDENCE=0.85,
+            LINEAR_MEETING_UNCERTAIN_MIN_CONFIDENCE=0.65,
+        ))
+    monkeypatch.setattr(executor.owner_of('_build_linear_meeting_source_result'), '_build_linear_meeting_source_result', fake_source_result)
+    monkeypatch.setattr(executor.owner_of('_extract_linear_meeting_candidates_from_sources'), '_extract_linear_meeting_candidates_from_sources', no_candidates)
+
+    result = await executor._execute_linear_meeting_actions(
+        skill=FakeSkill(),
+        text="create a project update from this PDF",
+        params={},
+        user_id="U1",
+        channel_id="C1",
+        thread_ts="1.1",
+        thread_history=[],
+        event_files=[{"id": "F1", "name": "meeting.pdf"}],
+    )
+
+    assert created_updates == []
+    assert "could not confidently match the Linear project" in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_linear_thread_reference_fallback_requires_review(monkeypatch):
+    executor = SkillExecutor()
+    create_calls = []
+    staged_batches = []
+
+    async def fake_source_result(**kwargs):
+        assert kwargs["exclude_current_message"] is True
+        assert kwargs["current_message_ts"] == "1.2"
+        return SourceParseResult(
+            sources=[
+                ParsedSource(
+                    label="Slack thread",
+                    text="<@UYANA> should decide whether the AI Meets Markets event leans into finance bro stereotypes.",
+                    kind="slack_text",
+                )
+            ]
+        )
+
+    async def no_concrete_candidates(**kwargs):
+        return []
+
+    async def contextual_candidate(**kwargs):
+        return {
+            "title": "Decide AI Meets Markets event positioning and naming",
+            "description": "Decide whether the event should lean into finance bro stereotypes and confirm the name.",
+            "owner_hint": "<@UYANA>",
+            "project_hint": "BITGET EVENT",
+            "evidence": "Can we go full finance bro...",
+            "source_label": "Slack thread",
+            "confidence": 0.95,
+            "contextual_review_only": True,
+        }
+
+    team = {"id": "team-1", "key": "MKT", "name": "Marketing"}
+    user = {"id": "user-1", "name": "Yana", "displayName": "Yana", "email": "yana@example.com"}
+    project = {
+        "id": "project-1",
+        "name": "BITGET EVENT",
+        "teams": {"nodes": [team]},
+        "members": {"nodes": [user]},
+    }
+
+    class FakeClient:
+        async def list_teams(self):
+            return [team]
+
+        async def list_users(self):
+            return [user]
+
+        async def list_active_projects(self):
+            return [project]
+
+        async def list_issue_labels(self):
+            return []
+
+        async def list_recent_open_issues(self):
+            return []
+
+        async def create_issue(self, **kwargs):
+            create_calls.append(kwargs)
+            return {"identifier": "MKT-1", "title": kwargs["title"]}
+
+        async def create_action_batch(self, **kwargs):
+            staged_batches.append(kwargs)
+            return {
+                "id": "batch-contextual",
+                "items": [{"id": "item-contextual", "position": 0}],
+            }
+
+    class FakeSkill:
+        def get_client_class(self, name):
+            assert name == "LinearMeetingActionsClient"
+            return FakeClient
+
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: SimpleNamespace(
+            LINEAR_DEFAULT_TEAM=None,
+            LINEAR_MEETING_AUTO_CREATE_MIN_CONFIDENCE=0.85,
+            LINEAR_MEETING_UNCERTAIN_MIN_CONFIDENCE=0.65,
+        ))
+    monkeypatch.setattr("roo.slack_client.get_user_info", lambda user_id: {"email": "yana@example.com"})
+    monkeypatch.setattr(executor.owner_of('_build_linear_meeting_source_result'), '_build_linear_meeting_source_result', fake_source_result)
+    monkeypatch.setattr(executor.owner_of('_extract_linear_meeting_candidates_from_sources'), '_extract_linear_meeting_candidates_from_sources', no_concrete_candidates)
+    monkeypatch.setattr(executor.owner_of('_extract_linear_thread_context_candidate'), '_extract_linear_thread_context_candidate', contextual_candidate)
+
+    result = await executor._execute_linear_meeting_actions(
+        skill=FakeSkill(),
+        text='@Roo add this to the Linear project called "BITGET EVENT"',
+        params={},
+        user_id="UASKER",
+        channel_id="C1",
+        thread_ts="1.1",
+        thread_history=[],
+        event_files=[],
+        current_message_ts="1.2",
+    )
+
+    assert create_calls == []
+    assert result["data"]["created_count"] == 0
+    assert result["data"]["review_count"] == 1
+    assert "Please review before I create it" in result["message"]
+    assert result["blocks"]
+    assert result["data"]["review_batch_id"] == "batch-contextual"
+    pending = staged_batches[0]["items"][0]
+    assert pending["issue_input"]["title"] == "Decide AI Meets Markets event positioning and naming"
+    assert pending["issue_input"]["project_id"] == "project-1"
+    assert pending["issue_input"]["assignee_id"] == "user-1"
+
+
+@pytest.mark.asyncio
+async def test_linear_thread_reference_fallback_skips_when_assignee_unresolved(monkeypatch):
+    executor = SkillExecutor()
+
+    async def fake_source_result(**kwargs):
+        return SourceParseResult(
+            sources=[
+                ParsedSource(
+                    label="Slack thread",
+                    text="The team discussed whether AI Meets Markets should use a finance bro theme.",
+                    kind="slack_text",
+                )
+            ]
+        )
+
+    async def no_concrete_candidates(**kwargs):
+        return []
+
+    async def contextual_candidate(**kwargs):
+        return {
+            "title": "Decide AI Meets Markets event positioning and naming",
+            "description": "Confirm the event positioning and name.",
+            "owner_hint": "Someone",
+            "project_hint": "BITGET EVENT",
+            "evidence": "finance bro theme",
+            "source_label": "Slack thread",
+            "confidence": 0.95,
+            "contextual_review_only": True,
+        }
+
+    team = {"id": "team-1", "key": "MKT", "name": "Marketing"}
+    project = {
+        "id": "project-1",
+        "name": "BITGET EVENT",
+        "teams": {"nodes": [team]},
+        "members": {"nodes": []},
+    }
+
+    class FakeClient:
+        async def list_teams(self):
+            return [team]
+
+        async def list_users(self):
+            return []
+
+        async def list_active_projects(self):
+            return [project]
+
+        async def list_issue_labels(self):
+            return []
+
+        async def list_recent_open_issues(self):
+            return []
+
+        async def create_issue(self, **kwargs):
+            raise AssertionError("contextual issue with unresolved owner should not be created")
+
+    class FakeSkill:
+        def get_client_class(self, name):
+            assert name == "LinearMeetingActionsClient"
+            return FakeClient
+
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: SimpleNamespace(
+            LINEAR_DEFAULT_TEAM=None,
+            LINEAR_MEETING_AUTO_CREATE_MIN_CONFIDENCE=0.85,
+            LINEAR_MEETING_UNCERTAIN_MIN_CONFIDENCE=0.65,
+        ))
+    monkeypatch.setattr(executor.owner_of('_build_linear_meeting_source_result'), '_build_linear_meeting_source_result', fake_source_result)
+    monkeypatch.setattr(executor.owner_of('_extract_linear_meeting_candidates_from_sources'), '_extract_linear_meeting_candidates_from_sources', no_concrete_candidates)
+    monkeypatch.setattr(executor.owner_of('_extract_linear_thread_context_candidate'), '_extract_linear_thread_context_candidate', contextual_candidate)
+
+    result = await executor._execute_linear_meeting_actions(
+        skill=FakeSkill(),
+        text='@Roo add this to the Linear project called "BITGET EVENT"',
+        params={},
+        user_id="UASKER",
+        channel_id="C1",
+        thread_ts="1.1",
+        thread_history=[],
+        event_files=[],
+        current_message_ts="1.2",
+    )
+
+    assert result["data"]["review_count"] == 0
+    assert result["data"]["skipped_count"] == 1
+    assert "Assignee unclear" in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_linear_meeting_slack_approval_creates_contextual_issue(monkeypatch):
+    import roo.main as main_module
+    decision_calls = []
+    background = []
+    updates = []
+
+    class FakeClient:
+        async def decide_action_batch(self, **kwargs):
+            decision_calls.append(kwargs)
+            return {
+                "counts": {"approved": 1, "rejected": 0, "failed": 0},
+                "items": [{
+                    "status": "approved",
+                    "display": {"title": "Decide event positioning"},
+                    "issue": {
+                        "identifier": "MKT-42",
+                        "url": "https://linear.test/MKT-42",
+                    },
+                }],
+            }
+
+    class FakeSkill:
+        def get_client_class(self, name):
+            assert name == "LinearMeetingActionsClient"
+            return FakeClient
+
+    class FakeAgent:
+        def _get_skill_by_name(self, name):
+            assert name == "linear-meeting-actions"
+            return FakeSkill()
+
+    class FakeRequest:
+        async def form(self):
+            return {
+                "payload": json.dumps(
+                    {
+                        "user": {"id": "UASKER"},
+                        "channel": {"id": "C1"},
+                        "message": {"ts": "1.2", "thread_ts": "1.1"},
+                        "actions": [
+                            {
+                                "action_id": "linear_meeting_approve",
+                                "value": json.dumps(
+                                    {
+                                        "batch_id": "batch-1",
+                                        "item_ids": ["item-1"],
+                                        "requested_by": "UASKER",
+                                    }
+                                ),
+                            }
+                        ],
+                    }
+                )
+            }
+
+    monkeypatch.setattr(main_module, "get_agent", lambda: FakeAgent())
+    monkeypatch.setattr(
+        "roo.slack_client.get_slack_client",
+        lambda: SimpleNamespace(chat_update=lambda **kwargs: updates.append(kwargs)),
+    )
+    monkeypatch.setattr(
+        main_module.asyncio,
+        "create_task",
+        lambda coroutine: background.append(coroutine),
+    )
+
+    response = await main_module.slack_actions(FakeRequest())
+    await background[0]
+
+    assert response.status_code == 200
+    assert decision_calls == [{
+        "batch_id": "batch-1",
+        "requested_by_slack_user_id": "UASKER",
+        "decision": "approve",
+        "item_ids": ["item-1"],
+    }]
+    assert updates[0]["blocks"] == []
+    assert "1 created" in updates[-1]["text"]
+    assert "MKT-42" in updates[-1]["text"]
+
+
+@pytest.mark.asyncio
+async def test_linear_meeting_slack_reject_clears_contextual_issue(monkeypatch):
+    import roo.main as main_module
+    decision_calls = []
+    background = []
+    updates = []
+
+    class FakeClient:
+        async def decide_action_batch(self, **kwargs):
+            decision_calls.append(kwargs)
+            return {
+                "counts": {"approved": 0, "rejected": 2, "failed": 0},
+                "items": [],
+            }
+
+    class FakeSkill:
+        def get_client_class(self, name):
+            assert name == "LinearMeetingActionsClient"
+            return FakeClient
+
+    class FakeAgent:
+        def _get_skill_by_name(self, name):
+            assert name == "linear-meeting-actions"
+            return FakeSkill()
+
+    class FakeRequest:
+        async def form(self):
+            return {
+                "payload": json.dumps(
+                    {
+                        "user": {"id": "UASKER"},
+                        "channel": {"id": "C1"},
+                        "message": {"ts": "1.2", "thread_ts": "1.1"},
+                        "actions": [
+                            {
+                                "action_id": "linear_meeting_reject_all",
+                                "value": json.dumps(
+                                    {"batch_id": "batch-2", "requested_by": "UASKER"}
+                                ),
+                            }
+                        ],
+                    }
+                )
+            }
+
+    monkeypatch.setattr(main_module, "get_agent", lambda: FakeAgent())
+    monkeypatch.setattr(
+        "roo.slack_client.get_slack_client",
+        lambda: SimpleNamespace(chat_update=lambda **kwargs: updates.append(kwargs)),
+    )
+    monkeypatch.setattr(
+        main_module.asyncio,
+        "create_task",
+        lambda coroutine: background.append(coroutine),
+    )
+
+    response = await main_module.slack_actions(FakeRequest())
+    await background[0]
+
+    assert response.status_code == 200
+    assert decision_calls == [{
+        "batch_id": "batch-2",
+        "requested_by_slack_user_id": "UASKER",
+        "decision": "reject",
+        "item_ids": None,
+    }]
+    assert "2 rejected" in updates[-1]["text"]
+
+
+@pytest.mark.asyncio
+async def test_linear_project_sizing_apply_is_requester_bound_and_reports_counts(
+    monkeypatch,
+):
+    import roo.main as main_module
+
+    apply_calls = []
+    posted_messages = []
+    background = []
+
+    class FakeClient:
+        async def apply_project_sizing_run(
+            self,
+            run_id,
+            *,
+            requested_by_slack_user_id,
+            limit,
+        ):
+            apply_calls.append((run_id, requested_by_slack_user_id, limit))
+            return {
+                "status": "completed",
+                "project": {"name": "Aaron AI"},
+                "counts": {
+                    "applied": 3,
+                    "already_sized": 1,
+                    "skipped_terminal": 1,
+                    "conflict": 0,
+                    "failed": 0,
+                },
+                "items": [],
+            }
+
+    class FakeSkill:
+        def get_client_class(self, name):
+            assert name == "LinearMeetingActionsClient"
+            return FakeClient
+
+    class FakeAgent:
+        def _get_skill_by_name(self, name):
+            assert name == "linear-meeting-actions"
+            return FakeSkill()
+
+    class FakeRequest:
+        async def form(self):
+            return {
+                "payload": json.dumps(
+                    {
+                        "user": {"id": "UASKER"},
+                        "channel": {"id": "C1"},
+                        "message": {"ts": "1.2", "thread_ts": "1.1"},
+                        "actions": [
+                            {
+                                "action_id": "linear_project_sizing_apply",
+                                "value": json.dumps(
+                                    {
+                                        "run_id": "run-1",
+                                        "requested_by": "UASKER",
+                                    }
+                                ),
+                            }
+                        ],
+                    }
+                )
+            }
+
+    monkeypatch.setattr(main_module, "get_agent", lambda: FakeAgent())
+    monkeypatch.setattr(
+        main_module,
+        "post_message",
+        lambda **kwargs: posted_messages.append(kwargs),
+    )
+    monkeypatch.setattr(
+        main_module.asyncio,
+        "create_task",
+        lambda coroutine: background.append(coroutine),
+    )
+
+    response = await main_module.slack_actions(FakeRequest())
+    await background[0]
+
+    assert response.status_code == 200
+    assert apply_calls == [("run-1", "UASKER", 20)]
+    assert posted_messages[0]["text"] == "Applying the reviewed effort labels now..."
+    assert "3 applied" in posted_messages[1]["text"]
+    assert "1 terminal" in posted_messages[1]["text"]
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("if you're not sure who to assign to, assign to Dr Sam Donegan", "Dr Sam Donegan"),
+        ("extract tasks and add to linear; if unsure, assign to Jane Doe", "Jane Doe"),
+        (
+            "If you cant find the right person or are unsure, assign them to dr sam.",
+            "dr sam",
+        ),
+        ("turn these notes into tasks. Default assignee: Sam Donegan", "Sam Donegan"),
+        ("add these to linear and assign to the correct people", None),
+    ],
+)
+def test_linear_meeting_default_assignee_prepass_extracts_fallback(text, expected):
+    executor = SkillExecutor()
+    params = executor._apply_linear_meeting_default_assignee_prepass(text, {})
+    assert params.get("default_assignee_hint") == expected
+
+
+@pytest.mark.asyncio
+async def test_linear_meeting_command_with_file_uses_extraction_not_direct_path(monkeypatch):
+    """Regression for the "one task about assigning the tasks" bug.
+
+    A direct-looking command ("add ... tasks ... linear") with an attached file must
+    extract action items from the file (not parse the command into a single issue), map
+    every task to the explicitly named project, fall back to the named assignee when an
+    owner is unclear, and queue everything for review.
+    """
+    executor = SkillExecutor()
+    created_inputs = []
+    staged_batches = []
+
+    async def fake_source_result(**kwargs):
+        return SourceParseResult(
+            sources=[
+                ParsedSource(
+                    label="MLAI Committee Meeting.pdf",
+                    text="Committee discussed the venue, sponsors, and the budget.",
+                    kind="pdf",
+                )
+            ],
+            files_seen=1,
+            files_parsed=1,
+        )
+
+    async def fake_candidates_from_sources(**kwargs):
+        assert kwargs["sources"][0].label == "MLAI Committee Meeting.pdf"
+        return [
+            {"title": "Confirm the venue booking", "owner_hint": "Sonia", "confidence": 0.9,
+             "source_label": "MLAI Committee Meeting.pdf"},
+            {"title": "Draft the sponsorship deck", "owner_hint": "the team", "confidence": 0.9,
+             "source_label": "MLAI Committee Meeting.pdf"},
+        ]
+
+    async def fail_direct(**kwargs):
+        raise AssertionError("direct-issue path must not run when a file was parsed")
+
+    team = {"id": "team-1", "key": "MLA", "name": "MLAI"}
+    sonia = {"id": "user-sonia", "name": "Sonia", "displayName": "Sonia", "email": "sonia@example.com"}
+    sam = {"id": "user-sam", "name": "Sam Donegan", "displayName": "Dr Sam Donegan", "email": "sam@example.com"}
+    project = {
+        "id": "project-mlai",
+        "name": "MLAI Core",
+        "teams": {"nodes": [team]},
+        "members": {"nodes": [sonia, sam]},
+    }
+
+    class FakeClient:
+        async def list_teams(self):
+            return [team]
+
+        async def list_users(self):
+            return [sonia, sam]
+
+        async def list_active_projects(self):
+            return [project]
+
+        async def list_issue_labels(self):
+            return []
+
+        async def list_recent_open_issues(self):
+            return []
+
+        async def create_issue(self, **kwargs):
+            created_inputs.append(kwargs)
+            return {"identifier": "MLA-1", "title": kwargs["title"]}
+
+        async def create_action_batch(self, **kwargs):
+            staged_batches.append(kwargs)
+            return {
+                "id": "batch-files",
+                "items": [
+                    {"id": f"item-{position}", "position": position}
+                    for position, _ in enumerate(kwargs["items"])
+                ],
+            }
+
+    class FakeSkill:
+        def get_client_class(self, name):
+            return FakeClient
+
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: SimpleNamespace(
+            LINEAR_DEFAULT_TEAM=None,
+            LINEAR_MEETING_AUTO_CREATE_MIN_CONFIDENCE=0.85,
+            LINEAR_MEETING_UNCERTAIN_MIN_CONFIDENCE=0.65,
+        ))
+    monkeypatch.setattr(executor.owner_of('_build_linear_meeting_source_result'), '_build_linear_meeting_source_result', fake_source_result)
+    monkeypatch.setattr(executor.owner_of('_extract_linear_meeting_candidates_from_sources'), '_extract_linear_meeting_candidates_from_sources', fake_candidates_from_sources)
+    monkeypatch.setattr(executor.owner_of('_extract_linear_direct_issue_candidates'), '_extract_linear_direct_issue_candidates', fail_direct)
+
+    result = await executor._execute_linear_meeting_actions(
+        skill=FakeSkill(),
+        text=(
+            "here's the committee meeting notes, please add them to the linear project "
+            "called 'MLAI Core' and assign the tasks to the correct people. if you're not "
+            "sure who to assign to, assign to Dr Sam Donegan"
+        ),
+        params={},
+        user_id="U1",
+        channel_id="C1",
+        thread_ts="1.1",
+        thread_history=[],
+        event_files=[{"id": "F1", "name": "MLAI Committee Meeting.pdf"}],
+    )
+
+    # Nothing auto-created; both extracted tasks are queued for review.
+    assert result["data"]["created_count"] == 0
+    assert result["data"]["review_count"] == 2
+    assert created_inputs == []
+
+    pending = {
+        p["issue_input"]["title"]: p["issue_input"]
+        for p in staged_batches[0]["items"]
+    }
+    assert set(pending) == {"Confirm the venue booking", "Draft the sponsorship deck"}
+    # Every task mapped to the explicitly named project and its team.
+    for issue_input in pending.values():
+        assert issue_input["project_id"] == "project-mlai"
+        assert issue_input["team_id"] == "team-1"
+    # Clear owner kept; vague owner fell back to the named default assignee.
+    assert pending["Confirm the venue booking"]["assignee_id"] == "user-sonia"
+    assert pending["Draft the sponsorship deck"]["assignee_id"] == "user-sam"
+
+
+@pytest.mark.asyncio
+async def test_contextual_founder_games_assignment_creates_one_step(monkeypatch):
+    executor = SkillExecutor()
+    created_inputs = []
+    team = {"id": "team-1", "key": "MLA", "name": "MLAI"}
+    sam = {
+        "id": "linear-sam",
+        "name": "Sam Donegan",
+        "displayName": "Sam",
+        "email": "sam@example.com",
+    }
+    project = {
+        "id": "project-founder-program",
+        "name": "Founder Program 2026",
+        "description": "Applications and operations for Founder Games.",
+        "content": "Founder Games run sheets, setup, and participant experience.",
+        "slackChannelId": "CFOUNDERS",
+        "teams": {"nodes": [team]},
+        "members": {"nodes": [sam]},
+        "membersSource": "project",
+    }
+    slack_context = {
+        "workspace_id": "TMLAI",
+        "channel": {
+            "id": "CFOUNDERS",
+            "name": "founder-programs",
+            "topic": "Founder Games planning",
+            "purpose": "",
+        },
+        "request": {
+            "user_id": "USAM",
+            "display_name": "Dr Sam",
+            "email": "sam@example.com",
+            "message_ts": "1784595900.000002",
+            "local_datetime": "2026-07-21T10:05:00+10:00",
+            "timezone": "Australia/Sydney",
+            "event_id": "Ev-founder-task",
+        },
+        "messages": [
+            {
+                "user": "UJESS",
+                "display_name": "Jess",
+                "email": "jess@example.com",
+                "text": (
+                    "Sam can you send me through the run sheet for the founder games by EOW "
+                    "and we can allocate support to setting up for that"
+                ),
+                "ts": "1784592300.000001",
+                "local_datetime": "2026-07-21T09:05:00+10:00",
+                "is_bot": False,
+                "files": [],
+            },
+            {
+                "user": "USAM",
+                "display_name": "Dr Sam",
+                "email": "sam@example.com",
+                "text": "@Roo add this as a task for me in Linear",
+                "ts": "1784595900.000002",
+                "local_datetime": "2026-07-21T10:05:00+10:00",
+                "is_bot": False,
+                "files": [],
+            },
+        ],
+        "selection": {"mode": "recent_channel", "contextual_reference": True},
+    }
+
+    async def extracted_candidates(**kwargs):
+        combined = "\n".join(source.text for source in kwargs["sources"])
+        assert "Jess (<@UJESS>, jess@example.com)" in combined
+        assert "@Roo add this" not in combined
+        return [
+            {
+                "title": "Send Founder Games run sheet to Jess",
+                "description": "Send Jess the run sheet so HEX can allocate setup support.",
+                "owner_hint": "Sam",
+                "project_hint": "Founder Games",
+                "due_expression": "EOW",
+                # The evidence timestamp is authoritative for relative dates,
+                # even if extraction supplied a stale normalization.
+                "due_date": "2026-07-31",
+                "evidence": (
+                    "Sam can you send me through the run sheet for the founder games by EOW"
+                ),
+                "evidence_message_ts": "1784592300.000001",
+                "explicit_commitment": True,
+                "source_label": "Slack thread",
+                "confidence": 0.95,
+            }
+        ]
+
+    class FakeClient:
+        async def list_teams(self):
+            return [team]
+
+        async def list_users(self):
+            return [sam]
+
+        async def list_active_projects(self):
+            return [project]
+
+        async def list_issue_labels(self):
+            return []
+
+        async def list_recent_open_issues(self):
+            return []
+
+        async def create_issue(self, **kwargs):
+            created_inputs.append(kwargs)
+            return {
+                "identifier": "MLA-42",
+                "title": kwargs["title"],
+                "url": "https://linear.test/MLA-42",
+            }
+
+    class FakeSkill:
+        def get_client_class(self, name):
+            assert name == "LinearMeetingActionsClient"
+            return FakeClient
+
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: SimpleNamespace(
+            OPENAI_API_KEY=None,
+            LINEAR_DEFAULT_TEAM=None,
+            LINEAR_MEETING_AUTO_CREATE_MIN_CONFIDENCE=0.85,
+            LINEAR_MEETING_UNCERTAIN_MIN_CONFIDENCE=0.65,
+            LINEAR_CONTEXTUAL_AUTO_CREATE_ENABLED=True,
+        ))
+    monkeypatch.setattr(
+        "roo.slack_client.get_user_info",
+        lambda user_id: {"email": "sam@example.com"} if user_id == "USAM" else {},
+    )
+    monkeypatch.setattr(
+        "roo.slack_client.get_message_permalink",
+        lambda channel_id, message_ts: "https://slack.test/source-message",
+    )
+    monkeypatch.setattr(executor.owner_of('_extract_linear_meeting_candidates_from_sources'), '_extract_linear_meeting_candidates_from_sources', extracted_candidates)
+
+    result = await executor._execute_linear_meeting_actions(
+        skill=FakeSkill(),
+        text="@Roo add this as a task for me in Linear",
+        params={},
+        user_id="USAM",
+        channel_id="CFOUNDERS",
+        thread_ts="1784595900.000002",
+        thread_history=slack_context["messages"],
+        current_message_ts="1784595900.000002",
+        slack_context=slack_context,
+    )
+
+    assert result["data"]["created_count"] == 1
+    assert result["data"]["review_count"] == 0
+    assert len(created_inputs) == 1
+    issue = created_inputs[0]
+    assert issue["title"] == "Send Founder Games run sheet to Jess"
+    assert issue["assignee_id"] == "linear-sam"
+    assert issue["project_id"] == "project-founder-program"
+    assert issue["team_id"] == "team-1"
+    assert issue["due_date"] == "2026-07-24"
+    assert len(issue["idempotency_key"]) == 64
+    assert "https://slack.test/source-message" in issue["description"]
+
+
+@pytest.mark.asyncio
+async def test_linear_meeting_unmatched_owner_skipped_without_fallback(monkeypatch):
+    """Without a fallback assignee, a task whose owner can't be resolved is skipped
+    (not reviewed). The fallback is what rescues it (see the test above)."""
+    executor = SkillExecutor()
+    created_inputs = []
+
+    async def fake_source_result(**kwargs):
+        return SourceParseResult(
+            sources=[ParsedSource(label="notes.pdf", text="The team will sort it out.", kind="pdf")],
+            files_seen=1,
+            files_parsed=1,
+        )
+
+    async def fake_candidates_from_sources(**kwargs):
+        return [{"title": "Sort out logistics", "owner_hint": "the team", "confidence": 0.9}]
+
+    team = {"id": "team-1", "key": "MLA", "name": "MLAI"}
+    project = {"id": "project-mlai", "name": "MLAI Core", "teams": {"nodes": [team]}, "members": {"nodes": []}}
+
+    class FakeClient:
+        async def list_teams(self):
+            return [team]
+
+        async def list_users(self):
+            return [{"id": "user-sonia", "name": "Sonia", "displayName": "Sonia", "email": "sonia@example.com"}]
+
+        async def list_active_projects(self):
+            return [project]
+
+        async def list_issue_labels(self):
+            return []
+
+        async def list_recent_open_issues(self):
+            return []
+
+        async def create_issue(self, **kwargs):
+            created_inputs.append(kwargs)
+            return {"identifier": "MLA-1", "title": kwargs["title"]}
+
+    class FakeSkill:
+        def get_client_class(self, name):
+            return FakeClient
+
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: SimpleNamespace(
+            LINEAR_DEFAULT_TEAM=None,
+            LINEAR_MEETING_AUTO_CREATE_MIN_CONFIDENCE=0.85,
+            LINEAR_MEETING_UNCERTAIN_MIN_CONFIDENCE=0.65,
+        ))
+    monkeypatch.setattr(executor.owner_of('_build_linear_meeting_source_result'), '_build_linear_meeting_source_result', fake_source_result)
+    monkeypatch.setattr(executor.owner_of('_extract_linear_meeting_candidates_from_sources'), '_extract_linear_meeting_candidates_from_sources', fake_candidates_from_sources)
+
+    result = await executor._execute_linear_meeting_actions(
+        skill=FakeSkill(),
+        text="add these notes to the linear project 'MLAI Core' as tasks",
+        params={},
+        user_id="U1",
+        channel_id="C1",
+        thread_ts="1.1",
+        thread_history=[],
+        event_files=[{"id": "F1", "name": "notes.pdf"}],
+    )
+
+    assert result["data"]["created_count"] == 0
+    assert result["data"]["review_count"] == 0
+    assert result["data"]["skipped_count"] == 1
+    assert created_inputs == []
+
+
+def test_normalize_candidate_string_false_is_not_an_explicit_commitment():
+    candidate = SkillExecutor()._normalize_linear_meeting_candidate(
+        {
+            "title": "Consider changing the format",
+            "explicit_commitment": "false",
+        }
+    )
+
+    assert candidate["explicit_commitment"] is False
+
+
+def test_project_namespace_prefix_is_ignored_for_exact_matching():
+    executor = SkillExecutor()
+    project = {"id": "project-acquire", "name": "[Studio] Project Acquire"}
+
+    direct = executor._match_linear_meeting_project(
+        {"project_hint": "Project Acquire"},
+        [project],
+        owner_user=None,
+    )
+    from_source = executor._match_linear_meeting_project_from_sources(
+        [
+            ParsedSource(
+                label="Project Acquire weekly meeting.pdf",
+                text="The team reviewed acquisition tooling.",
+                kind="pdf",
+            )
+        ],
+        [project],
+        explicit_project_hint=None,
+    )
+
+    assert direct["project"]["id"] == "project-acquire"
+    assert direct["confidence"] == 0.97
+    assert from_source["project"]["id"] == "project-acquire"
+    assert from_source["confidence"] >= 0.86
+
+
+def test_action_dedupe_merges_same_outcome_but_preserves_separate_setup_work():
+    executor = SkillExecutor()
+    candidates = [
+        {
+            "title": "Evaluate Apollo and Firmable for lead enrichment",
+            "owner_hint": "Callum",
+            "project_hint": "Project Acquire",
+            "evidence": "Compare the two enrichment products.",
+        },
+        {
+            "title": "Compare Firmable and Apollo lead enrichment tools",
+            "owner_hint": "Callum",
+            "project_hint": "Project Acquire",
+            "evidence": "Assess Apollo against Firmable.",
+        },
+        {
+            "title": "Set up Apollo and Firmable trial accounts",
+            "owner_hint": "Callum",
+            "project_hint": "Project Acquire",
+        },
+    ]
+
+    deduped = executor._dedupe_linear_meeting_candidates(candidates)
+
+    assert len(deduped) == 2
+    assert any("trial accounts" in item["title"] for item in deduped)
+    evaluation = next(item for item in deduped if "Evaluate" in item["title"])
+    assert "Assess Apollo against Firmable" in evaluation["evidence"]
+
+
+def test_bulk_creation_authorization_distinguishes_create_from_preview():
+    executor = SkillExecutor()
+
+    assert executor._linear_meeting_explicit_creation_authorized(
+        "Use this PDF to create all action items in Linear",
+        {},
+    )
+    assert not executor._linear_meeting_explicit_creation_authorized(
+        "Preview the action items from this PDF for Linear",
+        {"action": "extract"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_contextual_command_without_readable_history_explains_recovery(monkeypatch):
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: SimpleNamespace(OPENAI_API_KEY=None))
+    current_message = {
+        "user": "USAM",
+        "text": "@Roo add this as a task for me in Linear",
+        "ts": "1784595900.000002",
+        "is_bot": False,
+        "files": [],
+    }
+
+    result = await SkillExecutor()._execute_linear_meeting_actions(
+        skill=SimpleNamespace(),
+        text=current_message["text"],
+        params={},
+        user_id="USAM",
+        channel_id="CFOUNDERS",
+        thread_ts=current_message["ts"],
+        thread_history=[current_message],
+        current_message_ts=current_message["ts"],
+        slack_context={
+            "messages": [current_message],
+            "selection": {"mode": "recent_channel", "contextual_reference": True},
+        },
+    )
+
+    assert "couldn't find enough preceding Slack context" in result["message"]
+    assert "channel-history access" in result["message"]

@@ -6,7 +6,7 @@ Follows Anthropic's Agent Skills pattern with progressive disclosure.
 """
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional, Dict, Any, Set
+from typing import List, Optional, Dict, Any, Set, Literal
 import importlib.util
 import sys
 
@@ -73,66 +73,87 @@ class Skill:
         return None
 
 
-def load_skills(
-    skills_dir: Path,
-    allowed_names: Optional[Set[str]] = None,
-) -> List[Skill]:
-    """
-    Load all skill definitions from skill directories.
-    
-    Supports two structures:
-    1. New (preferred): skills/skill_name/SKILL.md
-    2. Legacy: skills/skill_name.md
-    
-    Args:
-        skills_dir: Directory containing skill folders/files
-    
-    Returns:
-        List of Skill objects
-    """
-    skills = []
-    
-    if not skills_dir.exists():
-        print(f"⚠️  Skills directory not found: {skills_dir}")
-        return skills
-    
-    # First, load from directories (new pattern)
-    for item in skills_dir.iterdir():
-        if item.is_dir() and not item.name.startswith(("_", ".")):
-            skill_file = item / "SKILL.md"
-            if skill_file.exists():
-                try:
-                    skill = load_skill_from_directory(
-                        item,
-                        allowed_names=allowed_names,
-                    )
-                    if skill:
-                        skills.append(skill)
-                        print(f"   ✅ Loaded skill: {skill.name} (from {item.name}/)")
-                except Exception as e:
-                    print(f"   ❌ Failed to load {item.name}/SKILL.md: {e}")
-    
-    # Then, load legacy flat files (for backwards compatibility)
-    for md_file in skills_dir.glob("*.md"):
-        # Skip if we already loaded this as a directory
-        skill_name = md_file.stem
-        if any(s.name == skill_name or s.name == skill_name.replace("_", "-") for s in skills):
+@dataclass
+class SkillLoadEntry:
+    path: Path
+    name: Optional[str]
+    status: Literal["loaded", "disabled", "broken", "missing"]
+    skill: Optional[Skill] = None
+    errors: List[str] = field(default_factory=list)
+    warnings: List[str] = field(default_factory=list)
+
+
+@dataclass
+class SkillLoadReport:
+    entries: List[SkillLoadEntry] = field(default_factory=list)
+
+    @property
+    def skills(self) -> List[Skill]:
+        return [entry.skill for entry in self.entries
+                if entry.status == "loaded" and entry.skill is not None]
+
+    def require(self, names: Set[str]) -> None:
+        missing = set(names) - {skill.name for skill in self.skills}
+        if missing:
+            details = [f"{entry.path}: {', '.join(entry.errors)}"
+                       for entry in self.entries if entry.name in missing and entry.errors]
+            raise ValueError("ROO_ENABLED_SKILLS references missing or invalid skills: "
+                             + ", ".join(sorted(missing)) + "; " + "; ".join(details))
+
+
+def load_skill_report(skills_dir: Path, allowed_names: Optional[Set[str]] = None,
+                      *, import_clients: bool = True) -> SkillLoadReport:
+    """Validate before imports; report failures without advertising broken skills."""
+    from .catalogue import inspect_catalogue, REQUIRED_CLIENTS
+    report = SkillLoadReport()
+    for package in inspect_catalogue(skills_dir):
+        if package.name and allowed_names is not None and package.name not in allowed_names:
+            report.entries.append(SkillLoadEntry(package.path, package.name, "disabled"))
             continue
-        
+        errors = [item.message for item in package.diagnostics if item.severity == "error"]
+        warnings = [item.message for item in package.diagnostics if item.severity == "warning"]
+        if errors:
+            report.entries.append(SkillLoadEntry(package.path, package.name, "broken", errors=errors))
+            continue
         try:
-            skill = load_skill_file(md_file, allowed_names=allowed_names)
-            if skill:
-                skills.append(skill)
-                print(f"   ✅ Loaded skill: {skill.name} (legacy: {md_file.name})")
-        except Exception as e:
-            print(f"   ❌ Failed to load {md_file.name}: {e}")
-    
-    return skills
+            required_client = REQUIRED_CLIENTS.get(package.name)
+            if required_client and (package.path.name != "SKILL.md"
+                                    or not (package.path.parent / "client.py").is_file()):
+                raise ValueError(f"Required client.py providing {required_client} is missing")
+            if package.path.name == "SKILL.md":
+                skill = load_skill_from_directory(package.path.parent, allowed_names,
+                                                  import_client=import_clients)
+            else:
+                skill = load_skill_file(package.path, allowed_names)
+            if skill is None:
+                raise ValueError("Validated package did not produce a skill")
+            if required_client and import_clients and not isinstance(skill.get_client_class(required_client), type):
+                raise ValueError(f"client.py must define class {required_client}")
+            report.entries.append(SkillLoadEntry(package.path, package.name, "loaded", skill,
+                                                 warnings=warnings))
+        except Exception as exc:
+            report.entries.append(SkillLoadEntry(package.path, package.name, "broken",
+                                                 errors=[f"{type(exc).__name__}: {exc}"]))
+    if allowed_names is not None:
+        found = {entry.name for entry in report.entries}
+        for name in sorted(set(allowed_names) - found):
+            report.entries.append(SkillLoadEntry(skills_dir, name, "missing", errors=["Package not found"]))
+    return report
+
+
+def load_skills(skills_dir: Path, allowed_names: Optional[Set[str]] = None) -> List[Skill]:
+    """Compatibility list API; new callers should retain the structured report."""
+    report = load_skill_report(skills_dir, allowed_names)
+    for entry in report.entries:
+        if entry.errors:
+            print(f"Skill {entry.name or entry.path}: {entry.status}: {'; '.join(entry.errors)}")
+    return report.skills
 
 
 def load_skill_from_directory(
     skill_dir: Path,
     allowed_names: Optional[Set[str]] = None,
+    *, import_client: bool = True,
 ) -> Optional[Skill]:
     """
     Load a skill from a directory containing SKILL.md.
@@ -181,13 +202,9 @@ def load_skill_from_directory(
 
     # Load implementation module if present
     client_file = skill_dir / "client.py"
-    if client_file.exists():
-        try:
-            skill._module = _load_module_from_file(client_file, f"skill_{name}_client")
-            print(f"      📦 Loaded implementation: client.py")
-        except Exception as e:
-            print(f"      ⚠️  Failed to load client.py: {e}")
-    
+    if import_client and client_file.exists():
+        skill._module = _load_module_from_file(client_file, f"skill_{name}_client")
+
     return skill
 
 
@@ -220,6 +237,8 @@ def load_skill_file(
         parameters=parameters,
         priority_channels=post.metadata.get("priority_channels", []),
         exclusive_channels=post.metadata.get("exclusive_channels", []),
+        routing=_validate_routing(name, post.metadata.get("routing")),
+        actions=_validate_actions(name, post.metadata.get("actions")),
     )
 
 
@@ -272,7 +291,11 @@ def _load_module_from_file(file_path: Path, module_name: str):
     
     module = importlib.util.module_from_spec(spec)
     sys.modules[module_name] = module
-    spec.loader.exec_module(module)
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        sys.modules.pop(module_name, None)
+        raise
     return module
 
 

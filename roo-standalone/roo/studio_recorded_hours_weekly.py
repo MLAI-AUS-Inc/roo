@@ -44,6 +44,8 @@ def build_weekly_recorded_report(config, client, selector, dataset, now):
             raise TimesheetError('duplicate_client_balance_hours')
         seen.add(work['id'])
         first, through = _window(work['work_start'], work['work_end'])
+        if work.get('work_start_at') is not None:
+            first, through = timestamp(work['work_start_at']), timestamp(work['work_end_at'])
         if first >= end or through <= start:
             continue
         invoice = invoices.get(work.get('invoice_id'))

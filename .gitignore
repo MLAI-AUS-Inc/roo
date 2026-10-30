@@ -1,2 +1,33 @@
+# Local credentials (keep configuration templates tracked)
 .env
-.env.payment-reminders
+.env.*
+!.env.example
+!.env.*.example
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+.venv/
+ENV/
+env/
+.pytest_cache/
+
+# Runtime data and local previews
+*.db
+/roo-standalone/data/
+/roo-standalone/studio-report-preview/
+/roo-standalone/timesheet-preview/
+/roo-standalone/output/pdf/
+*.log
+
+# Editors and OS
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db

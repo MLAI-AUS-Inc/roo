@@ -637,6 +637,60 @@ class MLAIBackendClient:
         )
 
 
+    async def _event_discount_request(
+        self, method: str, suffix: str, *, payload: Optional[dict] = None,
+        request_id: Optional[str] = None,
+    ) -> dict:
+        """Call the member-only service with verified private actor context."""
+        from ..event_discounts import trusted_actor_payload
+
+        if self.surface != "public" or not self.roo_api_key:
+            raise BackendIdentityError("Public Roo service authentication is required")
+        values = {**(payload or {}), **trusted_actor_payload(self.actor_context)}
+        headers = {"X-API-Key": self.roo_api_key}
+        if request_id:
+            headers["Idempotency-Key"] = request_id
+        response = await self._request(
+            method, self._api_v1_endpoint(f"points/event-discounts/{suffix}"),
+            json=values if method == "POST" else None,
+            params=values if method == "GET" else None,
+            headers=headers, request_id=request_id, timeout=30.0,
+            redact_logs=True,
+        )
+        self._raise_for_status_or_backend_unavailable(response)
+        result = response.json()
+        if not isinstance(result, dict):
+            raise MLAIBackendUnavailableError("Invalid event discount response")
+        return result
+
+    async def quote_event_discount(self, event_query: str) -> dict:
+        """Quote one backend-configured event offer without reserving points."""
+        return await self._event_discount_request(
+            "POST", "quote/", payload={"event_query": event_query},
+        )
+
+    async def redeem_event_discount(self, quote_id: str) -> dict:
+        """Redeem an explicitly confirmed quote with a stable retry key."""
+        from ..event_discounts import redemption_request_id, trusted_actor_payload
+
+        identity = trusted_actor_payload(self.actor_context)
+        request_id = redemption_request_id(
+            identity["slack_team_id"], identity["slack_user_id"], quote_id,
+        )
+        return await self._event_discount_request(
+            "POST", "redeem/", request_id=request_id,
+            payload={"quote_id": quote_id, "confirmed": True, "request_id": request_id},
+        )
+
+    async def get_event_redemption(self, redemption_id: str) -> dict:
+        """Retrieve the actor's existing coupon without another points spend."""
+        safe_id = str(UUID(str(redemption_id)))
+        return await self._event_discount_request("GET", f"redemptions/{safe_id}/")
+
+    async def list_event_redemptions(self) -> dict:
+        """Retrieve only the verified actor's event redemption history."""
+        return await self._event_discount_request("GET", "redemptions/")
+
     def _org_memory_endpoint(self, suffix: str) -> str:
         """Support backend base URLs with or without an /api/v1 suffix."""
 
@@ -3455,27 +3509,40 @@ class MLAIBackendClient:
     async def award_points(
         self,
         admin_slack_id: str,
-        target_slack_id: str,
+        target_slack_id: Optional[str],
         points: int,
-        reason: str
+        reason: str,
+        *,
+        target_profile_id: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
     ) -> dict:
-        """Manually award or deduct points (admin only)."""
+        """Award one canonical recipient; stable operations are checked atomically by the backend."""
+        if bool(target_slack_id) == bool(target_profile_id):
+            raise ValueError("Select exactly one points recipient.")
+        cleaned_target = self._clean_slack_id(target_slack_id) if target_slack_id else None
+        if cleaned_target and not re.fullmatch(r"[UW][A-Z0-9]+", cleaned_target):
+            raise ValueError("Select a real Slack member mention.")
+        if target_profile_id:
+            if str(UUID(target_profile_id)) != target_profile_id or not idempotency_key:
+                raise ValueError("A canonical recipient and stable operation key are required.")
+        if idempotency_key is not None and (not isinstance(idempotency_key, str) or not idempotency_key.strip() or len(idempotency_key) > 200):
+            raise ValueError("Invalid points award operation key.")
         # 1. Pre-flight Admin Check
-        is_admin = await self.is_admin(admin_slack_id)
-        if not is_admin:
-            raise PermissionError(f"User {admin_slack_id} is not a Points Admin.")
+        if not idempotency_key:
+            is_admin = await self.is_admin(admin_slack_id)
+            if not is_admin:
+                raise PermissionError(f"User {admin_slack_id} is not a Points Admin.")
 
         # 2. Pre-flight Self-Award Check
-        cleaned_target = self._clean_slack_id(target_slack_id)
         if admin_slack_id == cleaned_target and points > 0:
             raise ValueError("Nice try! You can't award points to yourself. 😉")
 
         # 3. Pre-flight Negative Check
-        if points < 0:
-            raise ValueError("Point deductions are disabled. Only positive awards are allowed.")
+        if not isinstance(points, int) or isinstance(points, bool) or points <= 0:
+            raise ValueError("Only positive whole-point awards are allowed.")
 
         # 4. Pre-flight Weekly Allowance Check
-        if points > 0:
+        if points > 0 and not idempotency_key:
             allowance = await self.get_admin_allowance(admin_slack_id)
             if 'error' in allowance:
                 raise PermissionError(allowance['error'])
@@ -3491,10 +3558,12 @@ class MLAIBackendClient:
 
         payload = {
             "admin_slack_id": admin_slack_id,
-            "target_slack_id": cleaned_target,
             "points": points,
             "reason": reason,
         }
+        payload["target_profile_id" if target_profile_id else "target_slack_id"] = target_profile_id or cleaned_target
+        if idempotency_key:
+            payload["idempotency_key"] = idempotency_key
         response = await self._request(
             "POST",
             f"{self._points_base}/admin/award/",

@@ -59,18 +59,18 @@ jobs:
           OPENAI_API_KEY: test
         run: >-
           pytest -q
-          roo/tests/test_surface_security.py
-          roo/tests/test_slack_security.py
-          roo/tests/test_backend_identity.py
-          roo/tests/test_mlai_backend_client.py
-          roo/tests/test_admin_brain.py
-          roo/tests/test_admin_brain_interactions.py
-          roo/tests/test_admin_dispatch.py
-          roo/tests/test_admin_worker.py
-          roo/tests/test_unified_admin_routing.py
-          roo/tests/test_unified_admin_smoke.py
-          roo/tests/test_admin_pilot_config.py
-          roo/tests/test_admin_pilot_smoke.py
+          ../tests/roo/test_surface_security.py
+          ../tests/roo/test_slack_security.py
+          ../tests/roo/test_backend_identity.py
+          ../tests/roo/test_mlai_backend_client.py
+          ../tests/roo/test_admin_brain.py
+          ../tests/roo/test_admin_brain_interactions.py
+          ../tests/roo/test_admin_dispatch.py
+          ../tests/roo/test_admin_worker.py
+          ../tests/roo/test_unified_admin_routing.py
+          ../tests/roo/test_unified_admin_smoke.py
+          ../tests/roo/test_admin_pilot_config.py
+          ../tests/roo/test_admin_pilot_smoke.py
 
   deploy:
     runs-on: ubuntu-latest
@@ -224,7 +224,7 @@ jobs:
             # Remove the legacy Admin Slack ingress before the internal worker
             # starts, regardless of which serialized main workflow runs first.
             cd "$PUBLIC_DEPLOY_DIR/roo-standalone"
-            docker compose up -d --no-deps --force-recreate nginx
+            docker compose --env-file .env -f ../infra/docker-compose.yml up -d --no-deps --force-recreate nginx
             nginx_ready=0
             for attempt in $(seq 1 18); do
               if curl --silent --show-error --fail --max-time 5 \
@@ -243,8 +243,8 @@ jobs:
             done
 
             cd "$ADMIN_DEPLOY_DIR/roo-standalone"
-            docker compose -f docker-compose.admin.yml build roo-admin
-            docker compose -f docker-compose.admin.yml run \
+            docker compose --env-file .env.admin -f ../infra/docker-compose.admin.yml build roo-admin
+            docker compose --env-file .env.admin -f ../infra/docker-compose.admin.yml run \
               -T --rm --no-deps \
               -v "$APPROVAL_MANIFEST:/run/pilot-approval.json:ro" \
               roo-admin \
@@ -252,7 +252,7 @@ jobs:
               --env-file /dev/null \
               --approval-manifest /run/pilot-approval.json \
               --organization-domain mlai.au
-            docker compose -f docker-compose.admin.yml run \
+            docker compose --env-file .env.admin -f ../infra/docker-compose.admin.yml run \
               -T --rm --no-deps \
               -v "$APPROVAL_MANIFEST:/run/pilot-approval.json:ro" \
               roo-admin \
@@ -262,7 +262,7 @@ jobs:
               --organization-domain mlai.au \
               --slack-team-id "$ADMIN_ROO_SLACK_TEAM_ID"
             UNIFIED_ROUTE_PROBE_TOKEN="$ROO_ADMIN_ROUTER_API_KEY" \
-            docker compose -f docker-compose.admin.yml run \
+            docker compose --env-file .env.admin -f ../infra/docker-compose.admin.yml run \
               -T --rm --no-deps \
               -e UNIFIED_ROUTE_PROBE_TOKEN \
               -v "$APPROVAL_MANIFEST:/run/pilot-approval.json:ro" \
@@ -282,21 +282,21 @@ jobs:
               if [ "$public_changed" = "1" ]; then
                 cp "$public_env_backup" "$PUBLIC_ENV"
                 cd "$PUBLIC_DEPLOY_DIR/roo-standalone"
-                docker compose up -d --build --no-deps roo || true
+                docker compose --env-file .env -f ../infra/docker-compose.yml up -d --build --no-deps roo || true
               fi
               if [ "$admin_started" = "1" ]; then
                 cd "$ADMIN_DEPLOY_DIR/roo-standalone"
-                docker compose -f docker-compose.admin.yml stop roo-admin || true
+                docker compose --env-file .env.admin -f ../infra/docker-compose.admin.yml stop roo-admin || true
               fi
             }
             trap rollback_on_error ERR
 
-            docker compose -f docker-compose.admin.yml up \
+            docker compose --env-file .env.admin -f ../infra/docker-compose.admin.yml up \
               -d --force-recreate --remove-orphans roo-admin
             admin_started=1
             ready=0
             for attempt in $(seq 1 18); do
-              if docker compose -f docker-compose.admin.yml exec -T roo-admin \
+              if docker compose --env-file .env.admin -f ../infra/docker-compose.admin.yml exec -T roo-admin \
                 python -c "import json,urllib.request; p=json.load(urllib.request.urlopen('http://127.0.0.1:8000/healthz/ready', timeout=5)); assert p['status']=='ok' and p['internal_only'] is True and p['org_brain_actions_enabled'] is False"; then
                 ready=1
                 break
@@ -321,7 +321,7 @@ jobs:
             public_changed=1
 
             cd "$PUBLIC_DEPLOY_DIR/roo-standalone"
-            docker compose up -d --build --no-deps roo
+            docker compose --env-file .env -f ../infra/docker-compose.yml up -d --build --no-deps roo
             ready=0
             for attempt in $(seq 1 18); do
               if curl --silent --show-error --fail --max-time 5 \

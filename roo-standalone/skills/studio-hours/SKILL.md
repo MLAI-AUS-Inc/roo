@@ -3,11 +3,11 @@ name: studio-hours
 description: Private Studio hours by client, project and builder, with monthly charts
 requires_auth: true
 routing:
-  use_when: Studio usage, project hours for a named client (even without saying Studio), per-client/project/builder totals, charts and detail follow-ups.
+  use_when: Studio usage, task-allowance burndowns, named-client project hours, per-client/project/builder totals, charts and detail follow-ups.
   avoid_when: Builder payroll timesheets, coworking attendance, ticket creation, or effort sizing.
   examples:
     - {text: "How many of my 40 Studio hours have we used this month?", action: summary}
-    - {text: "Give me a breakdown for the last three months on all projects and hours we've done for Mark Ghiasy the client", action: summary}
+    - {text: "Show Devashi Desai's Study Nash hours and charts for the last three months", action: summary}
     - {text: "Show hours per client and project for the last three months", action: summary}
     - {text: "Give me the in-depth report on what those hours were spent on", action: detailed}
   negative_examples:
@@ -45,6 +45,17 @@ unknown or ambiguous selections privately. A report for a named client includes
 that client's monthly allowance and project totals, with monthly and project
 charts. An all-clients overview groups projects under their verified client and
 shows unmapped projects separately, with no invented client allocations.
+
+For “Devashi Desai's Study Nash hours”, set client="Devashi Desai" and use the
+same summary/detail actions. The worker must verify the configured single
+Study Nash project grant. Project names in a message never add access. A Study
+Nash task-usage burndown uses this skill and the configured base monthly allowance.
+For hours used against purchased-hour credits, use studio-client-balance.
+The client's name may also be spelled Devarshi Desai; copy the requested spelling
+and let the private worker resolve configured aliases.
+For “all completed tasks” or “from the beginning”, use month=all. The private
+worker resolves configured Linear history; never substitute the contract or invoice
+start, change effort labels, or add invoice quantities to completed-ticket hours.
 
 Default to a clear summary: hours used out of the shared monthly allowance,
 remaining or overage, each project's total and builders within each project.

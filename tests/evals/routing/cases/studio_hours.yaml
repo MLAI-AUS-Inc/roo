@@ -1,0 +1,53 @@
+- id: studio-hours-this-month
+  text: "How many of my 40 Studio hours have we used this month?"
+  expect: {skill: studio-hours, action: summary}
+  tags: [studio-hours]
+- id: studio-hours-project-to-date
+  text: "Show all project-to-date Studio hours for Mark Ghiasy, including May and June"
+  expect: {skill: studio-hours, action: summary, params: {month: all, client: "Mark Ghiasy"}}
+  tags: [studio-hours, client-scope]
+- id: studio-hours-projects-builders
+  text: "Break down my Studio hours by project and builder"
+  expect: {skill: studio-hours, action: summary}
+  tags: [studio-hours]
+- id: studio-hours-monthly-history
+  text: "Show my monthly Studio hours from July to September 2026"
+  expect: {skill: studio-hours, action: summary, params: {month: "2026-07", months: 3}}
+  tags: [studio-hours]
+- id: studio-hours-detail-followup
+  text: "Give me the in-depth report on what those hours were spent on"
+  thread: {skill: studio-hours}
+  expect: {skill: studio-hours, action: detailed}
+  tags: [studio-hours, follow-up]
+- id: studio-hours-last-three-months
+  text: "Give me a high level Studio hours report and chart for the last 3 months"
+  expect: {skill: studio-hours, action: summary, params: {month: recent, months: 3}}
+  tags: [studio-hours]
+- id: studio-hours-three-full-months
+  text: "Show my Studio hours for the last three full months"
+  expect: {skill: studio-hours, action: summary, params: {month: last_complete, months: 3}}
+  tags: [studio-hours]
+- id: studio-hours-trap-coworking
+  text: "How many people used coworking last month?"
+  expect: {skill: mlai-points, action: coworking_report}
+  tags: [studio-hours, trap]
+- id: studio-hours-named-client-without-studio
+  text: "Give me a breakdown for the last three months on all projects and hours we've done for mark ghiasy the client"
+  expect: {skill: studio-hours, action: summary, params: {month: recent, months: 3, client: "mark ghiasy"}}
+  tags: [studio-hours, client-scope]
+- id: studio-hours-all-clients
+  text: "Show hours per client and project for the last three months"
+  expect: {skill: studio-hours, action: summary, params: {month: recent, months: 3, client: all}}
+  tags: [studio-hours, client-scope]
+- id: studio-hours-own-reset
+  text: "Show my own Studio projects this month"
+  expect: {skill: studio-hours, action: summary, params: {month: current, client: self}}
+  tags: [studio-hours, client-scope]
+- id: studio-hours-devashi-study-nash
+  text: "Show Devashi Desai's Study Nash hours and charts for the last three months"
+  expect: {skill: studio-hours, action: summary, params: {month: recent, months: 3, client: "Devashi Desai"}}
+  tags: [studio-hours, client-scope]
+- id: studio-hours-devashi-project-to-date
+  text: "Show all completed-task hours and a task burndown for Devarshi Desai's Project Study Nash"
+  expect: {skill: studio-hours, action: summary, params: {month: all, client: "Devarshi Desai"}}
+  tags: [studio-hours, client-scope]

@@ -3,17 +3,17 @@ name: mlai-points
 description: Roo points, tasks, rewards and coworking
 routing:
   use_when: >
-    Roo points, rewards, tasks, coworking, and points admin.
+    Points, rewards, tasks, coworking, and event discounts.
   avoid_when: >
-    linear-meeting-actions, luma-events, meeting rooms, GitHub, and introductions.
+    Event reports, meeting rooms, GitHub, introductions.
   examples:
+    - {text: "Spend points for an AI Meetup discount", action: quote_event_discount}
     - {text: "how do I earn points?", action: list_tasks}
     - {text: "what's my balance", action: balance}
     - {text: "flex my points", action: flex_points}
     - {text: "book me in for coworking tomorrow", action: book_coworking}
     - {text: "pls book me in sept 18th", action: book_coworking}
     - {text: "is coworking available next Friday?", action: check_coworking}
-    - {text: "book me in for 1pm today", action: book_coworking}
     - {text: "claim task ROO-12", action: claim_task}
     - {text: "how busy was the coworking space in may?", action: coworking_report}
     - {text: "give 10 points to @member for organising the meetup", action: award_points}
@@ -28,6 +28,18 @@ routing:
     - {text: "book club is meeting thursday, can you remind the channel?", instead: respond_in_chat}
     - {text: "how many people came to our last event?", instead: luma-events}
 actions:
+  - name: quote_event_discount
+    description: Quote event discount.
+    params:
+      event_query: {type: string, description: "Event name or ID."}
+  - name: redeem_event_discount
+    description: Confirm quoted discount.
+  - name: get_event_redemption
+    description: Get own coupon.
+    params:
+      redemption_id: {type: string}
+  - name: list_event_redemptions
+    description: List own coupons.
   - name: link_founder_account
     description: Link the user's Slack and Founder Tools accounts.
   - name: balance
@@ -86,7 +98,7 @@ actions:
   - name: book_coworking
     description: Book the user a coworking day.
     params:
-      date: {type: string, description: "Preserve the user's date phrase, e.g. sept 18th, 18 September, next Friday, in two days, tomorrow, 16/09/2026, or an explicit ISO date. Do not invent a year or reduce multiple dates to one; the handler resolves or clarifies them."}
+      date: {type: string, description: "Preserve the user's date phrase, year and multiple dates. Do not invent a year; the handler resolves or clarifies dates."}
   - name: cancel_coworking
     description: Cancel the user's coworking booking.
     params:
@@ -423,6 +435,15 @@ Nice work! Check out "@Roo tasks" to earn more 🦘
 ```
 
 ### Rewards Catalog
+
+Use current backend quotes and recorded charges for every price. New founder
+discounts require an approved monthly update shared publicly or with the MLAI
+community and the existing Australian startup eligibility checks. Private
+approvals earn 5 Roo points and do not unlock discounts. Already-earned
+discounts retain their original expiry. The discount lasts 30 days from first
+approval; edits and reapproval do not renew it. Do not infer eligibility from
+an audience choice or a generated draft.
+
 ```
 🎁 **Available Roo Rewards**
 Your balance: **12 points**
@@ -430,13 +451,14 @@ Lifetime earned: **42 points**
 
 • **Sticker** (`STICKER`) - 1 point
   _Merch; admin approval; you can redeem this now_
-• **1 Day Hot-desk** (`COWORKING_DAY`) - 4 points
+• **1 Day Hot-desk** (`COWORKING_DAY`) - 8 points, or 4 with an earned founder discount
   _Coworking; instant redemption; you can redeem this now_
 • **Free Workshop Ticket** (`WORKSHOP_FREE`) - 42 points
   _Events (Limited Stock); 5 left; admin approval; need 30 more points_
 
 **Other ways to use Roo Points**
-• SEO article generation costs 4 Roo Points.
+• SEO article generation costs 12 Roo Points, or 6 with an earned founder discount.
+• New founder discounts require an approved update shared publicly or with the MLAI community. Private approvals earn 5 Roo points and do not unlock discounts.
 • MLAI sometimes auctions merch, cool items, or experiences for a variable Roo Points bid. Highest bidder wins.
 
 **How lifetime earned Roo Points matter**
@@ -463,7 +485,7 @@ Keen to help? Just say "task claim ROO-0042" to get started!
 You beauty! 🎉
 
 Booked you in for **20 Dec 2025** at the coworking space.
-Cost: 1 point (Balance remaining: 14 points)
+Cost: 8 points
 
 See you there, legend!
 
@@ -474,7 +496,7 @@ Reminder: no food is permitted in the coworking space.
 ```
 Ah sorry mate, looks like you're a bit short on points.
 
-You need 1 point for coworking, but you've got 0.
+You need 8 points for coworking, but you've got 0.
 
 Here are some ways to earn points:
 • Check out open tasks with "@Roo tasks"
@@ -511,3 +533,22 @@ That sounds like it could be 'Draft newsletter edition' (12 pts) or 'Newsletter 
 | No availability | "No spots left on {date}. Want to check another day?" |
 | Network error | "Having trouble reaching the points system. Mind trying again in a tick?" |
 | Permission denied | Friendly explanation, point to admins if they need help |
+
+## Event discount redemptions
+
+Use `quote_event_discount` when a member wants to spend Roo Points on a discount
+for a named event. Use `luma-events` for event discovery or attendance reports
+without points redemption. Only backend-configured event offers are available;
+never invent a points cost, discount, event, or coupon.
+
+Event quotes, confirmations, and coupon links are private. Ask the member to DM
+Roo when they request this in a channel. A quote shows the exact points cost,
+benefit, and expiry. Spending requires the member's exact original command
+`confirm event discount <quote_id>` in the same private conversation thread.
+The executor independently parses that command; extracted `confirmed`, user IDs,
+and quote IDs do not grant spending permission. A bare yes must prompt the member
+to copy the confirmation command. Repeating the command safely retrieves the
+same redemption. Use `get_event_redemption` or `list_event_redemptions` when the
+member asks for an existing link; do not redeem again. Processing means the
+backend has not yet confirmed coupon issuance. Never claim a coupon is ready
+until the backend returns a fulfilled result with a validated Luma booking link.
