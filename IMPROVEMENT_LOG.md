@@ -4,6 +4,29 @@ A short record of repository cleanup, testing, security, and delivery changes.
 Each entry states what changed and how it was checked. Findings without fixes
 are labelled as such.
 
+## 2026-10-30
+
+- Repaired Study Nash project-name selectors after production routing passed
+  the project title as the client filter. Added explicit verified project aliases
+  to the private owner mapping without changing project access, and regression
+  checks for the exact queue-to-DM route and cross-client denial (106 targeted
+  tests passed). Recovered the latest original rejected request with its actor,
+  selector and earlier notice receipt preserved; Slack confirmed the summary,
+  usage/burndown charts and exceptions export delivered privately.
+- Added an explicit, private Linear source policy and project-history boundary
+  for Study Nash usage reports, with monthly base-allowance task burndowns.
+  Preserved other clients' reviewed sources, private delivery and access checks;
+  missing task evidence remains partial or blocks the report.
+- Adapted the new reporting tests and documentation to the consolidated
+  repository layout. All 551 reporting, chart, balance and routing regressions
+  passed with synthetic credentials; added the new source-policy and burndown
+  suites to the isolated reporting CI group (768 passed) and validated
+  documentation links.
+- Activated the approved single-project mapping and reporting grant, preserving
+  other client mappings, schedules, queue/data volumes and Public Roo's current
+  application image. The updated worker and restarted Public Roo passed health
+  checks; a report preview reads Linear without posting a Slack test message.
+
 ## 2026-10-28
 
 - Fixed the Roo account-link rollout gate to query dependency health inside

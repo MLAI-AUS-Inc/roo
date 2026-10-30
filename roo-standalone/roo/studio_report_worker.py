@@ -22,6 +22,7 @@ from .timesheet_worker import TimesheetService
 from .studio_report_source import StudioSourceAPI
 from .studio_report_backfill import history_beginning, load_backfill
 from .studio_report_clients import select_client, validate_client_reporting
+from .studio_report_policy import filter_backfill, linear_projects, validate_hours_policy
 from .studio_report_schedule import enqueue_weekly, scheduled_request_authorized, weekly_configuration
 from .payment_reminders import ReceiptStore
 from .timesheets import TimesheetConfig, TimesheetError, fingerprint, flag, timestamp
@@ -60,6 +61,7 @@ def configuration(env):
             month_offset(month, 0)
             allowance_units(value)
     validate_client_reporting(raw)
+    validate_hours_policy(raw)
     return config, raw
 
 
@@ -120,6 +122,14 @@ class StudioReportService(TimesheetService):
                  'client': client, 'projects': {key: self.config.projects[key] for key in client['project_ids']}}
         if targets:
             scope.update(targets=targets, groups=groups)
+        # Staff self-overviews also inherit source policies from their explicit
+        # owner grants. A changed owner policy must invalidate a saved report.
+        task_projects = linear_projects(self.clients, actor, selector or {})
+        if task_projects:
+            scope['linear_policies'] = {key: self.clients[key] for key in
+                [actor, *client.get('report_client_ids', [])]
+                if self.clients[key].get('hours_source') == 'linear'
+                and set(self.clients[key]['project_ids']) & task_projects}
         return fingerprint(scope)
 
     def report_for_request(self, request):
@@ -138,23 +148,26 @@ class StudioReportService(TimesheetService):
         freshness_at = datetime.now(timezone.utc) if selector.get('period') == 'weekly' else now
         scope = self.scope_fingerprint(actor, selector)
         client, groups, targets = select_client(self.clients, actor, selector)
+        task_projects = linear_projects(self.clients, actor, selector)
+        task_only = set(client['project_ids']) <= task_projects
+        owners = targets or {key: self.clients[key] for key in
+                              [actor, *self.clients[actor].get('report_client_ids', [])]}
         reviewed, finance_owners, snapshot = [], [], None
         preparation_key, source_checks = None, None
         source_stale = False
-        if selector.get('period') == 'weekly' and self.refresh:
+        if selector.get('period') == 'weekly' and self.refresh and not task_only:
             # Source preparation is private and shared by owner + frozen cutoff,
             # not repeated independently for Mark and Sam.
             preparation_key, snapshot, source_checks = self.refresh.for_request(request, freshness_at)
-        if self.balance_enabled and self.balance_path:
+        if self.balance_enabled and self.balance_path and not task_only:
             from .studio_client_balance_source import load_balance_snapshot, validate_snapshot_age
             from .studio_recorded_hours import build_recorded_report
             snapshot = snapshot or load_balance_snapshot(self.balance_path, self.config, self.clients)
-            owners = targets or {key: self.clients[key] for key in
-                                  [actor, *self.clients[actor].get('report_client_ids', [])]}
             for owner, owner_client in owners.items():
                 data = snapshot['clients'].get(owner)
                 if (data is not None and data.get('hours_reporting')
-                        and set(owner_client['project_ids']) <= set(client['project_ids'])):
+                        and set(owner_client['project_ids']) <= set(client['project_ids'])
+                        and not set(owner_client['project_ids']) & task_projects):
                     expired = validate_snapshot_age(data, freshness_at,
                         max_age_days=self.balance_max_age_days,
                         allow_historical=self.allow_historical_snapshot)
@@ -162,11 +175,20 @@ class StudioReportService(TimesheetService):
                     finance_owners.append(owner)
         covered = {key for owner in finance_owners for key in self.clients[owner]['project_ids']}
         legacy_projects = set(client['project_ids']) - covered
-        backfill = load_backfill(self.backfill_path, self.config) if legacy_projects else None
+        backfill_projects = legacy_projects - task_projects
+        backfill = (filter_backfill(load_backfill(self.backfill_path, self.config), task_projects)
+                    if backfill_projects else None)
         if start is None:
             beginnings = [snapshot['clients'][owner]['coverage']['start'][:7] for owner in finance_owners]
-            if legacy_projects or not beginnings:
-                beginnings.append(history_beginning(backfill, list(legacy_projects or client['project_ids'])))
+            for owner_client in owners.values():
+                if (owner_client.get('hours_source') == 'linear'
+                        and set(owner_client['project_ids']) & task_projects):
+                    beginning = owner_client.get('history_start_month')
+                    if not beginning:
+                        raise TimesheetError('all_time_coverage_not_configured')
+                    beginnings.append(beginning)
+            if backfill_projects or not beginnings:
+                beginnings.append(history_beginning(backfill, list(backfill_projects or client['project_ids'])))
             selector, start, _ = resolve_period(selector, now,
                 beginning=min(beginnings))
         month_selector, month_start = None, None
@@ -202,7 +224,11 @@ class StudioReportService(TimesheetService):
                 month_report['source_stale'] = source_stale
         if groups:
             report['client_groups'] = groups
-        report.update(actor=actor, scope=scope, backfill_digest=fingerprint(backfill))
+        report.update(actor=actor, scope=scope, backfill_digest=fingerprint(backfill),
+                      backfill_source_used=bool(backfill_projects),
+                      linear_project_ids=sorted(task_projects))
+        if task_only:
+            report['hours_source'] = 'linear'
         if month_report is not None:
             report['month_to_date'] = month_report
         if preparation_key:
@@ -217,6 +243,12 @@ class StudioReportService(TimesheetService):
         # Freeze rendered parts too. A delivery retry uses the same content hash
         # even when font versions or optional chart availability change.
         parts = [{'kind': 'message', 'content': chunk, 'status': 'pending'} for chunk in split_messages(summary(report))]
+        if task_only:
+            parts.append({'kind': 'message', 'content':
+                'Task-size estimates are compared with the base monthly allowance. '
+                'Contractual rollover is not included; this is not a clock-time ledger or confirmed contractual entitlement.'
+                + (' Unresolved completed tasks mean the balance is unconfirmed.' if not report['complete'] else ''),
+                'status': 'pending'})
         if source_checks:
             checked = min(check['checked_at'] for check in source_checks.values())
             parts.insert(0, {'kind': 'message', 'content':
@@ -254,6 +286,12 @@ class StudioReportService(TimesheetService):
                 if groups:
                     parts.append({'kind': 'file', 'filename': 'studio-hours-clients.png',
                                   'content': base64.b64encode(render_chart(report, breakdown='clients')).decode('ascii'), 'status': 'pending'})
+                if task_only:
+                    from .studio_task_burndown import render_task_burndown
+                    burndown = render_task_burndown(report)
+                    if burndown is not None:
+                        parts.append({'kind': 'file', 'filename': 'studio-hours-burndown.png',
+                                      'content': base64.b64encode(burndown).decode('ascii'), 'status': 'pending'})
         except Exception as exc:
             if month_report is not None:
                 raise TimesheetError('scheduled_report_chart_unavailable') from exc
@@ -348,8 +386,9 @@ class StudioReportService(TimesheetService):
             for owner in report['finance_owners']:
                 validate_snapshot_age(snapshot['clients'][owner], now, max_age_days=self.balance_max_age_days,
                     allow_historical=self.allow_historical_snapshot and report.get('source_stale') is True)
-        if (not report.get('canonical_only') and
-                report.get('backfill_digest', fingerprint(None)) != fingerprint(load_backfill(self.backfill_path, self.config))):
+        if (not report.get('canonical_only') and report.get('backfill_source_used', True) and
+                report.get('backfill_digest', fingerprint(None)) != fingerprint(filter_backfill(
+                    load_backfill(self.backfill_path, self.config), set(report.get('linear_project_ids', []))))):
             raise TimesheetError('invoice_backfill_changed')
         return self.deliver_parts(report['parts'], request['actor'], key, now)
 

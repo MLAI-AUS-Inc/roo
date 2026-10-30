@@ -292,8 +292,7 @@ def summary(report):
     if report['estimated_hour_units']:
         parts.append(f"{display_hours(report['estimated_hour_units'])}h have estimated daily timing.")
     source_date = timestamp(report['as_of']).astimezone(TZ).date().isoformat()
-    parts.append(f"Purchased hours use {money(report['allocation_rate_cents_per_hour'])}/h · A$5,000 = "
-                 f"{display_hours(credit_hour_units(500000, report['allocation_rate_cents_per_hour']))}h.")
+    parts.append(f"Purchased hours use {money(report['allocation_rate_cents_per_hour'])}/h from actual receipts.")
     parts.append(f"Source snapshot: {source_date} · coverage through {report['coverage_through']}.")
     if report['partial']:
         parts.append(f"Reviewed coverage begins {report['coverage_start']}; activity outside that coverage is unavailable.")

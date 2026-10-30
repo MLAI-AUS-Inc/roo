@@ -43,3 +43,11 @@
   text: "Show my own Studio projects this month"
   expect: {skill: studio-hours, action: summary, params: {month: current, client: self}}
   tags: [studio-hours, client-scope]
+- id: studio-hours-devashi-study-nash
+  text: "Show Devashi Desai's Study Nash hours and charts for the last three months"
+  expect: {skill: studio-hours, action: summary, params: {month: recent, months: 3, client: "Devashi Desai"}}
+  tags: [studio-hours, client-scope]
+- id: studio-hours-devashi-project-to-date
+  text: "Show all completed-task hours and a task burndown for Devarshi Desai's Project Study Nash"
+  expect: {skill: studio-hours, action: summary, params: {month: all, client: "Devarshi Desai"}}
+  tags: [studio-hours, client-scope]

@@ -28,6 +28,9 @@ def test_report_skill_is_opt_in_and_never_default_admin():
     {'action': 'summary', 'month': 'last_complete', 'months': 3},
     {'action': 'summary', 'month': 'all', 'client': 'Mark Ghiasy'},
     {'action': 'summary', 'month': 'recent', 'months': 3, 'client': 'mark ghiasy'},
+    {'action': 'summary', 'month': 'all', 'client': 'Devashi Desai'},
+    {'action': 'summary', 'month': 'all', 'client': 'Devarshi Desai'},
+    {'action': 'summary', 'month': 'recent', 'months': 3, 'client': 'Devashi Desai'},
     {'action': 'summary', 'month': 'recent', 'months': 3, 'client': 'all'}])
 async def test_real_executor_queues_authenticated_request_and_returns_text(tmp_path, monkeypatch, params):
     # Some legacy agent tests register a lightweight executor stub.

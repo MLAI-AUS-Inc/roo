@@ -109,6 +109,9 @@ hour allocations and work-date assumptions.
 
 ## Access and scope
 
+The [Devashi Desai / Study Nash handoff](studio-devashi-reports.md) applies the
+same reporting path to one explicitly verified project.
+
 Existing Studio client access is necessary. A reviewed finance dataset for that
 owner must also be present in the private snapshot. Publishing an owner dataset
 is an explicit financial reporting scope: its `project_ids` must match the owner's
