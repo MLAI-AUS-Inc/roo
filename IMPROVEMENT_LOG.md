@@ -125,3 +125,14 @@ are labelled as such.
   contract and Chat bridge action in backend deployment `faaeac1`, plus the
   desktop/mobile action allowlists on Chat main. Sam authorised admin merges
   of #311 and #302 on 30 October; no database migration is part of this change.
+
+- Added private, owner-scoped effort reviews for Study Nash's two conflicting
+  October task labels, using the S and XS sizes confirmed by Sam. Each review
+  must match its historical project and first-completion label-change event;
+  ambiguous unreviewed work stays excluded. Staff views inherit only granted
+  reviews, and review changes invalidate saved deliveries. Summaries, detail
+  and CSV explain the reviewed size basis. All 286 targeted policy, reporting,
+  isolation, finance-overlay and burndown tests pass. A complete production
+  source read found five eligible October tasks: 2.75 estimated hours after
+  correction, versus the previous partial 1.5 hours. No additional eligible
+  October completion explains the proposed 5 hours.
