@@ -21,7 +21,7 @@ Merge the verified owner into the private worker's existing
 {
   "UEXAMPLEDEVASHI": {
     "name": "Devarshi Desai",
-    "aliases": ["Devashi Desai"],
+    "aliases": ["Devashi Desai", "Study Nash", "Studynash", "[Studio] Studynash", "Project Study Nash"],
     "project_ids": ["00000000-0000-0000-0000-000000000003"],
     "hours_source": "linear",
     "history_start_month": "2026-08",
@@ -36,6 +36,11 @@ markers and reviewed finance overlays for that owner's projects. A task-only
 request does not open the invoice/finance files or invoke the finance refresh
 service. Other owners keep their current source policy. Mixed staff reports
 apply each owner's policy within the existing access grants.
+
+Keep the verified project spellings as explicit owner aliases. The router may
+send `client: "Study Nash"` for “my Study Nash hours”, even though it selects the
+correct hours tool. These aliases select the existing one-project owner within
+the requester's grants; they do not infer ownership or grant another client access.
 
 `history_start_month` is a private, verified project-history boundary for
 project-to-date requests. Study Nash's creation month was verified as August

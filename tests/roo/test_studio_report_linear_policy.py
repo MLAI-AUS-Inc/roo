@@ -1,10 +1,13 @@
 """Explicit task-only usage stays independent of reviewed invoice-hour sources."""
 import base64
 import json
+from types import SimpleNamespace
 
 import pytest
 
 from roo.studio_report_worker import configuration
+from roo.backend_identity import BackendActorContext
+from roo.studio_report_commands import enqueue
 from roo.studio_reports import summary, total_units
 from tests.roo.test_studio_devashi_reports import devashi
 from tests.roo.test_studio_client_balance_source import NOW, P1, P2, setup as finance_setup
@@ -55,6 +58,44 @@ def worker_env(setup):
         'STUDIO_REPORTS_DATA_DIR': str(setup.config.directory),
         'STUDIO_REPORTS_QUEUE_DIR': str(setup.config.queue),
     }
+
+
+@pytest.mark.parametrize('alias', ['Study Nash', 'Studynash', '[Studio] Studynash', 'Project Study Nash'])
+@pytest.mark.parametrize('actor', ['UDEVASHI', 'USAM'])
+def test_project_alias_from_real_route_delivers_only_the_configured_owner_tasks(task_client, monkeypatch, alias, actor):
+    forbid_invoice_reads(monkeypatch)
+    task_client.clients['UDEVASHI']['aliases'].extend(
+        ['Study Nash', 'Studynash', '[Studio] Studynash', 'Project Study Nash'])
+    configuration(worker_env(task_client))
+    settings = SimpleNamespace(ROO_SURFACE='public', STUDIO_REPORTS_ENABLED=True,
+        STUDIO_REPORTS_SLACK_TEAM_ID=task_client.config.team,
+        STUDIO_REPORTS_QUEUE_DIR=str(task_client.config.queue))
+    context = BackendActorContext('T123', actor, 'C123', '1.0', 'project-alias-request')
+    result = enqueue(settings, context,
+        {'month': 'current', 'action': 'summary', 'client': alias},
+        user_id=actor, channel_id='C123', thread_ts='1.0', now=NOW)
+    assert 'DM' in result
+    outcome, = task_client.service.commands(NOW)
+    assert outcome['status'] == 'sent'
+    saved = task_client.service.queue.read(outcome['request'])
+    report = task_client.service.requests.read(outcome['request'])
+    assert saved['status'] == 'done' and saved['actor'] == actor
+    assert saved['selector']['client'] == alias
+    assert set(report['projects']) == {P2} and total_units(report) == 12
+    assert 'studio-hours-burndown.png' in {p.get('filename') for p in report['parts']}
+    assert all(call.args == (actor,) for call in task_client.api.open_dm.call_args_list)
+    assert all(call.args[0] == 'D' + actor for call in task_client.api.post_message.call_args_list)
+    assert all(call.args[0] == 'D' + actor for call in task_client.api.upload_csv.call_args_list)
+
+
+@pytest.mark.parametrize('alias', ['Study Nash', 'Studynash', '[Studio] Studynash', 'Project Study Nash'])
+def test_project_alias_cannot_grant_another_client_access(task_client, monkeypatch, alias):
+    forbid_invoice_reads(monkeypatch)
+    task_client.clients['UDEVASHI']['aliases'].append(alias)
+    with pytest.raises(TimesheetError, match='report_client_unavailable'):
+        task_client.service.report_for_request(request('UMARK', month='current', client=alias))
+    task_client.api.collect.assert_not_called()
+    task_client.api.open_dm.assert_not_called()
 
 
 @pytest.mark.parametrize('actor,client', [

@@ -6,6 +6,13 @@ are labelled as such.
 
 ## 2026-10-30
 
+- Repaired Study Nash project-name selectors after production routing passed
+  the project title as the client filter. Added explicit verified project aliases
+  to the private owner mapping without changing project access, and regression
+  checks for the exact queue-to-DM route and cross-client denial (106 targeted
+  tests passed). Recovered the latest original rejected request with its actor,
+  selector and earlier notice receipt preserved; Slack confirmed the summary,
+  usage/burndown charts and exceptions export delivered privately.
 - Added an explicit, private Linear source policy and project-history boundary
   for Study Nash usage reports, with monthly base-allowance task burndowns.
   Preserved other clients' reviewed sources, private delivery and access checks;
