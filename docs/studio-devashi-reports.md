@@ -66,6 +66,34 @@ This document is an activation handoff, not proof of production activation.
 Changing an owner's source/history or revoking a grant invalidates saved delivery.
 No new recurring schedule is required for on-demand reporting.
 
+## Reviewed completion sizes
+
+An owner may have a private `effort_resolutions` mapping when a reviewer confirms
+which effort label added at first completion supersedes a conflicting old label:
+
+```json
+"effort_resolutions": {
+  "00000000-0000-0000-0000-000000000091": {
+    "project_id": "00000000-0000-0000-0000-000000000003",
+    "completion_event_id": "00000000-0000-0000-0000-000000000092",
+    "size": "S"
+  }
+}
+```
+
+These synthetic IDs must be replaced with verified evidence. Only Linear owners
+can configure reviews. The worker checks the historical project, first completion
+event, and label added in that event before counting the selected size. It does
+not infer a resolution for other duplicate labels or use later size changes.
+Reviews follow existing owner/staff grants and are included in the scope hash,
+so changing one invalidates saved delivery. Summary, detailed output and CSV
+identify the reviewed size basis. Payroll and Linear records are not modified.
+
+On 30 October, Sam confirmed the completion-time S and XS sizes for the two
+conflicting October tasks. The five eligible October tasks therefore total
+2.75 size-estimated hours under the existing rubric, rather than the previous
+partial 1.5 hours. A full source read found no additional eligible October work.
+
 ## Requests and output
 
 ```text

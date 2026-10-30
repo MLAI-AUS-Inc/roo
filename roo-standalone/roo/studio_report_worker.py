@@ -22,7 +22,8 @@ from .timesheet_worker import TimesheetService
 from .studio_report_source import StudioSourceAPI
 from .studio_report_backfill import history_beginning, load_backfill
 from .studio_report_clients import select_client, validate_client_reporting
-from .studio_report_policy import filter_backfill, linear_projects, validate_hours_policy
+from .studio_report_policy import (filter_backfill, linear_projects, selected_effort_resolutions,
+                                   validate_hours_policy)
 from .studio_report_schedule import enqueue_weekly, scheduled_request_authorized, weekly_configuration
 from .payment_reminders import ReceiptStore
 from .timesheets import TimesheetConfig, TimesheetError, fingerprint, flag, timestamp
@@ -150,6 +151,7 @@ class StudioReportService(TimesheetService):
         client, groups, targets = select_client(self.clients, actor, selector)
         task_projects = linear_projects(self.clients, actor, selector)
         task_only = set(client['project_ids']) <= task_projects
+        effort_resolutions = selected_effort_resolutions(self.clients, actor, selector)
         owners = targets or {key: self.clients[key] for key in
                               [actor, *self.clients[actor].get('report_client_ids', [])]}
         reviewed, finance_owners, snapshot = [], [], None
@@ -207,8 +209,10 @@ class StudioReportService(TimesheetService):
         if legacy_projects:
             self.api.verify(source)
             dataset = self.api.collect(source, now, {})
-        report = build_client_report(self.config, client, selector, dataset, now, backfill)
-        month_report = (build_client_report(self.config, client, month_selector, dataset, now, backfill)
+        report = build_client_report(self.config, client, selector, dataset, now, backfill,
+                                     effort_resolutions=effort_resolutions)
+        month_report = (build_client_report(self.config, client, month_selector, dataset, now, backfill,
+                                           effort_resolutions=effort_resolutions)
                         if month_selector else None)
         if finance_owners:
             from .studio_recorded_hours import overlay_recorded_reports

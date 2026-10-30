@@ -134,3 +134,25 @@ def test_backfill_none_and_v1_keep_their_existing_shape():
     filtered = filter_backfill(manifest, {'study-nash'})
     assert filtered == {'version': 1, 'entries': [], 'pending': [], 'sources': {}}
     assert len(manifest['entries']) == 1
+
+
+@pytest.mark.parametrize('mutation', ['not_mapping', 'bad_issue', 'bad_event', 'wrong_project',
+    'invalid_size', 'non_string_size', 'extra_field', 'missing_field', 'auto_source', 'staff_owner'])
+def test_invalid_effort_reviews_fail_closed(clients, mutation):
+    issue = '00000000-0000-0000-0000-000000000091'
+    record = {'project_id': 'study-nash', 'completion_event_id':
+              '00000000-0000-0000-0000-000000000092', 'size': 'S'}
+    owner = clients['UDEV']
+    owner['effort_resolutions'] = {issue: record}
+    if mutation == 'not_mapping': owner['effort_resolutions'] = []
+    elif mutation == 'bad_issue': owner['effort_resolutions'] = {'bad': record}
+    elif mutation == 'bad_event': record['completion_event_id'] = None
+    elif mutation == 'wrong_project': record['project_id'] = 'mark-project'
+    elif mutation == 'invalid_size': record['size'] = 'XXL'
+    elif mutation == 'non_string_size': record['size'] = []
+    elif mutation == 'extra_field': record['hours'] = 5
+    elif mutation == 'missing_field': del record['size']
+    elif mutation == 'auto_source': owner['hours_source'] = 'auto'
+    elif mutation == 'staff_owner': owner['report_client_ids'] = []
+    with pytest.raises(TimesheetError, match='invalid_effort_resolution'):
+        validate_hours_policy(clients)

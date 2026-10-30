@@ -12,7 +12,7 @@ from .payment_reminders import _escape
 from .studio_report_backfill import apply_backfill, history_beginning, replacements
 from .studio_report_clients import client_key
 from .studio_report_weekly_backfill import apply_weekly_backfill
-from .timesheets import LABELS, UNITS, TimesheetError, csv_file, reconstruct, timestamp
+from .timesheets import UNITS, TimesheetError, csv_file, reconstruct, timestamp
 
 TZ = ZoneInfo('Australia/Melbourne')
 _chart_lock = Lock()
@@ -138,7 +138,8 @@ def total_units(report):
     return sum(row['units'] for row in report['rows'])
 
 
-def build_client_report(config, client, selector, dataset, now, backfill=None):
+def build_client_report(config, client, selector, dataset, now, backfill=None, *, effort_resolutions=None):
+    from .studio_report_policy import resolve_report_effort
     beginning = history_beginning(backfill, client['project_ids']) if selector.get('month') == 'all' else None
     selector, start, end = resolve_period(selector, now, beginning=beginning)
     as_of = timestamp(now)
@@ -222,15 +223,14 @@ def build_client_report(config, client, selector, dataset, now, backfill=None):
             builder_id = (issue.get('assignee') or {}).get('id')
             if issue.get('assignee_count', 1) != 1 or builder_id not in config.builders:
                 raise TimesheetError('builder_mapping_required')
-            sizes = [LABELS[name] for name in issue['labels'].values() if name in LABELS]
-            if len(sizes) != 1:
-                raise TimesheetError('exactly_one_effort_label_required')
-            units = UNITS[sizes[0]] * (scale // 4)
+            size, reviewed_effort = resolve_report_effort(issue, history, completed, effort_resolutions)
+            units = UNITS[size] * (scale // 4)
             rows.append({'month': month, 'project_id': project_id, 'project': projects[project_id],
                          'builder_id': builder_id, 'builder': config.builders[builder_id]['name'],
                          'issue_id': original['id'], 'identifier': original['identifier'],
                          'title': issue['title'], 'completed_at': completed.astimezone(TZ).isoformat(),
-                         'size': sizes[0], 'units': units})
+                         'size': size, 'units': units,
+                         **({'effort_basis': 'reviewed_completion_label'} if reviewed_effort else {})})
             by_month[month]['units'] += units
         except TimesheetError as exc:
             by_month[month]['unresolved'] += 1
@@ -413,6 +413,9 @@ def summary(report):
             parts.append(str(report['pending_work_count']) + ' work sources remain unquantified and excluded.')
     if report['basis'] == 'completed_ticket_size_hours':
         parts.append('\nHours are based on completed-ticket sizes; work in progress and clocked time are not included.')
+        reviewed_effort = sum(row.get('effort_basis') == 'reviewed_completion_label' for row in report['rows'])
+        if reviewed_effort:
+            parts.append(f'{reviewed_effort} completed work items use reviewed completion-time sizes to resolve conflicting labels.')
     else:
         invoiced = sum(row['units'] for row in report['rows'] if row.get('source') == 'reviewed_invoice')
         recorded = sum(row['units'] for row in report['rows'] if row.get('source') == 'reviewed_recorded_time')
@@ -548,6 +551,8 @@ def detail_messages(report):
                      f" — {_escape(row['title'])} ({_escape(row['identifier'])})")
         if row.get('allocation_note'):
             lines.append('  Allocation assumption: ' + _escape(row['allocation_note']))
+        if row.get('effort_basis') == 'reviewed_completion_label':
+            lines.append('  Size confirmed from the first-completion label change.')
     if not report['rows']:
         lines.append('No counted completed work in this period.')
     return split_messages('\n'.join(lines))
@@ -577,11 +582,12 @@ def artifacts(report):
     if report['selector']['action'] == 'detailed':
         result['studio-hours-work.csv'] = csv_file(
             ['month', 'project', 'builder', 'completion_date_or_work_period_end', 'issue_or_invoice', 'work', 'size', 'hours',
-             'source', 'work_period_start', 'work_period_end', 'date_note', 'month_allocation', 'allocation_note'],
+             'source', 'work_period_start', 'work_period_end', 'date_note', 'month_allocation', 'allocation_note', 'effort_basis'],
             [[r['month'], r['project'], r['builder'], r['completed_at'], r['identifier'], r['title'],
               r['size'], Decimal(r['units']) / report.get('unit_scale', 4), r.get('source', 'completed_ticket_size'),
               r.get('work_start', ''), r.get('work_end', ''), r.get('date_note', ''),
-              r.get('month_allocation', 'work_dates'), r.get('allocation_note', '')] for r in report['rows']])
+              r.get('month_allocation', 'work_dates'), r.get('allocation_note', ''),
+              r.get('effort_basis', '')] for r in report['rows']])
     if report['exceptions']:
         result['studio-hours-unresolved.csv'] = csv_file(['month', 'project', 'issue', 'reason'],
             [[r['month'], r['project'], r['identifier'], r['reason']] for r in report['exceptions']])
