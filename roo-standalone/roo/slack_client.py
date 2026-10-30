@@ -78,6 +78,74 @@ def get_bot_user_id() -> str:
     return _bot_user_id
 
 
+def bind_article_price_message(
+    response: SlackApiResponse,
+    *,
+    blocks: list,
+    text: str,
+    channel: str,
+    thread_ts: Optional[str],
+    message_ts: Optional[str] = None,
+) -> None:
+    """Record a price card's verified Slack origin after posting or updating it."""
+    from .content_factory_pricing import bind_confirmation_card, confirmation_tokens
+
+    if not confirmation_tokens(blocks):
+        return
+    actual_channel = response.get("channel")
+    actual_ts = response.get("ts")
+    if (
+        response.get("ok") is not True
+        or actual_channel != channel
+        or not isinstance(actual_ts, str) or not actual_ts
+        or (message_ts is not None and actual_ts != message_ts)
+    ):
+        raise ValueError("Slack could not verify the article price confirmation's message.")
+    actual_thread = thread_ts or actual_ts
+    returned_message = response.get("message") or {}
+    if returned_message.get("thread_ts") and returned_message["thread_ts"] != actual_thread:
+        raise ValueError("Slack returned a different article confirmation thread.")
+    delivered_message = None
+    if "text" in returned_message and "blocks" in returned_message:
+        delivered_message = returned_message
+    elif response.get("text") is not None and response.get("blocks") is not None:
+        delivered_message = {"text": response.get("text"), "blocks": response.get("blocks")}
+    bind_confirmation_card(
+        blocks, text=text, delivered_message=delivered_message,
+        workspace_id=get_slack_app_identity()["team_id"],
+        channel_id=actual_channel, thread_ts=actual_thread, message_ts=actual_ts,
+    )
+
+
+def read_article_price_message(origin: dict) -> dict:
+    """Read the exact bot-owned Slack source; click payloads/digests are not proof."""
+    identity = get_slack_app_identity()
+    if identity["team_id"] != origin["workspace_id"]:
+        raise ValueError("The article confirmation belongs to a different workspace.")
+    client = get_slack_client()
+    kwargs = {
+        "channel": origin["channel_id"], "oldest": origin["message_ts"],
+        "latest": origin["message_ts"], "inclusive": True, "limit": 2,
+    }
+    if origin["thread_ts"] == origin["message_ts"]:
+        response = client.conversations_history(**kwargs)
+    else:
+        response = client.conversations_replies(ts=origin["thread_ts"], **kwargs)
+    matches = [
+        message for message in response.get("messages", [])
+        if message.get("ts") == origin["message_ts"]
+    ]
+    if response.get("ok") is not True or len(matches) != 1:
+        raise ValueError("The original article confirmation message is unavailable.")
+    message = matches[0]
+    if (
+        message.get("user") != identity["user_id"]
+        or (message.get("thread_ts") or message.get("ts")) != origin["thread_ts"]
+    ):
+        raise ValueError("The original article confirmation source could not be verified.")
+    return message
+
+
 def post_message(
     channel: str,
     text: str,
@@ -99,6 +167,11 @@ def post_message(
         Slack API response
     """
     client = get_slack_client()
+    from .content_factory_pricing import confirmation_tokens
+    if confirmation_tokens(kwargs.get("blocks") or []):
+        # Keep the fallback quote text stable when Slack returns the message.
+        kwargs["parse"] = "none"
+        kwargs["mrkdwn"] = False
     
     try:
         response = client.chat_postMessage(
@@ -108,6 +181,9 @@ def post_message(
             unfurl_links=False,
             unfurl_media=False,
             **kwargs
+        )
+        bind_article_price_message(
+            response, text=text, blocks=kwargs.get("blocks") or [], channel=channel, thread_ts=thread_ts,
         )
         
         if response.get("ok"):

@@ -56,6 +56,8 @@ jobs:
           python -m pytest ../tests/roo/test_surface_security.py -q
           python -m pytest ../tests/roo/test_deployment_checks.py -q
           python -m pytest ../tests/roo/test_bridge_mentions.py -q
+          # Article consent and Chat card handling must run with real client imports.
+          python -m pytest ../tests/roo/test_article_price_consent.py ../tests/roo/test_content_factory_article_flow.py ../tests/roo/test_chat_actions.py -q
           python -m pytest ../tests/roo/test_chat_points_awards.py -q
           # Chart rendering and binary uploads run offline, isolated from legacy stubs.
           python -m pytest ../tests/roo/test_coworking_charts.py ../tests/roo/test_slack_file_upload.py -q

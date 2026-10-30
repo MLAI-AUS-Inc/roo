@@ -114,3 +114,14 @@ are labelled as such.
   Validation: 41 targeted deployment/skill tests passed; all Compose profiles
   rendered with empty test environments; workflow YAML and SSH shell syntax
   checks passed. No deployment or live service calls performed.
+
+- Updated article quote consent PR #302 for current `main`: preserved the
+  executor facade and ported the gate into `ContentFactoryExecutor`; moved its
+  documentation/tests into the current repository layout and retained the
+  isolated CI consent group. Article/client/Chat regressions: 269 passed;
+  executor regressions: 34 passed; surface boundary checks: 30 passed; Slack,
+  internal-mention and backend-identity regressions: 58 passed. Skill
+  configuration lint and Python compilation pass. Verified the quote/replay
+  contract and Chat bridge action in backend deployment `faaeac1`, plus the
+  desktop/mobile action allowlists on Chat main. Sam authorised admin merges
+  of #311 and #302 on 30 October; no database migration is part of this change.

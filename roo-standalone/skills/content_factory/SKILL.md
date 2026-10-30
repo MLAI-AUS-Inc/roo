@@ -96,6 +96,14 @@ If the user provides a specific idea (e.g. "write about X"), extract it as **top
 ### Step 2: Confirm Before Starting
 Before starting generation, confirm the details with the user:
 
+Article price consent is a separate mandatory gate handled by the backend
+client. Roo retrieves the requesting founder's authoritative quote and presents
+the `confirm_article_price` button before article generation. Do not state a
+local/default price, assume any domain is free, or treat `confirmed`, a topic
+selection, or service authentication as price consent. A changed quote requires
+a fresh confirmation; unavailable quotes stop the article request. Topic-only
+research retains its existing billing contract.
+
 **If Topic Provided:**
 ```
 I'll generate an article for {domain} about "{topic}" targeting "{target_keyword}".
