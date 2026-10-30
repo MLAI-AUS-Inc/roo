@@ -11,8 +11,14 @@ are labelled as such.
   Preserved other clients' reviewed sources, private delivery and access checks;
   missing task evidence remains partial or blocks the report.
 - Adapted the new reporting tests and documentation to the consolidated
-  repository layout. Checked 183 targeted reporting, chart, balance and routing
-  regressions with synthetic credentials and validated local documentation links.
+  repository layout. All 551 reporting, chart, balance and routing regressions
+  passed with synthetic credentials; added the new source-policy and burndown
+  suites to the isolated reporting CI group (768 passed) and validated
+  documentation links.
+- Activated the approved single-project mapping and reporting grant, preserving
+  other client mappings, schedules, queue/data volumes and Public Roo's current
+  application image. The updated worker and restarted Public Roo passed health
+  checks; a report preview reads Linear without posting a Slack test message.
 
 ## 2026-10-28
 

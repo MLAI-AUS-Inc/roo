@@ -130,6 +130,11 @@ jobs:
             ../tests/roo/test_studio_report_source.py \
             ../tests/roo/test_invoice_source.py \
             ../tests/roo/test_studio_report_routing.py \
+            ../tests/roo/test_studio_devashi_reports.py \
+            ../tests/roo/test_studio_report_policy.py \
+            ../tests/roo/test_studio_report_linear_policy.py \
+            ../tests/roo/test_studio_report_mixed_sources.py \
+            ../tests/roo/test_studio_task_burndown.py \
             ../tests/roo/test_studio_report_schedule.py \
             ../tests/roo/test_studio_report_weeks.py \
             ../tests/roo/test_studio_report_charts.py \
