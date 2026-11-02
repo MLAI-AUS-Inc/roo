@@ -4,6 +4,16 @@ A short record of repository cleanup, testing, security, and delivery changes.
 Each entry states what changed and how it was checked. Findings without fixes
 are labelled as such.
 
+## 2026-11-02
+
+- Extended explicit owner effort reviews to bind a size label added before
+  first completion, preserving the existing same-event default. The selected
+  label must be present at completion, both history events must match, and
+  incomplete tasks remain excluded. This supports Sam's confirmed M review for
+  Alan's remaining ambiguous October task: Alan 5.25h plus Shan 2.75h, 8h
+  across nine completed tasks. All 299 targeted reporting, grant isolation,
+  finance-overlay and burndown tests pass with synthetic credentials.
+
 ## 2026-10-30
 
 - Repaired Study Nash project-name selectors after production routing passed
@@ -125,3 +135,14 @@ are labelled as such.
   contract and Chat bridge action in backend deployment `faaeac1`, plus the
   desktop/mobile action allowlists on Chat main. Sam authorised admin merges
   of #311 and #302 on 30 October; no database migration is part of this change.
+
+- Added private, owner-scoped effort reviews for Study Nash's two conflicting
+  October task labels, using the S and XS sizes confirmed by Sam. Each review
+  must match its historical project and first-completion label-change event;
+  ambiguous unreviewed work stays excluded. Staff views inherit only granted
+  reviews, and review changes invalidate saved deliveries. Summaries, detail
+  and CSV explain the reviewed size basis. All 286 targeted policy, reporting,
+  isolation, finance-overlay and burndown tests pass. A complete production
+  source read found five eligible October tasks: 2.75 estimated hours after
+  correction, versus the previous partial 1.5 hours. No additional eligible
+  October completion explains the proposed 5 hours.

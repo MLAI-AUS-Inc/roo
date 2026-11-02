@@ -291,3 +291,140 @@ def test_invalid_private_task_policy_fails_configuration(task_client, update):
     task_client.clients['UDEVASHI'].update(update)
     with pytest.raises(TimesheetError):
         configuration(worker_env(task_client))
+
+
+REVIEW_ISSUE = '00000000-0000-0000-0000-000000000091'
+REVIEW_EVENT = '00000000-0000-0000-0000-000000000092'
+
+
+def reviewed_ticket(setup):
+    item = ticket(project=P2, completed='2026-10-05T00:00:00.020Z')
+    item['issue'].update(id=REVIEW_ISSUE, labels=[
+        {'id': 'old-size', 'name': 'Extra Large (XL)'},
+        {'id': 'new-size', 'name': 'Small (S)'},
+    ])
+    item['history'] = [{'id': REVIEW_EVENT, 'createdAt': '2026-10-05T00:00:00Z',
+        'fromStateId': 'todo', 'toStateId': 'done',
+        'fromState': {'id': 'todo', 'type': 'unstarted'},
+        'toState': {'id': 'done', 'type': 'completed'}, 'addedLabelIds': ['new-size']}]
+    setup.clients['UDEVASHI']['effort_resolutions'] = {REVIEW_ISSUE: {
+        'project_id': P2, 'completion_event_id': REVIEW_EVENT, 'size': 'S'}}
+    setup.api.collect.return_value = [item]
+    return item
+
+
+@pytest.mark.parametrize('actor,selector', [
+    ('UDEVASHI', {}), ('USAM', {'client': 'Devarshi Desai'}),
+    ('USAM', {'client': 'all'}), ('USAM', {}),
+])
+@pytest.mark.parametrize('size,label,units', [('S', 'Small (S)', 4), ('XS', 'Extra Small (XS)', 1)])
+def test_reviewed_completion_size_follows_owner_grants(task_client, monkeypatch, actor, selector, size, label, units):
+    item = reviewed_ticket(task_client)
+    item['issue']['labels'][1]['name'] = label
+    task_client.clients['UDEVASHI']['effort_resolutions'][REVIEW_ISSUE]['size'] = size
+    configuration(worker_env(task_client))
+    # Keep this assertion about estimate resolution independent of finance overlays.
+    task_client.service.balance_enabled = False
+    task_client.service.backfill_path = None
+    result = task_client.service.report_for_request(request(actor, month='2026-10', **selector))
+    row, = result['rows']
+    assert row['size'] == size and row['units'] == units
+    assert row['effort_basis'] == 'reviewed_completion_label'
+    assert result['complete'] and not result['exceptions']
+    assert 'reviewed completion-time sizes' in summary(result)
+    from roo.studio_reports import artifacts, detail_messages
+    assert 'reviewed_completion_label' in artifacts(result)['studio-hours-work.csv']
+    assert 'Size confirmed from label history' in '\n'.join(detail_messages(result))
+    task_client.api.post_message.assert_not_called()
+
+
+@pytest.mark.parametrize('mutation', ['no_review', 'wrong_event', 'wrong_project',
+    'wrong_size', 'not_added', 'late_label', 'not_completion', 'second_completion'])
+def test_review_never_guesses_or_overrides_first_completion_evidence(task_client, mutation):
+    item = reviewed_ticket(task_client)
+    resolution = task_client.clients['UDEVASHI']['effort_resolutions'][REVIEW_ISSUE]
+    event = item['history'][0]
+    if mutation == 'no_review': task_client.clients['UDEVASHI']['effort_resolutions'] = {}
+    elif mutation == 'wrong_event': resolution['completion_event_id'] = P1
+    elif mutation == 'wrong_project': resolution['project_id'] = P1
+    elif mutation == 'wrong_size': resolution['size'] = 'XL'
+    elif mutation == 'not_added': event['addedLabelIds'] = []
+    elif mutation == 'late_label':
+        event['addedLabelIds'] = []
+        item['history'].append({'id': 'later', 'createdAt': '2026-10-06T00:00:00Z',
+                                'addedLabelIds': ['new-size']})
+    elif mutation == 'not_completion': event['fromState']['type'] = 'completed'
+    elif mutation == 'second_completion':
+        from copy import deepcopy
+        original = deepcopy(event)
+        original.update(id='first', createdAt='2026-10-04T00:00:00Z', addedLabelIds=[])
+        item['history'].insert(0, original)
+    result = task_client.service.report_for_request(request(month='2026-10'))
+    assert not result['rows'] and not result['complete'] and len(result['exceptions']) == 1
+
+
+def test_changed_review_invalidates_saved_delivery_scope(task_client):
+    reviewed_ticket(task_client)
+    first = task_client.service.scope_fingerprint('USAM', {'client': 'Devarshi Desai'})
+    task_client.clients['UDEVASHI']['effort_resolutions'][REVIEW_ISSUE]['size'] = 'XS'
+    assert task_client.service.scope_fingerprint('USAM', {'client': 'Devarshi Desai'}) != first
+
+
+LABEL_REVIEW_EVENT = '00000000-0000-0000-0000-000000000093'
+
+
+def earlier_reviewed_ticket(setup):
+    item = reviewed_ticket(setup)
+    item['issue']['labels'][1]['name'] = 'Medium (M)'
+    item['history'][0]['addedLabelIds'] = []
+    item['history'].append({'id': LABEL_REVIEW_EVENT, 'createdAt': '2026-10-04T00:00:00Z',
+                            'addedLabelIds': ['new-size']})
+    setup.clients['UDEVASHI']['effort_resolutions'][REVIEW_ISSUE].update(
+        size='M', label_event_id=LABEL_REVIEW_EVENT)
+    return item
+
+
+@pytest.mark.parametrize('actor,selector', [('UDEVASHI', {}), ('USAM', {'client': 'Devarshi Desai'})])
+def test_explicit_earlier_size_review_counts_both_builders_on_completion(task_client, actor, selector):
+    from tests.roo.test_studio_reports import B2
+    task_client.config.builders[B2] = {'name': 'Second builder', 'slack_user_id': 'USECOND'}
+    item = earlier_reviewed_ticket(task_client)
+    item['issue']['assignee']['id'] = B2
+    task_client.api.collect.return_value.append(
+        ticket(2, project=P2, completed='2026-10-05T01:00:00Z'))
+    configuration(worker_env(task_client))
+    result = task_client.service.report_for_request(request(actor, month='2026-10', **selector))
+    assert result['complete'] and not result['exceptions']
+    assert total_units(result) == 12
+    assert {row['builder']: row['units'] for row in result['rows']} == {'Builder': 4, 'Second builder': 8}
+    task_client.api.post_message.assert_not_called()
+
+
+@pytest.mark.parametrize('mutation', ['no_review', 'missing_event', 'duplicate_event',
+    'wrong_completion', 'after_completion', 'label_removed', 'not_added', 'still_in_review'])
+def test_earlier_size_review_requires_bound_label_and_completed_task(task_client, mutation):
+    from copy import deepcopy
+    item = earlier_reviewed_ticket(task_client)
+    review = task_client.clients['UDEVASHI']['effort_resolutions'][REVIEW_ISSUE]
+    label_event = item['history'][1]
+    if mutation == 'no_review': task_client.clients['UDEVASHI']['effort_resolutions'] = {}
+    elif mutation == 'missing_event': review['label_event_id'] = P1
+    elif mutation == 'duplicate_event': item['history'].append(deepcopy(label_event))
+    elif mutation == 'wrong_completion': review['completion_event_id'] = LABEL_REVIEW_EVENT
+    elif mutation == 'after_completion': label_event['createdAt'] = '2026-10-06T00:00:00Z'
+    elif mutation == 'label_removed': item['issue']['labels'].pop()
+    elif mutation == 'not_added': label_event['addedLabelIds'] = []
+    elif mutation == 'still_in_review':
+        item['history'][0].update(toState={'id': 'review', 'type': 'started'}, toStateId='review')
+        item['issue'].update(completedAt=None, state={'id': 'review', 'type': 'started'})
+    result = task_client.service.report_for_request(request(month='2026-10'))
+    assert not result['rows']
+    if mutation != 'still_in_review':
+        assert not result['complete'] and len(result['exceptions']) == 1
+
+
+def test_changed_label_review_invalidates_saved_delivery_scope(task_client):
+    earlier_reviewed_ticket(task_client)
+    first = task_client.service.scope_fingerprint('USAM', {'client': 'Devarshi Desai'})
+    task_client.clients['UDEVASHI']['effort_resolutions'][REVIEW_ISSUE]['label_event_id'] = REVIEW_EVENT
+    assert task_client.service.scope_fingerprint('USAM', {'client': 'Devarshi Desai'}) != first

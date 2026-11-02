@@ -66,6 +66,41 @@ This document is an activation handoff, not proof of production activation.
 Changing an owner's source/history or revoking a grant invalidates saved delivery.
 No new recurring schedule is required for on-demand reporting.
 
+## Reviewed completion sizes
+
+An owner may have a private `effort_resolutions` mapping when a reviewer confirms
+which effort label present at first completion supersedes a conflicting label:
+
+```json
+"effort_resolutions": {
+  "00000000-0000-0000-0000-000000000091": {
+    "project_id": "00000000-0000-0000-0000-000000000003",
+    "completion_event_id": "00000000-0000-0000-0000-000000000092",
+    "size": "S"
+  }
+}
+```
+
+These synthetic IDs must be replaced with verified evidence. Only Linear owners
+can configure reviews. The worker checks the historical project, first completion
+event, and label added in that event before counting the selected size. When a
+reviewed label was added earlier (for example, during review), add its event UUID
+as `label_event_id` alongside `completion_event_id`. The worker verifies both
+events, requires the label change at or before first completion, and confirms
+the selected label was still present then. Omission preserves the original
+same-event rule. Reviews never count tasks still in review or use later sizing.
+Reviews follow existing owner/staff grants and are included in the scope hash,
+so changing one invalidates saved delivery. Summary, detailed output and CSV
+identify the reviewed size basis. Payroll and Linear records are not modified.
+
+On 30 October, Sam confirmed the completion-time S and XS sizes for the two
+conflicting October tasks. The five eligible October tasks therefore total
+2.75 size-estimated hours under the existing rubric, rather than the previous
+partial 1.5 hours at that read. Alan subsequently completed four October tasks.
+On 2 November, Sam confirmed M (2h) for the remaining conflicting phone-system
+task, whose M label was added during review before completion. With that review,
+October totals 8 estimated hours: Shan 2.75h and Alan 5.25h across nine tasks.
+
 ## Requests and output
 
 ```text
