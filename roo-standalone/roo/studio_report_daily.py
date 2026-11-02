@@ -103,6 +103,11 @@ class DailyRefresh:
                         current = load_balance_snapshot(self.service.balance_path, self.service.config, self.service.clients)
                         if owner not in current['clients']:
                             raise TimesheetError('daily_finance_scope_missing')
+                        previous_data, incoming = current['clients'][owner], snapshot['clients'][owner]
+                        previous_review = previous_data.get('source_freshness', {}).get('hours_reviewed_at', previous_data['as_of'])
+                        if (timestamp(previous_data['as_of']) > timestamp(incoming['as_of'])
+                                or timestamp(previous_review) > timestamp(incoming['source_freshness']['hours_reviewed_at'])):
+                            raise TimesheetError('daily_newer_publication_exists')
                         current['clients'][owner] = snapshot['clients'][owner]
                         current['evidence'].update(snapshot['evidence'])
                         validate_balance_snapshot(current, self.service.config, self.service.clients)

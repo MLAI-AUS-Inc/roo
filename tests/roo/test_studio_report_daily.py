@@ -124,6 +124,19 @@ def test_failed_render_preserves_last_good_snapshot_and_retries(setup, monkeypat
     assert daily.tick(FRIDAY + timedelta(seconds=30)) == []
 
 
+def test_daily_does_not_overwrite_a_newer_manual_review(setup, monkeypatch):
+    latest(setup)
+    # A separate reviewer published after the source's work-review cutoff,
+    # even though the incoming Xero read itself happened later.
+    value = deepcopy(setup.value)
+    value['clients']['UMARK']['as_of'] = (FRIDAY - timedelta(hours=1)).isoformat()
+    setup.path.write_text(json.dumps(value))
+    before = setup.path.read_bytes()
+    monkeypatch.setattr('roo.studio_report_daily.render_bundle', Mock(return_value={'report.txt': 'synthetic'}))
+    assert DailyRefresh(setup.service, ['UMARK']).tick(FRIDAY)[0]['status'] == 'error'
+    assert setup.path.read_bytes() == before
+
+
 @pytest.mark.parametrize('day,offset', [('2026-10-04', '+11:00'), ('2026-11-01', '+11:00'),
                                        ('2027-01-01', '+11:00'), ('2027-04-04', '+10:00')])
 def test_daily_schedule_handles_month_year_and_dst_rollover(setup, monkeypatch, day, offset):
