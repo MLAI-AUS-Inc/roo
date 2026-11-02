@@ -709,7 +709,9 @@ def render_chart(report, breakdown=None):
             figure.legend(handles, legend_labels, loc='upper left',
                           bbox_to_anchor=(.09, (.6 + .3 * legend_rows) / height),
                           ncol=2, frameon=False, fontsize=9)
-            axes.set_xlabel('Month')
+            # Month names already label the axis. A second label collides with
+            # the source notes when seven or more month labels rotate.
+            axes.set_xlabel('')
             axes.set_ylabel('Reviewed hour-units and ticket-size estimates' if mixed else
                             'Invoice/recorded hour-units' if report.get('recorded_snapshot') else
                             'Hours recorded' if report['basis'] == 'invoice_first_recorded_hours' else 'Hours used')
