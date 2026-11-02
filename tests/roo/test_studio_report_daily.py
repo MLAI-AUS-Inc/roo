@@ -8,7 +8,7 @@ import pytest
 
 from roo.studio_report_daily import DailyRefresh
 from roo.studio_report_refresh import SourcePending
-from roo.studio_client_balance import build_balance_report
+from roo.studio_client_balance import build_balance_report, summary
 from roo.studio_client_balance_source import validate_balance_snapshot
 from roo.studio_recorded_hours import build_recorded_report
 from roo.timesheets import TimesheetError, timestamp
@@ -80,6 +80,21 @@ def test_november_work_is_unavailable_after_october_records_despite_new_cash_syn
     assert not report['period_has_coverage']
     assert report['monthly'][0]['coverage_available'] is False
     assert report['source_as_of'] == data['source_freshness']['hours_reviewed_at']
+    balance = build_balance_report(setup.clients['UMARK'], {'month': '2026-11', 'action': 'summary'}, data, data['as_of'])
+    assert not balance['work_period_has_coverage']
+    assert 'unavailable for this period; not counted as zero' in summary(balance)
+
+
+def test_latest_on_demand_report_discloses_work_and_finance_dates(setup):
+    latest(setup)
+    report = setup.service.report_for_request({'actor': 'UMARK', 'team': setup.config.team,
+        'report_kind': 'client_balance', 'selector': {'month': 'all', 'action': 'summary'},
+        'requested_at': FRIDAY.isoformat()})
+    assert 'Xero checked:' in report['parts'][0]['content']
+    assert '2 invoice emails await review' in report['parts'][0]['content']
+    assert report['source_preparations']
+    assert report['hours_report']['coverage_through'] == '2026-10-12'
+    setup.api.post_message.assert_not_called()
 
 
 def test_daily_publishes_validated_charts_once_across_restarts_without_delivery(setup):
@@ -140,3 +155,13 @@ def test_retry_after_midnight_resumes_previous_day_until_next_scheduled_run(setu
     assert daily.tick(after - timedelta(seconds=1)) == []
     assert daily.tick(after)[0]['status'] == 'waiting_data'
     assert setup.service.refresh.prepare.call_count == 2
+
+
+def test_manual_catchup_before_six_does_not_consume_next_daily_run(setup):
+    latest(setup)
+    now = timestamp('2026-10-17T00:10:00+11:00')
+    setup.service.refresh.prepare = Mock(side_effect=SourcePending(now.timestamp() + 300))
+    daily = DailyRefresh(setup.service, ['UMARK'])
+    assert daily.tick(now) == []
+    assert daily.tick(now, catch_up=True)[0]['status'] == 'waiting_data'
+    assert daily.tick(timestamp('2026-10-17T06:00:00+11:00'))[0]['status'] == 'waiting_data'

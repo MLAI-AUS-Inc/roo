@@ -222,6 +222,7 @@ def build_balance_report(client, selector, dataset, now):
         'coverage_start': coverage_start.isoformat(), 'coverage_through': cutoff.isoformat(),
         'as_of': dataset['as_of'], 'generated_at': timestamp(now).isoformat(),
         'period_has_coverage': has_coverage, 'partial': partial,
+        'work_period_has_coverage': not fresh or bool(fresh['latest_work_date'] and fresh['latest_work_date'] >= start.isoformat()),
         'opening_hour_units': opening, 'used_hour_units': period_used,
         'credited_hour_units': period_credit, 'payment_cents': period_paid, 'balance_hour_units': balance,
         'lifetime_used_hour_units': lifetime_used, 'lifetime_credited_hour_units': lifetime_credit,
@@ -255,7 +256,8 @@ def summary(report):
         parts.append('*' + reviewed_cutoff_notice(report) + '*')
     if report['period_has_coverage']:
         parts.extend([f"{report['start']} – {report['end']}",
-                      f"{'Invoice/recorded hour-units' if recorded_units else 'Recorded hours used'}: *{display_hours(report['used_hour_units'])}h*",
+                      (f"{'Invoice/recorded hour-units' if recorded_units else 'Recorded hours used'}: *{display_hours(report['used_hour_units'])}h*"
+                       if report.get('work_period_has_coverage', True) else 'Work hours: *unavailable for this period; not counted as zero*'),
                       f"Hours purchased: *{display_hours(report['credited_hour_units'])}h*"
                       f" · {money(report['payment_cents'])} received"])
         if report['opening_hour_units'] or detailed:
@@ -443,7 +445,7 @@ def render_chart(report):
                 spine.set_visible(False)
             axes.tick_params(length=0, pad=7)
             figure.legend(*axes.get_legend_handles_labels(), loc='lower left', bbox_to_anchor=(.11, .105),
-                          frameon=False, fontsize=9)
+                          frameon=False, fontsize=8.5, ncol=2 if report.get('source_freshness') else 1)
         figure.text(.06, .82, (f"{report['start']} – {report['end']}" if report['period_has_coverage'] else
                               f"Requested: {report['requested_start']} – {report['requested_end']}"),
                     fontsize=11, color='#334b58')
@@ -451,7 +453,9 @@ def render_chart(report):
             balance_label = 'Beyond purchased hours' if report['balance_hour_units'] >= 0 else 'Purchased hours remaining'
             if recorded_units:
                 balance_label = 'Provisional difference'
-            figure.text(.06, .775, f"{'Recorded units' if recorded_units else 'Hours used'} {display_hours(report['used_hour_units'])}h  ·  "
+            work_label = (f"{'Recorded units' if recorded_units else 'Hours used'} {display_hours(report['used_hour_units'])}h"
+                          if report.get('work_period_has_coverage', True) else 'Work hours unavailable')
+            figure.text(.06, .775, work_label + '  ·  ' +
                         f"{'Paid credits' if recorded_units else 'Hours purchased'} {display_hours(report['credited_hour_units'])}h  ·  "
                         f"{balance_label} {display_hours(abs(report['balance_hour_units']))}h", fontsize=10, color='#334b58')
         if report['scope_label']:
@@ -466,6 +470,9 @@ def render_chart(report):
         if report['pending_work_count']:
             note += f"{report['pending_work_count']} later invoices have unconfirmed hours; excluded. "
         note += f"Data through {report['coverage_through']}."
+        if report.get('source_freshness'):
+            fresh = report['source_freshness']
+            note += f" Work submitted through {fresh['latest_work_date'] or 'an unknown date'}; {fresh['unreviewed_invoice_count']} invoice emails await review."
         figure.text(.06, .03, '\n'.join(textwrap.wrap(note, width=118)), fontsize=8.5, color='#334b58')
         output = BytesIO()
         canvas.print_png(output)

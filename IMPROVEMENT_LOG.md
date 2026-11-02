@@ -13,6 +13,8 @@ are labelled as such.
   Expense reimbursements remain cash without creating purchased-hour credits.
   Synthetic tests cover restart deduplication, failed publication, source scope,
   partial data, receipt allocation, month/year rollover and both DST changes.
+  The complete 884-test reporting/worker selection passed; subsequent partial
+  rendering and manual catch-up cases pass in the focused daily/finance suite.
 
 - Fixed on-demand Studio hours and purchased-hours reports bypassing the
   enabled private source refresh. Each permitted finance owner now gets a

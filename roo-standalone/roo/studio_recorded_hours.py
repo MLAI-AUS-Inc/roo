@@ -23,6 +23,8 @@ def build_recorded_report(config, client, selector, dataset, now):
         work_dataset = deepcopy(dataset)
         work_dataset['coverage']['through'] = fresh['latest_work_date'] or dataset['coverage']['start']
     balance = build_balance_report(client, selector, work_dataset, now)
+    if fresh and not fresh['latest_work_date']:
+        balance['period_has_coverage'] = False
     resolved = balance['selector']
     monthly = [{'month': month_offset(resolved['month'], i).strftime('%Y-%m'),
                 'units': 0, 'unresolved': 0, 'allowance_units': None}

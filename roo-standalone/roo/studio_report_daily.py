@@ -72,7 +72,7 @@ class DailyRefresh:
             raise TimesheetError('invalid_daily_refresh_owners') from exc
         return cls(service, owners, env.get('STUDIO_REPORTS_DAILY_REFRESH_TIME', '06:00'))
 
-    def tick(self, now):
+    def tick(self, now, *, catch_up=False):
         local = timestamp(now).astimezone(TZ)
         day = local.date() - timedelta(days=int(local.time() < self.at))
         results = []
@@ -84,7 +84,7 @@ class DailyRefresh:
                 previous = self.store.read(key) or {}
                 # Before today's run, only resume an existing pending run.
                 # First activation waits until its configured local time.
-                if local.time() < self.at and not previous:
+                if local.time() < self.at and not previous and not catch_up:
                     continue
                 if previous.get('status') == 'done' or previous.get('retry_at', 0) > timestamp(now).timestamp():
                     continue

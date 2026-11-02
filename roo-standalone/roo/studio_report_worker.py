@@ -587,7 +587,7 @@ def main(argv=None):
             from .studio_report_daily import DailyRefresh
             daily = DailyRefresh.from_env(service, env)
             if args.refresh_daily:
-                results = daily.tick(datetime.now(timezone.utc)) if daily else []
+                results = daily.tick(datetime.now(timezone.utc), catch_up=True) if daily else []
                 print(json.dumps({'results': results, 'enabled': daily is not None}), flush=True)
                 return int(any(item['status'] != 'done' for item in results))
             if args.recover:

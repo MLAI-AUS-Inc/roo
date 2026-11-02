@@ -349,8 +349,9 @@ atomically updates the canonical finance file. `daily-refresh/` contains run
 receipts and an owner-keyed latest-directory pointer. Files are private (0600).
 Failed reads/renders retain the last good publication. The job sends no Slack
 messages or emails and never changes Xero. An operational one-shot entry point
-is `python -m roo.studio_report_worker --refresh-daily`; it observes the same
-schedule, deduplication and enablement flags and does not drain delivery queues.
+is `python -m roo.studio_report_worker --refresh-daily`; it can catch up the
+previous scheduled day before 06:00, observes deduplication/backoff/enablement,
+and does not drain delivery queues.
 
 Latest views verify current invoices and reconciled cash while retaining the
 original work-review timestamp, latest submitted work date and pending invoice
