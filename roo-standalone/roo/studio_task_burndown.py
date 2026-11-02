@@ -19,6 +19,8 @@ def render_task_burndown(report) -> bytes | None:
     enter this view. Partial months show the allowance less known estimates,
     never a confirmed remaining balance.
     """
+    if report.get('contract_allowance') is not None:
+        return render_contract_burndown(report)
     monthly = report['monthly']
     if (not monthly or all(month['allowance_units'] is None for month in monthly)
             or report.get('basis', 'completed_ticket_size_hours') != 'completed_ticket_size_hours'):
@@ -133,6 +135,86 @@ def render_task_burndown(report) -> bytes | None:
         figure.text(.065, .095, '\n'.join(textwrap.wrap(note, width=118)), fontsize=9, color='#334b58')
         figure.text(.065, .035, 'Completed-ticket size estimates; work in progress and clocked time excluded.\n'
                     + cutoff.strftime('As of %d %b %Y, %I:%M %p %Z.'), fontsize=9, color='#334b58')
+        output = BytesIO()
+        canvas.print_png(output)
+        return output.getvalue()
+
+
+def render_contract_burndown(report):
+    """Plot the same reviewed cycles as text/CSV, including opening history."""
+    contract = report['contract_allowance']
+    cycles = contract['cycles']
+    if not cycles or report.get('basis') != 'completed_ticket_size_hours':
+        return None
+    with _chart_lock:
+        from matplotlib.backends.backend_agg import FigureCanvasAgg
+        from matplotlib.dates import AutoDateLocator, ConciseDateFormatter
+        from matplotlib.figure import Figure
+        from matplotlib.ticker import FuncFormatter
+
+        figure = Figure(figsize=(11, 7.5), dpi=130)
+        canvas = FigureCanvasAgg(figure)
+        axes = figure.add_subplot(111)
+        figure.subplots_adjust(left=.12, right=.96, bottom=.29, top=.735)
+        first = timestamp(cycles[0]['start']).astimezone(TZ)
+        last = timestamp(cycles[-1]['as_of']).astimezone(TZ)
+        next_renewal = timestamp(cycles[-1]['end']).astimezone(TZ)
+        figure.text(.065, .94, 'Estimated task usage burndown', fontsize=22,
+                    weight='bold', color='#142c3a')
+        figure.text(.065, .885, textwrap.shorten(str(report['client']), width=75, placeholder='…'),
+                    fontsize=14, color='#334b58', parse_math=False)
+        figure.text(.065, .84,
+                    f'{first:%d %b %Y} – {last:%d %b %Y} · next renewal {next_renewal:%d %b %Y}',
+                    fontsize=11, color='#334b58')
+        partial = not contract['complete']
+        figure.text(.065, .79,
+                    'Partial task history: remaining hours and rollover are unconfirmed.' if partial else
+                    'Each drop uses counted completed-ticket size estimates on its completion date.',
+                    fontsize=10, weight='bold' if partial else 'normal',
+                    color='#9a4a00' if partial else '#334b58')
+        labels = set()
+        for cycle in cycles:
+            uncertain = not cycle['complete']
+            label = ('Partial: allowance minus known estimates' if uncertain else
+                     'Allowance + rollover minus counted task estimates')
+            points = cycle['points']
+            if points:
+                axes.step([timestamp(p['at']).astimezone(TZ) for p in points],
+                          [float(p['hours']) for p in points], where='post',
+                          color='#b86e22' if uncertain else '#147d92',
+                          linestyle='--' if uncertain else '-', linewidth=2.2,
+                          label=label if label not in labels else '_nolegend_')
+            else:
+                label = 'Balance unavailable: prior task history needs review'
+                axes.axvspan(timestamp(cycle['start']), timestamp(cycle['as_of']),
+                             facecolor='#e8edf0', alpha=.8, hatch='//', edgecolor='#a8b4bc',
+                             label=label if label not in labels else '_nolegend_')
+            labels.add(label)
+        for cycle in cycles[1:]:
+            axes.axvline(timestamp(cycle['start']), color='#b8c5cc', linestyle=':', linewidth=.7)
+        axes.axhline(0, color='#647580', linewidth=.8)
+        if first < last:
+            axes.set_xlim(first, last)
+        locator = AutoDateLocator(minticks=3, maxticks=8, tz=TZ)
+        axes.xaxis.set_major_locator(locator)
+        axes.xaxis.set_major_formatter(ConciseDateFormatter(locator, tz=TZ))
+        axes.yaxis.set_major_formatter(FuncFormatter(lambda value, _: f'{value:g}h'))
+        axes.set_xlabel('Completion date · Australia/Melbourne')
+        axes.set_ylabel('Allowance + rollover minus task estimates (hours)')
+        axes.grid(axis='y', color='#e8eef1', linewidth=.7)
+        axes.set_axisbelow(True)
+        axes.tick_params(length=0, pad=7)
+        for spine in axes.spines.values():
+            spine.set_visible(False)
+        figure.legend(*axes.get_legend_handles_labels(), loc='lower left',
+                      bbox_to_anchor=(.11, .15), frameon=False, fontsize=9)
+        note = (f"Monthly renewal on day {contract['renewal_day']} (last day for shorter months). "
+                f"{contract['rollover_percent']}% of unused base hours rolls forward, "
+                f"capped at {contract['rollover_cap_hours']}h.\n"
+                'Rollover is used first and expires after one cycle; pre-commencement work is excluded.')
+        figure.text(.065, .085, note, fontsize=9, color='#334b58')
+        figure.text(.065, .025, 'Task estimates only; work in progress and clocked time excluded.\n'
+                    + last.strftime('Usage cutoff: %d %b %Y, %I:%M %p %Z.'), fontsize=9, color='#334b58')
         output = BytesIO()
         canvas.print_png(output)
         return output.getvalue()

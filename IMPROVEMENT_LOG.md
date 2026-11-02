@@ -6,6 +6,18 @@ are labelled as such.
 
 ## 2026-11-02
 
+- Added reviewed agreement-based Studio allowance cycles, anchored to the
+  commencement date with monthly renewal, capped rollover consumed first and
+  expiry after one cycle. Calendar usage remains separate; summaries, charts
+  and cycle CSVs use the same calculation and opening history. Missing task
+  evidence withholds affected balances/rollover. New owner setup can require
+  signed agreement provenance and exact project scope, with an explicit Mark
+  Ghiasy exemption preserving existing behavior. Study Nash's approved terms
+  are 16 October commencement, 40h/month and 50% rollover capped at 20h.
+  All 635 targeted reporting, source, finance, access and cycle tests pass with
+  synthetic credentials; chart layout visually checked. Private configuration
+  and production verification are part of the authorized release handoff.
+
 - Extended explicit owner effort reviews to bind a size label added before
   first completion, preserving the existing same-event default. The selected
   label must be present at completion, both history events must match, and

@@ -26,7 +26,25 @@ Merge the verified owner into the private worker's existing
     "hours_source": "linear",
     "history_start_month": "2026-08",
     "monthly_hours": 40,
-    "monthly_allowances": {"2026-08": null, "2026-09": null}
+    "monthly_allowances": {},
+    "contract_terms": {
+      "version": 1,
+      "project_ids": ["00000000-0000-0000-0000-000000000003"],
+      "commencement_date": "2026-10-16",
+      "renewal": "monthly",
+      "included_hours": 40,
+      "rollover_percent": 50,
+      "rollover_cap_hours": 20,
+      "rollover_cycles": 1,
+      "rollover_first": true,
+      "source": {
+        "drive_file_id": "REPLACE_WITH_SIGNED_FILE_ID",
+        "sha256": "REPLACE_WITH_SIGNED_FILE_SHA256",
+        "signed_at": "2026-10-16T04:42:39Z",
+        "reviewed_at": "REPLACE_WITH_REVIEW_TIMESTAMP",
+        "reviewed_by": "REPLACE_WITH_VERIFIED_REVIEWER_SLACK_ID"
+      }
+    }
   }
 }
 ```
@@ -48,12 +66,19 @@ project-to-date requests. Study Nash's creation month was verified as August
 An omitted boundary still permits explicit months, but project-to-date fails
 closed until configured. Public Roo cannot supply or change either setting.
 
-Use the reviewed base monthly allowance and explicit overrides; a null month
-shows usage without inventing an allowance before the contract. A task burndown
-compares counted estimates with that month's **base** allowance, resetting at
-each calendar month. It excludes contractual rollover and payment credits, and
-does not calculate contractual remaining entitlement. Partial months prominently
-mark unresolved tasks and an unconfirmed balance.
+The signed agreement's cover gives commencement as **16 October 2026**;
+clauses 4, 5 and 25 provide 40 hours monthly, 50% rollover capped at 20 hours,
+and monthly renewal. Sam approved these terms on 2 November. The first cycle
+is 16 October–15 November; the next starts 16 November, not 1 November or a
+fixed 30 days later. Incoming rollover is used first and expires after one
+cycle. Only unused base hours can roll onward. See [contract cycles](studio-contract-cycles.md).
+
+The chart, summary and allowance CSV use the same cycle calculation. Calendar
+usage stays separate: a November report with no new work can still show 8h used
+in the current contract cycle and 32h estimated remaining. Pre-commencement
+tasks remain history and never consume the contract allowance. The worker
+reads from commencement for opening balances, even for a single month or week.
+Unresolved task history withholds remaining hours and affected rollover.
 
 Read-only inspection confirmed that Study Nash is already in the worker's
 project map and Sam's project scope. Add the verified owner ID to Sam's
@@ -111,7 +136,7 @@ October totals 8 estimated hours: Shan 2.75h and Alan 5.25h across nine tasks.
 ```
 
 Use `studio-hours` for these requests. The report includes monthly/project
-usage charts, a base-allowance task burndown when an allowance is configured,
+usage charts, a contract-cycle task burndown including agreed rollover,
 builder totals, and detailed task CSVs when requested. Both spellings select the
 same configured owner. The authenticated requester receives the private DM;
 naming Devarshi never changes its recipient.
@@ -124,3 +149,5 @@ Regression coverage:
 [`test_studio_report_linear_policy.py`](../tests/roo/test_studio_report_linear_policy.py),
 [`test_studio_report_policy.py`](../tests/roo/test_studio_report_policy.py),
 [`test_studio_task_burndown.py`](../tests/roo/test_studio_task_burndown.py).
+Contract boundary, rollover and exemption coverage is in
+[`test_studio_contract_cycles.py`](../tests/roo/test_studio_contract_cycles.py).
