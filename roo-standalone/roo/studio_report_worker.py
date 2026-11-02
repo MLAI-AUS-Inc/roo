@@ -146,9 +146,9 @@ class StudioReportService(TimesheetService):
         actor = request['actor']
         now = timestamp(request['requested_at'])
         selector, start, _ = resolve_period(request['selector'], now)
-        # A delayed Friday report can use a later reviewed snapshot. Freshness
+        # A delayed report can use a later reviewed snapshot. Freshness
         # is checked at the trusted read time; report bounds remain frozen.
-        freshness_at = datetime.now(timezone.utc) if selector.get('period') == 'weekly' else now
+        freshness_at = datetime.now(timezone.utc) if self.refresh or selector.get('period') == 'weekly' else now
         scope = self.scope_fingerprint(actor, selector)
         client, groups, targets = select_client(self.clients, actor, selector)
         task_projects = linear_projects(self.clients, actor, selector)
@@ -158,6 +158,7 @@ class StudioReportService(TimesheetService):
                               [actor, *self.clients[actor].get('report_client_ids', [])]}
         reviewed, finance_owners, snapshot = [], [], None
         preparation_key, source_checks = None, None
+        source_preparations, owner_checks = {}, {}
         source_stale = False
         if selector.get('period') == 'weekly' and self.refresh and not task_only:
             # Source preparation is private and shared by owner + frozen cutoff,
@@ -172,11 +173,15 @@ class StudioReportService(TimesheetService):
                 if (data is not None and data.get('hours_reporting')
                         and set(owner_client['project_ids']) <= set(client['project_ids'])
                         and not set(owner_client['project_ids']) & task_projects):
-                    expired = validate_snapshot_age(data, freshness_at,
-                        max_age_days=self.balance_max_age_days,
-                        allow_historical=self.allow_historical_snapshot)
-                    source_stale = source_stale or expired
                     finance_owners.append(owner)
+            if finance_owners and self.refresh and selector.get('period') != 'weekly':
+                snapshot, source_preparations, owner_checks = self.refresh.prepare_owners(
+                    finance_owners, request, freshness_at)
+            for owner in finance_owners:
+                expired = validate_snapshot_age(snapshot['clients'][owner], freshness_at,
+                    max_age_days=self.balance_max_age_days,
+                    allow_historical=self.allow_historical_snapshot and not self.refresh)
+                source_stale = source_stale or expired
         covered = {key for owner in finance_owners for key in self.clients[owner]['project_ids']}
         legacy_projects = set(client['project_ids']) - covered
         backfill_projects = legacy_projects - task_projects
@@ -239,6 +244,8 @@ class StudioReportService(TimesheetService):
         report.update(actor=actor, scope=scope, backfill_digest=fingerprint(backfill),
                       backfill_source_used=bool(backfill_projects),
                       linear_project_ids=sorted(task_projects))
+        if source_preparations:
+            report.update(source_preparations=source_preparations, owner_source_checks=owner_checks)
         if task_only:
             report['hours_source'] = 'linear'
         if month_report is not None:
@@ -255,6 +262,8 @@ class StudioReportService(TimesheetService):
         # Freeze rendered parts too. A delivery retry uses the same content hash
         # even when font versions or optional chart availability change.
         parts = [{'kind': 'message', 'content': chunk, 'status': 'pending'} for chunk in split_messages(summary(report))]
+        if owner_checks:
+            parts.insert(0, self.source_notice(owner_checks, request))
         if task_only and not report.get('contract_allowance'):
             parts.append({'kind': 'message', 'content':
                 'Task-size estimates are compared with the base monthly allowance. '
@@ -331,18 +340,35 @@ class StudioReportService(TimesheetService):
         # only queues identity and selection; this file is in the private volume.
         scope = self.scope_fingerprint(actor, selector)
         snapshot = load_balance_snapshot(self.balance_path, self.config, self.clients)
+        preparations, checks = {}, {}
+        if self.refresh:
+            # Establish finance scope before any network read; age is checked
+            # on the newly prepared projection, not the old discovery file.
+            client, _, targets = select_client(self.clients, actor, selector)
+            owner = next(iter(targets)) if targets else actor
+            if selector.get('client', 'self').casefold() == 'all':
+                raise TimesheetError('client_balance_single_client_required')
+            if owner not in snapshot['clients'] or set(snapshot['clients'][owner]['project_ids']) != set(client['project_ids']):
+                raise TimesheetError('client_balance_access_unavailable')
+            snapshot, preparations, checks = self.refresh.prepare_owners(
+                [owner], request, datetime.now(timezone.utc))
+        freshness_at = datetime.now(timezone.utc) if self.refresh else request['requested_at']
         client, dataset, owner = select_balance_dataset(snapshot, self.config, self.clients,
-            actor, selector, request['requested_at'], max_age_days=self.balance_max_age_days,
-            allow_historical=self.allow_historical_snapshot)
+            actor, selector, freshness_at, max_age_days=self.balance_max_age_days,
+            allow_historical=self.allow_historical_snapshot and not self.refresh)
         self.api.verify_recipient(actor, self.config.team)
         report = build_balance_report(client, selector, dataset, request['requested_at'])
         report.update(actor=actor, scope=scope, finance_owner=owner,
                       finance_digest=fingerprint(snapshot),
-                      source_stale=validate_snapshot_age(dataset, request['requested_at'],
+                      source_stale=validate_snapshot_age(dataset, freshness_at,
                           max_age_days=self.balance_max_age_days,
-                          allow_historical=self.allow_historical_snapshot))
+                          allow_historical=self.allow_historical_snapshot and not self.refresh))
+        if preparations:
+            report.update(source_preparations=preparations, owner_source_checks=checks)
         parts = [{'kind': 'message', 'content': chunk, 'status': 'pending'}
                  for chunk in split_messages(balance_summary(report))]
+        if checks:
+            parts.insert(0, self.source_notice(checks, request))
         # A failed chart must not be silently represented as a completed chart report.
         parts.append({'kind': 'file', 'filename': 'studio-client-balance.png',
                       'content': base64.b64encode(balance_chart(report)).decode('ascii'), 'status': 'pending'})
@@ -364,16 +390,35 @@ class StudioReportService(TimesheetService):
         report['parts'] = parts
         return report
 
+    def source_notice(self, checks, request):
+        checked = min(check['checked_at'] for streams in checks.values() for check in streams.values())
+        return {'kind': 'message', 'status': 'pending', 'content':
+            f"Sources checked: {timestamp(checked).astimezone(self.config.tz).isoformat()}. "
+            f"Reporting cutoff: {self.refresh.cutoff(request)}. "
+            'Hours, invoices and payments use verified source snapshots.'}
+
+    def finance_snapshot_for_delivery(self, report, request, now):
+        from .studio_client_balance_source import load_balance_snapshot
+        preparations = report.get('source_preparations')
+        if preparations:
+            if not self.refresh:
+                raise TimesheetError('studio_source_not_ready')
+            owners = report.get('finance_owners') or [report.get('finance_owner')]
+            if set(preparations) != set(owners):
+                raise TimesheetError('studio_source_scope_mismatch')
+            return self.refresh.frozen_owners(preparations, request, now)
+        return load_balance_snapshot(self.balance_path, self.config, self.clients)
+
     def deliver_request(self, report, request, key, now):
         if not self.request_authorized(request) or report.get('actor') != request['actor']:
             raise TimesheetError('not_authorized')
         if report.get('scope') != self.scope_fingerprint(request['actor'], request['selector']):
             raise TimesheetError('client_access_changed')
         if request.get('report_kind', 'hours') == 'client_balance':
-            from .studio_client_balance_source import load_balance_snapshot, select_balance_dataset
+            from .studio_client_balance_source import select_balance_dataset
             if not self.balance_enabled or report.get('kind') != 'client_balance':
                 raise TimesheetError('client_balance_not_configured')
-            snapshot = load_balance_snapshot(self.balance_path, self.config, self.clients)
+            snapshot = self.finance_snapshot_for_delivery(report, request, now)
             _, _, owner = select_balance_dataset(snapshot, self.config, self.clients, request['actor'],
                 request['selector'], now, max_age_days=self.balance_max_age_days,
                 allow_historical=self.allow_historical_snapshot and report.get('source_stale') is True)
@@ -383,7 +428,7 @@ class StudioReportService(TimesheetService):
         if request.get('report_kind', 'hours') != 'hours':
             raise TimesheetError('invalid_report_kind')
         if report.get('finance_owners'):
-            from .studio_client_balance_source import load_balance_snapshot, validate_snapshot_age
+            from .studio_client_balance_source import validate_snapshot_age
             if not self.balance_enabled:
                 raise TimesheetError('client_balance_not_configured')
             if report.get('preparation_key'):
@@ -392,7 +437,7 @@ class StudioReportService(TimesheetService):
                 snapshot = self.refresh.frozen(report['preparation_key'], report['finance_owners'][0],
                                                request['selector']['end'], now)
             else:
-                snapshot = load_balance_snapshot(self.balance_path, self.config, self.clients)
+                snapshot = self.finance_snapshot_for_delivery(report, request, now)
             if fingerprint(snapshot) != report.get('finance_digest'):
                 raise TimesheetError('client_balance_source_changed')
             for owner in report['finance_owners']:
@@ -431,19 +476,33 @@ class StudioReportService(TimesheetService):
                 saved = notices.read(key)
                 if saved is None:
                     _, _, targets = select_client(self.clients, request['actor'], request['selector'])
-                    owner = next(iter(targets)) if targets else request['actor']
-                    prepared = self.refresh.store.read(self.refresh.identity(owner, request['selector']['end'])) if self.refresh else None
-                    gaps = (prepared or {}).get('result', {}).get('missing', ['source_connection_unavailable'])
+                    owners = list(targets) or [request['actor'],
+                        *self.clients[request['actor']].get('report_client_ids', [])]
+                    prepared = [self.refresh.store.read(self.refresh.identity(owner, self.refresh.cutoff(request)))
+                                for owner in owners] if self.refresh else []
+                    results = [value['result'] for value in prepared if value and value.get('result')]
+                    gaps = {code for result in results for code in result.get('missing', [])}
+                    gaps = gaps or {'source_connection_unavailable'}
                     labels = {'hours_coverage_missing': 'hours coverage',
                         'new_invoices_require_review': 'new contractor invoices awaiting review',
                         'contractor_invoice_sync_failed': 'contractor invoice sync',
+                        'finance_rate_limited': 'Xero rate limit',
+                        'finance_sync_failed': 'invoice/payment connection',
                         'work_allocation_requires_review': 'work allocations',
                         'work_dates_require_review': 'precise work dates',
                         'source_connection_unavailable': 'source connection'}
                     missing = ', '.join(sorted({labels.get(code, 'invoice/payment verification') for code in gaps}))
-                    saved = {'text': f'Your Friday charts are waiting for: {missing}. '
-                        'Unavailable data has not been counted as zero. I’ll retry every five minutes and send the charts '
-                        'when the checks pass, using the original Friday reporting cutoff.'}
+                    weekly = request['selector'].get('period') == 'weekly'
+                    title = 'Your Friday charts are' if weekly else 'Your current Studio report is'
+                    cutoff_note = ('the original Friday reporting cutoff' if weekly else 'the original request cutoff')
+                    coverage = [result['checks']['hours']['complete_through'] for result in results
+                                if result.get('checks', {}).get('hours', {}).get('complete_through')]
+                    review_note = (f" Reviewed hours currently cover through {timestamp(min(coverage)).astimezone(self.config.tz).date()}."
+                                   if coverage else '')
+                    saved = {'text': f'{title} waiting for: {missing}.{review_note} '
+                        'Unavailable data has not been counted as zero. I’ll retry after the source’s retry time '
+                        f'and send the charts when the checks pass, using {cutoff_note}. '
+                        'Missing hours or invoice allocations need Studio review; retrying alone cannot approve them.'}
                     notices.write(key, saved)
                 return False, saved['text']
         if request.get('report_kind') == 'client_balance':

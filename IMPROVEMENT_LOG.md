@@ -6,6 +6,17 @@ are labelled as such.
 
 ## 2026-11-02
 
+- Fixed on-demand Studio hours and purchased-hours reports bypassing the
+  enabled private source refresh. Each permitted finance owner now gets a
+  signed preparation at the request cutoff; delivery retries reuse the frozen
+  projection. Historical fallback cannot replace a failed live read. Missing
+  coverage and provider rate limits produce specific durable notices. Source
+  timestamps and coverage are validated independently of readiness claims.
+  All 722 Studio/timesheet regressions pass with synthetic credentials, including
+  new on-demand, multi-owner, access, stale-source and retry cases. Production
+  diagnosis and remaining source dependencies are recorded in
+  [the incident note](docs/incidents/2026-11-02-studio-source-freshness.md).
+
 - Added reviewed agreement-based Studio allowance cycles, anchored to the
   commencement date with monthly renewal, capped rollover consumed first and
   expiry after one cycle. Calendar usage remains separate; summaries, charts

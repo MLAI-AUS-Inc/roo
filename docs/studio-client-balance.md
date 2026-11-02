@@ -30,7 +30,7 @@ separately in the report.
    or Xero credentials.
 
 The default implementation uses an **operator-reviewed snapshot**, with manual
-refresh and publication. Automatic Friday preparation is opt-in below. The
+refresh and publication. Automatic source preparation is opt-in below. The
 report shows its source timestamp and reviewed coverage. A source older than seven
 days fails closed by default; an operator must refresh the audit and publish a new
 snapshot. An `as_of` timestamp should reflect a real review, not a file copy date.
@@ -53,7 +53,7 @@ accounting or Linear reads. Historical fallback also applies to Friday reports,
 where an uncovered week is shown as unavailable. It does not refresh the source:
 current Friday totals still require verified work coverage.
 
-## Automatic Friday preparation
+## Automatic source preparation
 
 Enable `STUDIO_REPORTS_REFRESH_ENABLED` only in the private worker, with
 `STUDIO_REPORTS_SOURCE_URL` pointing to the backend's HTTPS
@@ -62,6 +62,16 @@ Enable `STUDIO_REPORTS_REFRESH_ENABLED` only in the private worker, with
 [source runbook](https://github.com/MLAI-AUS-Inc/mlai-backend/blob/main/docs/studio-report-source.md)
 defines the fixed client scope, private files and activation order. Neither
 the source key nor finance files may be mounted in Public Roo.
+
+With refresh enabled, every new on-demand hours or purchased-hours request also
+prepares its permitted owners through the request timestamp. It never substitutes
+the historical local file when the current sources are missing or unavailable,
+even if historical fallback is enabled. The local file identifies reviewed finance
+coverage; fresh signed projections supply the report data. All-clients hours views
+prepare each covered owner separately under existing grants. Linear-only owners
+continue reading Linear directly. Reports show both source-check and report-cutoff
+timestamps. A delivery retry uses its saved projection and attachments; a new
+Slack request always gets a new source preparation.
 
 At 16:30 Melbourne the worker prepares the upcoming Friday cutoff. At 17:00 it
 requires a closing pass, refreshing approved hours, contractor-invoice discovery,
@@ -79,10 +89,14 @@ weekly project hours, month-to-date project hours and payment burndown charts.
 The monthly view uses the calendar-month allocation policy, with estimated
 month assignments labelled. Source times and the original cutoff accompany
 delivery. Missing data produces one private notice and `waiting_data`, then
-retries every five minutes. No placeholder chart is marked as a completed
-current report. Historical on-demand requests retain their separate labelled
-fallback behaviour. Private `source-preparations/*.json` receipts contain gap
+retries after at least five minutes, respecting longer provider retry times.
+No placeholder chart is marked as a completed current report. Historical fallback
+is available only when automatic refresh is disabled. Private
+`source-preparations/*.json` receipts contain gap
 codes and stream times; backend review receipts identify unreviewed invoices.
+The notice identifies missing hours, invoice reviews and Xero rate limits.
+Retrying cannot approve missing work, infer invoice allocations or shorten a
+provider's rate limit. These remain explicit source dependencies, not zero usage.
 
 ## Ask Roo
 

@@ -6,6 +6,12 @@ request comes from a channel. Public Roo queues authenticated request metadata;
 a separate worker owns source credentials, verified client/project mappings,
 snapshots and delivery receipts. The feature is disabled by default.
 
+When `STUDIO_REPORTS_REFRESH_ENABLED=true`, on-demand reports refresh each
+selected reviewed-hours source before rendering, just like scheduled reports.
+The historical fallback flag cannot override this live-source check. Missing
+coverage, invoice reviews or rate-limited finance reads leave the request waiting
+with a specific reason. See the [source preparation contract](studio-client-balance.md#automatic-source-preparation).
+
 The private worker can explicitly enable labelled historical charts when the
 reviewed source expires, using `STUDIO_REPORTS_HISTORICAL_FALLBACK_ENABLED`.
 The default is false. The [hours and purchased-hours guide](studio-client-balance.md)
@@ -359,7 +365,7 @@ The worker prepares at 16:30 Melbourne and performs a closing refresh at 17:00.
 Both recipients share the preparation; each retains a separate private DM and
 durable delivery receipt. Source times and the original cutoff accompany the
 charts. Configure the dedicated HTTPS URL and key only in `.env.studio-reports`.
-See the [refresh contract](studio-client-balance.md#automatic-friday-preparation).
+See the [refresh contract](studio-client-balance.md#automatic-source-preparation).
 
 Missing work coverage, unreviewed invoices, provider errors, ambiguous weekly
 dates and unverified payments become `waiting_data`. Roo sends one private
