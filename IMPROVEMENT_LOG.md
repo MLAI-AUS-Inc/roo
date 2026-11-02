@@ -6,6 +6,16 @@ are labelled as such.
 
 ## 2026-11-02
 
+- Added an opt-in daily 06:00 Melbourne private Xero refresh with durable
+  per-owner/day receipts, provider backoff, atomic publication and chart files.
+  Latest on-demand views distinguish current finance from reviewed work and
+  pending invoice emails; Friday reports retain strict source coverage gates.
+  Expense reimbursements remain cash without creating purchased-hour credits.
+  Synthetic tests cover restart deduplication, failed publication, source scope,
+  partial data, receipt allocation, month/year rollover and both DST changes.
+  The complete 884-test reporting/worker selection passed; subsequent partial
+  rendering and manual catch-up cases pass in the focused daily/finance suite.
+
 - Fixed on-demand Studio hours and purchased-hours reports bypassing the
   enabled private source refresh. Each permitted finance owner now gets a
   signed preparation at the request cutoff; delivery retries reuse the frozen

@@ -4,6 +4,7 @@ No ticket estimates or contractor money conversions enter this projection.
 Every microhour is allocated by the shared balance calculation exactly once.
 """
 from collections import defaultdict
+from copy import deepcopy
 from datetime import date
 
 from .studio_client_balance import HOUR_UNITS, allocated_days_for_cutoff, build_balance_report
@@ -15,7 +16,15 @@ def build_recorded_report(config, client, selector, dataset, now):
     if selector.get('period') == 'weekly':
         from .studio_recorded_hours_weekly import build_weekly_recorded_report
         return build_weekly_recorded_report(config, client, selector, dataset, now)
-    balance = build_balance_report(client, selector, dataset, now)
+    # A new cash sync must never create zero-usage months after submitted work.
+    work_dataset = dataset
+    fresh = dataset.get('source_freshness')
+    if fresh:
+        work_dataset = deepcopy(dataset)
+        work_dataset['coverage']['through'] = fresh['latest_work_date'] or dataset['coverage']['start']
+    balance = build_balance_report(client, selector, work_dataset, now)
+    if fresh and not fresh['latest_work_date']:
+        balance['period_has_coverage'] = False
     resolved = balance['selector']
     monthly = [{'month': month_offset(resolved['month'], i).strftime('%Y-%m'),
                 'units': 0, 'unresolved': 0, 'allowance_units': None}
@@ -78,10 +87,10 @@ def build_recorded_report(config, client, selector, dataset, now):
             'invoice_first_projects': list(client['project_ids']),
             'qualifications': qualifications, 'unallocated_units': 0,
             'estimated_month_units': sum(m.get('estimated_units', 0) for m in monthly),
-            'recorded_snapshot': True, 'source_as_of': dataset['as_of'],
+            'recorded_snapshot': True, 'source_as_of': fresh['hours_reviewed_at'] if fresh else dataset['as_of'],
             'period_has_coverage': balance['period_has_coverage'],
             'coverage_through': balance['coverage_through'], 'partial': balance['partial'] or bool(exceptions),
-            'limitations': list(dataset['limitations']), 'pending_work_count': balance['pending_work_count']}
+            'limitations': balance['limitations'], 'pending_work_count': balance['pending_work_count']}
 
 
 def overlay_recorded_reports(report, reviewed):
