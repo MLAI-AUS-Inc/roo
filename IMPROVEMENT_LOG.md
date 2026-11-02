@@ -6,6 +6,10 @@ are labelled as such.
 
 ## 2026-11-02
 
+- Daily Studio publication now refuses to overwrite a newer finance snapshot
+  or manual work review, including a review published while charts render.
+  A synthetic race regression verifies the newer file remains unchanged.
+
 - Added an opt-in daily 06:00 Melbourne private Xero refresh with durable
   per-owner/day receipts, provider backoff, atomic publication and chart files.
   Latest on-demand views distinguish current finance from reviewed work and
