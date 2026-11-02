@@ -6,6 +6,11 @@ are labelled as such.
 
 ## 2026-11-02
 
+- Removed the redundant monthly chart axis title, which overlapped source
+  notes when seven or more month labels rotated. Existing chart and daily
+  refresh regressions cover the renderer; the live seven-month chart was
+  inspected during the daily refresh rollout.
+
 - Daily Studio publication now refuses to overwrite a newer finance snapshot
   or manual work review, including a review published while charts render.
   A synthetic race regression verifies the newer file remains unchanged.
