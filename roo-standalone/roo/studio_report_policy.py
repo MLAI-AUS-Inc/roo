@@ -21,14 +21,18 @@ def validate_hours_policy(clients):
                 (source != 'linear' or 'report_client_ids' in client))):
             raise TimesheetError('invalid_effort_resolution')
         for issue_id, resolution in resolutions.items():
+            required = {'project_id', 'completion_event_id', 'size'}
             if (not isinstance(resolution, dict)
-                    or set(resolution) != {'project_id', 'completion_event_id', 'size'}
+                    or not required.issubset(resolution)
+                    or set(resolution) - required - {'label_event_id'}
                     or resolution['project_id'] not in client['project_ids']
                     or not isinstance(resolution['size'], str) or resolution['size'] not in UNITS):
                 raise TimesheetError('invalid_effort_resolution')
             try:
                 UUID(issue_id)
                 UUID(resolution['completion_event_id'])
+                if 'label_event_id' in resolution:
+                    UUID(resolution['label_event_id'])
             except (ValueError, TypeError, AttributeError) as exc:
                 raise TimesheetError('invalid_effort_resolution') from exc
         if 'history_start_month' in client:
@@ -85,18 +89,24 @@ def selected_effort_resolutions(clients, actor, selector):
 
 
 def resolve_report_effort(issue, history, completed, resolutions):
-    """An explicit owner review can choose a size added at first completion."""
+    """An owner review chooses a size proved at or before first completion."""
     resolution = (resolutions or {}).get(issue['id'])
     if resolution is not None:
         events = [event for event in history if event['id'] == resolution['completion_event_id']]
         if len(events) != 1 or resolution['project_id'] != (issue.get('project') or {}).get('id'):
             raise TimesheetError('effort_resolution_evidence_mismatch')
         event = events[0]
+        label_events = [entry for entry in history if entry['id'] ==
+                        resolution.get('label_event_id', resolution['completion_event_id'])]
+        if len(label_events) != 1:
+            raise TimesheetError('effort_resolution_evidence_mismatch')
+        label_event = label_events[0]
         sizes = [LABELS[name] for key, name in issue['labels'].items()
-                 if key in (event.get('addedLabelIds') or []) and name in LABELS]
+                 if key in (label_event.get('addedLabelIds') or []) and name in LABELS]
         if (timestamp(event['createdAt']) != timestamp(completed)
                 or (event.get('toState') or {}).get('type') != 'completed'
                 or (event.get('fromState') or {}).get('type') == 'completed'
+                or timestamp(label_event['createdAt']) > timestamp(completed)
                 or sizes.count(resolution['size']) != 1):
             raise TimesheetError('effort_resolution_evidence_mismatch')
         return resolution['size'], True

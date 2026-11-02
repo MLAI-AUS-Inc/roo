@@ -4,6 +4,16 @@ A short record of repository cleanup, testing, security, and delivery changes.
 Each entry states what changed and how it was checked. Findings without fixes
 are labelled as such.
 
+## 2026-11-02
+
+- Extended explicit owner effort reviews to bind a size label added before
+  first completion, preserving the existing same-event default. The selected
+  label must be present at completion, both history events must match, and
+  incomplete tasks remain excluded. This supports Sam's confirmed M review for
+  Alan's remaining ambiguous October task: Alan 5.25h plus Shan 2.75h, 8h
+  across nine completed tasks. All 299 targeted reporting, grant isolation,
+  finance-overlay and burndown tests pass with synthetic credentials.
+
 ## 2026-10-30
 
 - Repaired Study Nash project-name selectors after production routing passed

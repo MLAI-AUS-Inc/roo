@@ -552,7 +552,7 @@ def detail_messages(report):
         if row.get('allocation_note'):
             lines.append('  Allocation assumption: ' + _escape(row['allocation_note']))
         if row.get('effort_basis') == 'reviewed_completion_label':
-            lines.append('  Size confirmed from the first-completion label change.')
+            lines.append('  Size confirmed from label history at or before first completion.')
     if not report['rows']:
         lines.append('No counted completed work in this period.')
     return split_messages('\n'.join(lines))
