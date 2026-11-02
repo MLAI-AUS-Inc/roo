@@ -392,6 +392,14 @@ class StudioReportService(TimesheetService):
 
     def source_notice(self, checks, request):
         checked = min(check['checked_at'] for streams in checks.values() for check in streams.values())
+        if self.refresh.mode(request) == 'latest':
+            reviewed = min(streams['hours']['reviewed_at'] for streams in checks.values())
+            pending = sum(streams['contractor_invoices']['unreviewed_count'] for streams in checks.values())
+            return {'kind': 'message', 'status': 'pending', 'content':
+                f"Xero checked: {timestamp(checked).astimezone(self.config.tz).isoformat()}. "
+                f"Recorded work reviewed: {timestamp(reviewed).astimezone(self.config.tz).isoformat()}. "
+                f"{pending} invoice emails await review. Later unsubmitted work is unknown; "
+                'these charts show recorded usage and verified receipts.'}
         return {'kind': 'message', 'status': 'pending', 'content':
             f"Sources checked: {timestamp(checked).astimezone(self.config.tz).isoformat()}. "
             f"Reporting cutoff: {self.refresh.cutoff(request)}. "
@@ -478,7 +486,7 @@ class StudioReportService(TimesheetService):
                     _, _, targets = select_client(self.clients, request['actor'], request['selector'])
                     owners = list(targets) or [request['actor'],
                         *self.clients[request['actor']].get('report_client_ids', [])]
-                    prepared = [self.refresh.store.read(self.refresh.identity(owner, self.refresh.cutoff(request)))
+                    prepared = [self.refresh.store.read(self.refresh.identity(owner, self.refresh.cutoff(request), self.refresh.mode(request)))
                                 for owner in owners] if self.refresh else []
                     results = [value['result'] for value in prepared if value and value.get('result')]
                     gaps = {code for result in results for code in result.get('missing', [])}
@@ -549,6 +557,7 @@ def main(argv=None):
     parser.add_argument('--detailed', action='store_true')
     parser.add_argument('--balance', action='store_true', help='Preview the private client hours and purchased-hours report')
     parser.add_argument('--output-dir', default='./studio-report-preview')
+    parser.add_argument('--refresh-daily', action='store_true', help='Run due private daily refreshes without delivery')
     parser.add_argument('--part', type=int)
     recovery = parser.add_mutually_exclusive_group()
     recovery.add_argument('--confirmed-absent', action='store_true')
@@ -575,6 +584,12 @@ def main(argv=None):
                 schedules=schedules,
                 allow_historical_snapshot=flag(env, 'STUDIO_REPORTS_HISTORICAL_FALLBACK_ENABLED'),
                 refresh=SourceRefresh.from_env(env, config, clients, client))
+            from .studio_report_daily import DailyRefresh
+            daily = DailyRefresh.from_env(service, env)
+            if args.refresh_daily:
+                results = daily.tick(datetime.now(timezone.utc)) if daily else []
+                print(json.dumps({'results': results, 'enabled': daily is not None}), flush=True)
+                return int(any(item['status'] != 'done' for item in results))
             if args.recover:
                 if args.part is None or not (args.confirmed_absent or args.delivered_reference):
                     raise TimesheetError('delivery_confirmation_required')
@@ -617,7 +632,8 @@ def main(argv=None):
                 now = datetime.now(timezone.utc)
                 if service.refresh:
                     service.refresh.prewarm(schedules, now)
-                results = enqueue_weekly(service, schedules, now)
+                results = daily.tick(now) if daily else []
+                results.extend(enqueue_weekly(service, schedules, now))
                 results.extend(service.commands(now))
                 if results or args.once:
                     print(json.dumps({'results': results}), flush=True)

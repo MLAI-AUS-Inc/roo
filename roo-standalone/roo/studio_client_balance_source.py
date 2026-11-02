@@ -71,6 +71,16 @@ def validate_balance_snapshot(value, config, clients):
             as_of = timestamp(dataset['as_of'])
             if start > through or through > as_of.astimezone(config.tz).date():
                 raise ValueError
+            fresh = dataset.get('source_freshness')
+            if fresh is not None:
+                if (timestamp(fresh['finance_checked_at']) != as_of
+                        or not timestamp(fresh['hours_complete_through']) <= timestamp(fresh['hours_reviewed_at']) <= as_of
+                        or type(fresh['unreviewed_invoice_count']) is not int or fresh['unreviewed_invoice_count'] < 0
+                        or not set(fresh['missing']) <= {'hours_coverage_missing', 'new_invoices_require_review'}
+                        or fresh['latest_work_date'] != max((row['work_end'] for row in dataset['hours']), default=None)):
+                    raise ValueError
+                if fresh['latest_work_date'] and _date(fresh['latest_work_date']) > timestamp(fresh['hours_complete_through']).astimezone(config.tz).date():
+                    raise ValueError
             for note in dataset['limitations']:
                 _text(note)
             if 'scope_label' in dataset:
@@ -114,6 +124,8 @@ def validate_balance_snapshot(value, config, clients):
                 if paid > invoice['amount_cents']:
                     raise ValueError
                 status = invoice['status']
+                if 'credit_eligible' in invoice and type(invoice['credit_eligible']) is not bool:
+                    raise ValueError
                 if status not in {'paid', 'authorised', 'voided', 'draft'}:
                     raise ValueError
                 if ((status == 'paid' and paid != invoice['amount_cents'])
@@ -149,6 +161,11 @@ def validate_balance_snapshot(value, config, clients):
                     allocations[key] += part['amount_cents']
                 if (sum(p['amount_cents'] for p in parts) != payment['amount_cents']
                         or payment['invoice_ids'] != [p['invoice_id'] for p in parts]):
+                    raise ValueError
+                credit = payment.get('credit_amount_cents', payment['amount_cents'])
+                _cents(credit)
+                expected_credit = sum(p['amount_cents'] for p in parts if invoices[p['invoice_id']].get('credit_eligible', True))
+                if credit != expected_credit or credit * 1_000_000 % rate:
                     raise ValueError
             if any(allocations[key] != row['paid_cents'] for key, row in invoices.items()):
                 raise ValueError

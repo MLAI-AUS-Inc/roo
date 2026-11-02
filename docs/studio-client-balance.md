@@ -324,3 +324,45 @@ the source during a prepared delivery blocks the old report and requires a new
 request. To roll back, disable the two balance flags and republish the previous
 approved snapshot only if its scope and freshness are still valid. Queue/delivery
 receipts must not be deleted to force resends. No database migration is required.
+## Daily read-only refresh
+
+The private worker can run a daily refresh without an external cron daemon:
+
+```dotenv
+STUDIO_REPORTS_REFRESH_ENABLED=true
+STUDIO_REPORTS_LATEST_ENABLED=true
+STUDIO_REPORTS_DAILY_REFRESH_ENABLED=true
+STUDIO_REPORTS_DAILY_REFRESH_TIME=06:00
+STUDIO_REPORTS_DAILY_REFRESH_OWNERS_JSON=["UEXAMPLECLIENT"]
+```
+
+The backend must support the signed `latest` preparation mode first. Only
+configured finance owners may be selected. The worker runs once per local day
+after 06:00 Australia/Melbourne, including a catch-up after a restart. DST and
+month boundaries use the timezone database. Durable failures retry after five
+minutes or the longer signed provider deadline. The existing worker's restart
+policy keeps scheduling active without a logged-in computer or ChatGPT session.
+
+Each successful run validates the full projection, renders usage/project/balance
+charts and CSVs under `daily-reports/<owner>/<day>/<snapshot-digest>/`, then
+atomically updates the canonical finance file. `daily-refresh/` contains run
+receipts and an owner-keyed latest-directory pointer. Files are private (0600).
+Failed reads/renders retain the last good publication. The job sends no Slack
+messages or emails and never changes Xero. An operational one-shot entry point
+is `python -m roo.studio_report_worker --refresh-daily`; it observes the same
+schedule, deduplication and enablement flags and does not drain delivery queues.
+
+Latest views verify current invoices and reconciled cash while retaining the
+original work-review timestamp, latest submitted work date and pending invoice
+count. New invoice mail requires review; money is never converted into worked
+hours. Months after the latest submitted work display unavailable usage. A
+balance after that date is a provisional recorded-units balance, with the
+unknown-work region shaded. Friday delivery still requires complete reviewed
+work through its original cutoff and does not accept partial preparations.
+
+Configure the backend's `credit_description_prefix` for this client. Only
+invoices whose every line matches that reviewed Studio subscription prefix buy
+hour credits. Mixed, expense and unknown descriptions remain cash-only pending
+classification. Existing explicitly mapped legacy receipts retain their
+reviewed treatment. Changing a subscription name or introducing mixed invoices
+requires a policy review; do not broaden this rule to all client receipts.

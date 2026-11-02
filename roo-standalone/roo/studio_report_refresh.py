@@ -18,11 +18,12 @@ class SourcePending(TimesheetError):
 
 
 class SourceRefresh:
-    def __init__(self, config, clients, http, url, key):
+    def __init__(self, config, clients, http, url, key, *, latest_enabled=False):
         if not url.startswith('https://') or len(key) < 32:
             raise TimesheetError('invalid_studio_source_configuration')
         self.config, self.clients, self.http, self.url, self.key = config, clients, http, url, key
         self.store = ReceiptStore(config.directory / 'source-preparations')
+        self.latest_enabled = latest_enabled
 
     @classmethod
     def from_env(cls, env, config, clients, http):
@@ -31,12 +32,15 @@ class SourceRefresh:
         if not flag(env, 'STUDIO_CLIENT_BALANCE_WORKER_ENABLED') or not env.get('STUDIO_CLIENT_BALANCE_FILE'):
             raise TimesheetError('studio_source_requires_canonical_hours')
         return cls(config, clients, http, env.get('STUDIO_REPORTS_SOURCE_URL', ''),
-                   env.get('STUDIO_REPORTS_SOURCE_KEY', ''))
+                   env.get('STUDIO_REPORTS_SOURCE_KEY', ''), latest_enabled=flag(env, 'STUDIO_REPORTS_LATEST_ENABLED'))
 
-    def identity(self, owner, cutoff):
+    def identity(self, owner, cutoff, mode='strict'):
         return fingerprint({'owner': owner, 'cutoff': timestamp(cutoff).isoformat(),
             'team': self.config.team, 'organization': self.config.organization,
-            'project_ids': sorted(self.clients[owner]['project_ids'])})
+            'project_ids': sorted(self.clients[owner]['project_ids']), **({'mode': mode} if mode != 'strict' else {})})
+
+    def mode(self, request):
+        return 'latest' if self.latest_enabled and request['selector'].get('period') != 'weekly' else 'strict'
 
     @staticmethod
     def cutoff(request):
@@ -66,37 +70,54 @@ class SourceRefresh:
     def prepare_owners(self, owners, request, now):
         snapshots, preparations, checks = [], {}, {}
         for owner in sorted(owners):
-            key, snapshot, checked = self.prepare(owner, self.cutoff(request), now)
+            key, snapshot, checked = self.prepare(owner, self.cutoff(request), now, mode=self.mode(request))
             snapshots.append(snapshot)
             preparations[owner], checks[owner] = key, checked
         return self.combine(snapshots), preparations, checks
 
     def frozen_owners(self, preparations, request, now):
-        return self.combine([self.frozen(key, owner, self.cutoff(request), now)
+        return self.combine([self.frozen(key, owner, self.cutoff(request), now, mode=self.mode(request))
                              for owner, key in sorted(preparations.items())])
 
-    def validate(self, result, owner, cutoff, now):
+    def validate(self, result, owner, cutoff, now, mode='strict'):
         if (result.get('version') != 1 or result.get('owner') != owner
                 or result.get('team') != self.config.team
                 or result.get('organization') != self.config.organization
                 or result.get('project_ids') != sorted(self.clients[owner]['project_ids'])
+                or result.get('mode', 'strict') != mode
+                or mode not in {'strict', 'latest'}
                 or timestamp(result['cutoff']) != timestamp(cutoff)
                 or timestamp(result['checked_at']) > timestamp(now) + timedelta(minutes=5)):
             raise TimesheetError('studio_source_scope_mismatch')
-        if result.get('status') == 'ready':
+        if result.get('status') == 'ready' or (mode == 'latest' and result.get('status') == 'partial'):
             checks = result['checks']
-            if (result.get('missing') or timestamp(result['checked_at']) < timestamp(cutoff)
+            if (timestamp(result['checked_at']) < timestamp(cutoff)
                     or set(checks) != {'hours', 'contractor_invoices', 'client_invoices', 'payments'}
-                    or any(timestamp(check['checked_at']) < timestamp(cutoff) for check in checks.values())
+                    or any(not timestamp(cutoff) <= timestamp(check['checked_at']) <= timestamp(result['checked_at'])
+                           for check in checks.values())):
+                raise TimesheetError('studio_source_coverage_invalid')
+            if mode == 'strict' and (result.get('missing')
                     or timestamp(checks['hours']['complete_through']) < timestamp(cutoff)
                     or timestamp(checks['hours']['reviewed_at']) < timestamp(cutoff)
                     or checks['contractor_invoices'].get('unreviewed_count') != 0):
+                raise TimesheetError('studio_source_coverage_invalid')
+            if mode == 'latest' and (not set(result['missing']) <= {'hours_coverage_missing', 'new_invoices_require_review'}
+                    or (result['status'] == 'partial') != bool(result['missing'])):
                 raise TimesheetError('studio_source_coverage_invalid')
             from .studio_client_balance_source import validate_balance_snapshot
             snapshot = validate_balance_snapshot(result['snapshot'], self.config, self.clients)
             if set(snapshot['clients']) != {owner}:
                 raise TimesheetError('studio_source_scope_mismatch')
             data = snapshot['clients'][owner]
+            if mode == 'latest':
+                fresh = data['source_freshness']
+                if (fresh['hours_reviewed_at'] != checks['hours']['reviewed_at']
+                        or fresh['hours_complete_through'] != checks['hours']['complete_through']
+                        or fresh['finance_checked_at'] != checks['payments']['checked_at']
+                        or fresh['finance_checked_at'] != checks['client_invoices']['checked_at']
+                        or fresh['unreviewed_invoice_count'] != checks['contractor_invoices']['unreviewed_count']
+                        or fresh['missing'] != result['missing']):
+                    raise TimesheetError('studio_source_coverage_invalid')
             if (timestamp(data['as_of']) < timestamp(cutoff)
                     or data['coverage']['through'] < timestamp(cutoff).astimezone(TZ).date().isoformat()):
                 raise TimesheetError('studio_source_coverage_invalid')
@@ -105,14 +126,14 @@ class SourceRefresh:
             raise TimesheetError('studio_source_response_invalid')
         return None
 
-    def prepare(self, owner, cutoff, now):
-        key = self.identity(owner, cutoff)
+    def prepare(self, owner, cutoff, now, *, mode='strict'):
+        key = self.identity(owner, cutoff, mode)
         with self.store.locked(key) as acquired:
             if not acquired:
                 raise SourcePending(timestamp(now).timestamp() + 60)
             cached = self.store.read(key)
             if cached and cached.get('result'):
-                snapshot = self.validate(cached['result'], owner, cutoff, now)
+                snapshot = self.validate(cached['result'], owner, cutoff, now, mode)
                 if snapshot is not None:
                     return key, snapshot, cached['result']['checks']
             # A warm-up can never suppress the closing pass at/after 17:00.
@@ -126,7 +147,7 @@ class SourceRefresh:
                 nonce = fingerprint({'random': uuid4().hex})
                 response = self.http.post(self.url, headers={'X-Studio-Source-Key': self.key},
                     json={'owner': owner, 'team': self.config.team, 'cutoff': timestamp(cutoff).isoformat(),
-                          'nonce': nonce}, timeout=180)
+                          'nonce': nonce, **({'mode': mode} if mode != 'strict' else {})}, timeout=180)
                 response.raise_for_status()
                 envelope = response.json()
                 result = envelope['result']
@@ -134,7 +155,7 @@ class SourceRefresh:
                 signature = hmac.new(self.key.encode(), body.encode(), hashlib.sha256).hexdigest()
                 if (not hmac.compare_digest(signature, envelope['signature']) or result.get('nonce') != nonce):
                     raise TimesheetError('studio_source_signature_invalid')
-                snapshot = self.validate(result, owner, cutoff, datetime.now(timezone.utc))
+                snapshot = self.validate(result, owner, cutoff, datetime.now(timezone.utc), mode)
                 if result.get('retry_at'):
                     retry_at = max(retry_at, timestamp(result['retry_at']).timestamp())
                     receipt['retry_at'] = retry_at
@@ -153,15 +174,15 @@ class SourceRefresh:
         owners = list(targets) or [request['actor']]
         if len(owners) != 1:
             raise TimesheetError('weekly_client_required')
-        return self.prepare(owners[0], self.cutoff(request), now)
+        return self.prepare(owners[0], self.cutoff(request), now, mode=self.mode(request))
 
-    def frozen(self, key, owner, cutoff, now):
-        if key != self.identity(owner, cutoff):
+    def frozen(self, key, owner, cutoff, now, *, mode='strict'):
+        if key != self.identity(owner, cutoff, mode):
             raise TimesheetError('studio_source_scope_mismatch')
         cached = self.store.read(key)
-        if not cached or cached.get('status') != 'ready':
+        if not cached or cached.get('status') not in ({'ready', 'partial'} if mode == 'latest' else {'ready'}):
             raise TimesheetError('studio_source_not_ready')
-        snapshot = self.validate(cached['result'], owner, cutoff, now)
+        snapshot = self.validate(cached['result'], owner, cutoff, now, mode)
         if snapshot is None:
             raise TimesheetError('studio_source_not_ready')
         return snapshot

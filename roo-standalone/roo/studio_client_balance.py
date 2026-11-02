@@ -126,7 +126,8 @@ def build_balance_report(client, selector, dataset, now):
         if original['id'] in payment_ids:
             raise TimesheetError('duplicate_client_balance_payment')
         payment_ids.add(original['id'])
-        credit = credit_hour_units(original['amount_cents'], rate)
+        credit_cents = original.get('credit_amount_cents', original['amount_cents'])
+        credit = credit_hour_units(credit_cents, rate) if credit_cents else 0
         day = _day(original['date'])
         if day <= cutoff:
             payment = {**original, 'credited_hour_units': credit}
@@ -201,6 +202,12 @@ def build_balance_report(client, selector, dataset, now):
     if estimated_units:
         limitations.append('The rise between receipts uses estimated daily timing from reviewed work periods; '
                            'it is not a daily timesheet.')
+    fresh = dataset.get('source_freshness')
+    if fresh:
+        partial = partial or bool(fresh['missing'])
+        limitations.append('Only Studio subscription receipts buy hour credits; other receipts remain cash only.')
+        limitations.append(f"Latest submitted work: {fresh['latest_work_date'] or 'unavailable'}. "
+                           'Later work is unknown; the balance uses recorded units only.')
     contractor_invoices = [dict(invoice) for invoice in dataset.get('contractor_invoices', [])]
     pending_work = [dict(item) for item in dataset.get('pending_work', [])]
     return {
@@ -226,6 +233,7 @@ def build_balance_report(client, selector, dataset, now):
         'payments': sorted(payments, key=lambda payment: (payment['date'], payment['id'])),
         'limitations': list(dict.fromkeys(limitations)),
         'recorded_units_basis': dataset.get('hours_reporting', False),
+        **({'source_freshness': fresh} if fresh else {}),
     }
 
 
@@ -389,6 +397,10 @@ def render_chart(report):
             values = [point['balance_hour_units'] / HOUR_UNITS for point in report['points']]
             axes.plot(dates, values, color='#147d92', linewidth=2.2,
                       label='Recorded units minus paid credits' if recorded_units else 'Hours used minus hours purchased', zorder=4)
+            latest_work = report.get('source_freshness', {}).get('latest_work_date')
+            if latest_work and latest_work < report['end']:
+                axes.axvspan(max(dates[0], datetime.combine(_day(latest_work), datetime.min.time())), dates[-1],
+                             color='#b6bdc4', alpha=.25, label='Later work unknown; recorded balance only', zorder=5)
             axes.fill_between(dates, values, 0, where=[value >= 0 for value in values], interpolate=True,
                               color='#f3c994', alpha=.65,
                               label='Recorded units above paid credits' if recorded_units else 'Hours used beyond purchased hours')
