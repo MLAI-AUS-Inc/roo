@@ -195,3 +195,135 @@ def test_prepared_snapshot_rechecked_for_scope_before_delivery(setup):
     setup.api.post_message.assert_not_called()
     setup.api.upload_csv.assert_not_called()
     assert http.post.call_count == 1
+
+
+def on_demand(kind='hours', actor='USAM', at=FRIDAY):
+    return {'team': 'T123', 'actor': actor, 'requested_at': at.isoformat(),
+            'report_kind': kind, 'selector': {'month': 'all', 'action': 'summary', 'client': 'Mark'}}
+
+
+@pytest.mark.parametrize('kind', ['hours', 'client_balance'])
+def test_on_demand_reads_current_sources_and_freezes_retry_without_reusing_old_file(setup, kind):
+    _, http, _ = configure(setup)
+    # Discovery file deliberately remains at October 11. Only the signed
+    # fresh response contains October 12 work and coverage through the 16th.
+    setup.service.allow_historical_snapshot = True
+    setup.value['clients']['UMARK']['hours_reporting'] = True
+    for row in setup.value['clients']['UMARK']['hours']:
+        row['builder_id'] = next(iter(setup.config.builders))
+    setup.path.write_text(json.dumps(setup.value))
+    request = on_demand(kind)
+    report = setup.service.report_for_request(request)
+    assert http.post.call_count == 1
+    assert report['source_stale'] is False
+    assert report['source_preparations'].keys() == {'UMARK'}
+    assert 'Sources checked:' in report['parts'][0]['content']
+    assert not any('Later activity is unavailable' in p['content'] for p in report['parts'] if p['kind'] == 'message')
+    assert setup.service.deliver_request(deepcopy(report), request, 'fresh-test', FRIDAY) == 'sent'
+    assert setup.service.deliver_request(deepcopy(report), request, 'fresh-test', FRIDAY) == 'sent'
+    assert http.post.call_count == 1
+    assert setup.api.upload_csv.call_count == len([p for p in report['parts'] if p['kind'] == 'file'])
+
+
+@pytest.mark.parametrize('kind', ['hours', 'client_balance'])
+def test_on_demand_missing_sources_never_fall_back_to_october_snapshot(setup, kind):
+    _, http, _ = configure(setup, missing=True)
+    setup.service.allow_historical_snapshot = True
+    setup.value['clients']['UMARK']['hours_reporting'] = True
+    for row in setup.value['clients']['UMARK']['hours']:
+        row['builder_id'] = next(iter(setup.config.builders))
+    setup.path.write_text(json.dumps(setup.value))
+    request = on_demand(kind)
+    with setup.service.queue.locked('a' * 64):
+        setup.service.queue.write('a' * 64, request)
+    outcome, = setup.service.commands(FRIDAY)
+    assert outcome['status'] == 'waiting_data'
+    assert http.post.call_count == 1
+    setup.api.upload_csv.assert_not_called()
+    text = setup.api.post_message.call_args.args[1]
+    assert 'Your current Studio report is waiting for: hours coverage' in text
+    assert 'Friday' not in text
+    assert 'need Studio review' in text
+    assert setup.service.requests.read('a' * 64) is None
+
+
+def test_new_slack_request_for_same_period_performs_new_source_read(setup, clock):
+    _, http, template = configure(setup)
+    setup.service.report_for_request(on_demand('client_balance'))
+    clock.value = FRIDAY + timedelta(minutes=1)
+    template.update(cutoff=clock.value.isoformat(), checked_at=clock.value.isoformat())
+    template['snapshot']['clients']['UMARK']['as_of'] = clock.value.isoformat()
+    for check in template['checks'].values():
+        check['checked_at'] = clock.value.isoformat()
+    template['checks']['hours'].update(complete_through=clock.value.isoformat(), reviewed_at=clock.value.isoformat())
+    setup.service.report_for_request(on_demand('client_balance', at=clock.value))
+    assert http.post.call_count == 2
+
+
+def test_on_demand_finance_access_is_checked_before_source_read(setup):
+    _, http, _ = configure(setup)
+    with pytest.raises(TimesheetError, match='report_client_unavailable'):
+        setup.service.report_for_request(on_demand('client_balance', actor='UOTHER'))
+    http.post.assert_not_called()
+
+
+def test_rate_limited_source_retry_is_preserved_and_explained(setup):
+    refresh, _, template = configure(setup, missing=True)
+    retry = FRIDAY + timedelta(hours=6)
+    template.update(missing=['finance_rate_limited', 'hours_coverage_missing'], retry_at=retry.isoformat())
+    with pytest.raises(SourcePending) as failure:
+        refresh.prepare('UMARK', FRIDAY, FRIDAY)
+    assert failure.value.retry_at == retry.timestamp()
+    request = {**on_demand('client_balance'), 'error': 'studio_source_waiting_data'}
+    _, notice = setup.service.failure_notice(request)
+    assert 'Xero rate limit' in notice and 'retry time' in notice
+
+
+@pytest.mark.parametrize('field,value', [('as_of', '2026-10-11T00:00:00Z'),
+                                        ('coverage', {'start': '2026-06-01', 'through': '2026-10-11'})])
+def test_signed_fresh_checks_cannot_launder_stale_snapshot(setup, field, value):
+    refresh, _, template = configure(setup)
+    template['snapshot']['clients']['UMARK'][field] = value
+    with pytest.raises(SourcePending):
+        refresh.prepare('UMARK', FRIDAY, FRIDAY)
+
+
+def test_staff_overview_refreshes_every_finance_owner_with_separate_scope(setup):
+    from tests.roo.test_studio_client_balance_source import P2
+    _, http, template = configure(setup)
+    setup.clients['USAM']['report_client_ids'].append('UOTHER')
+    other = deepcopy(template['snapshot']['clients']['UMARK'])
+    other['project_ids'] = [P2]
+    for row in other['hours']:
+        row['project_id'] = P2
+    discovery = deepcopy(template['snapshot'])
+    discovery['clients']['UOTHER'] = other
+    setup.path.write_text(json.dumps(discovery))
+
+    def response(*args, **kwargs):
+        owner = kwargs['json']['owner']
+        result = {**deepcopy(template), 'owner': owner, 'nonce': kwargs['json']['nonce']}
+        if owner == 'UOTHER':
+            result['project_ids'] = [P2]
+            result['snapshot']['clients'] = {'UOTHER': deepcopy(other)}
+        body = json.dumps(result, sort_keys=True, separators=(',', ':'))
+        return Mock(json=Mock(return_value={'result': result,
+            'signature': hmac.new(KEY.encode(), body.encode(), hashlib.sha256).hexdigest()}))
+
+    http.post.side_effect = response
+    request = on_demand()
+    request['selector']['client'] = 'all'
+    report = setup.service.report_for_request(request)
+    assert report['source_preparations'].keys() == {'UMARK', 'UOTHER'}
+    assert {call.kwargs['json']['owner'] for call in http.post.call_args_list} == {'UMARK', 'UOTHER'}
+    assert setup.service.deliver_request(report, request, 'staff-fresh', FRIDAY) == 'sent'
+    assert http.post.call_count == 2
+
+
+def test_prepared_owner_projections_reject_conflicting_shared_evidence(setup):
+    refresh, _, template = configure(setup)
+    first = template['snapshot']
+    second = deepcopy(first)
+    second['evidence']['evidence']['sha256'] = 'b' * 64
+    with pytest.raises(TimesheetError, match='studio_source_scope_mismatch'):
+        refresh.combine([first, second])

@@ -1,4 +1,4 @@
-"""Private source barrier shared by both recipients of a Friday report."""
+"""Private source barrier for fresh on-demand and scheduled reports."""
 from datetime import datetime, time, timedelta, timezone
 import hashlib
 import hmac
@@ -38,6 +38,43 @@ class SourceRefresh:
             'team': self.config.team, 'organization': self.config.organization,
             'project_ids': sorted(self.clients[owner]['project_ids'])})
 
+    @staticmethod
+    def cutoff(request):
+        # Every new Slack event gets a new live read. Delivery retries retain
+        # its original cutoff, just like the shared scheduled Friday reports.
+        return (request['selector']['end'] if request['selector'].get('period') == 'weekly'
+                else request['requested_at'])
+
+    def combine(self, snapshots):
+        """Combine only validated owner projections; conflicting evidence fails closed."""
+        combined = None
+        for snapshot in snapshots:
+            header = {k: v for k, v in snapshot.items() if k not in {'clients', 'evidence'}}
+            if combined is None:
+                combined = {**header, 'clients': {}, 'evidence': {}}
+            if header != {k: v for k, v in combined.items() if k not in {'clients', 'evidence'}}:
+                raise TimesheetError('studio_source_scope_mismatch')
+            for field in ('clients', 'evidence'):
+                for key, value in snapshot[field].items():
+                    if key in combined[field] and combined[field][key] != value:
+                        raise TimesheetError('studio_source_scope_mismatch')
+                    combined[field][key] = value
+        if combined is None:
+            raise TimesheetError('studio_source_not_ready')
+        return combined
+
+    def prepare_owners(self, owners, request, now):
+        snapshots, preparations, checks = [], {}, {}
+        for owner in sorted(owners):
+            key, snapshot, checked = self.prepare(owner, self.cutoff(request), now)
+            snapshots.append(snapshot)
+            preparations[owner], checks[owner] = key, checked
+        return self.combine(snapshots), preparations, checks
+
+    def frozen_owners(self, preparations, request, now):
+        return self.combine([self.frozen(key, owner, self.cutoff(request), now)
+                             for owner, key in sorted(preparations.items())])
+
     def validate(self, result, owner, cutoff, now):
         if (result.get('version') != 1 or result.get('owner') != owner
                 or result.get('team') != self.config.team
@@ -59,6 +96,10 @@ class SourceRefresh:
             snapshot = validate_balance_snapshot(result['snapshot'], self.config, self.clients)
             if set(snapshot['clients']) != {owner}:
                 raise TimesheetError('studio_source_scope_mismatch')
+            data = snapshot['clients'][owner]
+            if (timestamp(data['as_of']) < timestamp(cutoff)
+                    or data['coverage']['through'] < timestamp(cutoff).astimezone(TZ).date().isoformat()):
+                raise TimesheetError('studio_source_coverage_invalid')
             return snapshot
         if result.get('status') != 'waiting_data' or not result.get('missing'):
             raise TimesheetError('studio_source_response_invalid')
@@ -94,6 +135,9 @@ class SourceRefresh:
                 if (not hmac.compare_digest(signature, envelope['signature']) or result.get('nonce') != nonce):
                     raise TimesheetError('studio_source_signature_invalid')
                 snapshot = self.validate(result, owner, cutoff, datetime.now(timezone.utc))
+                if result.get('retry_at'):
+                    retry_at = max(retry_at, timestamp(result['retry_at']).timestamp())
+                    receipt['retry_at'] = retry_at
                 receipt.update(result=result, status=result['status'])
             except Exception as exc:
                 receipt['error'] = str(exc) if isinstance(exc, TimesheetError) else 'studio_source_unavailable'
@@ -109,7 +153,7 @@ class SourceRefresh:
         owners = list(targets) or [request['actor']]
         if len(owners) != 1:
             raise TimesheetError('weekly_client_required')
-        return self.prepare(owners[0], request['selector']['end'], now)
+        return self.prepare(owners[0], self.cutoff(request), now)
 
     def frozen(self, key, owner, cutoff, now):
         if key != self.identity(owner, cutoff):
