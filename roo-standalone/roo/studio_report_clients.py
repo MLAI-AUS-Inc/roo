@@ -65,5 +65,8 @@ def select_client(clients, actor, selector):
     unmapped = [key for key in requester['project_ids'] if key not in covered]
     if unmapped:
         groups.append({'name': 'Projects without a client mapping', 'project_ids': unmapped, 'unmapped': True})
-    return {**requester, 'name': 'All accessible clients', 'monthly_hours': None,
+    # An aggregate is usage only; never reuse one owner's contract as a shared
+    # allowance over other clients or unassigned projects.
+    aggregate = {key: value for key, value in requester.items() if key != 'contract_terms'}
+    return {**aggregate, 'name': 'All accessible clients', 'monthly_hours': None,
             'monthly_allowances': {}}, groups, selected

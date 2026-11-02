@@ -118,7 +118,12 @@ L 3h and XL 5h. Each report labels this basis and excludes work in progress.
 does not mean an active timer. Detailed rows explain each ticket's allocated
 hours; Roo never invents activities for individual clock hours.
 
-One shared **40-hour monthly allowance per client** is the default. Explicit
+New client projects use the signed agreement's commencement date, monthly
+anniversary and reviewed rollover terms. See [contract cycles](studio-contract-cycles.md)
+for the required private setup and the explicit **Mark Ghiasy exemption**.
+Calendar-month usage remains available, but does not reset a contract balance.
+
+For legacy/exempt owners, one shared **40-hour monthly allowance per client** is the default. Explicit
 `monthly_hours` and `monthly_allowances` overrides can represent other contracts
 and dated allowance changes. Months use Australia/Melbourne midnight boundaries
 and daylight saving. There is no implicit rollover, prorating or payment action.
@@ -272,6 +277,11 @@ provenance paths and contractor money are not copied into ordinary hours exports
 3. Set `STUDIO_REPORTS_CLIENTS_JSON` to verified owner Slack IDs and their explicit
    project IDs. For Mark Ghaisy, verify his Slack ID and every owned project ID;
    never grant access by matching his name or guessing his projects.
+   For every other new client, review the fully signed agreement in Drive and
+   configure [contract terms](studio-contract-cycles.md). Enable
+   `STUDIO_REPORTS_REQUIRE_CONTRACT_TERMS=true` and list only the verified Mark
+   owner ID in `STUDIO_REPORTS_CONTRACT_EXEMPT_CLIENT_IDS_JSON`. The worker
+   rejects missing terms or a project scope expanded without a matching review.
 4. Set `STUDIO_REPORTS_WORKER_ENABLED=true` for the worker. Keep the existing
    payroll worker's directories separate. Source reads and report delivery do
    not mutate its ledger or source tickets.

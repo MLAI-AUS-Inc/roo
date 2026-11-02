@@ -140,9 +140,13 @@ def total_units(report):
 
 def build_client_report(config, client, selector, dataset, now, backfill=None, *, effort_resolutions=None):
     from .studio_report_policy import resolve_report_effort
+    from .studio_contract_cycles import build_cycles, commencement, validate_terms
+    validate_terms(client)
+    terms = client.get('contract_terms')
     beginning = history_beginning(backfill, client['project_ids']) if selector.get('month') == 'all' else None
     selector, start, end = resolve_period(selector, now, beginning=beginning)
     as_of = timestamp(now)
+    evidence_start = min(start, commencement(terms)) if terms else start
     projects = {key: config.projects[key] for key in client['project_ids']}
     scale = 100 if (backfill or {}).get('version') == 2 else 4
     invoice_first = set((backfill or {}).get('invoice_first_projects', []))
@@ -150,12 +154,13 @@ def build_client_report(config, client, selector, dataset, now, backfill=None, *
     for index in range(selector['months']):
         key = month_offset(selector['month'], index).strftime('%Y-%m')
         monthly.append({'month': key, 'units': 0, 'unresolved': 0,
-                        'allowance_units': None if selector.get('period') in {'weekly', 'month_to_date'} else
+                        'allowance_units': None if terms or selector.get('period') in {'weekly', 'month_to_date'} else
                             allowance_units(client.get('monthly_allowances', {}).get(
                                 key, client.get('monthly_hours', 40)), scale)})
     by_month = {item['month']: item for item in monthly}
     replaced = replacements(backfill)
     rows, exceptions, seen = [], [], set()
+    cycle_rows, cycle_exceptions = [], []
     for item in dataset:
         original = item['issue']
         if original['id'] in seen:
@@ -178,8 +183,9 @@ def build_client_report(config, client, selector, dataset, now, backfill=None, *
                 raise TimesheetError('source_evidence_incomplete')
             continue
         completed = min(completions)  # Reopen/recomplete never consumes hours twice.
-        if not start <= completed < end:
+        if not evidence_start <= completed < end:
             continue
+        in_window = start <= completed
         missing_effort_history = False
         try:
             issue = reconstruct(original, history, completed)
@@ -225,22 +231,35 @@ def build_client_report(config, client, selector, dataset, now, backfill=None, *
                 raise TimesheetError('builder_mapping_required')
             size, reviewed_effort = resolve_report_effort(issue, history, completed, effort_resolutions)
             units = UNITS[size] * (scale // 4)
-            rows.append({'month': month, 'project_id': project_id, 'project': projects[project_id],
+            row = {'month': month, 'project_id': project_id, 'project': projects[project_id],
                          'builder_id': builder_id, 'builder': config.builders[builder_id]['name'],
                          'issue_id': original['id'], 'identifier': original['identifier'],
                          'title': issue['title'], 'completed_at': completed.astimezone(TZ).isoformat(),
                          'size': size, 'units': units,
-                         **({'effort_basis': 'reviewed_completion_label'} if reviewed_effort else {})})
-            by_month[month]['units'] += units
+                         **({'effort_basis': 'reviewed_completion_label'} if reviewed_effort else {})}
+            if in_window:
+                rows.append(row)
+                by_month[month]['units'] += units
+            if terms and completed >= commencement(terms):
+                cycle_rows.append(row)
         except TimesheetError as exc:
-            by_month[month]['unresolved'] += 1
-            exceptions.append({'month': month, 'project': projects[project_id],
-                               'identifier': original['identifier'], 'reason': str(exc)})
+            exception = {'month': month, 'project': projects[project_id],
+                         'identifier': original['identifier'], 'reason': str(exc)}
+            if in_window:
+                by_month[month]['unresolved'] += 1
+                exceptions.append(exception)
+            if terms and completed >= commencement(terms):
+                cycle_exceptions.append({**exception, 'completed_at': completed.astimezone(TZ).isoformat()})
     rows.sort(key=lambda row: (row['month'], row['project'], row['completed_at'], row['identifier']))
     report = {'selector': selector, 'client': client['name'], 'projects': projects,
             'monthly': monthly, 'rows': rows, 'exceptions': exceptions,
             'generated_at': as_of.astimezone(TZ).isoformat(), 'complete': not exceptions,
             'basis': 'completed_ticket_size_hours', 'unit_scale': scale}
+    if terms:
+        if backfill is not None:
+            raise TimesheetError('contract_cycles_require_task_source')
+        report['contract_allowance'] = build_cycles(terms, cycle_rows, cycle_exceptions,
+            scale=scale, visible_start=start, cutoff=min(end, as_of), include_cutoff=as_of < end)
     if selector.get('period') in {'weekly', 'month_to_date'}:
         return apply_weekly_backfill(report, backfill, config, as_of.astimezone(TZ))
     return apply_backfill(report, backfill, config, as_of.astimezone(TZ))
@@ -380,12 +399,14 @@ def summary(report):
         elif allowance is not None and not month.get('estimated_units'):
             parts.append(f"*{hours(allowance - used)} hours remaining* · {used / allowance:.0%} used")
         if not many:
-            parts.append('Project overview · no combined monthly allowance.' if allowance is None
+            parts.append('Calendar-month usage; allowance cycle below.' if report.get('contract_allowance') else
+                         'Project overview · no combined monthly allowance.' if allowance is None
                          else 'Shared monthly allowance across all your projects.')
             if not report.get('client_groups'):
                 parts.extend(project_breakdown(report, report['rows']))
     if many:
-        parts.append('Monthly allowances are shared across projects and reset each month; no rollover.'
+        parts.append('Calendar-month usage; allowance cycles below.' if report.get('contract_allowance') else
+                     'Monthly allowances are shared across projects and reset each month; no rollover.'
                      if any(month['allowance_units'] is not None for month in report['monthly']) else
                      'Project overview · no combined monthly allowance.')
         if not report.get('client_groups') and not invoice_first:
@@ -393,6 +414,8 @@ def summary(report):
             parts.extend(project_breakdown(report, report['rows']))
     if report.get('client_groups'):
         parts.extend(client_breakdown(report))
+    from .studio_contract_cycles import cycle_summary
+    parts.extend(cycle_summary(report))
     if report.get('recorded_snapshot'):
         if mixed:
             parts.append(f'\nReviewed projects ({_escape(mixed[0])}) use the same reviewed work records as the paid-credit chart. '
@@ -454,6 +477,7 @@ def week_label(selector):
 
 
 def weekly_summary(report):
+    from .studio_contract_cycles import cycle_summary
     scale = report.get('unit_scale', 4)
     hours = lambda units: display_hours(units, scale)
     unavailable = report.get('weekly_has_coverage') is False and not report['rows']
@@ -497,6 +521,7 @@ def weekly_summary(report):
             parts.append(str(report['pending_work_count']) + ' work sources remain unquantified and excluded.')
     for note in report.get('qualifications', []):
         parts.append(f"• {_escape(report['projects'][note['project_id']])}: {_escape(note['reason'])}")
+    parts.extend(cycle_summary(report))
     parts.append('Report cutoff: ' + timestamp(report['generated_at']).astimezone(TZ).strftime('%d %b %Y, %I:%M %p %Z') + '.')
     if report['selector']['action'] == 'detailed':
         parts.append('The attached breakdown lists the counted work, builders, dates and hours.')
@@ -505,6 +530,7 @@ def weekly_summary(report):
 
 def month_to_date_summary(report):
     """A compact companion to the weekly text, using the chart's exact rows."""
+    from .studio_contract_cycles import cycle_summary
     scale = report.get('unit_scale', 4)
     unavailable = report.get('period_has_coverage') is False
     title = month_label(report['selector']['month']) + ' · month to date'
@@ -530,6 +556,7 @@ def month_to_date_summary(report):
             parts.append(f"Includes {display_hours(report['estimated_month_units'], scale)}h with estimated monthly allocation; exact source quantities are preserved.")
     for note in report.get('qualifications', []):
         parts.append(f"• {_escape(report['projects'][note['project_id']])}: {_escape(note['reason'])}")
+    parts.extend(cycle_summary(report))
     return '\n'.join(parts)
 
 
@@ -578,7 +605,8 @@ def split_messages(text, limit=3500):
 
 
 def artifacts(report):
-    result = {}
+    from .studio_contract_cycles import cycle_artifacts
+    result = cycle_artifacts(report)
     if report['selector']['action'] == 'detailed':
         result['studio-hours-work.csv'] = csv_file(
             ['month', 'project', 'builder', 'completion_date_or_work_period_end', 'issue_or_invoice', 'work', 'size', 'hours',

@@ -63,6 +63,8 @@ def configuration(env):
             allowance_units(value)
     validate_client_reporting(raw)
     validate_hours_policy(raw)
+    from .studio_contract_cycles import validate_contract_policy
+    validate_contract_policy(raw, env)
     return config, raw
 
 
@@ -200,9 +202,15 @@ class StudioReportService(TimesheetService):
                 **({'client': selector['client']} if selector.get('client') else {})}, now)
         # The collection window must include project moves since the requested
         # month, even for months older than the payroll worker's initial cutoff.
+        source_start = min(start, month_start) if month_start else start
+        if client.get('contract_terms'):
+            from .studio_contract_cycles import commencement
+            # Opening balances and expiring rollover need the complete history
+            # from commencement, even for a current-month or weekly request.
+            source_start = min(source_start, commencement(client['contract_terms']))
         source = SimpleNamespace(team=self.config.team, organization=self.config.organization,
                                  projects={key: self.config.projects[key] for key in legacy_projects},
-                                 beginning=min(start, month_start) if month_start else start,
+                                 beginning=source_start,
                                  directory=self.config.directory)
         self.api.verify_recipient(actor, self.config.team)
         dataset = []
@@ -247,7 +255,7 @@ class StudioReportService(TimesheetService):
         # Freeze rendered parts too. A delivery retry uses the same content hash
         # even when font versions or optional chart availability change.
         parts = [{'kind': 'message', 'content': chunk, 'status': 'pending'} for chunk in split_messages(summary(report))]
-        if task_only:
+        if task_only and not report.get('contract_allowance'):
             parts.append({'kind': 'message', 'content':
                 'Task-size estimates are compared with the base monthly allowance. '
                 'Contractual rollover is not included; this is not a clock-time ledger or confirmed contractual entitlement.'
