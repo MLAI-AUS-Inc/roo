@@ -8,6 +8,9 @@ Roo integrates with Slack, `mlai-backend`, Linear, content services, and
 configured AI providers. It supports separate public and administrative
 surfaces; their credentials and permissions must remain isolated.
 
+See [verified MLAI Chat DMs](docs/mlai-chat-dms.md) for private message routing,
+points authorization, and the backend-first deployment order.
+
 For the wider platform map, start with
 [`mlai-engineering`](https://github.com/MLAI-AUS-Inc/mlai-engineering). AI
 coding agents must read [`.agents/AGENTS.md`](.agents/AGENTS.md). Repository

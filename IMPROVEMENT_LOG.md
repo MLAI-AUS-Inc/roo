@@ -188,3 +188,13 @@ are labelled as such.
   source read found five eligible October tasks: 2.75 estimated hours after
   correction, versus the previous partial 1.5 hours. No additional eligible
   October completion explains the proposed 5 hours.
+
+- Fixed Public Roo ignoring owner-authored MLAI Chat DMs marked with Slack
+  bot/app metadata. Private delivery verification now precedes normal routing,
+  binds the signed body to the acknowledged digest and canonical owner, and
+  preserves source-based award/reply idempotency and durable retries. Unrelated
+  bots and Admin Roo cannot delegate through this path. Backend deploys first;
+  historical requests are not replayed. Offline validation: 73 private/public
+  bridge tests, 87 points-award tests and 77 Slack/identity/private-delivery tests
+  passed; skill lint passed. Companion backend: 87 database-free authorization,
+  provider receipt and mention tests passed; model checks show no migrations.

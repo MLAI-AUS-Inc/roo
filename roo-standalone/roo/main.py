@@ -90,6 +90,7 @@ from .boost_moderation import (
 )
 from .link_love import handle_link_love_reply, link_love_retry_loop
 from .logging_safety import redact_log_text, slack_destination_type
+from .bridge_mentions import is_chat_dm_candidate, resolve_chat_dm
 from .slack_moderation import validate_slack_moderator_configuration
 from .start_here_introductions import (
     handle_start_here_intro,
@@ -205,7 +206,7 @@ def _retry_managed_slack_event_fingerprint(
     event = payload.get("event") if isinstance(payload, dict) else None
     if not isinstance(event, dict) or event.get("type") not in {"app_mention", "message"}:
         return None
-    if event.get("bot_id") and event.get("type") != "app_mention":
+    if event.get("bot_id") and event.get("type") != "app_mention" and not is_chat_dm_candidate(event):
         return None
     event_id = str(payload.get("event_id") or "").strip()
     if not event_id:
@@ -3153,6 +3154,16 @@ async def slack_events(
         await _complete_slack_event_receipt(request)
         return JSONResponse(status_code=200, content={})
 
+    if is_chat_dm_candidate(event):
+        if getattr(settings, "ROO_SURFACE", "public") != "public":
+            await _complete_slack_event_receipt(request)
+            return JSONResponse(status_code=200, content={})
+        _start_slack_event_task(
+            request,
+            _handle_chat_dm(_with_slack_delivery_context(event, payload)),
+        )
+        return _slack_event_response(request, work_pending=True)
+
     if event_type in {"app_mention", "message"} and parse_coworking_mention(str(event.get("text") or "")) is not None:
         # Channel message subscriptions can deliver the same mention separately.
         # app_mention owns channel requests; message.im owns explicit DM requests.
@@ -3345,6 +3356,21 @@ async def slack_events(
 
     await _complete_slack_event_receipt(request)
     return JSONResponse(status_code=200, content={})
+
+
+async def _handle_chat_dm(event: dict):
+    """Verify private Chat ownership before entering normal Roo skill routing."""
+    settings = get_settings()
+    resolved = await resolve_chat_dm(
+        event, slack_team_id=str(event.get("_slack_team_id") or ""),
+        surface=getattr(settings, "ROO_SURFACE", "public"), backend=_make_mlai_backend_client(),
+    )
+    if resolved is None or not _is_slack_context_allowed(
+        settings, channel_id=resolved.get("channel"), user_id=resolved.get("user"),
+        channel_type=resolved.get("channel_type"),
+    ):
+        return None
+    return await _handle_mention(resolved)
 
 
 async def _handle_start_here_intro(event: dict):
