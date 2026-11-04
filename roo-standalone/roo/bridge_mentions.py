@@ -1,6 +1,7 @@
 """Authenticate a Chat bridge mention and its explicitly selected recipients."""
 
 import asyncio
+import hashlib
 import logging
 import re
 from typing import Any
@@ -10,6 +11,16 @@ from uuid import UUID
 from .clients.mlai_backend import MLAIBackendClient, MLAIBackendUnavailableError
 
 logger = logging.getLogger(__name__)
+
+
+def is_chat_dm_candidate(event: dict[str, Any]) -> bool:
+    """Select bot-marked DMs for verification, never grant them authority."""
+    return (
+        event.get("type") == "message" and event.get("channel_type") == "im"
+        and bool(re.fullmatch(r"D[A-Z0-9]+", str(event.get("channel") or "")))
+        and bool(event.get("bot_id") or event.get("app_id") or event.get("subtype") == "bot_message")
+        and event.get("subtype") in (None, "", "bot_message", "file_share")
+    )
 
 _TERMINAL_ERRORS = {
     "invalid_bridge_context", "unknown_bridge_sender", "bridge_context_revoked",
@@ -148,3 +159,49 @@ async def resolve_bridge_mention(
         "_slack_event_id": f"mlai-chat:{actor['source_event_id']}",
         "_verified_bridge_context": verified_context,
     }
+
+
+async def resolve_chat_dm(
+    event: dict[str, Any], *, slack_team_id: str, surface: str, backend: MLAIBackendClient,
+) -> dict[str, Any] | None:
+    """Bind a signed Slack DM to its exact acknowledged private Chat delivery."""
+    if surface != "public" or not is_chat_dm_candidate(event):
+        return None
+    context = {
+        "workspace_id": slack_team_id, "channel_id": str(event.get("channel") or ""),
+        "message_id": str(event.get("ts") or ""),
+        "thread_ts": str(event.get("thread_ts") or event.get("ts") or ""),
+        "bridge_user_id": str(event.get("user") or ""),
+    }
+    for attempt in range(4):
+        response = await backend.resolve_chat_dm_actor(context)
+        if response.status_code == 409 and attempt < 3:
+            await asyncio.sleep(0.2 * (2 ** attempt))
+            continue
+        break
+    try:
+        actor = response.json()
+    except ValueError as exc:
+        raise MLAIBackendUnavailableError("Invalid private bridge actor response") from exc
+    if response.status_code != 200:
+        if isinstance(actor, dict) and response.status_code in {400, 403, 404} and actor.get("error") in _TERMINAL_ERRORS:
+            logger.info("Ignoring unauthorized Chat DM: %s", actor["error"])
+            return None
+        raise MLAIBackendUnavailableError("Private bridge actor lookup is not ready")
+    text = event.get("text")
+    if (not isinstance(actor, dict) or any(actor.get(key) != value for key, value in context.items())
+            or actor.get("version") != 2 or actor.get("posting_mode") != "member"
+            or actor.get("user_id") != context["bridge_user_id"]
+            or not re.fullmatch(r"[UW][A-Z0-9]+", context["bridge_user_id"])
+            or not isinstance(actor.get("source_event_id"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", actor["source_event_id"])
+            or not isinstance(text, str) or not text.strip()
+            or actor.get("message_text_sha256") != hashlib.sha256(text.encode("utf-8")).hexdigest()
+            or actor.get("recipient_targets") != [] or actor.get("source_labels") != []):
+        raise MLAIBackendUnavailableError("Private bridge actor response has mismatched scope")
+    try:
+        verified_context = _verified_context(actor)
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise MLAIBackendUnavailableError("Invalid private bridge actor context") from exc
+    return {**event, "_slack_event_id": f"mlai-chat:{actor['source_event_id']}",
+            "_verified_bridge_context": verified_context}
