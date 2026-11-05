@@ -3910,6 +3910,8 @@ class MLAIBackendClient:
         points: int,
         reason: str,
         idempotency_key: Optional[str] = None,
+        *,
+        target_profile_id: Optional[str] = None,
     ) -> dict:
         """System award points (bypasses client-side admin checks)."""
         payload = {
@@ -3918,6 +3920,11 @@ class MLAIBackendClient:
             "points": points,
             "reason": reason,
         }
+        if target_profile_id:
+            if target_slack_id or str(UUID(target_profile_id)) != target_profile_id or not idempotency_key:
+                raise ValueError("Canonical profile and stable operation key required")
+            payload.pop("target_slack_id")
+            payload["target_profile_id"] = target_profile_id
         if idempotency_key:
             payload["idempotency_key"] = str(idempotency_key)
         response = await self._request(
@@ -3926,7 +3933,7 @@ class MLAIBackendClient:
             json=payload,
             timeout=15.0,
             circuit_breaker=True,
-            use_admin_headers=True,
+            use_admin_headers=not bool(target_profile_id),
         )
         response.raise_for_status()
         return response.json()

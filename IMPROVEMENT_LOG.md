@@ -4,6 +4,15 @@ A short record of repository cleanup, testing, security, and delivery changes.
 Each entry states what changed and how it was checked. Findings without fixes
 are labelled as such.
 
+## 2026-11-05
+
+- Added verified MLAI Chat link-love replies in the configured boost channel,
+  including members without Slack accounts. Reward-only resolution preserves
+  completed delivery proof, account/device consent, channel allowlists, self
+  reward rejection, signed-event retries and canonical recipient keys. Names
+  are escaped for notifications. No schema changes. Offline regression checks
+  cover bridged/native replies, restarts, duplicates and the prior DM path.
+
 ## 2026-11-02
 
 - Removed the redundant monthly chart axis title, which overlapped source

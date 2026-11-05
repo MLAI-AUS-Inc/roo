@@ -90,7 +90,7 @@ from .boost_moderation import (
 )
 from .link_love import handle_link_love_reply, link_love_retry_loop
 from .logging_safety import redact_log_text, slack_destination_type
-from .bridge_mentions import is_chat_dm_candidate, resolve_chat_dm
+from .bridge_mentions import is_chat_dm_candidate, resolve_chat_dm, resolve_link_love_reply
 from .slack_moderation import validate_slack_moderator_configuration
 from .start_here_introductions import (
     handle_start_here_intro,
@@ -193,9 +193,21 @@ def _request_settings(request: Request) -> Settings:
     return getattr(state, "roo_settings", None) or get_settings()
 
 
+def _is_chat_link_love_candidate(event: dict, settings: Settings) -> bool:
+    return bool(
+        event.get("type") == "message" and getattr(settings, "ROO_SURFACE", "public") == "public"
+        and (event.get("bot_id") or event.get("app_id") or event.get("subtype") == "bot_message")
+        and event.get("subtype") in (None, "", "bot_message")
+        and getattr(settings, "BOOST_LINK_LOVE_ENABLED", False)
+        and event.get("channel") == getattr(settings, "BOOST_LINK_LOVE_CHANNEL_ID", "")
+        and event.get("channel") and event.get("thread_ts") and event.get("thread_ts") != event.get("ts")
+    )
+
+
 def _retry_managed_slack_event_fingerprint(
     raw_body: bytes,
     request_fingerprint: str,
+    settings: Optional[Settings] = None,
 ) -> Optional[str]:
     """Return a durable identity for messages and delegated bot app mentions."""
 
@@ -206,7 +218,8 @@ def _retry_managed_slack_event_fingerprint(
     event = payload.get("event") if isinstance(payload, dict) else None
     if not isinstance(event, dict) or event.get("type") not in {"app_mention", "message"}:
         return None
-    if event.get("bot_id") and event.get("type") != "app_mention" and not is_chat_dm_candidate(event):
+    if (event.get("bot_id") and event.get("type") != "app_mention" and not is_chat_dm_candidate(event)
+            and not (settings and _is_chat_link_love_candidate(event, settings))):
         return None
     event_id = str(payload.get("event_id") or "").strip()
     if not event_id:
@@ -2915,6 +2928,7 @@ async def verify_slack_signature(
         event_fingerprint = _retry_managed_slack_event_fingerprint(
             raw_body,
             fingerprint,
+            settings,
         )
     if event_fingerprint is not None:
         disposition, claim_token = store.claim_event(
@@ -3259,6 +3273,12 @@ async def slack_events(
                 await _complete_slack_event_receipt(request)
             return JSONResponse(status_code=200, content={})
     
+    # Only the reward handler receives these verified bot-authored replies.
+    # All other bot traffic retains the normal filtering and addressing gates.
+    if _is_chat_link_love_candidate(event, settings):
+        _start_slack_event_task(request, _handle_chat_link_love(_with_slack_delivery_context(event, payload)))
+        return _slack_event_response(request, work_pending=True)
+
     if (
         event_type == "message"
         and not event.get("bot_id")
@@ -3371,6 +3391,19 @@ async def _handle_chat_dm(event: dict):
     ):
         return None
     return await _handle_mention(resolved)
+
+
+async def _handle_chat_link_love(event: dict):
+    settings = get_settings()
+    resolved = await resolve_link_love_reply(
+        event, slack_team_id=str(event.get("_slack_team_id") or ""), backend=_make_mlai_backend_client(),
+    )
+    if resolved is None or not _is_slack_context_allowed(
+        settings, channel_id=resolved.get("channel"), user_id=resolved.get("_link_love_actor_slack_id") or resolved.get("user"),
+        channel_type=resolved.get("channel_type"),
+    ):
+        return None
+    return await handle_link_love_reply(resolved)
 
 
 async def _handle_start_here_intro(event: dict):

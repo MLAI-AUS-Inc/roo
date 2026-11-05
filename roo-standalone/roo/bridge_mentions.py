@@ -205,3 +205,42 @@ async def resolve_chat_dm(
         raise MLAIBackendUnavailableError("Invalid private bridge actor context") from exc
     return {**event, "_slack_event_id": f"mlai-chat:{actor['source_event_id']}",
             "_verified_bridge_context": verified_context}
+
+
+async def resolve_link_love_reply(event, *, slack_team_id, backend):
+    """Verify a reward reply without granting general mention authority."""
+    context = {
+        "workspace_id": slack_team_id, "channel_id": str(event.get("channel") or ""),
+        "message_id": str(event.get("ts") or ""), "thread_ts": str(event.get("thread_ts") or ""),
+        "bridge_user_id": str(event.get("user") or ""), "purpose": "link_love",
+    }
+    for attempt in range(4):
+        response = await backend.resolve_chat_bridge_actor(context)
+        if response.status_code == 409 and attempt < 3:
+            await asyncio.sleep(0.2 * (2 ** attempt))
+            continue
+        break
+    try:
+        actor = response.json()
+    except ValueError as exc:
+        raise MLAIBackendUnavailableError("Invalid reward actor response") from exc
+    if response.status_code != 200:
+        if isinstance(actor, dict) and response.status_code in {400, 403, 404} and actor.get("error") in _TERMINAL_ERRORS:
+            return None
+        raise MLAIBackendUnavailableError("Reward actor lookup is not ready")
+    try:
+        if not isinstance(actor, dict) or any(actor.get(k) != v for k, v in context.items()):
+            raise ValueError("Mismatched reward scope")
+        profile = _profile_id(actor.get("actor_profile_id"))
+        slack_id = actor.get("actor_slack_user_id")
+        if (not isinstance(actor.get("text"), str) or not actor["text"].strip()
+                or not isinstance(actor.get("source_event_id"), str)
+                or not re.fullmatch(r"[0-9a-f]{64}", actor["source_event_id"])
+                or type(actor.get("is_root_author")) is not bool
+                or not isinstance(slack_id, str)
+                or slack_id and not re.fullmatch(r"[UW][A-Z0-9]+", slack_id)):
+            raise ValueError("Invalid reward authority")
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise MLAIBackendUnavailableError("Invalid reward actor context") from exc
+    return {**event, "user": f"profile:{profile}", "text": actor["text"],
+            "_link_love_actor_slack_id": slack_id, "_link_love_root_author": actor["is_root_author"]}
