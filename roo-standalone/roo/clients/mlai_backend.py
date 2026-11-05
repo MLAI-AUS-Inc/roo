@@ -43,6 +43,14 @@ class MLAIBackendUnavailableError(RuntimeError):
         self.reason_code = reason_code
 
 
+class PointsAwardValidationError(ValueError):
+    """A local rejection before an award request could have been sent."""
+
+    def __init__(self, message: str, *, reason_code: str) -> None:
+        super().__init__(message)
+        self.reason_code = reason_code
+
+
 def _valid_coworking_discount(source, points_cost, standard_cost, discount_applied):
     # Free Office Manager bookings are a different benefit, not a monthly
     # update discount. Older ordinary receipts may omit booking_source.
@@ -3525,15 +3533,19 @@ class MLAIBackendClient:
     ) -> dict:
         """Award one canonical recipient; stable operations are checked atomically by the backend."""
         if bool(target_slack_id) == bool(target_profile_id):
-            raise ValueError("Select exactly one points recipient.")
+            raise PointsAwardValidationError("Select exactly one points recipient.", reason_code="recipient")
         cleaned_target = self._clean_slack_id(target_slack_id) if target_slack_id else None
         if cleaned_target and not re.fullmatch(r"[UW][A-Z0-9]+", cleaned_target):
-            raise ValueError("Select a real Slack member mention.")
+            raise PointsAwardValidationError("Select a real Slack member mention.", reason_code="slack_recipient")
         if target_profile_id:
-            if str(UUID(target_profile_id)) != target_profile_id or not idempotency_key:
-                raise ValueError("A canonical recipient and stable operation key are required.")
+            try:
+                canonical_profile = str(UUID(target_profile_id)) == target_profile_id
+            except (ValueError, AttributeError, TypeError):
+                canonical_profile = False
+            if not canonical_profile or not idempotency_key:
+                raise PointsAwardValidationError("A canonical recipient and stable operation key are required.", reason_code="profile_recipient")
         if idempotency_key is not None and (not isinstance(idempotency_key, str) or not idempotency_key.strip() or len(idempotency_key) > 200):
-            raise ValueError("Invalid points award operation key.")
+            raise PointsAwardValidationError("Invalid points award operation key.", reason_code="operation")
         # 1. Pre-flight Admin Check
         if not idempotency_key:
             is_admin = await self.is_admin(admin_slack_id)
@@ -3542,11 +3554,11 @@ class MLAIBackendClient:
 
         # 2. Pre-flight Self-Award Check
         if admin_slack_id == cleaned_target and points > 0:
-            raise ValueError("Nice try! You can't award points to yourself. 😉")
+            raise PointsAwardValidationError("Nice try! You can't award points to yourself. 😉", reason_code="self_award")
 
         # 3. Pre-flight Negative Check
         if not isinstance(points, int) or isinstance(points, bool) or points <= 0:
-            raise ValueError("Only positive whole-point awards are allowed.")
+            raise PointsAwardValidationError("Only positive whole-point awards are allowed.", reason_code="amount")
 
         # 4. Pre-flight Weekly Allowance Check
         if points > 0 and not idempotency_key:
@@ -3555,12 +3567,14 @@ class MLAIBackendClient:
                 raise PermissionError(allowance['error'])
             remaining = allowance.get('remaining', 0)
             if remaining <= 0:
-                raise ValueError(
-                    f"You've used your full weekly allowance ({allowance.get('allowance', 0)} pts). It resets on Monday."
+                raise PointsAwardValidationError(
+                    f"You've used your full weekly allowance ({allowance.get('allowance', 0)} pts). It resets on Monday.",
+                    reason_code="allowance_exhausted",
                 )
             if points > remaining:
-                raise ValueError(
-                    f"You only have {remaining} pts left this week. Try awarding {remaining} or less."
+                raise PointsAwardValidationError(
+                    f"You only have {remaining} pts left this week. Try awarding {remaining} or less.",
+                    reason_code="allowance_exceeded",
                 )
 
         payload = {
