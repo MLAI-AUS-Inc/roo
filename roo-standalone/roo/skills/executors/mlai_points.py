@@ -1436,6 +1436,42 @@ class MlaiPointsExecutor(BackendErrors, PromptExecutor):
         return detail
 
 
+    def _points_award_error(self, exc: Exception) -> tuple[str, bool]:
+        """Return a public-safe explanation and whether the outcome is unknown."""
+        if isinstance(exc, httpx.HTTPStatusError):
+            status = exc.response.status_code
+            if 400 <= status < 500 and status != 408:
+                # Only recognized domain messages can reach a shared channel.
+                # The generic extractor also accepts arbitrary proxy bodies and
+                # structured JSON, so its output alone is not safe to publish.
+                detail = self._redact_points_balance_error(
+                    self._extract_http_error_detail(exc)
+                )
+                public_details = {
+                    "Award exceeds the administrator's remaining weekly allowance",
+                    "Admins cannot award points to themselves",
+                    "Only Points Admins can award points manually",
+                    "Recipient is not an active Chat member",
+                    "Recipient is not active",
+                    "Recipient Slack identity changed; select the member again",
+                    "Award operation was already used with different details",
+                    "Points must be an integer",
+                    "Points must be a nonzero 32-bit integer",
+                    "reason must contain 1 to 2000 characters",
+                    "There are not enough Roo Points for this action.",
+                }
+                return (
+                    detail if detail in public_details
+                    else "The points backend rejected this award.",
+                    False,
+                )
+        if isinstance(exc, PermissionError):
+            return "You're not authorized to award these points.", False
+        # A timeout, server failure, or response-decoding error may follow a
+        # committed award. Do not turn uncertainty into a definite rejection.
+        return "I couldn't confirm whether this award went through.", True
+
+
     def _deliver_personal_points_message(
         self,
         *,
@@ -4734,10 +4770,12 @@ class MlaiPointsExecutor(BackendErrors, PromptExecutor):
                             f"exc_type={exc.__class__.__name__}"
                         )
                 except Exception as e:
+                    error, unconfirmed = self._points_award_error(e)
                     errors.append(
                         {
                             "user": target_id,
-                            "error": self._redact_points_balance_error(str(e)),
+                            "error": error,
+                            "unconfirmed": unconfirmed,
                         }
                     )
             
@@ -4749,11 +4787,26 @@ class MlaiPointsExecutor(BackendErrors, PromptExecutor):
                 r = results[0]
                 return f"{emoji} {verb} {abs(points)} points to <@{r['user']}>.\n\nReason: {reason}"
             
-            lines = [f"{emoji} {verb} {abs(points)} points each!\n\nReason: {reason}\n"]
+            has_unconfirmed = any(e["unconfirmed"] for e in errors)
+            if not errors:
+                heading = f"{emoji} {verb} {abs(points)} points each!"
+            elif results:
+                heading = (
+                    f"⚠️ Partially completed: awarded {abs(points)} points to "
+                    f"{len(results)} of {len(results) + len(errors)} recipients."
+                )
+            elif has_unconfirmed:
+                heading = "⚠️ I couldn't confirm whether these points were awarded."
+            else:
+                heading = "❌ No points were awarded."
+            lines = [f"{heading}\n\nReason: {reason}\n"]
             for r in results:
                 lines.append(f"✅ <@{r['user']}>: points awarded")
             for e in errors:
-                lines.append(f"❌ <@{e['user']}>: {e['error']}")
+                marker = "⚠️" if e["unconfirmed"] else "❌"
+                lines.append(f"{marker} <@{e['user']}>: {e['error']}")
+            if has_unconfirmed:
+                lines.append("\nCheck the points history before sending a new award.")
             
             return "\n".join(lines)
         

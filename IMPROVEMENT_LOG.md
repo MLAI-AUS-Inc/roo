@@ -4,6 +4,17 @@ A short record of repository cleanup, testing, security, and delivery changes.
 Each entry states what changed and how it was checked. Findings without fixes
 are labelled as such.
 
+## 2026-11-05
+
+- Fixed Slack manual award replies claiming success when every recipient was
+  rejected. Replies now distinguish confirmed, partial, rejected and unconfirmed
+  outcomes, show recognized backend rejection reasons, and keep raw diagnostics
+  and private balances out of public replies. Existing allowances, request
+  idempotency and recipient DM/replay behavior are unchanged.
+- Added 20 offline award-result regressions to the deployment gate; all pass.
+  The pre-fix run reproduced 17 reporting failures. Another 91 award/privacy
+  regressions pass. See the [approved plan](plans/2026-11-05-award-result-reporting.md).
+
 ## 2026-11-02
 
 - Removed the redundant monthly chart axis title, which overlapped source
