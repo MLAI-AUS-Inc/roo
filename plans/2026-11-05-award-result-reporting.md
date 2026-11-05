@@ -39,3 +39,12 @@ unchanged allowance with read-only checks. Keep an available rollback image.
 Privacy of backend error details; unknown outcomes after a possible commit;
 partial successes; request identity and repeated recipient notifications;
 no allowance, identity, or award policy changes.
+
+## Review resolution
+
+The final review identified that `ValueError` can represent either a local
+preflight rejection or failure to decode a response after a possible commit.
+`roo-standalone/roo/clients/mlai_backend.py` now uses a `ValueError` subtype and
+stable reason codes for preflight validation only. Public replies use fixed
+safe messages. Award policy and request execution are unchanged; real-client
+boundary tests cover local rejection and post-request decoding failure.

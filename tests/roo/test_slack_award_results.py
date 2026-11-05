@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-from roo.clients.mlai_backend import MLAIBackendUnavailableError
+from roo.clients.mlai_backend import MLAIBackendClient, MLAIBackendUnavailableError
 from roo.skills.executor import SkillExecutor
 from roo.skills.executors import mlai_points
 
@@ -180,3 +180,56 @@ async def test_dm_failure_does_not_change_confirmed_award(monkeypatch, delivery)
     result = await award(AwardBackend({"UTARGET": confirmation()}))
     assert "Awarded 30 points to <@UTARGET>" in result
     assert "private" not in result and "❌" not in result
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target,points,key,remaining,expected", [
+    ("UADMIN", 30, "operation-1", 100, "cannot award points to themselves"),
+    ("INVALID", 30, "operation-1", 100, "real Slack member"),
+    ("UTARGET", 0, "operation-1", 100, "positive whole-point"),
+    ("UTARGET", 30, "", 100, "operation key"),
+    ("UTARGET", 30, None, 5, "remaining weekly allowance"),
+    ("UTARGET", 30, None, 0, "full weekly allowance"),
+])
+async def test_real_client_preflight_rejection_is_definite(
+    monkeypatch, target, points, key, remaining, expected,
+):
+    backend = MLAIBackendClient(base_url="https://backend.invalid", api_key="test")
+    requests = []
+
+    async def reject_network(*args, **kwargs):
+        requests.append((args, kwargs))
+        raise AssertionError("Preflight rejection must not send an award")
+
+    async def admin(*args):
+        return True
+
+    async def allowance(*args):
+        return {"allowance": 256, "remaining": remaining}
+
+    monkeypatch.setattr(backend, "_request", reject_network)
+    monkeypatch.setattr(backend, "is_admin", admin)
+    monkeypatch.setattr(backend, "get_admin_allowance", allowance)
+    with pytest.raises(ValueError) as rejection:
+        await backend.award_points("UADMIN", target, points, "mentoring", idempotency_key=key)
+    message, unconfirmed = mlai_points.MlaiPointsExecutor()._points_award_error(rejection.value)
+    assert unconfirmed is False
+    assert expected in message
+    assert requests == []
+
+
+@pytest.mark.asyncio
+async def test_real_client_response_decoding_failure_remains_unconfirmed(monkeypatch):
+    backend = MLAIBackendClient(base_url="https://backend.invalid", api_key="test")
+    requests = []
+
+    async def invalid_confirmation(method, path, **kwargs):
+        requests.append((method, path))
+        return httpx.Response(200, content="not-json", request=httpx.Request(method, "https://backend.invalid" + path))
+
+    monkeypatch.setattr(backend, "_request", invalid_confirmation)
+    with pytest.raises(ValueError) as rejection:
+        await backend.award_points("UADMIN", "UTARGET", 30, "mentoring", idempotency_key="operation-1")
+    _, unconfirmed = mlai_points.MlaiPointsExecutor()._points_award_error(rejection.value)
+    assert unconfirmed is True
+    assert len(requests) == 1

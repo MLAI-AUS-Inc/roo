@@ -7,6 +7,7 @@ from ...coworking_dates import CoworkingDateError, resolve_coworking_date
 from .constants import FOUNDER_ACCOUNT_LINK_MAX_FUTURE_SECONDS
 from .constants import FULL_POINTS_ADMIN_ROLES
 from ...clients.mlai_backend import MLAIBackendClient, MLAIBackendUnavailableError, validate_coworking_booking_result
+from ...clients.mlai_backend import PointsAwardValidationError
 from uuid import NAMESPACE_URL, uuid4, uuid5
 from ...coworking_messages import NO_FOOD_REMINDER
 from .constants import POINTS_SUPER_ADMIN_SLACK_ID
@@ -1438,6 +1439,20 @@ class MlaiPointsExecutor(BackendErrors, PromptExecutor):
 
     def _points_award_error(self, exc: Exception) -> tuple[str, bool]:
         """Return a public-safe explanation and whether the outcome is unknown."""
+        if isinstance(exc, PointsAwardValidationError):
+            # Codes distinguish preflight rejections from ValueErrors raised
+            # while decoding a response after an award may have committed.
+            messages = {
+                "recipient": "Select exactly one points recipient.",
+                "slack_recipient": "Select a real Slack member mention.",
+                "profile_recipient": "A canonical recipient and stable operation key are required.",
+                "operation": "Invalid points award operation key.",
+                "self_award": "Admins cannot award points to themselves.",
+                "amount": "Only positive whole-point awards are allowed.",
+                "allowance_exhausted": "You've used your full weekly allowance. It resets on Monday.",
+                "allowance_exceeded": "Award exceeds the administrator's remaining weekly allowance.",
+            }
+            return messages.get(exc.reason_code, "The award was rejected before it was sent."), False
         if isinstance(exc, httpx.HTTPStatusError):
             status = exc.response.status_code
             if 400 <= status < 500 and status != 408:
