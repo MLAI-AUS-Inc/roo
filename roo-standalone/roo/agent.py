@@ -1205,11 +1205,15 @@ class RooAgent:
         channel_id: Optional[str] = None,
     ) -> str:
         """Generate a general conversational response."""
-        # Format history
         history_context = ""
         if history:
             history_str = "\n".join([f"{msg.get('user')}: {msg.get('text')}" for msg in history[:-1]])
-            history_context = f"\nRecent Context:\n{history_str}\n"
+            if history_str:
+                history_context = (
+                    "<untrusted_channel_history>\n"
+                    f"{history_str}\n"
+                    "</untrusted_channel_history>"
+                )
 
         skill_lines = []
         for s in self._skills_for_slack_context(channel_id=channel_id):
@@ -1222,16 +1226,14 @@ class RooAgent:
         prompt_template = (
             Path(__file__).resolve().parent / "prompts" / "system_prompt.md"
         ).read_text(encoding="utf-8")
-        prompt = prompt_template.rstrip("\n").format(
-            skill_list=skill_list,
-            history_context=history_context,
-        )
+        prompt = prompt_template.rstrip("\n").format(skill_list=skill_list)
+        messages = [{"role": "system", "content": prompt}]
+        if history_context:
+            messages.append({"role": "user", "content": history_context})
+        messages.append({"role": "user", "content": text})
 
         try:
-            response = await chat([
-                {"role": "system", "content": prompt},
-                {"role": "user", "content": text}
-            ])
+            response = await chat(messages)
             return response.content
         except Exception as e:
             print(f"❌ General response failed: {e}")
