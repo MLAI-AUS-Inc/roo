@@ -6,6 +6,12 @@ are labelled as such.
 
 ## 2026-11-05
 
+- Added verified MLAI Chat link-love replies in the configured boost channel,
+  including members without Slack accounts. Reward-only resolution preserves
+  completed delivery proof, account/device consent, channel allowlists, self
+  reward rejection, signed-event retries and canonical recipient keys. Names
+  are escaped for notifications. No schema changes. Offline regression checks
+  cover bridged/native replies, restarts, duplicates and the prior DM path.
 - Fixed Slack manual award replies claiming success when every recipient was
   rejected. Replies now distinguish confirmed, partial, rejected and unconfirmed
   outcomes, show recognized backend rejection reasons, and keep raw diagnostics

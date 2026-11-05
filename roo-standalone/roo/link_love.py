@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import json
 import re
 import sqlite3
@@ -742,13 +743,21 @@ def _build_notification_text(awards: list[dict[str, Any]]) -> str:
     lines = [heading]
     for award in awards:
         user_id = award.get("slack_user_id")
-        lines.append(f":white_check_mark: <@{user_id}>: awarded 2 pts")
+        if str(user_id).startswith("profile:"):
+            result = json.loads(award.get("backend_result_json") or "{}")
+            name = str(result.get("display_name") or "MLAI Chat member")
+            name = html.escape(re.sub(r"[\x00-\x1f\x7f`*_~]", " ", name), quote=False)[:200]
+            label = f"{name} (MLAI Chat)"
+        else:
+            label = f"<@{user_id}>"
+        lines.append(f":white_check_mark: {label}: awarded 2 pts")
     return "\n".join(lines)
 
 
 def _build_expired_link_love_notice(slack_user_id: str) -> str:
+    label = "MLAI Chat member" if slack_user_id.startswith("profile:") else f"<@{slack_user_id}>"
     return (
-        f"Sorry <@{slack_user_id}>, this post is more than a week old, "
+        f"Sorry {label}, this post is more than a week old, "
         "so it no longer qualifies for link-love points."
     )
 
@@ -808,9 +817,13 @@ async def process_link_love_award(
     )
 
     try:
+        recipient = str(award["slack_user_id"])
+        target = {"target_slack_id": recipient}
+        if recipient.startswith("profile:"):
+            target = {"target_slack_id": "", "target_profile_id": recipient.removeprefix("profile:")}
         backend_result = await client.system_award_points(
             admin_slack_id=bot_user_id,
-            target_slack_id=str(award["slack_user_id"]),
+            **target,
             points=LINK_LOVE_POINTS,
             reason=LINK_LOVE_REASON,
             idempotency_key=link_love_backend_idempotency_key(award),
@@ -925,7 +938,8 @@ async def handle_link_love_reply(
         )
         return {"status": "ignored", "reason": "root_author_missing"}
 
-    if root_author_slack_id == slack_user_id:
+    if (root_author_slack_id == slack_user_id or event.get("_link_love_root_author")
+            or root_author_slack_id == event.get("_link_love_actor_slack_id")):
         store.mark_reply_check_classified(
             int(reply_check["id"]),
             status="ineligible",
