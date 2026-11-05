@@ -7,6 +7,7 @@ from ...coworking_dates import CoworkingDateError, resolve_coworking_date
 from .constants import FOUNDER_ACCOUNT_LINK_MAX_FUTURE_SECONDS
 from .constants import FULL_POINTS_ADMIN_ROLES
 from ...clients.mlai_backend import MLAIBackendClient, MLAIBackendUnavailableError, validate_coworking_booking_result
+from ...clients.mlai_backend import PointsAwardValidationError
 from uuid import NAMESPACE_URL, uuid4, uuid5
 from ...coworking_messages import NO_FOOD_REMINDER
 from .constants import POINTS_SUPER_ADMIN_SLACK_ID
@@ -1434,6 +1435,56 @@ class MlaiPointsExecutor(BackendErrors, PromptExecutor):
         if cls._is_points_balance_error(detail) and re.search(r"\d", detail):
             return "There are not enough Roo Points for this action."
         return detail
+
+
+    def _points_award_error(self, exc: Exception) -> tuple[str, bool]:
+        """Return a public-safe explanation and whether the outcome is unknown."""
+        if isinstance(exc, PointsAwardValidationError):
+            # Codes distinguish preflight rejections from ValueErrors raised
+            # while decoding a response after an award may have committed.
+            messages = {
+                "recipient": "Select exactly one points recipient.",
+                "slack_recipient": "Select a real Slack member mention.",
+                "profile_recipient": "A canonical recipient and stable operation key are required.",
+                "operation": "Invalid points award operation key.",
+                "self_award": "Admins cannot award points to themselves.",
+                "amount": "Only positive whole-point awards are allowed.",
+                "allowance_exhausted": "You've used your full weekly allowance. It resets on Monday.",
+                "allowance_exceeded": "Award exceeds the administrator's remaining weekly allowance.",
+            }
+            return messages.get(exc.reason_code, "The award was rejected before it was sent."), False
+        if isinstance(exc, httpx.HTTPStatusError):
+            status = exc.response.status_code
+            if 400 <= status < 500 and status != 408:
+                # Only recognized domain messages can reach a shared channel.
+                # The generic extractor also accepts arbitrary proxy bodies and
+                # structured JSON, so its output alone is not safe to publish.
+                detail = self._redact_points_balance_error(
+                    self._extract_http_error_detail(exc)
+                )
+                public_details = {
+                    "Award exceeds the administrator's remaining weekly allowance",
+                    "Admins cannot award points to themselves",
+                    "Only Points Admins can award points manually",
+                    "Recipient is not an active Chat member",
+                    "Recipient is not active",
+                    "Recipient Slack identity changed; select the member again",
+                    "Award operation was already used with different details",
+                    "Points must be an integer",
+                    "Points must be a nonzero 32-bit integer",
+                    "reason must contain 1 to 2000 characters",
+                    "There are not enough Roo Points for this action.",
+                }
+                return (
+                    detail if detail in public_details
+                    else "The points backend rejected this award.",
+                    False,
+                )
+        if isinstance(exc, PermissionError):
+            return "You're not authorized to award these points.", False
+        # A timeout, server failure, or response-decoding error may follow a
+        # committed award. Do not turn uncertainty into a definite rejection.
+        return "I couldn't confirm whether this award went through.", True
 
 
     def _deliver_personal_points_message(
@@ -4734,10 +4785,12 @@ class MlaiPointsExecutor(BackendErrors, PromptExecutor):
                             f"exc_type={exc.__class__.__name__}"
                         )
                 except Exception as e:
+                    error, unconfirmed = self._points_award_error(e)
                     errors.append(
                         {
                             "user": target_id,
-                            "error": self._redact_points_balance_error(str(e)),
+                            "error": error,
+                            "unconfirmed": unconfirmed,
                         }
                     )
             
@@ -4749,11 +4802,26 @@ class MlaiPointsExecutor(BackendErrors, PromptExecutor):
                 r = results[0]
                 return f"{emoji} {verb} {abs(points)} points to <@{r['user']}>.\n\nReason: {reason}"
             
-            lines = [f"{emoji} {verb} {abs(points)} points each!\n\nReason: {reason}\n"]
+            has_unconfirmed = any(e["unconfirmed"] for e in errors)
+            if not errors:
+                heading = f"{emoji} {verb} {abs(points)} points each!"
+            elif results:
+                heading = (
+                    f"⚠️ Partially completed: awarded {abs(points)} points to "
+                    f"{len(results)} of {len(results) + len(errors)} recipients."
+                )
+            elif has_unconfirmed:
+                heading = "⚠️ I couldn't confirm whether these points were awarded."
+            else:
+                heading = "❌ No points were awarded."
+            lines = [f"{heading}\n\nReason: {reason}\n"]
             for r in results:
                 lines.append(f"✅ <@{r['user']}>: points awarded")
             for e in errors:
-                lines.append(f"❌ <@{e['user']}>: {e['error']}")
+                marker = "⚠️" if e["unconfirmed"] else "❌"
+                lines.append(f"{marker} <@{e['user']}>: {e['error']}")
+            if has_unconfirmed:
+                lines.append("\nCheck the points history before sending a new award.")
             
             return "\n".join(lines)
         

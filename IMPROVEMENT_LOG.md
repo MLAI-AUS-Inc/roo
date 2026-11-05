@@ -12,6 +12,18 @@ are labelled as such.
   reward rejection, signed-event retries and canonical recipient keys. Names
   are escaped for notifications. No schema changes. Offline regression checks
   cover bridged/native replies, restarts, duplicates and the prior DM path.
+- Fixed Slack manual award replies claiming success when every recipient was
+  rejected. Replies now distinguish confirmed, partial, rejected and unconfirmed
+  outcomes, show recognized backend rejection reasons, and keep raw diagnostics
+  and private balances out of public replies. Existing allowances, request
+  idempotency and recipient DM/replay behavior are unchanged.
+- Added 27 offline award-result regressions to the deployment gate; all pass.
+  The pre-fix run reproduced 17 reporting failures. Another 91 award/privacy
+  regressions pass. The independent review found local validation errors were
+  incorrectly marked uncertain; a typed client rejection preserves `ValueError`
+  compatibility while distinguishing preflight failure from response decoding.
+  Six real-client regressions reproduced that finding before the fix; all 125
+  result/client checks pass. See the [approved plan](plans/2026-11-05-award-result-reporting.md).
 
 ## 2026-11-02
 
