@@ -477,3 +477,10 @@ Tests exercise shared budgets, monthly/DST boundaries, historical ownership,
 reopened work, incomplete data, fresh reads, scoped private delivery, retries,
 access revocation, CSV escaping, charts and conversational routing without
 external calls.
+
+For owners with submitted-work collection enabled on the private backend,
+on-demand reports show explicit submitted hours from matched invoices and
+completed Linear records. Finance timestamps and manual work review timestamps
+are reported independently. A Xero cooldown can use a labelled prior receipt
+snapshot while work continues to update. The balance line ends at the latest
+submitted work date. Later reconciled payments remain visible.

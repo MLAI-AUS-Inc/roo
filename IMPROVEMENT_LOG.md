@@ -219,3 +219,7 @@ are labelled as such.
   bridge tests, 87 points-award tests and 77 Slack/identity/private-delivery tests
   passed; skill lint passed. Companion backend: 87 database-free authorization,
   provider receipt and mention tests passed; model checks show no migrations.
+
+- 2026-11-14. Private Studio reports validate submitted work and cached finance
+  independently, preserve strict weekly checks and display the last verified
+  receipt. Synthetic source, daily refresh and chart tests cover the new path.

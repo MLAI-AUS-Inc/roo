@@ -425,8 +425,10 @@ def summary(report):
             parts.append(f'Linear task projects ({_escape(mixed[1])}) use completed-ticket size estimates read fresh through '
                          + task_source_timestamp(report) + '.')
         else:
-            parts.append('\nThis view uses the same reviewed work records as the paid-credit chart. '
-                         'Amounts are invoice/recorded hour-units, not verified clock time or confirmed billable entitlement.')
+            submitted = any(row.get('source', '').startswith('submitted_') for row in report['rows'])
+            caption = ('This view includes submitted work from the paid-credit chart.' if submitted else
+                       'This view uses the same reviewed work records as the paid-credit chart.')
+            parts.append('\n' + caption + ' Amounts are invoice/recorded hour-units, not verified clock time or confirmed billable entitlement.')
             parts.append('Source review: ' + report['source_as_of'][:10] +
                          ' · coverage through ' + report['coverage_through'] + '.')
         if report.get('partial'):
@@ -444,6 +446,10 @@ def summary(report):
         recorded = sum(row['units'] for row in report['rows'] if row.get('source') == 'reviewed_recorded_time')
         estimated = sum(row['units'] for row in report['rows'] if row.get('source', 'completed_ticket_size') == 'completed_ticket_size')
         components = [f'{hours(invoiced)}h from reviewed invoices']
+        for source, label in [('submitted_invoice', 'submitted invoices'), ('submitted_linear', 'submitted Linear records')]:
+            submitted = sum(row['units'] for row in report['rows'] if row.get('source') == source)
+            if submitted:
+                components.append(f'{hours(submitted)}h from {label}')
         if recorded:
             components.append(f'{hours(recorded)}h from additional recorded work')
         if estimated or not report.get('invoice_first_projects'):
@@ -569,9 +575,10 @@ def detail_messages(report):
             lines.append(f"\n*{month_label(row['month']) if row['month'] else 'Work month unallocated'} · {_escape(row['project'])}*")
             previous = group
         period = row['completed_at'][:10]
-        if row.get('source') in {'reviewed_invoice', 'reviewed_recorded_time'}:
+        if row.get('source') in {'reviewed_invoice', 'reviewed_recorded_time', 'submitted_invoice', 'submitted_linear'}:
             period = row['work_start'] + (' – ' + row['work_end'] if row['work_end'] != row['work_start'] else '')
-            period = (period or 'Work month unconfirmed') + (' · invoice' if row['source'] == 'reviewed_invoice' else ' · recorded work')
+            period = (period or 'Work month unconfirmed') + (' · ' + {'reviewed_invoice': 'invoice', 'reviewed_recorded_time': 'recorded work',
+                'submitted_invoice': 'submitted invoice', 'submitted_linear': 'submitted Linear record'}[row['source']])
         if row.get('month_allocation') == 'estimated':
             period += ' · estimated allocation to ' + month_label(row['month'])
         lines.append(f"• {period} · {_escape(row['builder'])} · *{display_hours(row['units'], report.get('unit_scale', 4))}h*"

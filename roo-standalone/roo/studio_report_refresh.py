@@ -91,17 +91,24 @@ class SourceRefresh:
             raise TimesheetError('studio_source_scope_mismatch')
         if result.get('status') == 'ready' or (mode == 'latest' and result.get('status') == 'partial'):
             checks = result['checks']
+            live_submissions = (mode == 'latest' and result.get('snapshot', {}).get('clients', {})
+                                .get(owner, {}).get('source_freshness', {}).get('submissions_checked_at'))
+            earliest_finance = timestamp(result['checked_at']) - timedelta(days=7)
+            allowed_gaps = {'hours_coverage_missing', 'new_invoices_require_review'}
+            if live_submissions:
+                allowed_gaps.update({'submitted_work_requires_review', 'finance_rate_limited'})
             if (timestamp(result['checked_at']) < timestamp(cutoff)
                     or set(checks) != {'hours', 'contractor_invoices', 'client_invoices', 'payments'}
-                    or any(not timestamp(cutoff) <= timestamp(check['checked_at']) <= timestamp(result['checked_at'])
-                           for check in checks.values())):
+                    or any(not (earliest_finance if live_submissions and name in {'client_invoices', 'payments'} else timestamp(cutoff))
+                               <= timestamp(check['checked_at']) <= timestamp(result['checked_at'])
+                           for name, check in checks.items())):
                 raise TimesheetError('studio_source_coverage_invalid')
             if mode == 'strict' and (result.get('missing')
                     or timestamp(checks['hours']['complete_through']) < timestamp(cutoff)
                     or timestamp(checks['hours']['reviewed_at']) < timestamp(cutoff)
                     or checks['contractor_invoices'].get('unreviewed_count') != 0):
                 raise TimesheetError('studio_source_coverage_invalid')
-            if mode == 'latest' and (not set(result['missing']) <= {'hours_coverage_missing', 'new_invoices_require_review'}
+            if mode == 'latest' and (not set(result['missing']) <= allowed_gaps
                     or (result['status'] == 'partial') != bool(result['missing'])):
                 raise TimesheetError('studio_source_coverage_invalid')
             from .studio_client_balance_source import validate_balance_snapshot

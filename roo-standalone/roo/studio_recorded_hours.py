@@ -65,7 +65,8 @@ def build_recorded_report(config, client, selector, dataset, now):
                    'title': work['description'], 'completed_at': work['work_end'],
                    'work_start': work['work_start'], 'work_end': work['work_end'],
                    'size': '', 'units': units,
-                   'source': 'reviewed_invoice' if invoice else 'reviewed_recorded_time',
+                   'source': ('submitted_' + work['submission_source'] if work.get('submission_source')
+                              else 'reviewed_invoice' if invoice else 'reviewed_recorded_time'),
                    'date_note': 'Source work period, not a ticket completion date.',
                    'month_allocation': 'estimated' if estimated else 'work_dates',
                    'allocation_note': work['allocation_note'] +
