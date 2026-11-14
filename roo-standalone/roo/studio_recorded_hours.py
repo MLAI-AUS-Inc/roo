@@ -129,7 +129,7 @@ def overlay_recorded_reports(report, reviewed):
     report['estimated_month_units'] = sum(m['estimated_units'] for m in by_month.values())
     report['invoice_first_projects'] = sorted(set(report.get('invoice_first_projects', [])) | covered)
     report['basis'] = ('invoice_first_recorded_hours' if all(row.get('source') in
-                        {'reviewed_invoice', 'reviewed_recorded_time'} for row in report['rows'])
+                        {'reviewed_invoice', 'reviewed_recorded_time', 'submitted_invoice', 'submitted_linear'} for row in report['rows'])
                        else 'reviewed_invoices_and_completed_ticket_sizes')
     report.update(recorded_snapshot=True, complete=False,
                   source_as_of=min(item['source_as_of'] for item in reviewed),
