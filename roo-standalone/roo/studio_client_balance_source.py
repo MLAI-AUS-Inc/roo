@@ -73,13 +73,22 @@ def validate_balance_snapshot(value, config, clients):
                 raise ValueError
             fresh = dataset.get('source_freshness')
             if fresh is not None:
-                if (timestamp(fresh['finance_checked_at']) != as_of
+                submissions = fresh.get('submissions_checked_at')
+                allowed_gaps = {'hours_coverage_missing', 'new_invoices_require_review'}
+                if submissions:
+                    if timestamp(submissions) != as_of or not as_of - timedelta(days=7) <= timestamp(fresh['finance_checked_at']) <= as_of:
+                        raise ValueError
+                    allowed_gaps.update({'submitted_work_requires_review', 'finance_rate_limited'})
+                if ((not submissions and timestamp(fresh['finance_checked_at']) != as_of)
                         or not timestamp(fresh['hours_complete_through']) <= timestamp(fresh['hours_reviewed_at']) <= as_of
                         or type(fresh['unreviewed_invoice_count']) is not int or fresh['unreviewed_invoice_count'] < 0
-                        or not set(fresh['missing']) <= {'hours_coverage_missing', 'new_invoices_require_review'}
+                        or not set(fresh['missing']) <= allowed_gaps
                         or fresh['latest_work_date'] != max((row['work_end'] for row in dataset['hours']), default=None)):
                     raise ValueError
-                if fresh['latest_work_date'] and _date(fresh['latest_work_date']) > timestamp(fresh['hours_complete_through']).astimezone(config.tz).date():
+                review_day = timestamp(fresh['hours_complete_through']).astimezone(config.tz).date()
+                if any(_date(row['work_end']) > review_day and not (
+                        submissions and row.get('submission_source') in {'linear', 'invoice'})
+                        for row in dataset['hours']):
                     raise ValueError
             for note in dataset['limitations']:
                 _text(note)

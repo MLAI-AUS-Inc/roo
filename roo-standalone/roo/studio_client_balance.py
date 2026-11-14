@@ -214,7 +214,8 @@ def build_balance_report(client, selector, dataset, now):
         'kind': 'client_balance', 'selector': resolved, 'client': client['name'], 'name': client['name'],
         'currency': dataset['currency'], 'basis': dataset['basis'], 'unit_scale': HOUR_UNITS,
         'allocation_rate_cents_per_hour': rate, 'scope_label': dataset.get('scope_label', ''),
-        'invoice_status_as_of': observed_end.isoformat() if invoice_status_historical else source_day.isoformat(),
+        'invoice_status_as_of': min(observed_end, timestamp(fresh['finance_checked_at']).astimezone(TZ).date()).isoformat()
+            if fresh else observed_end.isoformat() if invoice_status_historical else source_day.isoformat(),
         'invoice_status_historical': invoice_status_historical,
         'start': start.isoformat(), 'end': end.isoformat(),
         'requested_start': requested_start.date().isoformat(),
@@ -281,6 +282,21 @@ def summary(report):
     if not payments:
         parts.append('No payments received in the covered selected period.')
     visible_invoices = [invoice for invoice in report['invoices'] if invoice['status'] in {'paid', 'authorised'}]
+    fresh = report.get('source_freshness', {})
+    if fresh.get('submissions_checked_at'):
+        if report['payments']:
+            last_payment = report['payments'][-1]
+            invoice_numbers = {row['id']: row['number'] for row in report['invoices']}
+            last_numbers = ', '.join(_escape(invoice_numbers[key]) for key in last_payment['invoice_ids'] if key in invoice_numbers)
+            parts.append(f"Last verified payment: {money(last_payment['amount_cents'])} on {last_payment['date']} ({last_numbers}).")
+        flagged = fresh.get('submission_exceptions', 0)
+        submitted = sum(row['period_hour_units'] for row in report['hours'] if row.get('submission_source'))
+        parts.append(f"Includes {display_hours(submitted)}h of submitted work in this period. "
+                     f"{flagged} conflicting or incomplete work records await review.")
+        if 'finance_rate_limited' in fresh['missing']:
+            parts.append('Xero is rate-limited. Showing the last verified receipts.')
+        paid_at = timestamp(fresh['finance_checked_at']).astimezone(TZ)
+        parts.append(f"Invoice and payment status checked {paid_at:%d %b %Y %H:%M %Z}.")
     if detailed and visible_invoices:
         parts.append('\n*Client invoices · issue date / amount / paid / status*')
         parts.append('Invoice payment totals and status as of ' + report['invoice_status_as_of'] +
@@ -397,16 +413,17 @@ def render_chart(report):
         else:
             dates = [datetime.combine(_day(point['date']), datetime.min.time()) for point in report['points']]
             values = [point['balance_hour_units'] / HOUR_UNITS for point in report['points']]
-            axes.plot(dates, values, color='#147d92', linewidth=2.2,
-                      label='Recorded units minus paid credits' if recorded_units else 'Hours used minus hours purchased', zorder=4)
             latest_work = report.get('source_freshness', {}).get('latest_work_date')
+            visible = sum(at.date().isoformat() <= latest_work for at in dates) if latest_work else len(dates)
+            axes.plot(dates[:visible], values[:visible], color='#147d92', linewidth=2.2,
+                      label='Recorded units minus paid credits' if recorded_units else 'Hours used minus hours purchased', zorder=4)
             if latest_work and latest_work < report['end']:
                 axes.axvspan(max(dates[0], datetime.combine(_day(latest_work), datetime.min.time())), dates[-1],
                              color='#b6bdc4', alpha=.25, label='Later work unknown; recorded balance only', zorder=5)
-            axes.fill_between(dates, values, 0, where=[value >= 0 for value in values], interpolate=True,
+            axes.fill_between(dates[:visible], values[:visible], 0, where=[value >= 0 for value in values[:visible]], interpolate=True,
                               color='#f3c994', alpha=.65,
                               label='Recorded units above paid credits' if recorded_units else 'Hours used beyond purchased hours')
-            axes.fill_between(dates, values, 0, where=[value <= 0 for value in values], interpolate=True,
+            axes.fill_between(dates[:visible], values[:visible], 0, where=[value <= 0 for value in values[:visible]], interpolate=True,
                               color='#a7d9c4', alpha=.65,
                               label='Paid credits above recorded units' if recorded_units else 'Purchased hours remaining')
             axes.axhline(0, color='#647580', linewidth=1)
@@ -472,6 +489,8 @@ def render_chart(report):
         note += f"Data through {report['coverage_through']}."
         if report.get('source_freshness'):
             fresh = report['source_freshness']
+            checked = timestamp(fresh['finance_checked_at']).astimezone(TZ)
+            note += f" Payments checked {checked:%d %b %H:%M %Z}."
             note += f" Work submitted through {fresh['latest_work_date'] or 'an unknown date'}; {fresh['unreviewed_invoice_count']} invoice emails await review."
         figure.text(.06, .03, '\n'.join(textwrap.wrap(note, width=118)), fontsize=8.5, color='#334b58')
         output = BytesIO()

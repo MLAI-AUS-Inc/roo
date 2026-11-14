@@ -393,11 +393,14 @@ class StudioReportService(TimesheetService):
     def source_notice(self, checks, request):
         checked = min(check['checked_at'] for streams in checks.values() for check in streams.values())
         if self.refresh.mode(request) == 'latest':
+            checked = min(streams['payments']['checked_at'] for streams in checks.values())
+            work_checked = min(streams['hours']['checked_at'] for streams in checks.values())
             reviewed = min(streams['hours']['reviewed_at'] for streams in checks.values())
             pending = sum(streams['contractor_invoices']['unreviewed_count'] for streams in checks.values())
             return {'kind': 'message', 'status': 'pending', 'content':
                 f"Xero checked: {timestamp(checked).astimezone(self.config.tz).isoformat()}. "
-                f"Recorded work reviewed: {timestamp(reviewed).astimezone(self.config.tz).isoformat()}. "
+                f"Work sources checked {timestamp(work_checked).astimezone(self.config.tz).isoformat()}. "
+                f"Last manual review {timestamp(reviewed).astimezone(self.config.tz).isoformat()}. "
                 f"{pending} invoice emails await review. Later unsubmitted work is unknown; "
                 'these charts show recorded usage and verified receipts.'}
         return {'kind': 'message', 'status': 'pending', 'content':

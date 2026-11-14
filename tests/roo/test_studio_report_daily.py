@@ -178,3 +178,19 @@ def test_manual_catchup_before_six_does_not_consume_next_daily_run(setup):
     assert daily.tick(now) == []
     assert daily.tick(now, catch_up=True)[0]['status'] == 'waiting_data'
     assert daily.tick(timestamp('2026-10-17T06:00:00+11:00'))[0]['status'] == 'waiting_data'
+
+
+def test_new_submission_and_cached_finance_keep_independent_cutoffs(setup):
+    refresh, _, result = latest(setup)
+    data = result['snapshot']['clients']['UMARK']
+    fresh = data['source_freshness']
+    yesterday = (FRIDAY - timedelta(days=1)).isoformat()
+    fresh.update(submissions_checked_at=FRIDAY.isoformat(), finance_checked_at=yesterday, latest_work_date='2026-10-16')
+    result['checks']['payments']['checked_at'] = result['checks']['client_invoices']['checked_at'] = yesterday
+    result['missing'].append('finance_rate_limited')
+    work = data['hours'][-1]
+    work.update(submission_source='linear', work_start='2026-10-16',work_end='2026-10-16')
+    assert refresh.validate(result, 'UMARK', FRIDAY, FRIDAY, 'latest')
+    work.pop('submission_source')
+    with pytest.raises(TimesheetError):
+        refresh.validate(result, 'UMARK', FRIDAY, FRIDAY, 'latest')
