@@ -63,6 +63,9 @@ def configuration(env):
             allowance_units(value)
     validate_client_reporting(raw)
     validate_hours_policy(raw)
+    from .studio_contract_finance import validate_cash_policy
+    for client in raw.values():
+        validate_cash_policy(client)
     from .studio_contract_cycles import validate_contract_policy
     validate_contract_policy(raw, env)
     return config, raw
@@ -339,6 +342,26 @@ class StudioReportService(TimesheetService):
         # Resolve access before touching finance records. The Public runtime
         # only queues identity and selection; this file is in the private volume.
         scope = self.scope_fingerprint(actor, selector)
+        client, _, targets = select_client(self.clients, actor, selector)
+        if selector.get('client', 'self').casefold() == 'all':
+            raise TimesheetError('client_balance_single_client_required')
+        owner = next(iter(targets)) if targets else actor
+        if client.get('contract_cash'):
+            if not self.refresh:
+                raise TimesheetError('client_balance_not_configured')
+            from .studio_contract_finance import cash_summary, financial_view, render_chart as contract_chart
+            key, source, _ = self.refresh.prepare(owner, self.refresh.cutoff(request), datetime.now(timezone.utc),
+                                                   mode='contract_cash')
+            hours = self.report_for_request({**request, 'report_kind': 'hours'})
+            view = financial_view(hours, client, source)
+            chart = base64.b64encode(contract_chart(hours, view)).decode('ascii')
+            messages = [{'kind': 'message', 'content': chunk, 'status': 'pending'}
+                        for chunk in split_messages(cash_summary(view))]
+            hours['parts'] = [*messages, {'kind': 'file', 'filename': 'studio-contract-payments.png',
+                              'content': chart, 'status': 'pending'}, *hours['parts']]
+            hours.update(kind='client_balance', finance_owner=owner, contract_cash_view=view,
+                         contract_cash_key=key, finance_digest=fingerprint(source))
+            return hours
         snapshot = load_balance_snapshot(self.balance_path, self.config, self.clients)
         preparations, checks = {}, {}
         if self.refresh:
@@ -429,6 +452,17 @@ class StudioReportService(TimesheetService):
             from .studio_client_balance_source import select_balance_dataset
             if not self.balance_enabled or report.get('kind') != 'client_balance':
                 raise TimesheetError('client_balance_not_configured')
+            if report.get('contract_cash_key'):
+                client, _, targets = select_client(self.clients, request['actor'], request['selector'])
+                owner = next(iter(targets)) if targets else request['actor']
+                if (not self.refresh or not client.get('contract_cash') or owner != report['finance_owner']
+                        or request['selector'].get('client','self').casefold() == 'all'):
+                    raise TimesheetError('client_balance_access_unavailable')
+                source = self.refresh.frozen(report['contract_cash_key'], owner, self.refresh.cutoff(request),
+                                             now, mode='contract_cash')
+                if fingerprint(source) != report['finance_digest']:
+                    raise TimesheetError('client_balance_source_changed')
+                return self.deliver_parts(report['parts'], request['actor'], key, now)
             snapshot = self.finance_snapshot_for_delivery(report, request, now)
             _, _, owner = select_balance_dataset(snapshot, self.config, self.clients, request['actor'],
                 request['selector'], now, max_age_days=self.balance_max_age_days,
@@ -489,7 +523,9 @@ class StudioReportService(TimesheetService):
                     _, _, targets = select_client(self.clients, request['actor'], request['selector'])
                     owners = list(targets) or [request['actor'],
                         *self.clients[request['actor']].get('report_client_ids', [])]
-                    prepared = [self.refresh.store.read(self.refresh.identity(owner, self.refresh.cutoff(request), self.refresh.mode(request)))
+                    prepared = [self.refresh.store.read(self.refresh.identity(owner, self.refresh.cutoff(request),
+                        'contract_cash' if request.get('report_kind') == 'client_balance' and self.clients[owner].get('contract_cash')
+                        else self.refresh.mode(request)))
                                 for owner in owners] if self.refresh else []
                     results = [value['result'] for value in prepared if value and value.get('result')]
                     gaps = {code for result in results for code in result.get('missing', [])}
