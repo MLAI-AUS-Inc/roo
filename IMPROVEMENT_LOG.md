@@ -11,8 +11,10 @@ are labelled as such.
   private worker checks the backend ledger before preparing bank handoffs, and
   verifies receipts before reporting payment. Existing member invoice PDFs and
   commands remain compatible. Calendar, invoice, source, worker, signed-ingress
-  and replay regressions pass offline. Backend schema approval and database
-  integration verification are pending, and feature switches default to off.
+  and replay regressions pass offline. The approved backend migration and
+  database regressions pass on disposable SQLite and PostgreSQL, including
+  concurrent approval against the last customer hour. Feature switches default
+  to off until the client configuration and opening ledger are reviewed.
 
 ## 2026-11-05
 
