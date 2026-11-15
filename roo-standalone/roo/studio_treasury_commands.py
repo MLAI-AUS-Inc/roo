@@ -70,7 +70,7 @@ def enqueue_event(settings, payload):
         return {"handled": False}
     dm = event.get("channel_type") == "im" and str(event.get("channel", "")).startswith("D")
     return enqueue(settings, team=payload.get("team_id"), actor=event.get("user"), channel=event.get("channel"),
-        source=event.get("ts"), command=parse(event.get("text"), settings.TIMESHEET_SLACK_BOT_USER_ID, dm))
+        source=event.get("ts"), command=parse(event.get("text"), getattr(settings, "TIMESHEET_SLACK_BOT_USER_ID", ""), dm))
 
 
 def enqueue_button(settings, payload):

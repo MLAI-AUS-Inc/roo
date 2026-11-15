@@ -26,6 +26,11 @@ def test_exact_commands_preserve_member_invoice_and_other_payments():
         assert parse(text, "UBOT", False) is None
 
 
+def test_generic_events_do_not_require_studio_configuration():
+    assert enqueue_event(SimpleNamespace(), {"event": {"type": "message", "channel": "D123",
+        "channel_type": "im", "text": "hello", "user": "UMEMBER", "ts": "123.456"}}) == {"handled": False}
+
+
 def test_workspace_treasurer_and_replay_are_verified(settings):
     command = {"operation": "preview", "selector": "recent"}
     kwargs = dict(team="T123", actor="USAM", channel="C123", source="123.456", command=command)

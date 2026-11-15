@@ -3840,7 +3840,7 @@ async def slack_commands(
             queued = await asyncio.to_thread(enqueue_treasury, timesheet_settings,
                 team=form.get("team_id"), actor=form.get("user_id"), channel=form.get("channel_id"),
                 source=form.get("trigger_id"), command=parse_treasury_command(form.get("text"),
-                    timesheet_settings.TIMESHEET_SLACK_BOT_USER_ID, True))
+                    getattr(timesheet_settings, "TIMESHEET_SLACK_BOT_USER_ID", ""), True))
             if not queued.get("handled"):
                 queued = await asyncio.to_thread(
                     enqueue_invoice, timesheet_settings,
