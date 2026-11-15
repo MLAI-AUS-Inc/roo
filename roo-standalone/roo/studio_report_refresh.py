@@ -85,10 +85,16 @@ class SourceRefresh:
                 or result.get('organization') != self.config.organization
                 or result.get('project_ids') != sorted(self.clients[owner]['project_ids'])
                 or result.get('mode', 'strict') != mode
-                or mode not in {'strict', 'latest'}
+                or mode not in {'strict', 'latest', 'contract_cash'}
                 or timestamp(result['cutoff']) != timestamp(cutoff)
                 or timestamp(result['checked_at']) > timestamp(now) + timedelta(minutes=5)):
             raise TimesheetError('studio_source_scope_mismatch')
+        if mode == 'contract_cash':
+            from .studio_contract_finance import validate_cash_result
+            policy = self.clients[owner].get('contract_cash')
+            if not policy:
+                raise TimesheetError('client_balance_access_unavailable')
+            return validate_cash_result(result, policy, cutoff)
         if result.get('status') == 'ready' or (mode == 'latest' and result.get('status') == 'partial'):
             checks = result['checks']
             live_submissions = (mode == 'latest' and result.get('snapshot', {}).get('clients', {})
@@ -142,7 +148,7 @@ class SourceRefresh:
             if cached and cached.get('result'):
                 snapshot = self.validate(cached['result'], owner, cutoff, now, mode)
                 if snapshot is not None:
-                    return key, snapshot, cached['result']['checks']
+                    return key, snapshot, cached['result'].get('checks', {})
             # A warm-up can never suppress the closing pass at/after 17:00.
             closing = timestamp(now) >= timestamp(cutoff)
             if (cached and timestamp(now).timestamp() < cached.get('retry_at', 0)
@@ -174,7 +180,7 @@ class SourceRefresh:
             self.store.write(key, receipt)
             if snapshot is None:
                 raise SourcePending(retry_at)
-            return key, snapshot, result['checks']
+            return key, snapshot, result.get('checks', {})
 
     def for_request(self, request, now):
         _, _, targets = select_client(self.clients, request['actor'], request['selector'])
@@ -187,7 +193,7 @@ class SourceRefresh:
         if key != self.identity(owner, cutoff, mode):
             raise TimesheetError('studio_source_scope_mismatch')
         cached = self.store.read(key)
-        if not cached or cached.get('status') not in ({'ready', 'partial'} if mode == 'latest' else {'ready'}):
+        if not cached or cached.get('status') not in ({'ready', 'partial'} if mode in {'latest', 'contract_cash'} else {'ready'}):
             raise TimesheetError('studio_source_not_ready')
         snapshot = self.validate(cached['result'], owner, cutoff, now, mode)
         if snapshot is None:

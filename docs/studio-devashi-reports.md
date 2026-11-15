@@ -151,3 +151,17 @@ Regression coverage:
 [`test_studio_task_burndown.py`](../tests/roo/test_studio_task_burndown.py).
 Contract boundary, rollover and exemption coverage is in
 [`test_studio_contract_cycles.py`](../tests/roo/test_studio_contract_cycles.py).
+
+### Combined on-demand contract and payment reports
+
+For a reviewed Linear owner, configure `contract_cash` on that owner's private
+client entry with `xero_contact_id` and the signed `monthly_fee_net_cents`.
+The backend must independently bind the same owner, contact, team and projects
+in its private contract-cash scope. Owner and staff grant checks still apply.
+A combined request attaches the standard Linear report and contract-cycle
+burndown plus a chart of actual gross invoices and reconciled receipts. The
+package-equivalent cost uses the fee before GST. Paying the monthly invoice
+does not allocate the monthly allowance twice. The cash panel uses the actual
+finance observation time. Contract usage and rollover use task evidence and
+the signed anniversary. Disabling the owner's finance setting leaves the
+existing usage route available.
