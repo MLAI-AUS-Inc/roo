@@ -4,6 +4,16 @@ A short record of repository cleanup, testing, security, and delivery changes.
 Each entry states what changed and how it was checked. Findings without fixes
 are labelled as such.
 
+## 2026-11-15
+
+- Added optional Studio calendar enrichment to meeting actions, private time
+  confirmation and editing, and signed builder-invoice review requests. A separate
+  private worker checks the backend ledger before preparing bank handoffs, and
+  verifies receipts before reporting payment. Existing member invoice PDFs and
+  commands remain compatible. Calendar, invoice, source, worker, signed-ingress
+  and replay regressions pass offline. Backend schema approval and database
+  integration verification are pending, and feature switches default to off.
+
 ## 2026-11-05
 
 - Added verified MLAI Chat link-love replies in the configured boost channel,

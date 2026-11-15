@@ -221,11 +221,25 @@ class LinearMeetingActionsExecutor(SkillExecutorInterface):
                 },
             }
         if not candidates and not project_update_requested:
+            calendar_message = ""
+            calendar_meetings = []
+            if (getattr(settings, "STUDIO_MEETINGS_CALENDAR_ENABLED", False) and not use_direct_issue_path
+                    and (has_document_sources or re.search(r"\b(?:meetings?|transcript|action items|check.in)\b", text, re.I))):
+                from ...studio_meeting_calendar import enrich
+                matched_project = self._resolve_linear_meeting_request_project(
+                    sources=source_result.sources, candidates=[], projects=projects,
+                    explicit_project_hint=params.get("project_hint"), channel_id=channel_id,
+                    channel_context=(slack_context or {}).get("channel"))
+                calendar_message, calendar_meetings = await enrich(client, settings, actor=user_id,
+                    candidates=[{"project_match": matched_project}], mode="create" if action == "create" else "review",
+                    request_source=str(current_message_ts or thread_ts or ""), channel=channel_id)
             return {
                 "message": (
                     "I couldn't find any concrete action items in those meeting notes."
                     + self._format_linear_meeting_source_warnings(source_result.warnings)
-                )
+                    + calendar_message
+                ),
+                "data": {"calendar_meetings": calendar_meetings},
             }
 
         request_project_match = self._resolve_linear_meeting_request_project(
@@ -694,6 +708,14 @@ class LinearMeetingActionsExecutor(SkillExecutorInterface):
             contextual_review_mode=contextual_review_mode,
         )
         message += self._format_linear_meeting_source_warnings(source_result.warnings)
+        calendar_meetings = []
+        meeting_request = has_document_sources or bool(re.search(r"\b(?:meetings?|transcript|action items|check.in)\b", text, re.I))
+        if not use_direct_issue_path and meeting_request:
+            from ...studio_meeting_calendar import enrich
+            calendar_message, calendar_meetings = await enrich(client, settings, actor=user_id,
+                candidates=prepared_candidates, mode="create" if action == "create" and not contextual_review_mode else "review",
+                request_source=str(current_message_ts or thread_ts or ""), channel=channel_id)
+            message += calendar_message
         blocks = (
             self._build_linear_meeting_review_blocks(
                 message,
@@ -713,6 +735,7 @@ class LinearMeetingActionsExecutor(SkillExecutorInterface):
                 "skipped_count": len(skipped),
                 "review_batch_id": str((review_batch or {}).get("id") or "") or None,
                 "effort_sizing_results": sizing_shadow,
+                "calendar_meetings": calendar_meetings,
             },
         }
 

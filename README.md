@@ -47,6 +47,10 @@ Member invoices to MLAI, fillable PDF details, fortnightly draft/final delivery
 and recovery are described in [the invoice guide](docs/studio-invoices.md).
 They extend the same private timesheet worker and are disabled by default.
 
+Calendar-linked meeting time and private builder payment reviews are described
+in [the Studio treasury guide](docs/studio-treasury.md). Reviews match approved
+Linear work against customer invoice coverage before preparing bank handoffs.
+
 Client-owned monthly usage reports, opt-in Friday reports, project/builder
 breakdowns and detailed work exports are described in
 [the client hours guide](docs/studio-client-hours.md).

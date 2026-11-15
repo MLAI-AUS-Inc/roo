@@ -1,0 +1,9 @@
+services:
+  treasury:
+    build: .
+    env_file: .env.treasury
+    command: python -m roo.studio_treasury_worker --env-file .env.treasury
+    restart: unless-stopped
+    volumes:
+      - ./data/studio-treasury-queue:/app/studio-treasury/queue
+      - ./data/timesheets:/app/timesheets/data:ro

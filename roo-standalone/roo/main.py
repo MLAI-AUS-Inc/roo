@@ -25,6 +25,8 @@ from fastapi.responses import JSONResponse
 from .config import get_settings, Settings, validate_runtime_security
 from .timesheet_commands import enqueue as enqueue_timesheet, enqueue_event as enqueue_timesheet_event
 from .invoice_commands import enqueue as enqueue_invoice, enqueue_event as enqueue_invoice_event
+from .studio_treasury_commands import enqueue as enqueue_treasury, enqueue_event as enqueue_treasury_event, parse as parse_treasury_command
+from .studio_treasury_interactions import ACTION_IDS as STUDIO_ACTION_IDS, handle as handle_studio_action, modal_context as studio_modal_context
 from .agent import RooAgent, get_agent
 from .addressing import (
     candidate_reason_for_message,
@@ -3131,7 +3133,9 @@ async def slack_events(
         user_id=timesheet_event.get("user"), channel_type=timesheet_event.get("channel_type"),
     ):
         try:
-            queued = await asyncio.to_thread(enqueue_invoice_event, timesheet_settings, payload)
+            queued = await asyncio.to_thread(enqueue_treasury_event, timesheet_settings, payload)
+            if not queued.get("handled"):
+                queued = await asyncio.to_thread(enqueue_invoice_event, timesheet_settings, payload)
             acknowledgement = _invoice_ack if queued.get("handled") else _timesheet_ack
             if not queued.get("handled"):
                 queued = await asyncio.to_thread(enqueue_timesheet_event, timesheet_settings, payload)
@@ -3833,11 +3837,16 @@ async def slack_commands(
         timesheet_settings, channel_id=form.get("channel_id"), user_id=form.get("user_id"), channel_type=None,
     ):
         try:
-            queued = await asyncio.to_thread(
-                enqueue_invoice, timesheet_settings,
+            queued = await asyncio.to_thread(enqueue_treasury, timesheet_settings,
                 team=form.get("team_id"), actor=form.get("user_id"), channel=form.get("channel_id"),
-                source_id=form.get("trigger_id"), text=form.get("text"), dm=True,
-            )
+                source=form.get("trigger_id"), command=parse_treasury_command(form.get("text"),
+                    timesheet_settings.TIMESHEET_SLACK_BOT_USER_ID, True))
+            if not queued.get("handled"):
+                queued = await asyncio.to_thread(
+                    enqueue_invoice, timesheet_settings,
+                    team=form.get("team_id"), actor=form.get("user_id"), channel=form.get("channel_id"),
+                    source_id=form.get("trigger_id"), text=form.get("text"), dm=True,
+                )
             if not queued.get("handled"):
                 queued = await asyncio.to_thread(
                     enqueue_timesheet, timesheet_settings,
@@ -6661,9 +6670,12 @@ async def _handle_slack_action_payload(request: Request, payload: dict):
         *MEETING_ROOM_CHOOSE_ROOM_ACTION_IDS,
         *MEETING_ROOM_PUBLIC_CHOOSE_ROOM_ACTION_IDS,
     }
+    studio_submission = studio_modal_context(payload)
+    is_studio_action = early_interactive_action_id in STUDIO_ACTION_IDS or bool(studio_submission)
     is_duplicate_request = _is_duplicate_slack_request(request)
     if (
         is_duplicate_request
+        and not is_studio_action
         and not is_meeting_room_action
     ):
         print("↩️ Ignoring duplicate signed Slack action request")
@@ -6686,6 +6698,7 @@ async def _handle_slack_action_payload(request: Request, payload: dict):
     channel_id = (
         payload.get("channel", {}).get("id")
         or submission.get("channel_id")
+        or studio_submission.get("channel")
     )
     channel_type = (
         "im" if str(channel_id or "").startswith("D") else None
@@ -6764,9 +6777,16 @@ async def _handle_slack_action_payload(request: Request, payload: dict):
         )
         return JSONResponse(status_code=200, content={})
 
-    if is_duplicate_request:
+    if is_duplicate_request and not is_studio_action:
         print("↩️ Ignoring duplicate signed Slack action request")
         return JSONResponse(status_code=200, content={})
+
+    if is_studio_action:
+        try:
+            result = await asyncio.to_thread(handle_studio_action, settings, payload, get_slack_client())
+        except Exception:
+            raise HTTPException(status_code=503, detail="Studio request could not be saved; retry")
+        return JSONResponse(status_code=200, content=result)
 
     if getattr(settings, "ROO_SURFACE", "public") == "admin":
         if payload_type == "view_submission":

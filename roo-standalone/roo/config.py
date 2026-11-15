@@ -95,6 +95,10 @@ class Settings(BaseSettings):
     TIMESHEET_QUEUE_DIR: str = "/app/timesheets/queue"
     STUDIO_INVOICE_COMMANDS_ENABLED: bool = False
     STUDIO_INVOICE_QUEUE_DIR: str = "/app/timesheets/invoice-queue"
+    STUDIO_MEETINGS_CALENDAR_ENABLED: bool = False
+    STUDIO_TREASURY_COMMANDS_ENABLED: bool = False
+    STUDIO_TREASURY_SLACK_IDS: str = ""
+    STUDIO_TREASURY_QUEUE_DIR: str = "/app/studio-treasury/queue"
 
     # Client reporting queues contain request metadata only; source credentials
     # and owner/project mappings live in the separate Studio report worker.
