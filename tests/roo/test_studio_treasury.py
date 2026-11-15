@@ -71,6 +71,8 @@ def test_invoice_period_scan_proposes_addition_before_a_write():
     result = {"calendar_scan": [{"title": "Acquire check-in", "start": "2026-10-12", "action": "planned"}],
               "scan": {"mode": "review", "start": "2026-10-11", "end": "2026-10-25"}, "meetings": [], "links": []}
     assert blocks(result)[1]["elements"][0]["action_id"] == "studio_meeting_add_scan"
+    result["calendar_scan"][0]["action"] = "needs_review"
+    assert blocks(result)[1]["elements"][0]["action_id"] == "studio_meeting_add_scan"
     result["scan"]["mode"] = "create"
     assert len(blocks(result)) == 1
 

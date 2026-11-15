@@ -91,7 +91,7 @@ def blocks(result):
     text = format_review(result)
     output = [{"type": "section", "text": {"type": "mrkdwn", "text": text[:2900]}}]
     if "meetings" in result:
-        if result.get("scan", {}).get("mode") == "review" and any(row["action"] == "planned" for row in result.get("calendar_scan", [])):
+        if result.get("scan", {}).get("mode") == "review" and any(row["action"] in {"planned", "needs_review"} for row in result.get("calendar_scan", [])):
             output.append({"type": "actions", "elements": [{"type": "button",
                 "text": {"type": "plain_text", "text": "Add missing meetings"}, "action_id": "studio_meeting_add_scan",
                 "value": json.dumps({"start": result["scan"]["start"], "end": result["scan"]["end"]})}]})
