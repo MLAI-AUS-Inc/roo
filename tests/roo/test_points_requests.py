@@ -4185,7 +4185,7 @@ async def test_book_coworking_nudges_founder_when_charged_standard_price(tmp_pat
     assert "Cost: 8 points" in result["message"]
     assert "Balance remaining" not in result["message"]
     assert "may qualify for 4-point coworking" in result["message"]
-    assert "app=founder-tools&next=/founder-tools" in result["message"]
+    assert "https://chat.mlai.au/my-startup/updates?view=new" in result["message"]
     assert "@Roo link" not in result["message"]
     assert "\n\nAlready submitted using a different MLAI account?" in delivered["text"]
     assert "`@Roo link`" in delivered["text"]
@@ -4317,5 +4317,5 @@ async def test_book_coworking_omits_link_nudge_when_accounts_are_linked(
 
     assert "Cost: 8 points" in result["message"]
     assert "may qualify for 4-point coworking" in result["message"]
-    assert "app=founder-tools&next=/founder-tools" in result["message"]
+    assert "https://chat.mlai.au/my-startup/updates?view=new" in result["message"]
     assert "@Roo link" not in result["message"]

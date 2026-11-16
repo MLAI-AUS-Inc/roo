@@ -2598,8 +2598,8 @@ class MlaiPointsExecutor(BackendErrors, PromptExecutor):
                 "\n\n💡 Startup founders may qualify for 4-point coworking after "
                 "approving an eligible monthly update and sharing it publicly or "
                 "with the MLAI community. Private approvals earn 5 Roo points and "
-                "do not unlock discounts. Share yours here: "
-                "https://mlai.au/platform/login?app=founder-tools&next=/founder-tools"
+                "do not unlock discounts. Write your update in Pulse on MLAI Chat: "
+                "https://chat.mlai.au/my-startup/updates?view=new"
             )
 
             if founder_tools_explicitly_linked is False:

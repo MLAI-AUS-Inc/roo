@@ -4,6 +4,11 @@ A short record of repository cleanup, testing, security, and delivery changes.
 Each entry states what changed and how it was checked. Findings without fixes
 are labelled as such.
 
+## 2026-11-16
+
+- Standard-price coworking confirmations link to the Pulse update editor in MLAI
+  Chat. Eleven offline coworking booking regressions passed.
+
 ## 2026-11-05
 
 - Added verified MLAI Chat link-love replies in the configured boost channel,
