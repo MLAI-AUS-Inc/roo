@@ -4,6 +4,18 @@ A short record of repository cleanup, testing, security, and delivery changes.
 Each entry states what changed and how it was checked. Findings without fixes
 are labelled as such.
 
+## 2026-11-15
+
+- Added optional Studio calendar enrichment to meeting actions, private time
+  confirmation and editing, and signed builder-invoice review requests. A separate
+  private worker checks the backend ledger before preparing bank handoffs, and
+  verifies receipts before reporting payment. Existing member invoice PDFs and
+  commands remain compatible. Calendar, invoice, source, worker, signed-ingress
+  and replay regressions pass offline. The approved backend migration and
+  database regressions pass on disposable SQLite and PostgreSQL, including
+  concurrent approval against the last customer hour. Feature switches default
+  to off until the client configuration and opening ledger are reviewed.
+
 ## 2026-11-05
 
 - Added verified MLAI Chat link-love replies in the configured boost channel,
@@ -223,3 +235,10 @@ are labelled as such.
 - 2026-11-14. Private Studio reports validate submitted work and cached finance
   independently, preserve strict weekly checks and display the last verified
   receipt. Synthetic source, daily refresh and chart tests cover the new path.
+
+- 2026-11-16. Studio treasury deployment now shares a durable queue between
+  Public Roo and its separate worker project, so public restarts preserve work.
+  The worker mounts the existing sealed invoice volume read-only and accepts
+  Compose-provided environment values without reading a public env file.
+  All 11 focused tests passed, including real Compose rendering of the mount
+  boundaries and the worker entry point with a synthetic environment.

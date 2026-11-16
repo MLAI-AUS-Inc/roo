@@ -31,3 +31,12 @@ with no additional GST. Drafts arrive every second Thursday at 5pm Melbourne
 time; Friday finals supersede them after noon. Business/contact details,
 ABN, bank details and invoice metadata are editable locally in the PDF.
 Work and amounts are fixed. Save the filled copy locally before issuing it.
+
+When the treasurer asks to pay builders, use the signed `check builder invoices`
+or `pay builder invoices` workflow. A private treasury worker independently
+matches the invoice to approved Linear work and remaining customer coverage.
+Use contractual size credits for size-priced agreements and approved actual
+time for hourly agreements. A generated invoice or completed ticket alone
+does not establish customer coverage. Show exceptions before the bank handoff.
+Only a verified bank receipt establishes payment. Member invoice requests
+continue to return only the requesting member's own PDF.

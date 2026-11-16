@@ -394,6 +394,10 @@ class LinearMeetingActionsClient:
                 "An identical Linear issue creation is still in progress; no duplicate was created."
             )
 
+    async def studio_calendar(self, *, workspace, actor, projects, mode):
+        return await self._request_json("POST", "/api/integrations/linear/meeting-actions/calendar",
+            payload={"workspace": workspace, "actor": actor, "projects": projects, "mode": mode}, timeout=20.0)
+
     async def create_action_batch(
         self,
         *,
