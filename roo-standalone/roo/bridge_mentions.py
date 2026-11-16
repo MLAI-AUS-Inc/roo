@@ -25,8 +25,21 @@ def is_chat_dm_candidate(event: dict[str, Any]) -> bool:
 _TERMINAL_ERRORS = {
     "invalid_bridge_context", "unknown_bridge_sender", "bridge_context_revoked",
     "bridge_actor_unverified", "bridge_actor_consent_required", "roo_not_explicitly_mentioned",
-    "invalid_native_mentions",
+    "invalid_native_mentions", "bridge_actor_slack_unlinked",
 }
+
+# The backend issues these only for a genuine, verified Chat delivery whose
+# author can fix the gap themselves, so Roo may tell them how. Every other
+# refusal stays silent: it may come from a forged or unrelated bot message.
+EXPLAINABLE_REFUSALS = {"bridge_actor_slack_unlinked", "bridge_actor_consent_required"}
+
+
+class BridgeMentionRefused(Exception):
+    """A verified Chat sender Roo cannot act for, with a member-fixable reason."""
+
+    def __init__(self, code: str):
+        super().__init__(code)
+        self.code = code
 
 
 @dataclass(frozen=True)
@@ -134,7 +147,11 @@ async def resolve_bridge_mention(
         raise MLAIBackendUnavailableError("Invalid bridge actor response") from exc
     if response.status_code != 200:
         if isinstance(actor, dict) and response.status_code in {400, 403, 404} and actor.get("error") in _TERMINAL_ERRORS:
-            logger.info("Ignoring unauthorized bridge mention: %s", actor["error"])
+            # Fixed token, no personal data, so refusals can be counted.
+            logger.warning("BRIDGE_MENTION_REFUSED code=%s channel=%s",
+                           actor["error"], context["channel_id"])
+            if response.status_code == 403 and actor["error"] in EXPLAINABLE_REFUSALS:
+                raise BridgeMentionRefused(actor["error"])
             return None
         raise MLAIBackendUnavailableError("Bridge actor lookup is not ready")
     if (not isinstance(actor, dict)

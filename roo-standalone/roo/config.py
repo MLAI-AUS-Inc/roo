@@ -215,6 +215,9 @@ class Settings(BaseSettings):
     ROO_POINTS_STRIPE_CHECKOUT_HOSTS: str = "checkout.stripe.com"
     MEETING_ROOM_BOOKING_ENABLED: bool = False
     FOUNDER_TOOLS_LINK_ORIGINS: str = ""
+    # Reply once when a verified MLAI Chat sender cannot use Roo yet (no Slack
+    # link, or AI sharing off) instead of ignoring the message.
+    BRIDGE_REFUSAL_REPLIES_ENABLED: bool = True
     BOOST_LINK_LOVE_ENABLED: bool = True
     BOOST_LINK_LOVE_CHANNEL_NAME: str = "boost-my-startup"
     BOOST_LINK_LOVE_CHANNEL_ID: str = ""
