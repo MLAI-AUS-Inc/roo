@@ -1,0 +1,23 @@
+# Separate project so Public Roo --remove-orphans cannot remove the worker.
+name: roo-studio-treasury
+
+services:
+  treasury:
+    build:
+      context: ../roo-standalone
+      dockerfile: ../infra/Dockerfile
+    env_file:
+      - ../roo-standalone/.env.treasury
+    command: ["python", "-m", "roo.studio_treasury_worker"]
+    environment:
+      STUDIO_TREASURY_QUEUE_DIR: /app/studio-treasury/queue
+      STUDIO_TREASURY_FINALS_DIR: /app/timesheets/data/invoices/finals
+    restart: unless-stopped
+    volumes:
+      - ../roo-standalone/data/studio-treasury-queue:/app/studio-treasury/queue
+      - timesheet-data:/app/timesheets/data:ro
+
+volumes:
+  timesheet-data:
+    external: true
+    name: roo-timesheets_timesheet-data

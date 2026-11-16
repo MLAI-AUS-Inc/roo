@@ -235,3 +235,10 @@ are labelled as such.
 - 2026-11-14. Private Studio reports validate submitted work and cached finance
   independently, preserve strict weekly checks and display the last verified
   receipt. Synthetic source, daily refresh and chart tests cover the new path.
+
+- 2026-11-16. Studio treasury deployment now shares a durable queue between
+  Public Roo and its separate worker project, so public restarts preserve work.
+  The worker mounts the existing sealed invoice volume read-only and accepts
+  Compose-provided environment values without reading a public env file.
+  All 11 focused tests passed, including real Compose rendering of the mount
+  boundaries and the worker entry point with a synthetic environment.

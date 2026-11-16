@@ -31,6 +31,19 @@ def test_generic_events_do_not_require_studio_configuration():
         "channel_type": "im", "text": "hello", "user": "UMEMBER", "ts": "123.456"}}) == {"handled": False}
 
 
+def test_private_worker_accepts_compose_environment_without_a_file(monkeypatch):
+    from roo import studio_treasury_worker as module
+    monkeypatch.setattr('sys.argv', ['treasury', '--once'])
+    monkeypatch.setattr(module, 'dotenv_values', Mock(side_effect=AssertionError('implicit env file')))
+    monkeypatch.setenv('STUDIO_TREASURY_KEY', 'synthetic-private-key')
+    worker = Mock()
+    constructor = Mock(return_value=worker)
+    monkeypatch.setattr(module, 'TreasuryWorker', constructor)
+    module.main()
+    assert constructor.call_args.args[0]['STUDIO_TREASURY_KEY'] == 'synthetic-private-key'
+    worker.tick.assert_called_once_with()
+
+
 def test_workspace_treasurer_and_replay_are_verified(settings):
     command = {"operation": "preview", "selector": "recent"}
     kwargs = dict(team="T123", actor="USAM", channel="C123", source="123.456", command=command)

@@ -208,10 +208,10 @@ class TreasuryWorker:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--env-file", required=True)
+    parser.add_argument("--env-file")
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args()
-    worker = TreasuryWorker({**dotenv_values(args.env_file), **os.environ})
+    worker = TreasuryWorker({**(dotenv_values(args.env_file) if args.env_file else {}), **os.environ})
     while True:
         worker.tick()
         if args.once:

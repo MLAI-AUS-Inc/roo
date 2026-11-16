@@ -18,11 +18,12 @@ def test_base_public_restart_keeps_worker_queue(tmp_path):
     # Compose v2 still checks env_file existence with --no-env-resolution.
     # Render copied real configs with empty test environments, never .env data.
     for filename in ('docker-compose.yml', 'docker-compose.timesheet-commands.yml', 'docker-compose.timesheets.yml',
-                     'docker-compose.studio-reports.yml'):
+                     'docker-compose.studio-reports.yml', 'docker-compose.studio-treasury.yml'):
         shutil.copyfile(root / filename, infra / filename)
     (source / '.env').write_text('')
     (source / '.env.timesheets').write_text('')
     (source / '.env.studio-reports').write_text('')
+    (source / '.env.treasury').write_text('')
     def config(*files):
         command = ['docker', 'compose']
         for name in files:
@@ -53,3 +54,17 @@ def test_base_public_restart_keeps_worker_queue(tmp_path):
     assert studio_queue(public) != queue(public)
     assert public['environment']['STUDIO_REPORTS_QUEUE_DIR'] == '/app/studio-reports/queue'
     assert not any(m['target'] == '/app/studio-reports/data' for m in public['volumes'])
+    treasury = config('docker-compose.studio-treasury.yml')
+    assert treasury['name'] == 'roo-studio-treasury'
+    private = treasury['services']['treasury']
+    def treasury_queue(service):
+        return next(m['source'] for m in service['volumes'] if m['target'] == '/app/studio-treasury/queue')
+    assert treasury_queue(public) == treasury_queue(private)
+    assert public['environment']['STUDIO_TREASURY_QUEUE_DIR'] == '/app/studio-treasury/queue'
+    assert not any(m['target'] == '/app/timesheets/data' for m in public['volumes'])
+    finals = next(m for m in private['volumes'] if m['target'] == '/app/timesheets/data')
+    assert finals['read_only'] is True
+    assert treasury['volumes'][finals['source']]['name'] == 'roo-timesheets_timesheet-data'
+    assert treasury['volumes'][finals['source']]['external'] is True
+    assert 'STUDIO_TREASURY_KEY' not in public.get('environment', {})
+    assert private['command'] == ['python', '-m', 'roo.studio_treasury_worker']

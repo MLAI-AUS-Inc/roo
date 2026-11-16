@@ -43,8 +43,14 @@ private worker, which owns `.env.treasury` and its separate backend key. The
 public service receives neither that key nor the sealed invoice directory.
 
 The private worker runs `python -m roo.studio_treasury_worker --env-file
-.env.treasury`. `--once` is useful for an operator tick. The optional Compose
-overlay mounts the timesheet final artifacts read-only. Existing member invoice
+.env.treasury`. `--once` is useful for an operator tick. Under Compose, the
+environment comes from the private `env_file`, so no command-line file is needed.
+Use `docker compose -f infra/docker-compose.studio-treasury.yml up -d --build`
+from the repository root after configuring that private environment. Its separate
+project survives normal Public Roo restarts. The base public profile and private
+worker share only the persistent treasury queue. The existing
+`roo-timesheets_timesheet-data` volume supplies final invoice artifacts read-only
+to the worker; it is never mounted in Public Roo. Existing member invoice
 commands and sealed PDFs retain their existing paths and behavior.
 
 The queue preserves completed backend results before Slack delivery. A `sending`
