@@ -967,6 +967,55 @@ async def _handle_meeting_room_text_choice(
     return True
 
 
+_BRIDGE_REFUSAL_REPLIES = {
+    "bridge_actor_slack_unlinked": (
+        "I can't act on this one yet. Requests sent from MLAI Chat need a Slack "
+        "account connected in MLAI Chat settings. To book coworking, use the "
+        "*Book today* button in MLAI Chat, which works without Slack."
+    ),
+    "bridge_actor_consent_required": (
+        "I can't act on this one yet. Turn on AI sharing in MLAI Chat settings, "
+        "then send it again."
+    ),
+}
+
+
+async def _explain_bridge_refusal(event: dict[str, Any], code: str, settings: Settings) -> bool:
+    """Tell a verified Chat sender, once per message, why Roo cannot act.
+
+    Only called for refusals the backend issues for a genuine Chat delivery.
+    Runs no skill, model call or backend write, mentions nobody and never
+    echoes the sender's text. A stable client_msg_id makes redelivery a no-op.
+    """
+    text = _BRIDGE_REFUSAL_REPLIES.get(code)
+    channel_id = str(event.get("channel") or "")
+    message_ts = str(event.get("ts") or "")
+    if (
+        not text
+        or not channel_id
+        or not message_ts
+        or getattr(settings, "ROO_SURFACE", "public") != "public"
+        or not getattr(settings, "BRIDGE_REFUSAL_REPLIES_ENABLED", True)
+    ):
+        return False
+    try:
+        response = await asyncio.to_thread(
+            post_message,
+            channel=channel_id,
+            text=text,
+            thread_ts=str(event.get("thread_ts") or message_ts),
+            client_msg_id=str(uuid5(NAMESPACE_URL, f"roo-bridge-refused:{channel_id}:{message_ts}")),
+            redact_logs=True,
+        )
+    except Exception as exc:
+        slack_error = getattr(exc, "response", None)
+        if slack_error is not None and slack_error.get("error") == "duplicate_message":
+            return True
+        print(f"BRIDGE_REFUSAL_REPLY_FAILED code={code} error_type={exc.__class__.__name__}")
+        return False
+    return bool(response and response.get("ok"))
+
+
 async def _handle_app_mention_with_room_choice(
     event: dict[str, Any],
     *,
@@ -974,13 +1023,17 @@ async def _handle_app_mention_with_room_choice(
 ) -> Optional[dict[str, Any]]:
     settings = get_settings()
     if event.get("bot_id") or event.get("app_id") or event.get("subtype") == "bot_message":
-        from .bridge_mentions import resolve_bridge_mention
+        from .bridge_mentions import BridgeMentionRefused, resolve_bridge_mention
 
-        event = await resolve_bridge_mention(
-            event, slack_team_id=slack_team_id,
-            surface=getattr(settings, "ROO_SURFACE", "public"),
-            backend=_make_mlai_backend_client(),
-        )
+        try:
+            event = await resolve_bridge_mention(
+                event, slack_team_id=slack_team_id,
+                surface=getattr(settings, "ROO_SURFACE", "public"),
+                backend=_make_mlai_backend_client(),
+            )
+        except BridgeMentionRefused as refused:
+            await _explain_bridge_refusal(event, refused.code, settings)
+            return None
         if event is None or not _is_slack_context_allowed(
             settings, channel_id=event.get("channel"), user_id=event.get("user"),
             channel_type=event.get("channel_type"),

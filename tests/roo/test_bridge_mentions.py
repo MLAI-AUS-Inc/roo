@@ -1,10 +1,10 @@
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
 import pytest
 
-from roo.bridge_mentions import resolve_bridge_mention, VerifiedBridgeContext
+from roo.bridge_mentions import BridgeMentionRefused, resolve_bridge_mention, VerifiedBridgeContext
 from roo.clients.mlai_backend import MLAIBackendClient, MLAIBackendUnavailableError
 
 EVENT = {"type": "app_mention", "user": "UBRIDGE", "bot_id": "BBRIDGE",
@@ -145,11 +145,117 @@ async def test_pending_and_misconfigured_lookup_remain_retryable(status, body):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status,error", [(404, "unknown_bridge_sender"), (403, "bridge_actor_unverified"),
-    (403, "bridge_actor_consent_required"), (403, "roo_not_explicitly_mentioned"), (403, "invalid_native_mentions")])
+    (403, "roo_not_explicitly_mentioned"), (403, "invalid_native_mentions"),
+    (400, "invalid_bridge_context"), (403, "bridge_context_revoked"),
+    # Explainable codes on an unexpected status stay silent too.
+    (404, "bridge_actor_slack_unlinked"), (400, "bridge_actor_consent_required")])
 async def test_unauthorized_bridge_mentions_do_not_invoke_roo(status, error):
     backend = AsyncMock()
     backend.resolve_chat_bridge_actor.return_value = httpx.Response(status, json={"error": error})
     assert await resolve(backend) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", ["bridge_actor_slack_unlinked", "bridge_actor_consent_required"])
+async def test_member_fixable_refusals_are_reported_not_resolved(error, caplog):
+    backend = AsyncMock()
+    backend.resolve_chat_bridge_actor.return_value = httpx.Response(403, json={"error": error})
+    with caplog.at_level("WARNING", logger="roo.bridge_mentions"):
+        with pytest.raises(BridgeMentionRefused) as refused:
+            await resolve(backend)
+    assert refused.value.code == error
+    assert f"BRIDGE_MENTION_REFUSED code={error} channel=CMEMES" in caplog.text
+
+
+def _refusal_patches(main, backend, post, settings=None):
+    return (
+        patch.object(main, "get_settings", return_value=settings or SimpleNamespace(ROO_SURFACE="public")),
+        patch.object(main, "_make_mlai_backend_client", return_value=backend),
+        patch.object(main, "_handle_meeting_room_text_choice", new_callable=AsyncMock, return_value=False),
+        patch.object(main, "_handle_mention", new_callable=AsyncMock),
+        patch.object(main, "get_agent", side_effect=AssertionError("no agent for a refused sender")),
+        patch.object(main, "post_message", post),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error,phrase", [
+    ("bridge_actor_slack_unlinked", "Slack account connected in MLAI Chat settings"),
+    ("bridge_actor_consent_required", "Turn on AI sharing in MLAI Chat settings"),
+])
+async def test_refused_chat_sender_gets_one_threaded_explanation(error, phrase):
+    from contextlib import ExitStack
+    from uuid import NAMESPACE_URL, uuid5
+    from roo import main
+
+    backend = AsyncMock()
+    backend.resolve_chat_bridge_actor.return_value = httpx.Response(403, json={"error": error})
+    post = Mock(return_value={"ok": True})
+    with ExitStack() as stack:
+        mocks = [stack.enter_context(p) for p in _refusal_patches(main, backend, post)]
+        assert await main._handle_app_mention_with_room_choice(EVENT, slack_team_id="TMLAI") is None
+        mocks[3].assert_not_called()
+    kwargs = post.call_args.kwargs
+    assert kwargs["channel"] == "CMEMES"
+    assert kwargs["thread_ts"] == EVENT["thread_ts"]
+    assert phrase in kwargs["text"]
+    assert "<@" not in kwargs["text"] and "999" not in kwargs["text"]
+    assert kwargs["client_msg_id"] == str(uuid5(NAMESPACE_URL, f"roo-bridge-refused:CMEMES:{EVENT['ts']}"))
+
+
+@pytest.mark.asyncio
+async def test_refusal_reply_is_idempotent_and_never_raises():
+    from contextlib import ExitStack
+    from roo import main
+
+    class Duplicate(Exception):
+        response = {"error": "duplicate_message"}
+
+    backend = AsyncMock()
+    backend.resolve_chat_bridge_actor.return_value = httpx.Response(
+        403, json={"error": "bridge_actor_slack_unlinked"})
+    for failure in (Duplicate(), RuntimeError("slack down")):
+        post = Mock(side_effect=failure)
+        with ExitStack() as stack:
+            for p in _refusal_patches(main, backend, post):
+                stack.enter_context(p)
+            assert await main._handle_app_mention_with_room_choice(EVENT, slack_team_id="TMLAI") is None
+        post.assert_called_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("settings", [
+    SimpleNamespace(ROO_SURFACE="public", BRIDGE_REFUSAL_REPLIES_ENABLED=False),
+])
+async def test_refusal_reply_kill_switch_restores_silence(settings):
+    from contextlib import ExitStack
+    from roo import main
+
+    backend = AsyncMock()
+    backend.resolve_chat_bridge_actor.return_value = httpx.Response(
+        403, json={"error": "bridge_actor_slack_unlinked"})
+    post = Mock()
+    with ExitStack() as stack:
+        for p in _refusal_patches(main, backend, post, settings):
+            stack.enter_context(p)
+        assert await main._handle_app_mention_with_room_choice(EVENT, slack_team_id="TMLAI") is None
+    post.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_silent_refusals_post_nothing():
+    from contextlib import ExitStack
+    from roo import main
+
+    backend = AsyncMock()
+    backend.resolve_chat_bridge_actor.return_value = httpx.Response(
+        403, json={"error": "bridge_actor_unverified"})
+    post = Mock()
+    with ExitStack() as stack:
+        for p in _refusal_patches(main, backend, post):
+            stack.enter_context(p)
+        assert await main._handle_app_mention_with_room_choice(EVENT, slack_team_id="TMLAI") is None
+    post.assert_not_called()
 
 
 @pytest.mark.asyncio
