@@ -4,6 +4,17 @@ A short record of repository cleanup, testing, security, and delivery changes.
 Each entry states what changed and how it was checked. Findings without fixes
 are labelled as such.
 
+## 2026-11-17
+
+- Admins can check in MLAI Chat members who have no linked Slack account.
+  Bridged coworking check-ins take targets only from the backend-verified
+  recipients. A recipient without a Slack ID is booked by MLAI profile through
+  the backend, which re-checks the Points Admin role. Model-extracted names are
+  no longer treated as Slack IDs: previously "book in @Isaak" queued an endless
+  retry for `slack_user_id="Isaak Eriksson"`. Backend profile booking deploys
+  first. 72 coworking, 54 bridge-mention, 11 admin-batch, 158 points/internal
+  and 71 skill-contract tests pass offline.
+
 ## 2026-11-16
 
 - Standard-price coworking confirmations link to the Pulse update editor in MLAI
