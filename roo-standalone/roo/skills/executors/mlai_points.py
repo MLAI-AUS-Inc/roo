@@ -2509,7 +2509,12 @@ class MlaiPointsExecutor(BackendErrors, PromptExecutor):
                 if raw_target in (None, ""):
                     continue
                 cleaned = re.sub(r"[<@>]", "", str(raw_target)).strip()
-                if cleaned and (not bot_id or cleaned != bot_id):
+                # Model-extracted values can be display names ("Isaak Eriksson").
+                # Only a real Slack member ID may become a booking target.
+                if (
+                    re.fullmatch(r"[UW][A-Z0-9]{2,}", cleaned)
+                    and (not bot_id or cleaned != bot_id)
+                ):
                     target_slack_ids.append(cleaned)
 
         deduped: list[str] = []
@@ -2517,6 +2522,164 @@ class MlaiPointsExecutor(BackendErrors, PromptExecutor):
             if target not in deduped:
                 deduped.append(target)
         return deduped
+
+
+    def _coworking_checkin_targets(
+        self,
+        text: str,
+        params: dict,
+        *,
+        bot_id: Optional[str],
+        verified_bridge_context=None,
+    ) -> tuple[list[str], list[Any]]:
+        """Return (Slack IDs, Slack-less MLAI recipients) to check in.
+
+        For MLAI Chat messages the backend-verified recipients are the only
+        authority: model-extracted parameters are never used, and a recipient
+        without a linked Slack account is booked by MLAI profile instead.
+        """
+        recipients = getattr(verified_bridge_context, "recipient_targets", None)
+        if verified_bridge_context is None or recipients is None:
+            return self._extract_coworking_checkin_targets(text, params, bot_id=bot_id), []
+        slack_ids: list[str] = []
+        for mentioned in re.findall(r"<@([UW][A-Z0-9]+)>", str(text or "")):
+            if mentioned != bot_id and mentioned not in slack_ids:
+                slack_ids.append(mentioned)
+        profiles: list[Any] = []
+        for recipient in recipients:
+            if recipient.slack_user_id:
+                if recipient.slack_user_id not in slack_ids:
+                    slack_ids.append(recipient.slack_user_id)
+            elif all(p.profile_id != recipient.profile_id for p in profiles):
+                profiles.append(recipient)
+        return slack_ids, profiles
+
+
+    async def _book_coworking_for_profile(
+        self,
+        *,
+        client,
+        admin_user_id: str,
+        recipient,
+        booking_date: str,
+        channel_id: Optional[str],
+    ) -> str:
+        """Synchronously check in a member who has no linked Slack account.
+
+        The backend operation receipt makes a retried request idempotent, so a
+        failure is reported for the admin to retry rather than queued.
+        """
+        name = str(recipient.display_name or "that member").strip() or "that member"
+        operation_id = str(uuid5(
+            NAMESPACE_URL,
+            f"roo:coworking-profile:{admin_user_id}:{recipient.profile_id}:{booking_date}",
+        ))
+        try:
+            result = await client.book_coworking_for_profile(
+                admin_user_id,
+                recipient.profile_id,
+                booking_date,
+                channel_id,
+                operation_id=operation_id,
+            )
+        except httpx.HTTPStatusError as exc:
+            if 400 <= exc.response.status_code < 500:
+                detail = self._redact_points_balance_error(
+                    self._extract_http_error_detail(exc) or "The booking request was rejected."
+                )
+                if exc.response.status_code in {401, 403}:
+                    detail = "Only full Points Admins can check people in for coworking."
+                return f"🛑 I couldn't check {name} in for **{booking_date}**: {detail}"
+            return (
+                f"I couldn't confirm {name}'s coworking booking for **{booking_date}** "
+                "because MLAI backend had a problem. Please ask me again in a moment. "
+                "I won't double-book the same day."
+            )
+        except MLAIBackendUnavailableError:
+            return (
+                f"I couldn't confirm {name}'s coworking booking for **{booking_date}** "
+                "because MLAI backend timed out. Please ask me again in a moment. "
+                "I won't double-book the same day."
+            )
+        if result.get("already_booked"):
+            return f"{name} is already booked in for **{booking_date}** at the coworking space. ✅"
+        cost = result.get("points_cost") or 0
+        point_word = "point" if cost == 1 else "points"
+        return (
+            f"You beauty! 🎉\n\n"
+            f"Checked {name} in for **{booking_date}** at the coworking space.\n"
+            f"Cost: {cost} {point_word}\n\n"
+            f"{NO_FOOD_REMINDER}"
+        )
+
+
+    async def _admin_coworking_checkin(
+        self,
+        *,
+        client,
+        user_id: str,
+        target_slack_ids: list[str],
+        profile_targets: list[Any],
+        booking_date: str,
+        channel_id: Optional[str],
+        thread_ts: Optional[str],
+    ) -> Any:
+        """Check tagged members in as a full Points Admin."""
+        admin_details = await client.get_admin_details(user_id)
+        if not self._is_full_points_admin_details(admin_details):
+            return self._full_points_admin_denial(admin_details, "check people in for coworking")
+
+        profile_messages = [
+            await self._book_coworking_for_profile(
+                client=client,
+                admin_user_id=user_id,
+                recipient=recipient,
+                booking_date=booking_date,
+                channel_id=channel_id,
+            )
+            for recipient in profile_targets
+        ]
+        if not target_slack_ids:
+            return "\n\n".join(profile_messages)
+
+        if len(target_slack_ids) > 1:
+            slack_result = await self._book_coworking_many_for_admin(
+                client=client,
+                admin_user_id=user_id,
+                target_user_ids=target_slack_ids,
+                booking_date=booking_date,
+                channel_id=channel_id,
+                thread_ts=thread_ts,
+            )
+        else:
+            try:
+                slack_result = await self._book_coworking_with_intent(
+                    client=client,
+                    target_user_id=target_slack_ids[0],
+                    requested_by_user_id=user_id,
+                    booking_date=booking_date,
+                    channel_id=channel_id,
+                    thread_ts=thread_ts,
+                    admin_checkin=True,
+                )
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code != 400:
+                    raise
+                slack_result = await self._format_admin_coworking_bad_request(
+                    client=client,
+                    target_user_id=target_slack_ids[0],
+                    exc=exc,
+                )
+        if not profile_messages:
+            return slack_result
+        extra = "\n\n".join(profile_messages)
+        if isinstance(slack_result, str):
+            return f"{slack_result}\n\n{extra}"
+        if isinstance(slack_result, dict) and not slack_result.get("suppress_post"):
+            message = str(slack_result.get("message") or "")
+            return {**slack_result, "message": f"{message}\n\n{extra}" if message else extra}
+        # The Slack-ID result was already delivered; reply with the rest.
+        return extra
 
 
     def _coworking_booking_already_queued_message(
@@ -4051,49 +4214,24 @@ class MlaiPointsExecutor(BackendErrors, PromptExecutor):
             except Exception:
                 bot_id = None
 
-            target_slack_ids = self._extract_coworking_checkin_targets(
+            target_slack_ids, profile_targets = self._coworking_checkin_targets(
                 text,
                 params,
                 bot_id=bot_id,
+                verified_bridge_context=verified_bridge_context,
             )
-            if not target_slack_ids:
+            if not target_slack_ids and not profile_targets:
                 return "Who should I check in? Mention one or more users, like `check @Jasmine @Lee in today`."
 
-            admin_details = await client.get_admin_details(user_id)
-            if not self._is_full_points_admin_details(admin_details):
-                return self._full_points_admin_denial(admin_details, "check people in for coworking")
-
-            booking_date = params["date"]
-
-            if len(target_slack_ids) > 1:
-                return await self._book_coworking_many_for_admin(
-                    client=client,
-                    admin_user_id=user_id,
-                    target_user_ids=target_slack_ids,
-                    booking_date=booking_date,
-                    channel_id=channel_id,
-                    thread_ts=thread_ts,
-                )
-
-            target_user_id = target_slack_ids[0]
-            try:
-                return await self._book_coworking_with_intent(
-                    client=client,
-                    target_user_id=target_user_id,
-                    requested_by_user_id=user_id,
-                    booking_date=booking_date,
-                    channel_id=channel_id,
-                    thread_ts=thread_ts,
-                    admin_checkin=True,
-                )
-            except httpx.HTTPStatusError as exc:
-                if exc.response.status_code == 400:
-                    return await self._format_admin_coworking_bad_request(
-                        client=client,
-                        target_user_id=target_user_id,
-                        exc=exc,
-                    )
-                raise
+            return await self._admin_coworking_checkin(
+                client=client,
+                user_id=user_id,
+                target_slack_ids=target_slack_ids,
+                profile_targets=profile_targets,
+                booking_date=params["date"],
+                channel_id=channel_id,
+                thread_ts=thread_ts,
+            )
 
         elif action == "check_coworking":
             check_date = params.get("date")
@@ -4121,47 +4259,22 @@ class MlaiPointsExecutor(BackendErrors, PromptExecutor):
                 bot_id = get_bot_user_id()
             except Exception:
                 bot_id = None
-            target_slack_ids = self._extract_coworking_checkin_targets(
+            target_slack_ids, profile_targets = self._coworking_checkin_targets(
                 text,
                 params,
                 bot_id=bot_id,
+                verified_bridge_context=verified_bridge_context,
             )
-            if target_slack_ids:
-                admin_details = await client.get_admin_details(user_id)
-                if not self._is_full_points_admin_details(admin_details):
-                    return self._full_points_admin_denial(admin_details, "check people in for coworking")
-
-                booking_date = params["date"]
-
-                if len(target_slack_ids) > 1:
-                    return await self._book_coworking_many_for_admin(
-                        client=client,
-                        admin_user_id=user_id,
-                        target_user_ids=target_slack_ids,
-                        booking_date=booking_date,
-                        channel_id=channel_id,
-                        thread_ts=thread_ts,
-                    )
-
-                target_user_id = target_slack_ids[0]
-                try:
-                    return await self._book_coworking_with_intent(
-                        client=client,
-                        target_user_id=target_user_id,
-                        requested_by_user_id=user_id,
-                        booking_date=booking_date,
-                        channel_id=channel_id,
-                        thread_ts=thread_ts,
-                        admin_checkin=True,
-                    )
-                except httpx.HTTPStatusError as exc:
-                    if exc.response.status_code == 400:
-                        return await self._format_admin_coworking_bad_request(
-                            client=client,
-                            target_user_id=target_user_id,
-                            exc=exc,
-                        )
-                    raise
+            if target_slack_ids or profile_targets:
+                return await self._admin_coworking_checkin(
+                    client=client,
+                    user_id=user_id,
+                    target_slack_ids=target_slack_ids,
+                    profile_targets=profile_targets,
+                    booking_date=params["date"],
+                    channel_id=channel_id,
+                    thread_ts=thread_ts,
+                )
 
             booking_date = params["date"]
             return await self._book_coworking_with_intent(

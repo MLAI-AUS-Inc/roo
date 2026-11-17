@@ -2606,6 +2606,47 @@ class MLAIBackendClient:
             expected_date=booking_date,
         )
 
+    async def book_coworking_for_profile(
+        self,
+        admin_slack_user_id: str,
+        target_profile_id: str,
+        booking_date: str,
+        slack_channel_id: Optional[str] = None,
+        *,
+        operation_id: Optional[str] = None,
+    ) -> dict:
+        """Admin check-in for an MLAI member who has no linked Slack account.
+
+        The backend re-checks the admin's Points Admin role for this path.
+        """
+        payload = {
+            "admin_slack_user_id": admin_slack_user_id,
+            "target_profile_id": target_profile_id,
+            "date": booking_date,
+        }
+        if operation_id:
+            payload["operation_id"] = str(operation_id).strip()
+        if slack_channel_id:
+            payload["slack_channel_id"] = slack_channel_id
+        response = await self._request(
+            "POST",
+            f"{self._points_base}/coworking/book/",
+            json=payload,
+            timeout=15.0,
+            transport_retries=1,
+            retry_backoff_seconds=0.5,
+            circuit_breaker=True,
+        )
+        response.raise_for_status()
+        try:
+            result = response.json()
+        except ValueError as exc:
+            raise MLAIBackendUnavailableError(
+                "MLAI backend returned invalid JSON after coworking booking",
+                reason_code="invalid_backend_response",
+            ) from exc
+        return validate_coworking_booking_result(result, expected_date=booking_date)
+
     async def book_coworking_many(
         self,
         admin_slack_user_id: str,

@@ -4319,3 +4319,187 @@ async def test_book_coworking_omits_link_nudge_when_accounts_are_linked(
     assert "may qualify for 4-point coworking" in result["message"]
     assert "https://chat.mlai.au/my-startup/updates?view=new" in result["message"]
     assert "@Roo link" not in result["message"]
+
+
+class FakeProfileCheckinCoworkingClient(FakeAdminCheckinCoworkingClient):
+    def __init__(self, *, profile_exception=None, profile_result=None, **kwargs):
+        super().__init__(**kwargs)
+        self.profile_exception = profile_exception
+        self.profile_result = profile_result
+        self.profile_args = []
+
+    async def book_coworking_for_profile(
+        self, admin_slack_user_id, target_profile_id, booking_date,
+        slack_channel_id=None, *, operation_id=None,
+    ):
+        self.profile_args.append(
+            (admin_slack_user_id, target_profile_id, booking_date, slack_channel_id, operation_id)
+        )
+        if self.profile_exception:
+            raise self.profile_exception
+        return self.profile_result or complete_coworking_booking_result(booking_date, cost=5)
+
+
+def _bridge_context(*recipients):
+    from roo.bridge_mentions import BridgeRecipient, VerifiedBridgeContext
+
+    return VerifiedBridgeContext(
+        source_event_id="a" * 64,
+        actor_profile_id="11111111-1111-1111-1111-111111111111",
+        posting_mode="member",
+        recipient_targets=tuple(BridgeRecipient(*recipient) for recipient in recipients),
+    )
+
+
+ISAAK_PROFILE = "22222222-2222-2222-2222-222222222222"
+
+
+@pytest.mark.asyncio
+async def test_coworking_bridged_admin_checkin_books_slackless_member_by_profile(tmp_path, monkeypatch):
+    store = coworking_intent_store(tmp_path / "intents.db")
+    client = FakeProfileCheckinCoworkingClient()
+    executor = SkillExecutor()
+    monkeypatch.setattr("roo.utils.get_current_date", lambda: date(2026, 11, 17))
+    patch_skill_dependency(monkeypatch, 'get_coworking_intent_store', lambda: store)
+    monkeypatch.setattr(slack_client_module, "get_bot_user_id", lambda: "UROO")
+
+    result = await executor._handle_points_action(
+        client=client,
+        action="book_coworking",
+        # The model extracted a display name; it must never be used as a Slack ID.
+        params={"action": "book_coworking", "target_users": ["Isaak Eriksson"]},
+        text="<@UROO> book in @Isaak Eriksson (Ask Avi)",
+        user_id="UADMIN",
+        channel_id="C123",
+        thread_ts="111.222",
+        skill=SimpleNamespace(name="mlai-points"),
+        verified_bridge_context=_bridge_context(
+            (ISAAK_PROFILE, "Isaak Eriksson", ("Isaak Eriksson (Ask Avi)",), None),
+        ),
+    )
+
+    assert "Checked Isaak Eriksson in for **2026-11-17**" in result
+    assert "<@" not in result
+    assert client.book_args is None
+    admin, profile, day, channel, operation_id = client.profile_args[0]
+    assert (admin, profile, day, channel) == ("UADMIN", ISAAK_PROFILE, "2026-11-17", "C123")
+    assert operation_id
+    assert store.counts_by_status() == {}
+
+
+@pytest.mark.asyncio
+async def test_coworking_bridged_admin_checkin_prefers_recipient_slack_alias(tmp_path, monkeypatch):
+    store = coworking_intent_store(tmp_path / "intents.db")
+    client = FakeProfileCheckinCoworkingClient()
+    executor = SkillExecutor()
+    monkeypatch.setattr("roo.utils.get_current_date", lambda: date(2026, 11, 17))
+    patch_skill_dependency(monkeypatch, 'get_coworking_intent_store', lambda: store)
+    patch_skill_dependency(monkeypatch, 'send_dm', lambda *args, **kwargs: {"ok": True})
+    monkeypatch.setattr(slack_client_module, "get_bot_user_id", lambda: "UROO")
+
+    result = await executor._handle_points_action(
+        client=client,
+        action="admin_checkin_coworking",
+        params={},
+        text="<@UROO> book in @Lee",
+        user_id="UADMIN",
+        channel_id="C123",
+        thread_ts="111.222",
+        skill=SimpleNamespace(name="mlai-points"),
+        verified_bridge_context=_bridge_context(
+            (ISAAK_PROFILE, "Lee", ("Lee",), "UTARGET"),
+        ),
+    )
+
+    assert "Checked <@UTARGET> in" in result["message"]
+    assert client.book_args[0] == "UTARGET"
+    assert client.profile_args == []
+
+
+@pytest.mark.asyncio
+async def test_coworking_bridged_profile_checkin_requires_full_admin(monkeypatch):
+    client = FakeProfileCheckinCoworkingClient(role="partner")
+    executor = SkillExecutor()
+    monkeypatch.setattr("roo.utils.get_current_date", lambda: date(2026, 11, 17))
+    monkeypatch.setattr(slack_client_module, "get_bot_user_id", lambda: "UROO")
+
+    result = await executor._handle_points_action(
+        client=client,
+        action="book_coworking",
+        params={},
+        text="<@UROO> book in @Isaak",
+        user_id="UPARTNER",
+        channel_id="C123",
+        thread_ts="111.222",
+        skill=SimpleNamespace(name="mlai-points"),
+        verified_bridge_context=_bridge_context(
+            (ISAAK_PROFILE, "Isaak Eriksson", ("Isaak",), None),
+        ),
+    )
+
+    assert "partner admins can only generate coworking reports" in result
+    assert client.profile_args == []
+
+
+@pytest.mark.asyncio
+async def test_coworking_bridged_profile_checkin_reports_backend_rejection(monkeypatch):
+    request = httpx.Request("POST", "https://backend.test/api/v1/points/coworking/book/")
+    response = httpx.Response(
+        400, request=request, json={"error": "Coworking is fully booked for 2026-11-17"},
+    )
+    client = FakeProfileCheckinCoworkingClient(
+        profile_exception=httpx.HTTPStatusError("bad", request=request, response=response),
+    )
+    executor = SkillExecutor()
+    monkeypatch.setattr("roo.utils.get_current_date", lambda: date(2026, 11, 17))
+    monkeypatch.setattr(slack_client_module, "get_bot_user_id", lambda: "UROO")
+
+    result = await executor._handle_points_action(
+        client=client,
+        action="book_coworking",
+        params={},
+        text="<@UROO> book in @Isaak",
+        user_id="UADMIN",
+        channel_id="C123",
+        thread_ts="111.222",
+        skill=SimpleNamespace(name="mlai-points"),
+        verified_bridge_context=_bridge_context(
+            (ISAAK_PROFILE, "Isaak Eriksson", ("Isaak",), None),
+        ),
+    )
+
+    assert result.startswith("🛑 I couldn't check Isaak Eriksson in for **2026-11-17**")
+    assert "fully booked" in result
+
+
+@pytest.mark.asyncio
+async def test_coworking_bridged_self_booking_ignores_model_extracted_names(tmp_path, monkeypatch):
+    store = coworking_intent_store(tmp_path / "intents.db")
+    client = FakeProfileCheckinCoworkingClient()
+    executor = SkillExecutor()
+    monkeypatch.setattr("roo.utils.get_current_date", lambda: date(2026, 11, 17))
+    patch_skill_dependency(monkeypatch, 'get_coworking_intent_store', lambda: store)
+    monkeypatch.setattr(slack_client_module, "get_bot_user_id", lambda: "UROO")
+
+    await executor._handle_points_action(
+        client=client,
+        action="book_coworking",
+        params={"action": "book_coworking", "target_users": ["me"]},
+        text="<@UROO> book me in",
+        user_id="UMEMBER",
+        channel_id="C123",
+        thread_ts="111.222",
+        skill=SimpleNamespace(name="mlai-points"),
+        verified_bridge_context=_bridge_context(),
+    )
+
+    assert client.admin_checks == []
+    assert client.book_args == ("UMEMBER", "2026-11-17", "C123")
+
+
+def test_coworking_checkin_targets_drop_display_names_from_model_params():
+    executor = SkillExecutor()
+    targets = executor._extract_coworking_checkin_targets(
+        "book Isaak in", {"target_users": ["Isaak Eriksson", "<@ULEE>"]}, bot_id="UROO",
+    )
+    assert targets == ["ULEE"]
