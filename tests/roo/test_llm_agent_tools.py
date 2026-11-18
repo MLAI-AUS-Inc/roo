@@ -297,3 +297,26 @@ def test_malformed_tool_exception_never_contains_raw_arguments_or_name():
         ))
     assert str(captured.value) == "ward_tool_arguments_invalid_json"
     assert raw_secret not in str(captured.value)
+
+
+def test_gpt6_router_selects_one_tool_without_executing_it():
+    response = SimpleNamespace(model="gpt-6.2-sol", output=[
+        SimpleNamespace(type="reasoning"),
+        SimpleNamespace(type="function_call", name="route", arguments='{"action":"lookup"}'),
+    ])
+    fake = FakeResponses([response])
+    client = OpenAIClient.__new__(OpenAIClient)
+    client.model = "gpt-6.2-sol"
+    client.client = SimpleNamespace(responses=fake)
+    schema = {"type": "object", "properties": {"action": {"type": "string"}}}
+    messages = [{"role": "user", "content": "lookup"}]
+    result = _run(client.chat_tools(messages, [
+        {"type": "function", "function": {"name": "route", "parameters": schema}},
+    ], reasoning_effort="medium", safety_identifier="example"))
+    assert (result.name, result.arguments) == ("route", {"action": "lookup"})
+    assert fake.calls == [{
+        "model": "gpt-6.2-sol", "input": messages, "store": False,
+        "tools": [{"type": "function", "name": "route", "parameters": schema, "strict": False}],
+        "tool_choice": "required", "parallel_tool_calls": False, "max_output_tokens": 4096,
+        "reasoning": {"effort": "medium"}, "safety_identifier": "example",
+    }]

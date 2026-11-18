@@ -186,7 +186,7 @@ async def test_sizing_uses_dedicated_openai_responses_configuration(monkeypatch)
     assert result["c1"].effort_label == "Small (S)"
     _, response_format, kwargs = calls[0]
     assert response_format is StudioEffortAssessmentBatch
-    assert kwargs["model"] == "gpt-5.6-sol"
+    assert kwargs["model"] == "gpt-6.2-sol"
     assert kwargs["reasoning_effort"] == "xhigh"
     assert kwargs["store"] is False
     assert "untrusted data" in calls[0][0][-1]["content"]
@@ -567,7 +567,7 @@ async def test_new_issue_sizing_runs_for_non_studio_project(monkeypatch):
     )
 
     assert prepared["effort_label_id"] == "effort-small"
-    assert prepared["effort_assessment"]["model"] == "gpt-5.6-sol"
+    assert prepared["effort_assessment"]["model"] == "gpt-6.2-sol"
     assert prepared["effort_assessment"]["rubric_version"] == "project-effort-v2"
 
 
@@ -708,7 +708,7 @@ async def test_project_backfill_builds_no_write_preview_with_full_context(monkey
     )
     assert len(created_payloads) == 1
     assert created_payloads[0]["items"][0]["issue_id"] == "issue-open"
-    assert created_payloads[0]["model"] == "gpt-5.6-sol"
+    assert created_payloads[0]["model"] == "gpt-6.2-sol"
 
 
 @pytest.mark.asyncio

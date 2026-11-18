@@ -15,7 +15,7 @@ from .llm import ToolCallParseError, get_llm_client
 
 logger = logging.getLogger(__name__)
 
-LINEAR_SKILL_MODEL = "gpt-5.6-sol"
+LINEAR_SKILL_MODEL = "gpt-6.2-sol"
 
 LinearReasoningEffort = Literal["low", "medium", "high", "xhigh", "max"]
 LinearInferenceStage = Literal[

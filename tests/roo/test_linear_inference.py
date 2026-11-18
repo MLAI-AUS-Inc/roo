@@ -135,7 +135,7 @@ async def test_linear_gateway_always_uses_exact_sol_model(monkeypatch):
 
     assert result.value.value == "ok"
     assert providers == ["openai"]
-    assert calls[0]["model"] == LINEAR_SKILL_MODEL == "gpt-5.6-sol"
+    assert calls[0]["model"] == LINEAR_SKILL_MODEL == "gpt-6.2-sol"
     assert calls[0]["reasoning_effort"] == "low"
     assert calls[0]["timeout"] == 30.0
     assert calls[0]["max_retries"] == 0
@@ -222,8 +222,8 @@ async def test_studio_missing_output_retries_with_less_reasoning_and_more_headro
     assert result.value.value == "recovered"
     assert result.attempts == 2
     assert [call["model"] for call in calls] == [
-        "gpt-5.6-sol",
-        "gpt-5.6-sol",
+        "gpt-6.2-sol",
+        "gpt-6.2-sol",
     ]
     assert [call["reasoning_effort"] for call in calls] == ["xhigh", "high"]
     assert [call["max_output_tokens"] for call in calls] == [16_000, 24_000]
@@ -274,7 +274,7 @@ async def test_linear_gateway_surfaces_timeout_without_validation_escalation(
         )
 
     assert len(calls) == 1
-    assert calls[0]["model"] == LINEAR_SKILL_MODEL == "gpt-5.6-sol"
+    assert calls[0]["model"] == LINEAR_SKILL_MODEL == "gpt-6.2-sol"
     assert calls[0]["reasoning_effort"] == "medium"
     assert calls[0]["timeout"] == 60.0
     assert calls[0]["max_retries"] == 0

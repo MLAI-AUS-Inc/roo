@@ -23,7 +23,7 @@ from roo.llm import AgentResponse
 
 
 class _FakeLLMResponse:
-    def __init__(self, content: str, model: str = "gpt-5.6-terra"):
+    def __init__(self, content: str, model: str = "gpt-6.1-terra"):
         self.content = content
         self.model = model
         self.usage = {"prompt_tokens": 20, "completion_tokens": 8}
@@ -51,7 +51,7 @@ class _FakeLLMClient:
 
     async def chat(self, messages, **kwargs):
         self.calls.append({"messages": messages, "kwargs": kwargs})
-        if kwargs.get("model") == "gpt-4o-mini":
+        if kwargs.get("model") == "gpt-6-luna":
             return _FakeLLMResponse(self.classifier_json)
         return _FakeLLMResponse(self.reply_text)
 
@@ -64,7 +64,7 @@ class _FakeLLMClient:
             trace.append({"name": name, "arguments": arguments})
         return AgentResponse(
             content=self.reply_text,
-            model=kwargs.get("model", "gpt-5.6-terra"),
+            model=kwargs.get("model", "gpt-6.1-terra"),
             usage={"prompt_tokens": 20, "completion_tokens": 8},
             tool_calls=trace,
         )
@@ -112,7 +112,7 @@ def test_case_loads_and_secrets_stripped_from_prompt(monkeypatch):
     # The narrator user-prompt payload must NOT contain the secret answer.
     assert len(fake.calls) == 1, "one Sash turn must make one Terra request"
     call = fake.calls[0]
-    assert call["kwargs"]["model"] == "gpt-5.6-terra"
+    assert call["kwargs"]["model"] == "gpt-6.1-terra"
     serialized = repr(call["messages"])
     assert "Adrenal Crisis" not in serialized
     assert "acceptable_answers" not in serialized
@@ -297,7 +297,7 @@ def test_local_guess_hint_is_conservative_and_never_calls_a_classifier(monkeypat
     assert result["correct"] is None
     assert result["diagnosis"] is None
     assert len(fake.calls) == 1
-    assert all(call["kwargs"]["model"] != "gpt-4o-mini" for call in fake.calls)
+    assert all(call["kwargs"]["model"] != "gpt-6-luna" for call in fake.calls)
     assert sim_patient.looks_like_diagnosis_guess("is it worse after food?") is False
     assert sim_patient.looks_like_diagnosis_guess("does she have any allergies?") is False
     assert sim_patient.looks_like_diagnosis_guess("what about the cortisol?") is False
@@ -328,7 +328,7 @@ def test_check_guess_tolerates_malformed_case():
 
 def test_nurse_role_skips_classifier_and_never_adjudicates(monkeypatch):
     # Even a blatant guess phrased at the nurse must NOT be classified or
-    # adjudicated — the classifier (gpt-4o-mini) must never be called.
+    # adjudicated — the classifier (gpt-6-luna) must never be called.
     fake = _install_fake(
         monkeypatch,
         '{"is_guess": true, "diagnosis": "adrenal crisis"}',  # would win if consulted
@@ -343,12 +343,12 @@ def test_nurse_role_skips_classifier_and_never_adjudicates(monkeypatch):
     assert result["patient_name"] == sim_patient.NURSE_NAME
     assert result["case_id"] == 1  # same case file as the patient
 
-    classifier_calls = [c for c in fake.calls if c["kwargs"].get("model") == "gpt-4o-mini"]
+    classifier_calls = [c for c in fake.calls if c["kwargs"].get("model") == "gpt-6-luna"]
     assert not classifier_calls, "nurse role must never invoke the guess classifier"
 
     assert fake.calls == []
     assert len(fake.agent_calls) == 1
-    assert fake.agent_calls[0]["kwargs"]["model"] == "gpt-5.6-terra"
+    assert fake.agent_calls[0]["kwargs"]["model"] == "gpt-6.1-terra"
     assert result["response_source"] == "llm"
 
 
@@ -1330,7 +1330,7 @@ def test_case2_historian_quality_reaches_prompt_without_secrets(monkeypatch):
 
     assert result["case_id"] == 2
     assert result["patient_name"] == "Leila Farouk"
-    reply_calls = [c for c in fake.calls if c["kwargs"].get("model") != "gpt-4o-mini"]
+    reply_calls = [c for c in fake.calls if c["kwargs"].get("model") != "gpt-6-luna"]
     assert reply_calls, "expected a narrator reply LLM call"
     user_prompt = reply_calls[0]["messages"][1]["content"]
     # Her historian dial ships with the case file...

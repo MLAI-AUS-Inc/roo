@@ -38,7 +38,7 @@ class ToneOfVoiceExecutor(PromptExecutor):
                 {"role": "user", "content": user_prompt}
             ],
             provider="openai",
-            model="gpt-5.2",
+            model="gpt-6.2-sol",
             max_tokens=8192,
             reasoning_effort="high"
         )

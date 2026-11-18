@@ -64,7 +64,7 @@ This skill turns pasted Slack meeting transcripts, summaries, supported Slack fi
 - Assign new issues to the best matching Linear user.
 - Attach new issues to the best matching Linear project and team.
 - Consolidate paraphrased action items that produce the same deliverable, preserve genuinely separate work, avoid likely duplicate open issues, and make retries idempotent from Slack source evidence.
-- Use the exact `gpt-5.6-sol` model through the OpenAI Responses API for every Linear inference stage.
+- Use the exact `gpt-6.2-sol` model through the OpenAI Responses API for every Linear inference stage.
 - Select model reasoning effort from source length, source count, ambiguity, partial work, dependencies, artifacts, and conflicting context; never derive model effort from the XS/S/M/L/XL task label.
 - Recover a timed-out meeting-note chunk at progressively smaller scope while keeping the overall extraction bounded and creating no partial Linear issues.
 - For every resolved project, estimate remaining effort in bounded batches and apply exactly one compatible XS/S/M/L/XL label to each new non-terminal issue.
@@ -105,7 +105,7 @@ This skill turns pasted Slack meeting transcripts, summaries, supported Slack fi
 10. Select only a team that is both attached to the resolved project and present in Roo's complete accessible-team catalogue. If the project team is absent, stop that item and report that Roo's Linear API key cannot access the team; never substitute the configured default team.
 11. Resolve relative dates from the evidence message in the configured workspace timezone.
 12. Suppress candidates that are already completed or cancelled. Consolidate candidates that share the same action family, object, owner, project, and outcome before effort sizing; do not merge distinct setup, evaluation, implementation, documentation, outreach, or scheduling deliverables merely because their wording overlaps.
-13. For each resolved project, read its bounded project updates, active work, terminal references, related issues, label registry, and labelled precedents. Estimate candidates in bounded groups of three with structured `gpt-5.6-sol` Responses API calls.
+13. For each resolved project, read its bounded project updates, active work, terminal references, related issues, label registry, and labelled precedents. Estimate candidates in bounded groups of three with structured `gpt-6.2-sol` Responses API calls.
 14. Estimate remaining work rather than original scope: XS is up to 15 minutes, S is up to 1 hour, M is up to 2 hours, L is up to 3 hours, and XL is up to 5 hours or has substantial uncertainty. Work over 5 hours is XL and should be split.
 15. Start direct cleanup at `low`, ordinary extraction and source summaries at `medium`, and contextual inference, project synthesis, and effort sizing at `high`. Increase to `xhigh` when deterministic complexity signals warrant it.
 16. Treat each extracted source chunk as one inference source; track total batch chunks separately so a long PDF does not artificially increase every chunk's reasoning effort.

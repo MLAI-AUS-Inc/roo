@@ -118,7 +118,7 @@ def test_extracted_tone_handler_preserves_prompt_and_model(monkeypatch):
     messages = client.chat.call_args.args[0]
     assert messages[0] == {'role': 'system', 'content': 'Original style rules'}
     assert messages[1]['content'].endswith('Actual source')
-    assert client.chat.call_args.kwargs == dict(model='gpt-5.2', max_tokens=8192, reasoning_effort='high')
+    assert client.chat.call_args.kwargs == dict(model='gpt-6.2-sol', max_tokens=8192, reasoning_effort='high')
 
 
 def test_every_current_package_has_explicit_handler_or_event_binding():
