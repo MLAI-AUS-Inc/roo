@@ -122,7 +122,7 @@ class Settings(BaseSettings):
     
     # LLM Providers (at least one required)
     OPENAI_API_KEY: Optional[str] = None
-    OPENAI_VISION_MODEL: str = "gpt-4.1-mini"
+    OPENAI_VISION_MODEL: str = "gpt-6.1-terra"
     GOOGLE_API_KEY: Optional[str] = None
     ANTHROPIC_API_KEY: Optional[str] = None
     
@@ -179,7 +179,7 @@ class Settings(BaseSettings):
     TIMEZONE: str = "Australia/Melbourne"
     # Used by router v2 and the legacy LLM fallback. Override via ROUTER_MODEL
     # in .env; re-run `scripts/run_routing_eval.py --mode v2` after any change.
-    ROUTER_MODEL: str = "gpt-5.5"
+    ROUTER_MODEL: str = "gpt-6.2-sol"
     LINEAR_MEETING_AUTO_CREATE_MIN_CONFIDENCE: float = 0.85
     LINEAR_MEETING_UNCERTAIN_MIN_CONFIDENCE: float = 0.65
     LINEAR_MEETING_EXTRACTION_CONCURRENCY: int = 3
@@ -258,7 +258,7 @@ class Settings(BaseSettings):
     # validation below requires a strong key and a separate safety-id salt.
     SIM_PATIENT_API_KEY: Optional[str] = None
     SIM_PATIENT_SAFETY_SALT: Optional[str] = None
-    SIM_PATIENT_MODEL: str = "gpt-5.6-terra"
+    SIM_PATIENT_MODEL: str = "gpt-6.1-terra"
     SIM_PATIENT_REASONING_EFFORT: str = "low"
     # Must remain below MLAI Backend's 24s read timeout so abandoned model
     # calls do not outlive their authenticated gateway request.

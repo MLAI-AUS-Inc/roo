@@ -68,7 +68,7 @@ async def test_tone_uses_shared_prompt_executor_with_unchanged_provider_options(
     assert providers == ['openai']
     assert client.chat.call_args.args[0][0] == {'role':'system','content':'Style rules'}
     assert client.chat.call_args.args[0][1]['content'].endswith('Selected source')
-    assert client.chat.call_args.kwargs == dict(model='gpt-5.2', max_tokens=8192, reasoning_effort='high')
+    assert client.chat.call_args.kwargs == dict(model='gpt-6.2-sol', max_tokens=8192, reasoning_effort='high')
 
 
 @pytest.mark.asyncio

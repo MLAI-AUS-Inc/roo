@@ -71,7 +71,7 @@ JSON:"""
                     },
                     {"role": "user", "content": extract_prompt},
                 ],
-                model="gpt-4o-mini",
+                model="gpt-6-luna",
                 max_tokens=1024,
             )
 

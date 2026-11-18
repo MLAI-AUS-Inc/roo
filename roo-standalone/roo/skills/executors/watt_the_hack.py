@@ -87,7 +87,7 @@ class WattTheHackExecutor(PromptExecutor):
             qa_response = await openai_client.chat([
                 {"role": "system", "content": qa_system_prompt},
                 {"role": "user", "content": text},
-            ], model="gpt-4o-mini", max_tokens=700)
+            ], model="gpt-6-luna", max_tokens=700)
             return qa_response.content.strip()
 
         # Prefer title/body the router already extracted from the message.
@@ -112,7 +112,7 @@ JSON:"""
         extract_response = await openai_client.chat([
             {"role": "system", "content": "You extract structured data from text. Return valid JSON only."},
             {"role": "user", "content": extract_prompt}
-        ], model="gpt-4o-mini", max_tokens=1024)
+        ], model="gpt-6-luna", max_tokens=1024)
 
         try:
             content = extract_response.content.strip()

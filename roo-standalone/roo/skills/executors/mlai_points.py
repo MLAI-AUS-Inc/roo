@@ -1921,7 +1921,7 @@ class MlaiPointsExecutor(BackendErrors, PromptExecutor):
         try:
             return get_settings().ROUTER_MODEL
         except Exception:
-            return "gpt-5.4"
+            return "gpt-6.2-sol"
 
 
     async def _extract_coworking_report_intent_with_llm(self, text: str, params: dict) -> dict:

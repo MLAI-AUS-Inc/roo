@@ -4,6 +4,10 @@ A short record of repository cleanup, testing, security, and delivery changes.
 Each entry states what changed and how it was checked. Findings without fixes
 are labelled as such.
 
+## 2026-11-18
+
+- Updated OpenAI model roles and migrated GPT-6 tool selection to Responses. Added request-shape coverage for required tools and optional arguments.
+
 ## 2026-11-17
 
 - Admins can check in MLAI Chat members who have no linked Slack account.

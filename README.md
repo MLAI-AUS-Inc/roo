@@ -78,6 +78,8 @@ pip install -r requirements.txt
 test -f .env || cp .env.example .env
 ```
 
+OpenAI routing, Linear inference and tone rewriting use GPT-6.2 Sol. Short text replies and event copy use GPT-6 Luna. Vision extraction and the simulated patient use GPT-6.1 Terra. The router uses the Responses API for GPT-6 function calls.
+
 At least one supported model provider must be configured for live model calls.
 Slack and backend credentials are only required for features that call those
 services. Use explicitly provisioned development or staging values; do not use

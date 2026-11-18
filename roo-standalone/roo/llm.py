@@ -177,7 +177,7 @@ class OpenAIClient(BaseLLMClient):
         """Send chat completion request."""
         model = kwargs.get("model", self.model)
         # Newer OpenAI models (gpt-5+, o-series) have different param requirements
-        is_reasoning_model = model.startswith(("gpt-5", "o1", "o3"))
+        is_reasoning_model = model.startswith(("gpt-5", "gpt-6", "o1", "o3"))
         max_tokens_key = "max_completion_tokens" if is_reasoning_model else "max_tokens"
         create_kwargs = {
             "model": model,
@@ -192,6 +192,9 @@ class OpenAIClient(BaseLLMClient):
             create_kwargs["extra_body"] = kwargs["extra_body"]
         if "reasoning_effort" in kwargs:
             create_kwargs["reasoning_effort"] = kwargs["reasoning_effort"]
+        elif model == "gpt-6-luna":
+            # Short chat replies share the output budget with reasoning tokens.
+            create_kwargs["reasoning_effort"] = "none"
         if kwargs.get("safety_identifier"):
             create_kwargs["safety_identifier"] = kwargs["safety_identifier"]
 
@@ -219,45 +222,63 @@ class OpenAIClient(BaseLLMClient):
         (callers retry once, then fall back).
         """
         model = kwargs.get("model", self.model)
-        is_reasoning_model = model.startswith(("gpt-5", "o1", "o3"))
-        max_tokens_key = "max_completion_tokens" if is_reasoning_model else "max_tokens"
-        # Reasoning models spend completion tokens on internal reasoning before
-        # emitting the tool call — give them headroom or they return nothing.
-        default_max_tokens = 4096 if is_reasoning_model else 1024
-        create_kwargs = {
-            "model": model,
-            "messages": messages,
-            "tools": tools,
-            "tool_choice": kwargs.get("tool_choice", "required"),
-            max_tokens_key: kwargs.get("max_tokens", default_max_tokens),
-            "n": 1,
-        }
-        if not is_reasoning_model:
-            create_kwargs["temperature"] = kwargs.get("temperature", 0.2)
-        # gpt-5.x rejects function tools + reasoning_effort on /v1/chat/completions
-        # (API error 400: "use /v1/responses instead"), so only forward the knob
-        # for models that accept the combination.
-        if "reasoning_effort" in kwargs and not model.startswith("gpt-5"):
-            create_kwargs["reasoning_effort"] = kwargs["reasoning_effort"]
+        if model.startswith("gpt-6"):
+            # Responses defaults tools to strict. Roo's routing schemas include
+            # optional arguments and validate the selected tool locally.
+            response_kwargs = {
+                "model": model, "input": messages, "store": False,
+                "tools": [{"type": "function", "strict": False, **tool["function"]} for tool in tools],
+                "tool_choice": kwargs.get("tool_choice", "required"),
+                "parallel_tool_calls": False,
+                "max_output_tokens": kwargs.get("max_tokens", 4096),
+                "reasoning": {"effort": kwargs.get("reasoning_effort", "low")},
+            }
+            if kwargs.get("safety_identifier"):
+                response_kwargs["safety_identifier"] = kwargs["safety_identifier"]
+            response = await self._request_client(kwargs).responses.create(**response_kwargs)
+            call = next((item for item in response.output if item.type == "function_call"), None)
+            if call is None:
+                raise ToolCallParseError("model_tool_call_missing")
+        else:
+            is_reasoning_model = model.startswith(("gpt-5", "o1", "o3"))
+            max_tokens_key = "max_completion_tokens" if is_reasoning_model else "max_tokens"
+            # Reasoning models spend completion tokens on internal reasoning before
+            # emitting the tool call — give them headroom or they return nothing.
+            default_max_tokens = 4096 if is_reasoning_model else 1024
+            create_kwargs = {
+                "model": model,
+                "messages": messages,
+                "tools": tools,
+                "tool_choice": kwargs.get("tool_choice", "required"),
+                max_tokens_key: kwargs.get("max_tokens", default_max_tokens),
+                "n": 1,
+            }
+            if not is_reasoning_model:
+                create_kwargs["temperature"] = kwargs.get("temperature", 0.2)
+            # gpt-5.x rejects function tools + reasoning_effort on /v1/chat/completions
+            # (API error 400: "use /v1/responses instead"), so only forward the knob
+            # for models that accept the combination.
+            if "reasoning_effort" in kwargs and not model.startswith("gpt-5"):
+                create_kwargs["reasoning_effort"] = kwargs["reasoning_effort"]
 
-        if kwargs.get("safety_identifier"):
-            create_kwargs["safety_identifier"] = kwargs["safety_identifier"]
+            if kwargs.get("safety_identifier"):
+                create_kwargs["safety_identifier"] = kwargs["safety_identifier"]
 
-        response = await self._request_client(kwargs).chat.completions.create(**create_kwargs)
+            response = await self._request_client(kwargs).chat.completions.create(**create_kwargs)
 
-        message = response.choices[0].message
-        tool_calls = getattr(message, "tool_calls", None) or []
-        if not tool_calls:
-            raise ToolCallParseError("model_tool_call_missing")
-        call = tool_calls[0]
-        raw_arguments = call.function.arguments or "{}"
+            message = response.choices[0].message
+            tool_calls = getattr(message, "tool_calls", None) or []
+            if not tool_calls:
+                raise ToolCallParseError("model_tool_call_missing")
+            call = tool_calls[0].function
+        raw_arguments = call.arguments or "{}"
         try:
             arguments = json.loads(raw_arguments)
         except json.JSONDecodeError as exc:
             raise ToolCallParseError("model_tool_arguments_invalid_json") from exc
         if not isinstance(arguments, dict):
             raise ToolCallParseError("model_tool_arguments_not_object")
-        return ToolCall(name=call.function.name, arguments=arguments, model=response.model)
+        return ToolCall(name=call.name, arguments=arguments, model=response.model)
 
     async def agent_with_tools(
         self,
@@ -459,7 +480,7 @@ DEFAULT_CONFIGS = {
         "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
     },
     LLMProvider.OPENAI: {
-        "model": "gpt-4o-mini",
+        "model": "gpt-6-luna",
         "base_url": None,
     },
     LLMProvider.ANTHROPIC: {
@@ -568,8 +589,10 @@ async def extract_text_from_image(
     image_base64 = base64.b64encode(image_bytes).decode("ascii")
     data_url = f"data:{mime_type};base64,{image_base64}"
     client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+    selected_model = model or settings.OPENAI_VISION_MODEL
+    token_key = "max_completion_tokens" if selected_model.startswith(("gpt-5", "gpt-6", "o1", "o3")) else "max_tokens"
     response = await client.chat.completions.create(
-        model=model or settings.OPENAI_VISION_MODEL,
+        model=selected_model,
         messages=[
             {
                 "role": "user",
@@ -579,6 +602,6 @@ async def extract_text_from_image(
                 ],
             }
         ],
-        max_tokens=2048,
+        **{token_key: 2048},
     )
     return response.choices[0].message.content or ""
