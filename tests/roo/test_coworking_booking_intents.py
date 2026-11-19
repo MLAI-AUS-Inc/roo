@@ -525,6 +525,53 @@ async def test_terminal_rejection_notification_survives_slack_failure_and_restar
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("requested_by", "opening"),
+    [
+        (None, "🛑 I couldn't book you in: "),
+        ("UADMIN", "🛑 I couldn't check <@U123> in: "),
+    ],
+)
+async def test_retried_booking_rejection_explains_points_shortfall(
+    tmp_path,
+    monkeypatch,
+    requested_by,
+    opening,
+):
+    store, intent, leased = leased_intent(tmp_path, requested_by_slack_id=requested_by)
+    request = httpx.Request("POST", "https://backend.test/coworking")
+    response = httpx.Response(
+        400,
+        request=request,
+        json={"error": "Insufficient balance: 3 < 8 required"},
+    )
+    client = FakeClient(
+        error=httpx.HTTPStatusError("bad request", request=request, response=response)
+    )
+    posts = []
+    slack_client_module = importlib.import_module("roo.slack_client")
+    monkeypatch.setattr(
+        slack_client_module,
+        "post_message",
+        lambda **kwargs: posts.append(kwargs) or {"ok": True, "ts": "444.555"},
+    )
+
+    result = await coworking.process_coworking_booking_intent(
+        leased,
+        store=store,
+        client=client,
+        notify=True,
+    )
+
+    assert result["status"] == "blocked"
+    assert store.get(intent["id"])["last_error"] == "insufficient_points:3:8"
+    assert posts[0]["text"] == (
+        f"{opening}Not enough Roo Points: **3** available, **8** needed. "
+        "DM Roo `topup` to add more. No booking was created."
+    )
+
+
+@pytest.mark.asyncio
 async def test_duplicate_slack_confirmation_counts_as_durable_delivery(
     tmp_path,
     monkeypatch,

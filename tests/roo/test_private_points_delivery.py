@@ -30,15 +30,21 @@ def coworking_intent_store(db_path):
         ),
         (
             "Insufficient balance: 4 < 8 required",
-            "There are not enough Roo Points for this action.",
+            "Not enough Roo Points: **4** available, **8** needed. "
+            "DM Roo `topup` to add more.",
+        ),
+        (
+            "Insufficient microroo balance: 2500000 < 8000000 required",
+            "Not enough Roo Points: **2.5** available, **8** needed. "
+            "DM Roo `topup` to add more.",
         ),
         (
             "You have 4 Roo Points but need 8",
-            "There are not enough Roo Points for this action.",
+            "You have 4 Roo Points but need 8",
         ),
     ],
 )
-def test_points_error_redaction_preserves_reason_without_exposing_balance(
+def test_points_error_shows_the_shortfall_numbers(
     detail,
     expected,
 ):
@@ -550,7 +556,7 @@ class CoworkingClient:
 
 
 @pytest.mark.asyncio
-async def test_channel_coworking_confirmation_keeps_remaining_balance_in_member_dm(
+async def test_channel_coworking_confirmation_shows_remaining_balance(
     monkeypatch,
     tmp_path,
 ):
@@ -570,7 +576,7 @@ async def test_channel_coworking_confirmation_keeps_remaining_balance_in_member_
     )
 
     assert "Booked you in" in result["message"]
-    assert "Balance remaining" not in result["message"]
+    assert "Balance remaining: 9 points" in result["message"]
     assert direct_messages[0]["user"] == "UMEMBER"
     assert "Balance remaining: 9 points" in direct_messages[0]["text"]
 
@@ -610,7 +616,7 @@ async def test_dm_coworking_confirmation_returns_remaining_balance_directly(
 
 
 @pytest.mark.asyncio
-async def test_admin_coworking_confirmation_never_exposes_target_balance(
+async def test_admin_coworking_confirmation_shows_target_balance(
     monkeypatch,
     tmp_path,
 ):
@@ -630,8 +636,7 @@ async def test_admin_coworking_confirmation_never_exposes_target_balance(
     )
 
     assert "Checked <@UTARGET> in" in result["message"]
-    assert "13" not in result["message"]
-    assert "Their balance" not in result["message"]
+    assert "Their balance: 13 pts" in result["message"]
     assert direct_messages[0]["user"] == "UTARGET"
     assert "Balance remaining: 13 points" in direct_messages[0]["text"]
 

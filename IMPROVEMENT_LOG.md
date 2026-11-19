@@ -4,6 +4,20 @@ A short record of repository cleanup, testing, security, and delivery changes.
 Each entry states what changed and how it was checked. Findings without fixes
 are labelled as such.
 
+## 2026-11-19
+
+- Roo now shows the numbers when a booking or award fails for lack of Roo
+  Points: "Not enough Roo Points: **3** available, **8** needed. DM Roo
+  `topup` to add more." Previously Roo hid the numbers and said only "There
+  are not enough Roo Points for this action". A booking rejected on a
+  background retry also keeps its shortfall (`insufficient_points:3:8`)
+  instead of saying only "contact an MLAI admin".
+- Coworking confirmations in the channel now show the remaining balance
+  ("Balance remaining: 9 points", or "Their balance: 13 pts" for admin
+  check-ins). Before, it went only by DM. A check-in by MLAI profile uses the
+  backend's new `points_balance`. The full `tests/roo` suite passes offline:
+  3255 passed.
+
 ## 2026-11-18
 
 - Updated OpenAI model roles and migrated GPT-6 tool selection to Responses. Added request-shape coverage for required tools and optional arguments.

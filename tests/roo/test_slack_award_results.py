@@ -117,10 +117,9 @@ async def test_unknown_rejections_use_safe_fallback(error, delivery):
 
 
 @pytest.mark.asyncio
-async def test_balance_detail_is_redacted_from_public_rejection(delivery):
+async def test_balance_rejection_shows_the_shortfall(delivery):
     result = await award(AwardBackend({"UTARGET": http_error(payload={"error": "Insufficient balance: 88 < 100 required"})}))
-    assert "not enough Roo Points" in result
-    assert "88" not in result and "100" not in result
+    assert "Not enough Roo Points: **88** available, **100** needed." in result
     assert delivery == []
 
 

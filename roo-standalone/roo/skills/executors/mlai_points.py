@@ -25,6 +25,7 @@ import calendar
 from ...llm import chat
 from datetime import date, datetime, timedelta, timezone
 from ...backend_identity import get_backend_actor_context
+from ...points_shortfall import public_points_error
 from ...slack_client import get_bot_user_id, post_ephemeral, post_message, send_dm, upload_file
 from ...config import get_settings
 import httpx
@@ -1429,12 +1430,10 @@ class MlaiPointsExecutor(BackendErrors, PromptExecutor):
         )
 
 
-    @classmethod
-    def _redact_points_balance_error(cls, error_detail: str) -> str:
-        detail = str(error_detail or "").strip()
-        if cls._is_points_balance_error(detail) and re.search(r"\d", detail):
-            return "There are not enough Roo Points for this action."
-        return detail
+    @staticmethod
+    def _redact_points_balance_error(error_detail: str) -> str:
+        """Public wording for a backend error; shortfalls keep their numbers."""
+        return public_points_error(error_detail)
 
 
     def _points_award_error(self, exc: Exception) -> tuple[str, bool]:
@@ -1473,10 +1472,10 @@ class MlaiPointsExecutor(BackendErrors, PromptExecutor):
                     "Points must be an integer",
                     "Points must be a nonzero 32-bit integer",
                     "reason must contain 1 to 2000 characters",
-                    "There are not enough Roo Points for this action.",
                 }
                 return (
-                    detail if detail in public_details
+                    detail
+                    if detail in public_details or detail.startswith("Not enough Roo Points:")
                     else "The points backend rejected this award.",
                     False,
                 )
@@ -2605,10 +2604,16 @@ class MlaiPointsExecutor(BackendErrors, PromptExecutor):
             return f"{name} is already booked in for **{booking_date}** at the coworking space. ✅"
         cost = result.get("points_cost") or 0
         point_word = "point" if cost == 1 else "points"
+        balance = result.get("points_balance")
+        balance_line = (
+            f"\nTheir balance: {balance} pts"
+            if isinstance(balance, (int, float)) and not isinstance(balance, bool)
+            else ""
+        )
         return (
             f"You beauty! 🎉\n\n"
             f"Checked {name} in for **{booking_date}** at the coworking space.\n"
-            f"Cost: {cost} {point_word}\n\n"
+            f"Cost: {cost} {point_word}{balance_line}\n\n"
             f"{NO_FOOD_REMINDER}"
         )
 
@@ -2864,10 +2869,9 @@ class MlaiPointsExecutor(BackendErrors, PromptExecutor):
             booking_date=booking_date,
             target_user_id=target_user_id,
             cost=cost,
-            new_balance=None,
+            new_balance=new_balance,
             admin_checkin=admin_checkin,
             discount_applied=discount_applied,
-            include_balance=False,
             # Cross-account guidance belongs in the member's private DM.
             founder_tools_explicitly_linked=None,
         )

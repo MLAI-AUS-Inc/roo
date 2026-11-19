@@ -373,8 +373,7 @@ async def test_backend_batch_failure_formats_no_bookings_created_response(batch_
 
     assert "No bookings were created" in result
     assert "One or more users have insufficient Roo Points" in result
-    assert "<@U2>: There are not enough Roo Points for this action" in result
-    assert "4 < 8" not in result
+    assert "<@U2>: Not enough Roo Points: **4** available, **8** needed." in result
     intent = batch_runtime["store"].get_by_key(
         coworking_module.build_coworking_batch_intent_key(
             "UADMIN", ["U1", "U2"], "2026-07-04"
