@@ -32,7 +32,6 @@ async def run_addressing_eval(
             candidate_reason=str(case.get("candidate_reason") or "eval_candidate"),
             explicit_mention=bool(case.get("explicit_mention")),
             min_implicit_confidence=min_confidence,
-            indirect_mention_confidence=min_confidence,
             model=model,
         )
         actual = "respond" if decision.should_respond else "ignore"

@@ -208,7 +208,6 @@ async def decide_addressing(
     candidate_reason: str,
     explicit_mention: bool,
     min_implicit_confidence: float,
-    indirect_mention_confidence: float,
     model: Optional[str] = None,
     classifier_timeout_seconds: float = 5.0,
 ) -> AddressDecision:
@@ -219,6 +218,17 @@ async def decide_addressing(
             should_respond=False,
             confidence=1.0,
             reason="deterministic_indirect_mention",
+            source="deterministic",
+            candidate_reason=candidate_reason,
+        )
+    if explicit_mention:
+        # A real @Roo tag is always answered. The model may only veto implicit
+        # follow-ups: once it worked again, it silently skipped a burst of
+        # near-identical "@Roo book" requests in the coworking channel.
+        return AddressDecision(
+            should_respond=True,
+            confidence=1.0,
+            reason="explicit_mention",
             source="deterministic",
             candidate_reason=candidate_reason,
         )
@@ -238,22 +248,17 @@ async def decide_addressing(
             timeout=classifier_timeout_seconds,
         )
     except Exception as exc:
-        # Direct mentions keep today's reliable fallback. Implicit messages fail
-        # closed so a model/provider outage cannot make Roo interrupt channels.
+        # Implicit messages fail closed so a model/provider outage cannot make
+        # Roo interrupt channels.
         return AddressDecision(
-            should_respond=explicit_mention,
-            confidence=1.0 if explicit_mention else 0.0,
+            should_respond=False,
+            confidence=0.0,
             reason=f"classifier_error:{exc.__class__.__name__}",
             source="fallback",
             candidate_reason=candidate_reason,
         )
 
-    if explicit_mention:
-        should_respond = not (
-            decision == IGNORE and confidence >= indirect_mention_confidence
-        )
-    else:
-        should_respond = decision == RESPOND and confidence >= min_implicit_confidence
+    should_respond = decision == RESPOND and confidence >= min_implicit_confidence
     return AddressDecision(
         should_respond=should_respond,
         confidence=confidence,
