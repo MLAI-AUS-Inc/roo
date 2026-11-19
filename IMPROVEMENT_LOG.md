@@ -6,6 +6,14 @@ are labelled as such.
 
 ## 2026-11-19
 
+- Roo always answers an explicit @Roo mention again. Once #327 fixed the
+  addressing classifier's model calls, the classifier could veto direct
+  mentions at 90% confidence, and in a 14:10 burst of "@Roo book" requests in
+  #cowork-and-chill-melbourne it silently skipped three. The model now only
+  decides implicit follow-ups. The deterministic check still ignores mentions
+  that teach the command ("you'll need to say @Roo topup"). Removed the unused
+  `ROO_CONTEXTUAL_INDIRECT_MENTION_CONFIDENCE` setting. The full `tests/roo`
+  suite passes offline: 3256 passed.
 - Roo now shows the numbers when a booking or award fails for lack of Roo
   Points: "Not enough Roo Points: **3** available, **8** needed. DM Roo
   `topup` to add more." Previously Roo hid the numbers and said only "There

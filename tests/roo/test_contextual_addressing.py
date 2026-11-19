@@ -104,7 +104,6 @@ async def test_implicit_followup_requires_high_confidence(monkeypatch):
         candidate_reason="same_user_thread_continuation",
         explicit_mention=False,
         min_implicit_confidence=0.90,
-        indirect_mention_confidence=0.90,
     )
     assert not decision.should_respond
     assert decision.confidence == 0.89
@@ -123,7 +122,6 @@ async def test_implicit_classifier_failure_is_silent_but_direct_mention_survives
         "history": [],
         "current_message_ts": "2.0",
         "min_implicit_confidence": 0.90,
-        "indirect_mention_confidence": 0.90,
     }
     implicit = await addressing.decide_addressing(
         **common,
@@ -137,6 +135,40 @@ async def test_implicit_classifier_failure_is_silent_but_direct_mention_survives
     )
     assert not implicit.should_respond
     assert direct.should_respond
+
+
+@pytest.mark.asyncio
+async def test_explicit_mention_is_answered_without_asking_the_classifier(monkeypatch):
+    # In a burst of "@Roo book" requests the model confidently ignored three
+    # real mentions. A direct tag must never be vetoed by the model.
+    calls = []
+
+    async def ignoring_chat_tools(*args, **kwargs):
+        calls.append(args)
+        return ToolCall(
+            name="decide_addressing",
+            arguments={"decision": "ignore", "confidence": 0.99, "reason": "repeat"},
+        )
+
+    monkeypatch.setattr(addressing, "chat_tools", ignoring_chat_tools)
+    decision = await addressing.decide_addressing(
+        text="<@UROO> book me please",
+        user_id="UANTHONY",
+        bot_user_id="UROO",
+        history=[
+            {"user": "UMONISH", "text": "<@UROO> book in"},
+            {"user": "UROO", "text": "Booked you in", "is_bot": True},
+            {"user": "UELIS", "text": "<@UROO> Book"},
+        ],
+        current_message_ts="3.0",
+        candidate_reason="explicit_mention",
+        explicit_mention=True,
+        min_implicit_confidence=0.90,
+    )
+
+    assert decision.should_respond
+    assert decision.reason == "explicit_mention"
+    assert calls == []
 
 
 def test_contextual_store_dedupes_and_tracks_same_user_sessions(tmp_path):
@@ -376,7 +408,6 @@ def contextual_settings(**overrides):
         "ROO_CONTEXTUAL_MESSAGE_RECEIPT_TTL_SECONDS": 600,
         "ROO_CONTEXTUAL_SHADOW_MODE": False,
         "ROO_CONTEXTUAL_MIN_CONFIDENCE": 0.90,
-        "ROO_CONTEXTUAL_INDIRECT_MENTION_CONFIDENCE": 0.90,
         "ROO_CONTEXTUAL_MODEL": None,
         "ROO_CONTEXTUAL_CLASSIFIER_TIMEOUT_SECONDS": 5.0,
         "ROO_CONTEXTUAL_ADJACENCY_SECONDS": 180,

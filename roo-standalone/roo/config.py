@@ -109,7 +109,6 @@ class Settings(BaseSettings):
     ROO_CONTEXTUAL_SHADOW_MODE: bool = False
     ROO_CONTEXTUAL_CHANNEL_IDS: str = ""
     ROO_CONTEXTUAL_MIN_CONFIDENCE: float = 0.90
-    ROO_CONTEXTUAL_INDIRECT_MENTION_CONFIDENCE: float = 0.90
     ROO_CONTEXTUAL_ADJACENCY_SECONDS: int = 3 * 60
     ROO_CONTEXTUAL_THREAD_TTL_SECONDS: int = 30 * 60
     ROO_CONTEXTUAL_MESSAGE_RECEIPT_TTL_SECONDS: int = 10 * 60
@@ -395,10 +394,6 @@ class Settings(BaseSettings):
             )
         if not 0.5 <= self.ROO_CONTEXTUAL_MIN_CONFIDENCE <= 1.0:
             raise ValueError("ROO_CONTEXTUAL_MIN_CONFIDENCE must be between 0.5 and 1.0")
-        if not 0.5 <= self.ROO_CONTEXTUAL_INDIRECT_MENTION_CONFIDENCE <= 1.0:
-            raise ValueError(
-                "ROO_CONTEXTUAL_INDIRECT_MENTION_CONFIDENCE must be between 0.5 and 1.0"
-            )
         if self.ROO_CONTEXTUAL_ADJACENCY_SECONDS <= 0:
             raise ValueError("ROO_CONTEXTUAL_ADJACENCY_SECONDS must be positive")
         if self.ROO_CONTEXTUAL_THREAD_TTL_SECONDS <= 0:

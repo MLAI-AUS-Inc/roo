@@ -613,7 +613,6 @@ async def _handle_contextual_slack_message(
         candidate_reason=candidate_reason,
         explicit_mention=explicit_mention,
         min_implicit_confidence=settings.ROO_CONTEXTUAL_MIN_CONFIDENCE,
-        indirect_mention_confidence=settings.ROO_CONTEXTUAL_INDIRECT_MENTION_CONFIDENCE,
         model=(settings.ROO_CONTEXTUAL_MODEL or None),
         classifier_timeout_seconds=settings.ROO_CONTEXTUAL_CLASSIFIER_TIMEOUT_SECONDS,
     )
