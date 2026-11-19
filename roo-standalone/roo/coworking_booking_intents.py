@@ -13,6 +13,7 @@ from uuid import NAMESPACE_URL, uuid4, uuid5
 import httpx
 
 from .config import get_settings
+from .points_shortfall import shortfall_failure_code, shortfall_from_failure_code
 from .coworking_booking_schema_v3 import (
     REQUIRED_COLUMNS,
     REQUIRED_INDEXES,
@@ -75,6 +76,18 @@ def is_retryable_coworking_exception(exc: Exception) -> bool:
     return False
 
 
+def _http_shortfall_code(exc: httpx.HTTPStatusError) -> Optional[str]:
+    """Keep a points shortfall's numbers so a later retry can still explain it."""
+    if exc.response.status_code != 400:
+        return None
+    try:
+        payload = exc.response.json()
+    except Exception:
+        return None
+    detail = payload.get("error") if isinstance(payload, dict) else None
+    return shortfall_failure_code(detail) if isinstance(detail, str) else None
+
+
 def coworking_failure_code(exc: Exception) -> str:
     """Return a bounded diagnostic code without persisting external error text."""
     from .clients.mlai_backend import MLAIBackendUnavailableError
@@ -85,6 +98,9 @@ def coworking_failure_code(exc: Exception) -> str:
             return reason_code
         return "backend_unavailable"
     if isinstance(exc, httpx.HTTPStatusError):
+        shortfall = _http_shortfall_code(exc)
+        if shortfall:
+            return shortfall
         return f"backend_http_{int(exc.response.status_code)}"
     if isinstance(exc, httpx.TransportError):
         return "backend_transport_error"
@@ -1495,12 +1511,20 @@ def _coworking_retry_blocked_message(
     requested_by_slack_id: str,
     error: str,
 ) -> str:
+    shortfall = shortfall_from_failure_code(error)
     if requested_by_slack_id and requested_by_slack_id != slack_user_id:
+        if shortfall:
+            return (
+                f"🛑 I couldn't check <@{slack_user_id}> in: {shortfall} "
+                "No booking was created."
+            )
         return (
             "I retried the coworking check-in for "
             f"<@{slack_user_id}>, but I still couldn't process it. "
             "No new booking was created. Please try again or contact an MLAI admin."
         )
+    if shortfall:
+        return f"🛑 I couldn't book you in: {shortfall} No booking was created."
     return (
         "I retried your coworking booking request, but I still couldn't process it. "
         "No new booking was created. Please try again or contact an MLAI admin."

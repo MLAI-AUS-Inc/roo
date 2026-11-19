@@ -25,6 +25,7 @@ import calendar
 from ...llm import chat
 from datetime import date, datetime, timedelta, timezone
 from ...backend_identity import get_backend_actor_context
+from ...points_shortfall import public_points_error
 from ...slack_client import get_bot_user_id, post_ephemeral, post_message, send_dm, upload_file
 from ...config import get_settings
 import httpx
@@ -1429,12 +1430,10 @@ class MlaiPointsExecutor(BackendErrors, PromptExecutor):
         )
 
 
-    @classmethod
-    def _redact_points_balance_error(cls, error_detail: str) -> str:
-        detail = str(error_detail or "").strip()
-        if cls._is_points_balance_error(detail) and re.search(r"\d", detail):
-            return "There are not enough Roo Points for this action."
-        return detail
+    @staticmethod
+    def _redact_points_balance_error(error_detail: str) -> str:
+        """Public wording for a backend error; shortfalls keep their numbers."""
+        return public_points_error(error_detail)
 
 
     def _points_award_error(self, exc: Exception) -> tuple[str, bool]:
@@ -1473,10 +1472,10 @@ class MlaiPointsExecutor(BackendErrors, PromptExecutor):
                     "Points must be an integer",
                     "Points must be a nonzero 32-bit integer",
                     "reason must contain 1 to 2000 characters",
-                    "There are not enough Roo Points for this action.",
                 }
                 return (
-                    detail if detail in public_details
+                    detail
+                    if detail in public_details or detail.startswith("Not enough Roo Points:")
                     else "The points backend rejected this award.",
                     False,
                 )

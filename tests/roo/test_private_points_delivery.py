@@ -30,15 +30,21 @@ def coworking_intent_store(db_path):
         ),
         (
             "Insufficient balance: 4 < 8 required",
-            "There are not enough Roo Points for this action.",
+            "Not enough Roo Points: **4** available, **8** needed. "
+            "DM Roo `topup` to add more.",
+        ),
+        (
+            "Insufficient microroo balance: 2500000 < 8000000 required",
+            "Not enough Roo Points: **2.5** available, **8** needed. "
+            "DM Roo `topup` to add more.",
         ),
         (
             "You have 4 Roo Points but need 8",
-            "There are not enough Roo Points for this action.",
+            "You have 4 Roo Points but need 8",
         ),
     ],
 )
-def test_points_error_redaction_preserves_reason_without_exposing_balance(
+def test_points_error_shows_the_shortfall_numbers(
     detail,
     expected,
 ):

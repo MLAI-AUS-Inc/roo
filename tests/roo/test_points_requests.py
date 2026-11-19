@@ -2959,8 +2959,7 @@ async def test_admin_checkin_insufficient_balance_message_names_target(tmp_path,
 
     intent = store.get_by_key("coworking:UTARGET:2026-05-04")
     assert "I couldn't check <@UTARGET> in" in result
-    assert "There are not enough Roo Points" in result
-    assert "0 points" not in result
+    assert "Insufficient balance: need 1 point" in result
     assert "UADMIN" not in result
     assert client.balance_args is None
     assert intent["status"] == "blocked"
@@ -3965,7 +3964,7 @@ async def test_terminal_coworking_rejection_survives_delivery_crash(
 
 
 @pytest.mark.asyncio
-async def test_book_coworking_redacts_balance_rejection_in_channel(
+async def test_book_coworking_explains_balance_rejection_in_channel(
     tmp_path,
     monkeypatch,
 ):
@@ -4017,15 +4016,15 @@ async def test_book_coworking_redacts_balance_rejection_in_channel(
     assert result["suppress_post"] is True
     assert posted_messages[0]["text"] == (
         "🛑 I couldn't book you in for **2026-08-25**: "
-        "There are not enough Roo Points for this action."
+        "Not enough Roo Points: **0** available, **8** needed. "
+        "DM Roo `topup` to add more."
     )
-    assert "balance: 0" not in posted_messages[0]["text"]
-    assert "< 8" not in posted_messages[0]["text"]
     assert direct_messages == [
         (
             "U123",
             "🛑 I couldn't book you in for **2026-08-25**: "
-            "There are not enough Roo Points for this action.\n\n"
+            "Not enough Roo Points: **0** available, **8** needed. "
+            "DM Roo `topup` to add more.\n\n"
             "Your current balance is **0 Roo Points**.",
         )
     ]
