@@ -2789,7 +2789,7 @@ async def test_admin_checkin_books_target_for_today(tmp_path, monkeypatch):
 
     intent = store.get_by_key("coworking:UTARGET:2026-05-04")
     assert "Checked <@UTARGET> in for **2026-05-04**" in result["message"]
-    assert "Their balance" not in result["message"]
+    assert "Their balance: 13 pts" in result["message"]
     assert direct_messages[0][0] == "UTARGET"
     assert "Balance remaining: 13 points" in direct_messages[0][1]
     assert client.book_args == ("UTARGET", "2026-05-04", "C123")
@@ -2825,7 +2825,7 @@ async def test_admin_checkin_book_mention_phrase_books_target_for_today(tmp_path
     intent = store.get_by_key("coworking:UTARGET:2026-05-04")
     assert action == "admin_checkin_coworking"
     assert "Checked <@UTARGET> in for **2026-05-04**" in result["message"]
-    assert "balance" not in result["message"].lower()
+    assert "their balance:" in result["message"].lower()
     assert client.book_args == ("UTARGET", "2026-05-04", "C123")
     assert client.balance_args == "UTARGET"
     assert intent["requested_by_slack_id"] == "UADMIN"
@@ -2852,7 +2852,7 @@ async def test_admin_checkin_honors_explicit_date(tmp_path, monkeypatch):
     )
 
     assert "Checked <@UTARGET> in for **2026-06-01**" in result["message"]
-    assert "balance" not in result["message"].lower()
+    assert "their balance:" in result["message"].lower()
     assert client.book_args == ("UTARGET", "2026-06-01", "C123")
 
 
@@ -4182,7 +4182,7 @@ async def test_book_coworking_nudges_founder_when_charged_standard_price(tmp_pat
 
     assert "Booked you in for **2026-05-04**" in result["message"]
     assert "Cost: 8 points" in result["message"]
-    assert "Balance remaining" not in result["message"]
+    assert "Balance remaining:" in result["message"]
     assert "may qualify for 4-point coworking" in result["message"]
     assert "https://chat.mlai.au/my-startup/updates?view=new" in result["message"]
     assert "@Roo link" not in result["message"]
@@ -4273,7 +4273,7 @@ async def test_book_coworking_omits_nudge_when_discount_applied(tmp_path, monkey
 
     assert "Booked you in for **2026-05-04**" in result["message"]
     assert f"Cost: {0 if office_manager else 4} points" in result["message"]
-    assert "Balance remaining" not in result["message"]
+    assert "Balance remaining:" in result["message"]
     assert "may qualify for 4-point coworking" not in result["message"]
     assert "@Roo link" not in result["message"]
 
@@ -4356,7 +4356,12 @@ ISAAK_PROFILE = "22222222-2222-2222-2222-222222222222"
 @pytest.mark.asyncio
 async def test_coworking_bridged_admin_checkin_books_slackless_member_by_profile(tmp_path, monkeypatch):
     store = coworking_intent_store(tmp_path / "intents.db")
-    client = FakeProfileCheckinCoworkingClient()
+    client = FakeProfileCheckinCoworkingClient(
+        profile_result={
+            **complete_coworking_booking_result("2026-11-17", cost=5),
+            "points_balance": 7,
+        },
+    )
     executor = SkillExecutor()
     monkeypatch.setattr("roo.utils.get_current_date", lambda: date(2026, 11, 17))
     patch_skill_dependency(monkeypatch, 'get_coworking_intent_store', lambda: store)
@@ -4378,6 +4383,7 @@ async def test_coworking_bridged_admin_checkin_books_slackless_member_by_profile
     )
 
     assert "Checked Isaak Eriksson in for **2026-11-17**" in result
+    assert "Their balance: 7 pts" in result
     assert "<@" not in result
     assert client.book_args is None
     admin, profile, day, channel, operation_id = client.profile_args[0]

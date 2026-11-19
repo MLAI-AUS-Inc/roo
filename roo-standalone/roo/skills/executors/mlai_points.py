@@ -2604,10 +2604,16 @@ class MlaiPointsExecutor(BackendErrors, PromptExecutor):
             return f"{name} is already booked in for **{booking_date}** at the coworking space. ✅"
         cost = result.get("points_cost") or 0
         point_word = "point" if cost == 1 else "points"
+        balance = result.get("points_balance")
+        balance_line = (
+            f"\nTheir balance: {balance} pts"
+            if isinstance(balance, (int, float)) and not isinstance(balance, bool)
+            else ""
+        )
         return (
             f"You beauty! 🎉\n\n"
             f"Checked {name} in for **{booking_date}** at the coworking space.\n"
-            f"Cost: {cost} {point_word}\n\n"
+            f"Cost: {cost} {point_word}{balance_line}\n\n"
             f"{NO_FOOD_REMINDER}"
         )
 
@@ -2863,10 +2869,9 @@ class MlaiPointsExecutor(BackendErrors, PromptExecutor):
             booking_date=booking_date,
             target_user_id=target_user_id,
             cost=cost,
-            new_balance=None,
+            new_balance=new_balance,
             admin_checkin=admin_checkin,
             discount_applied=discount_applied,
-            include_balance=False,
             # Cross-account guidance belongs in the member's private DM.
             founder_tools_explicitly_linked=None,
         )
