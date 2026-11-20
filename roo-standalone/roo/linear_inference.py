@@ -16,14 +16,14 @@ from .llm import ToolCallParseError, get_llm_client
 logger = logging.getLogger(__name__)
 
 LINEAR_SKILL_MODEL = "gpt-6.2-sol"
+LINEAR_PROJECT_REASONING_MODEL = "gpt-6.2-astra"
 
 LinearReasoningEffort = Literal["low", "medium", "high", "xhigh", "max"]
 LinearInferenceStage = Literal[
     "direct_issue",
     "meeting_actions",
     "contextual_issue",
-    "project_update_summary",
-    "project_update_compose",
+    "project_reconciliation",
     "effort_sizing",
     "studio_effort",
 ]
@@ -66,8 +66,7 @@ _STAGE_MAX_OUTPUT_TOKENS: dict[LinearInferenceStage, int] = {
     "direct_issue": 4_000,
     "meeting_actions": 8_000,
     "contextual_issue": 2_500,
-    "project_update_summary": 1_800,
-    "project_update_compose": 3_000,
+    "project_reconciliation": 8_000,
     "effort_sizing": 16_000,
     "studio_effort": 16_000,
 }
@@ -76,8 +75,7 @@ _STAGE_BASE_EFFORT: dict[LinearInferenceStage, LinearReasoningEffort] = {
     "direct_issue": "low",
     "meeting_actions": "medium",
     "contextual_issue": "high",
-    "project_update_summary": "medium",
-    "project_update_compose": "high",
+    "project_reconciliation": "medium",
     "effort_sizing": "high",
     "studio_effort": "high",
 }
@@ -85,8 +83,7 @@ _STAGE_MAX_INITIAL_EFFORT: dict[LinearInferenceStage, LinearReasoningEffort] = {
     "direct_issue": "high",
     "meeting_actions": "xhigh",
     "contextual_issue": "xhigh",
-    "project_update_summary": "high",
-    "project_update_compose": "xhigh",
+    "project_reconciliation": "high",
     "effort_sizing": "xhigh",
     "studio_effort": "xhigh",
 }
@@ -124,48 +121,44 @@ class LinearDirectIssueBatch(BaseModel):
     issues: list[LinearCandidate] = Field(default_factory=list, max_length=30)
 
 
+ProjectFactKind = Literal["progress", "requirement", "decision", "blocker", "next_step", "question", "health"]
+ProjectHealth = Literal["onTrack", "atRisk", "offTrack"]
+
+
+class LinearMeetingFact(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: ProjectFactKind
+    text: str = Field(min_length=1, max_length=500)
+    evidence: str = Field(min_length=1, max_length=800)
+    project_hint: str = Field(default="", max_length=240)
+    health: ProjectHealth | None = None
+
+
+class LinearMeetingCandidate(LinearCandidate):
+    explicit_commitment: bool = False
+
+
 class LinearMeetingActionBatch(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    action_items: list[LinearCandidate] = Field(default_factory=list, max_length=50)
+    action_items: list[LinearMeetingCandidate] = Field(default_factory=list, max_length=50)
+    project_facts: list[LinearMeetingFact] = Field(default_factory=list, max_length=40)
+
+
+def validate_meeting_fact_quotes(batch: LinearMeetingActionBatch, text: str) -> None:
+    """Reject invented quotes while tolerating line wraps from PDFs and Slack."""
+    source = " ".join(text.split())
+    for finding in [*batch.action_items, *batch.project_facts]:
+        quote = " ".join(finding.evidence.split())
+        if not quote or quote not in source:
+            raise LinearInferenceValidationError("Meeting finding is missing its original quote.")
 
 
 class LinearContextualIssueResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     issue: LinearCandidate | None = None
-
-
-class LinearProjectUpdateResult(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    body: str = Field(min_length=1, max_length=12000)
-    health: Literal["onTrack", "atRisk", "offTrack"] = "onTrack"
-
-
-class LinearProjectSourceSummary(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    work_done: list[str] = Field(default_factory=list, max_length=30)
-    decisions: list[str] = Field(default_factory=list, max_length=30)
-    risks_open_questions: list[str] = Field(default_factory=list, max_length=30)
-    next_steps: list[str] = Field(default_factory=list, max_length=30)
-
-    def to_markdown(self) -> str:
-        sections = (
-            ("Work done", self.work_done),
-            ("Decisions", self.decisions),
-            ("Risks / open questions", self.risks_open_questions),
-            ("Next steps", self.next_steps),
-        )
-        rendered: list[str] = []
-        for heading, items in sections:
-            cleaned = [str(item).strip() for item in items if str(item).strip()]
-            if cleaned:
-                rendered.append(
-                    f"- {heading}\n" + "\n".join(f"  - {item}" for item in cleaned)
-                )
-        return "\n".join(rendered)
 
 
 @dataclass(frozen=True)
@@ -184,6 +177,7 @@ class LinearReasoningSignals:
     dependency_count: int = 0
     artifact_count: int = 0
     conflicting_context: bool = False
+    allow_astra: bool = False
 
 
 @dataclass(frozen=True)
@@ -194,6 +188,7 @@ class LinearReasoningDecision:
     complexity_score: int
     reasons: tuple[str, ...]
     retry: bool = False
+    model: str = LINEAR_SKILL_MODEL
 
 
 StructuredT = TypeVar("StructuredT", bound=BaseModel)
@@ -295,6 +290,12 @@ def choose_linear_reasoning(signals: LinearReasoningSignals) -> LinearReasoningD
         timeout_seconds=_linear_timeout_seconds(signals.stage, effort),
         complexity_score=score,
         reasons=tuple(reasons) or ("stage_baseline",),
+        model=(
+            LINEAR_PROJECT_REASONING_MODEL
+            if signals.stage == "project_reconciliation" and signals.allow_astra
+            and (signals.conflicting_context or signals.ambiguity or signals.source_count > 1 or score >= 3)
+            else LINEAR_SKILL_MODEL
+        ),
     )
 
 
@@ -351,7 +352,7 @@ def _log_linear_inference_event(
     payload = {
         "event": event,
         "stage": signals.stage,
-        "model": LINEAR_SKILL_MODEL,
+        "model": decision.model,
         "reasoning_effort": decision.effort,
         "timeout_seconds": decision.timeout_seconds,
         "complexity_score": decision.complexity_score,
@@ -400,7 +401,7 @@ async def run_linear_structured_inference(
     safety_identifier: str | None = None,
     validator: Callable[[StructuredT], None] | None = None,
 ) -> LinearInferenceResult[StructuredT]:
-    """Run one Sol request and one bounded, failure-specific recovery attempt."""
+    """Run the selected model with one bounded, failure-specific recovery attempt."""
 
     client = get_llm_client("openai")
     parse_method = getattr(client, "responses_parse", None)
@@ -418,6 +419,7 @@ async def run_linear_structured_inference(
     last_error: Exception | None = None
     attempt_decision = decision
     attempt_max_output_tokens = _STAGE_MAX_OUTPUT_TOKENS[signals.stage]
+    attempt_messages = messages
     for attempt in range(2):
         started_at = time.monotonic()
         _log_linear_inference_event(
@@ -430,9 +432,9 @@ async def run_linear_structured_inference(
         )
         try:
             parsed = await parse_method(
-                messages,
+                attempt_messages,
                 response_format,
-                model=LINEAR_SKILL_MODEL,
+                model=attempt_decision.model,
                 reasoning_effort=attempt_decision.effort,
                 timeout=attempt_decision.timeout_seconds,
                 max_retries=0,
@@ -493,6 +495,14 @@ async def run_linear_structured_inference(
             )
             if attempt == 1:
                 raise
+            if signals.stage in {"meeting_actions", "project_reconciliation"} and isinstance(
+                exc, LinearInferenceValidationError
+            ):
+                # These validators report a fixed contract violation without transcript or user data.
+                attempt_messages = [
+                    {"role": "system", "content": f"Correct this validation failure and return the full result. {exc}"},
+                    *messages,
+                ]
             if (
                 signals.stage in {"effort_sizing", "studio_effort"}
                 and isinstance(exc, ToolCallParseError)

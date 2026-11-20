@@ -434,13 +434,16 @@ def _linear_meeting_followup_decision(text: str) -> Optional[str]:
 
 def _linear_meeting_batch_summary(batch: dict[str, Any]) -> str:
     counts = batch.get("counts") if isinstance(batch.get("counts"), dict) else {}
-    approved = int(counts.get("approved") or 0)
+    approved = int(counts.get("created", counts.get("approved")) or 0)
+    already_tracked = int(counts.get("alreadyTracked") or 0)
     rejected = int(counts.get("rejected") or 0)
     failed = int(counts.get("failed") or 0)
     message = (
         f"Linear meeting actions updated: {approved} created, "
         f"{rejected} rejected, {failed} failed."
     )
+    if already_tracked:
+        message += f" {already_tracked} already tracked in Linear."
     for item in batch.get("items") or []:
         if not isinstance(item, dict) or item.get("status") != "approved":
             continue

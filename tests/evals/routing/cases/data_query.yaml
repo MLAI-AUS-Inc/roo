@@ -70,6 +70,14 @@
   text: "summarize this meeting as a Linear project update"
   expect: {skill: linear-meeting-actions}
   tags: [paraphrase]
+- id: linear-draft-project-update
+  text: "draft a short Linear project update from these meeting notes"
+  expect: {skill: linear-meeting-actions}
+  tags: [paraphrase]
+- id: linear-publish-update-preview-tasks
+  text: "publish a project update in Linear and extract action items"
+  expect: {skill: linear-meeting-actions}
+  tags: [paraphrase]
 - id: linear-do-project-update
   text: "do a project update in Linear"
   expect: {skill: linear-meeting-actions}

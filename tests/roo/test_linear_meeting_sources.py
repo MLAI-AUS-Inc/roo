@@ -249,7 +249,8 @@ async def test_parse_docx_source(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_parse_text_pdf_source_with_mocked_pymupdf(monkeypatch):
+@pytest.mark.parametrize("page_count", [1, 2])
+async def test_parse_text_pdf_source_with_mocked_pymupdf(monkeypatch, page_count):
     class FakePage:
         def get_text(self, mode):
             assert mode == "text"
@@ -257,7 +258,7 @@ async def test_parse_text_pdf_source_with_mocked_pymupdf(monkeypatch):
 
     class FakeDocument:
         def __len__(self):
-            return 1
+            return page_count
 
         def load_page(self, index):
             assert index == 0
@@ -277,6 +278,7 @@ async def test_parse_text_pdf_source_with_mocked_pymupdf(monkeypatch):
     result = await sources.parse_linear_meeting_sources(
         text="send this pdf to Linear",
         params={},
+        max_pdf_pages=1,
         event_files=[
             {"id": "F1", "name": "meeting.pdf", "size": 10, "url_private_download": "https://x/pdf"}
         ],
@@ -285,6 +287,9 @@ async def test_parse_text_pdf_source_with_mocked_pymupdf(monkeypatch):
     assert result.files_parsed == 1
     assert "[meeting.pdf page 1]" in result.combined_text()
     assert "Sam will update the project plan" in result.combined_text()
+    assert bool(result.warnings) == (page_count > 1)
+    if page_count > 1:
+        assert "pages after 1 were not processed" in result.warnings[0]
 
 
 @pytest.mark.asyncio
