@@ -13,6 +13,7 @@ from .linear_inference import (
     LinearReasoningSignals,
     ProjectFactKind,
     ProjectHealth,
+    normalize_meeting_quote,
     run_linear_structured_inference,
 )
 from .linear_meeting_sources import ParsedSource
@@ -63,7 +64,7 @@ class _Source:
 
 
 def _anchor_quote(quote: str, row: dict, sources: list[_Source]) -> str | None:
-    quote = " ".join(quote.split())
+    quote = normalize_meeting_quote(quote)
     if not quote:
         return None
     index = row.get("source_index")
@@ -92,13 +93,17 @@ Use source order within one transcript; upload order between sources does not es
 Separate what people proposed, committed to, reported as working, and independently verified as shipped.
 Write each fact as one short conversational sentence, with a concrete actor and next step if supported.
 Use changes for material decisions already made, progress, new requirements and blockers.
-Use decisions only for new or materially changed unresolved questions that need a person's decision to move forward.
+Prioritize the delivery stage, owner and next step for material work. A mostly drafted guide that still needs review or publication is progress. Prefer that over incidental metrics.
+Use decisions only for new or materially changed unresolved questions that someone must answer to move work forward. Leave out unaccepted policy ideas and optional discussion topics.
 Combine questions about the same outcome. Omit questions already answered, routine to-dos and optional ideas.
 Empty changes and decisions are valid. Never repeat a sentence between them. Use only supplied evidence IDs.
 Set health only when the current meeting explicitly supports that overall project health. Otherwise return null.
 For each zero-based candidate index return exactly one action. Cite that candidate's commitment or status evidence.
 Choose 'new' only for genuinely new, explicitly committed work with a concrete outcome; leave unsupported work for review.
+Treat a status report about work already in progress as an update. Do not propose a ticket for that work without a new accepted assignment or next step.
+Ignore invitations to opt in, generic requests for volunteers, and personal reminders unless someone specifically accepted a project deliverable.
 When a candidate matches one of its shortlisted issues, compare actual outcome and acceptance criteria. An issue can be a dependency instead of a duplicate.
+If a new detail extends an existing deliverable, use changed_scope unless the meeting agreed to a separately deliverable piece of work. Compare against descriptions, including existing acceptance criteria and planned work.
 Use the supplied issue id and relation 'same_outcome' for tracked/closed issues; 'changed_scope' for changes to existing work (review).
 If comparing a distinct issue, cite that issue with 'distinct'; leave both fields null when no issue is relevant. Unclear links go to review.
 Use 'duplicate' only for the same promised outcome as an earlier candidate and supply its index. Do not merge independent deliverables.
@@ -124,7 +129,7 @@ async def reconcile_project_meeting(
     if len(candidates) > 100 or len(facts) > 500:
         raise LinearInferenceValidationError("More meeting findings than one reconciliation can cover.")
 
-    source_texts = [_Source(source.label, " ".join(source.text.split())) for source in sources]
+    source_texts = [_Source(source.label, normalize_meeting_quote(source.text)) for source in sources]
     evidence: dict[str, str] = {}
     health_evidence: dict[str, set[str]] = {}
     claims = []

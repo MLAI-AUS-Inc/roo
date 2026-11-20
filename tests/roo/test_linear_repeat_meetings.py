@@ -69,12 +69,14 @@ async def test_repeat_meetings_link_old_work_and_publish_only_a_material_change(
     repeat = "Priya is still building the guest invitation email flow."
     staging = "Priya showed guest email invites working in staging."
     test = "Priya will test expired links on Thursday."
+    optional = "Anyone interested can sign up for the invite beta."
     question = "Sam needs to decide whether admins should approve guests before release."
     health = "Sam said the project is on track."
     runs = [
         (f"{build} {health}", [(build, "Build email invitations")], [(build, "requirement")]),
-        (f"{repeat} {staging} {test} {question} {health}",
-         [(repeat, "Implement guest invite emails"), (test, "Test expired guest email links")],
+        (f"{repeat} {staging} {test} {optional} {question} {health}",
+         [(repeat, "Implement guest invite emails"), (test, "Test expired guest email links"),
+          (optional, "Check guest email and opt into the beta if interested")],
          [(staging, "progress"), (test, "next_step"), (question, "question")]),
     ]
     meeting = 0
@@ -107,6 +109,8 @@ async def test_repeat_meetings_link_old_work_and_publish_only_a_material_change(
             if meeting > 1:
                 assert "ENG-2" in context["candidates"][1]["issue_ids"]
             matches = [None] if meeting == 0 else ["ENG-1", None] if meeting == 1 else ["ENG-1", "ENG-2"]
+            if meeting > 0:
+                matches.append(None)
             changes = (
                 [(build, "requirement", "Priya will build email invitations for guests.")]
                 if meeting == 0 else
@@ -116,7 +120,8 @@ async def test_repeat_meetings_link_old_work_and_publish_only_a_material_change(
             )
             return {
                 "actions": [
-                    {"candidate_index": item["index"], "disposition": "tracked" if match else "new",
+                    {"candidate_index": item["index"],
+                     "disposition": "ignore" if item["index"] == 2 else "tracked" if match else "new",
                      "evidence_ids": [item["evidence_id"]], "semantic_issue_id": match,
                      "semantic_relation": "same_outcome" if match else None, "duplicate_of_index": None}
                     for item, match in zip(context["candidates"], matches, strict=True)
@@ -156,6 +161,7 @@ async def test_repeat_meetings_link_old_work_and_publish_only_a_material_change(
     assert second["data"]["review_count"] == 0
     assert "Already tracked in Linear" in second["message"]
     assert "ENG-1" in second["message"]
+    assert "opt into the beta" not in second["message"]
     assert [issue["title"] for issue in issues] == ["Build email invitations", "Test expired guest email links"]
     assert updates[-1]["body"] == (
         "Email invites work in staging. Priya will test expired links on Thursday.\n\n"

@@ -52,13 +52,15 @@ def fake_provider(monkeypatch, *, mutate=None):
 @pytest.mark.parametrize("allow_astra,expected", [(False, "gpt-6.2-sol"), (True, "gpt-6.2-astra")])
 async def test_complex_meeting_uses_scoped_model_and_chronological_evidence(monkeypatch, meeting, allow_astra, expected):
     calls = fake_provider(monkeypatch)
+    meeting["sources"][0].text = meeting["sources"][0].text.replace("security", "“security”")
+    meeting["facts"][0]["evidence"] = 'hold CSV export until "security" signs off.'
     meeting["candidates"][0].update({"evidence": "two merged quotes", "source_label": "Demo, mirror", "_source_quote": "I will add CSV export.", "_source_label": "Demo"})
     result = await reconcile_project_meeting(**meeting, allow_astra=allow_astra)
     assert len(calls) == 1
     payload, params = calls[0]
     assert params["model"] == expected and params["store"] is False
     assert [c["kind"] for c in payload["claims"]] == ["requirement", "blocker"]
-    assert result.evidence[result.changes[0].evidence_ids[0]] == "hold CSV export until security signs off."
+    assert result.evidence[result.changes[0].evidence_ids[0]] == 'hold CSV export until "security" signs off.'
     assert result.actions[0].matched_issue_id == "i" and result.health is None
 
 
@@ -90,9 +92,9 @@ async def test_partial_project_and_wrong_source_fail_before_inference(monkeypatc
 
 
 def test_meeting_candidates_require_source_and_explicit_commitment():
-    batch = inference.LinearMeetingActionBatch.model_validate({"action_items": [{"title": "Ship", "evidence": "consider shipping"}]})
+    batch = inference.LinearMeetingActionBatch.model_validate({"action_items": [{"title": "Ship", "evidence": 'consider "shipping"'}]})
     assert batch.action_items[0].explicit_commitment is False
-    inference.validate_meeting_fact_quotes(batch, "We should consider\nshipping.")
+    inference.validate_meeting_fact_quotes(batch, "We should consider\n“shipping”.")
     with pytest.raises(inference.LinearInferenceValidationError):
         inference.validate_meeting_fact_quotes(batch, "Tomorrow we'll cancel.")
     assert inference.choose_linear_reasoning(inference.LinearReasoningSignals(stage="project_reconciliation", allow_astra=True)).model == "gpt-6.2-sol"

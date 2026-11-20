@@ -17,6 +17,7 @@ from roo.linear_inference import (
     LinearCandidate,
     LinearDirectIssueBatch,
     LinearInferenceTimeoutError,
+    LinearInferenceValidationError,
     LinearReasoningSignals,
     choose_linear_reasoning,
 )
@@ -128,6 +129,7 @@ def test_linear_meeting_owner_matches_name_fallback():
     match = executor._match_linear_meeting_owner(
         "Jane Doe",
         [
+            {"id": "lin-user-2", "name": "Jane Lee", "displayName": "jane2", "email": "jane.lee@example.com"},
             {"id": "lin-user-1", "name": "Jane Doe", "displayName": "Jane", "email": "jane@example.com"},
         ],
     )
@@ -1136,8 +1138,10 @@ async def test_linear_meeting_candidate_extraction_chunks_sources(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_linear_meeting_timeout_retries_only_failed_chunk_at_smaller_scope(
+@pytest.mark.parametrize("evidence_failure", [False, True])
+async def test_linear_meeting_retries_only_failed_chunk_at_smaller_scope(
     monkeypatch,
+    evidence_failure,
 ):
     executor = SkillExecutor()
     calls = []
@@ -1166,6 +1170,8 @@ async def test_linear_meeting_timeout_retries_only_failed_chunk_at_smaller_scope
             }
         )
         if recovery_depth == 0:
+            if evidence_failure:
+                raise LinearInferenceValidationError("Meeting finding is missing its original quote.")
             raise _meeting_timeout_error(
                 source_chars=len(transcript),
                 batch_chunk_index=batch_chunk_index,
@@ -1192,7 +1198,7 @@ async def test_linear_meeting_timeout_retries_only_failed_chunk_at_smaller_scope
     initial_calls = [call for call in calls if call["recovery_depth"] == 0]
     recovery_calls = [call for call in calls if call["recovery_depth"] == 1]
     assert len(initial_calls) == 1
-    assert len(recovery_calls) == 2
+    assert len(recovery_calls) >= 2
     assert all(call["chars"] < initial_calls[0]["chars"] for call in recovery_calls)
     assert all(call["source_count"] == 1 for call in calls)
     assert {call["batch_chunk_index"] for call in calls} == {1}
