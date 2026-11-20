@@ -172,3 +172,81 @@ async def test_published_health_must_agree_with_extracted_health(monkeypatch, me
     else:
         with pytest.raises(inference.LinearInferenceValidationError):
             await reconcile_project_meeting(**meeting)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("missing_candidate", [False, True])
+async def test_large_meeting_preserves_global_duplicates_and_original_evidence(monkeypatch, missing_candidate):
+    action_quotes = [f"Priya: I will deliver expense export milestone {i}." for i in range(18)]
+    status_quotes = [f"Priya: We verified expense export checkpoint {i} in staging." for i in range(49)]
+    latest = "Priya: We put expense export on hold pending sign-off."
+    meeting = {
+        "sources": [ParsedSource("Meeting", "\n".join([*action_quotes, *status_quotes, latest]), "text")],
+        "project": {"id": "p", "name": "Demo"},
+        "inventory": ProjectIssueInventory("p", [
+            {"id": "linear-uuid", "identifier": "DEMO-42", "title": "Deliver expense export milestone 0",
+             "state": {"type": "started"}},
+            *({"id": f"linear-{i}", "title": f"Deliver expense export milestone {i}", "state": {"type": "started"}}
+              for i in range(1, 8)),
+            {"id": "diagram-uuid", "identifier": "DEMO-77", "title": "Publish the architecture diagrams",
+             "state": {"type": "started"}},
+        ], True),
+        "candidates": [
+            {"title": "Publish the architecture diagrams" if i == 16 else f"Deliver expense export milestone {i}",
+             "explicit_commitment": i != 10, "evidence": quote}
+            for i, quote in enumerate(action_quotes)
+        ],
+        "facts": [
+            {"kind": "progress", "text": quote, "evidence": quote}
+            for quote in [*status_quotes, latest]
+        ],
+    }
+    calls = []
+
+    class Client:
+        async def responses_parse(self, messages, response_format, **kwargs):
+            payload = json.loads(messages[-1]["content"])
+            calls.append((response_format.__name__, payload))
+            assert len(messages[-1]["content"]) <= 55_000
+            if response_format.__name__ == "_ActionBatch":
+                assert len(payload["candidates"]) <= 8
+                assert len(payload["meeting_candidates"]) == 18
+                assert latest in [claim["text"] for claim in payload["claims"]]
+                actions = []
+                for item in payload["candidates"]:
+                    index = item["index"]
+                    if missing_candidate and index == 8:
+                        continue
+                    if index == 9:
+                        assert "DEMO-77" not in item["issue_ids"]
+                    dispositions = {0: "tracked", 8: "duplicate"}
+                    actions.append({
+                        "candidate_index": index,
+                        "disposition": dispositions.get(index, "new"),
+                        "semantic_issue_id": {0: "DEMO-42", 9: "DEMO-77"}.get(index),
+                        "semantic_relation": {0: "same_outcome", 9: "distinct"}.get(index),
+                        "duplicate_of_index": 1 if index == 8 else None,
+                    })
+                return {"actions": actions}
+            assert not payload["candidates"]
+            fact = payload["claims"][-1]
+            return {
+                "changes": [{"kind": "progress", "text": fact["text"], "evidence_ids": fact["evidence_ids"]}],
+                "decisions": [], "health": None, "health_evidence_ids": [],
+            }
+
+    monkeypatch.setattr(inference, "get_llm_client", lambda provider: Client())
+    if missing_candidate:
+        with pytest.raises(inference.LinearInferenceValidationError, match="every supplied candidate"):
+            await reconcile_project_meeting(**meeting)
+        return
+
+    result = await reconcile_project_meeting(**meeting)
+    assert [action.candidate_index for action in result.actions] == list(range(18))
+    assert result.actions[0].semantic_issue_id == "linear-uuid"
+    assert result.actions[8].duplicate_of_index == 1
+    assert [action.disposition for action in result.actions[9:12]] == ["review", "review", "new"]
+    assert result.evidence[result.actions[8].evidence_ids[0]] == action_quotes[8]
+    assert result.changes[0].text == latest
+    assert sum(model == "_ActionBatch" for model, _ in calls) == 3
+    assert sum(model == "_ProjectStatus" for model, _ in calls) == 4
