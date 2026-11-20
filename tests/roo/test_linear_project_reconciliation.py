@@ -9,7 +9,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "roo-standalone"))
 from roo import linear_inference as inference
 from roo.linear_meeting_sources import ParsedSource
 from roo.linear_project_context import ProjectIssueInventory
-from roo.linear_project_reconciliation import reconcile_project_meeting
+from roo.linear_project_reconciliation import (
+    _MAX_RECONCILIATION_CONTEXT_CHARS,
+    _serialize_project_context,
+    reconcile_project_meeting,
+)
 
 
 @pytest.fixture
@@ -98,6 +102,39 @@ def test_meeting_candidates_require_source_and_explicit_commitment():
     with pytest.raises(inference.LinearInferenceValidationError):
         inference.validate_meeting_fact_quotes(batch, "Tomorrow we'll cancel.")
     assert inference.choose_linear_reasoning(inference.LinearReasoningSignals(stage="project_reconciliation", allow_astra=True)).model == "gpt-6.2-sol"
+
+
+def test_large_meeting_fits_by_shortening_issue_descriptions_before_touching_evidence():
+    competing_issues = [
+        {
+            "id": f"issue-{i}",
+            "title": f"Implementation outcome {i}",
+            "description": "Implementation details and acceptance criteria. " * 25,
+            "state": {"type": "started"},
+        }
+        for i in range(167)
+    ]
+    quotes = {
+        f"quote-{i}": f"Decision {i}. " + "Material progress reported by the owner. " * 12
+        for i in range(90)
+    }
+    candidates = [
+        {"title": f"Outcome {i}", "issue_ids": [f"issue-{n}" for n in range(i * 3, i * 3 + 3)]}
+        for i in range(38)
+    ]
+    payload = {"quotes": quotes, "candidates": candidates, "issues": competing_issues}
+    assert len(json.dumps(payload, separators=(",", ":"))) > _MAX_RECONCILIATION_CONTEXT_CHARS
+
+    compacted = _serialize_project_context(payload)
+    assert len(compacted) <= _MAX_RECONCILIATION_CONTEXT_CHARS
+    result = json.loads(compacted)
+    assert result["issue_descriptions_shortened"]
+    assert result["quotes"] == quotes
+    assert result["candidates"] == candidates
+    assert [issue["id"] for issue in result["issues"]] == [issue["id"] for issue in competing_issues]
+    assert all(issue["state"] == {"type": "started"} for issue in result["issues"])
+    assert 0 < len(result["issues"][0]["description"]) < len(competing_issues[0]["description"])
+    assert result["issues"][-1]["description"] == ""
 
 
 @pytest.mark.asyncio

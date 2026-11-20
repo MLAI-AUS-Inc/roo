@@ -427,6 +427,9 @@ async def run_linear_structured_inference(
     last_error: Exception | None = None
     attempt_decision = decision
     attempt_max_output_tokens = _STAGE_MAX_OUTPUT_TOKENS[signals.stage]
+    if signals.stage == "project_reconciliation" and signals.candidate_count >= 25:
+        # Larger meetings must return a disposition for every candidate.
+        attempt_max_output_tokens = 12_000
     attempt_messages = messages
     for attempt in range(2):
         started_at = time.monotonic()
