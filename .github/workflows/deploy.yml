@@ -214,6 +214,7 @@ jobs:
           ROO_PRIVATE_BASE_URL: ${{ vars.ROO_PRIVATE_BASE_URL }}
           MEETING_ROOM_BOOKING_ENABLED: ${{ vars.MEETING_ROOM_BOOKING_ENABLED || 'false' }}
           LINEAR_CHANNEL_ISSUE_WRITES_ENABLED: ${{ vars.LINEAR_CHANNEL_ISSUE_WRITES_ENABLED || 'false' }}
+          LINEAR_MEETING_ASTRA_PROJECTS: ${{ vars.LINEAR_MEETING_ASTRA_PROJECTS }}
           FOUNDER_ACCOUNT_LINK_ENABLED: ${{ vars.FOUNDER_ACCOUNT_LINK_ENABLED || 'false' }}
           COWORKING_REPORT_SLACK_TEAM_ID: ${{ vars.COWORKING_REPORT_SLACK_TEAM_ID }}
           COWORKING_REPORT_SLACK_CHANNEL_ID: ${{ vars.COWORKING_REPORT_SLACK_CHANNEL_ID }}
@@ -222,7 +223,7 @@ jobs:
           host: ${{ secrets.DO_HOST }}
           username: ${{ secrets.DO_USERNAME }}
           key: ${{ secrets.DO_SSH_KEY }}
-          envs: SIM_PATIENT_API_KEY,SIM_PATIENT_SAFETY_SALT,ROO_API_KEY,ROO_PUBLIC_HOST,ROO_PRIVATE_BASE_URL,MEETING_ROOM_BOOKING_ENABLED,LINEAR_CHANNEL_ISSUE_WRITES_ENABLED,FOUNDER_ACCOUNT_LINK_ENABLED,COWORKING_REPORT_SLACK_TEAM_ID,COWORKING_REPORT_SLACK_CHANNEL_ID,COWORKING_INTENTS_V3_MIGRATION_APPROVED,RELEASE_SHA
+          envs: SIM_PATIENT_API_KEY,SIM_PATIENT_SAFETY_SALT,ROO_API_KEY,ROO_PUBLIC_HOST,ROO_PRIVATE_BASE_URL,MEETING_ROOM_BOOKING_ENABLED,LINEAR_CHANNEL_ISSUE_WRITES_ENABLED,LINEAR_MEETING_ASTRA_PROJECTS,FOUNDER_ACCOUNT_LINK_ENABLED,COWORKING_REPORT_SLACK_TEAM_ID,COWORKING_REPORT_SLACK_CHANNEL_ID,COWORKING_INTENTS_V3_MIGRATION_APPROVED,RELEASE_SHA
           script: |
             # Stop if any command fails
             set -eu
@@ -254,6 +255,14 @@ jobs:
               false|FALSE|False|0|no|NO|No|off|OFF|Off|'') LINEAR_CHANNEL_ISSUE_WRITES_ENABLED=false ;;
               *) echo "LINEAR_CHANNEL_ISSUE_WRITES_ENABLED must be boolean" >&2; exit 1 ;;
             esac
+            LINEAR_MEETING_ASTRA_PROJECTS="${LINEAR_MEETING_ASTRA_PROJECTS:-}"
+            if [ -n "$LINEAR_MEETING_ASTRA_PROJECTS" ] && [ "$LINEAR_MEETING_ASTRA_PROJECTS" != "*" ]; then
+              project_id_pattern='[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}'
+              if ! printf '%s' "$LINEAR_MEETING_ASTRA_PROJECTS" | grep -Eiq "^${project_id_pattern}(,${project_id_pattern})*$"; then
+                echo "LINEAR_MEETING_ASTRA_PROJECTS must contain comma-separated Linear project UUIDs" >&2
+                exit 1
+              fi
+            fi
             case "$FOUNDER_ACCOUNT_LINK_ENABLED" in
               true|TRUE|True|1|yes|YES|Yes|on|ON|On) FOUNDER_ACCOUNT_LINK_ENABLED=true ;;
               false|FALSE|False|0|no|NO|No|off|OFF|Off|'') FOUNDER_ACCOUNT_LINK_ENABLED=false ;;
@@ -428,6 +437,7 @@ jobs:
             fi
             upsert_env "ROO_IMPLICIT_ACTION_ALLOWLIST" "$implicit_actions"
             upsert_env "LINEAR_CHANNEL_ISSUE_WRITES_ENABLED" "$LINEAR_CHANNEL_ISSUE_WRITES_ENABLED"
+            upsert_env "LINEAR_MEETING_ASTRA_PROJECTS" "$LINEAR_MEETING_ASTRA_PROJECTS"
             
             # Build first, then run or validate the explicitly approved schema
             # migration before any new application process can report ready.
@@ -462,6 +472,10 @@ jobs:
             done
 
             docker compose --env-file .env -f ../infra/docker-compose.yml exec -T -e EXPECTED_RELEASE_SHA="$RELEASE_SHA" -e EXPECTED_FOUNDER_ACCOUNT_LINK_ENABLED="$FOUNDER_ACCOUNT_LINK_ENABLED" roo python -c 'import os; from roo.config import get_settings; settings = get_settings(); actions = settings.implicit_action_allowlist; assert os.environ.get("ROO_RELEASE_SHA") == os.environ["EXPECTED_RELEASE_SHA"]; assert settings.FOUNDER_ACCOUNT_LINK_ENABLED is (os.environ["EXPECTED_FOUNDER_ACCOUNT_LINK_ENABLED"] == "true"); assert ("mlai-points:link_founder_account" in actions) is settings.FOUNDER_ACCOUNT_LINK_ENABLED; assert "mlai-points:link_account" not in actions; print({"release_sha": os.environ["ROO_RELEASE_SHA"], "founder_account_link_enabled": settings.FOUNDER_ACCOUNT_LINK_ENABLED, "link_action_enabled": "mlai-points:link_founder_account" in actions})'
+
+            docker compose --env-file .env -f ../infra/docker-compose.yml exec -T \
+              -e EXPECTED_LINEAR_MEETING_ASTRA_PROJECTS="$LINEAR_MEETING_ASTRA_PROJECTS" \
+              roo python -c 'import os; from roo.config import get_settings; scope = get_settings().LINEAR_MEETING_ASTRA_PROJECTS; assert scope == os.environ["EXPECTED_LINEAR_MEETING_ASTRA_PROJECTS"]; print({"linear_meeting_astra_projects": scope})'
 
             if [ "$FOUNDER_ACCOUNT_LINK_ENABLED" = "true" ]; then
               docker compose --env-file .env -f ../infra/docker-compose.yml exec -T roo python -c '

@@ -66,7 +66,7 @@ This skill turns pasted Slack meeting transcripts, summaries, supported Slack fi
 - Assign new issues to the best matching Linear user.
 - Attach new issues to the best matching Linear project and team.
 - Consolidate paraphrased action items that produce the same deliverable, preserve genuinely separate work, avoid likely duplicate open issues, and make retries idempotent from Slack source evidence.
-- Use `gpt-6.2-sol` via the OpenAI Responses API for one evidence extraction pass, direct requests, sizing and routine reconciliation. For complex reconciliation, opt in by setting `LINEAR_MEETING_ASTRA_PROJECTS` to comma-separated Linear project IDs or `*` for all projects. The eligible stage uses `gpt-6.2-astra`.
+- Use `gpt-6.2-sol` via the OpenAI Responses API for one evidence extraction pass, direct requests, sizing and routine reconciliation. For complex reconciliation, opt in by setting `LINEAR_MEETING_ASTRA_PROJECTS` to comma-separated Linear project IDs or `*` for all projects. The eligible stage uses `gpt-6.2-astra`. Public Roo reads the production scope from the `LINEAR_MEETING_ASTRA_PROJECTS` repository variable on deploy.
 - Select model reasoning effort from source length, source count, ambiguity, partial work, dependencies, artifacts, and conflicting context; never derive model effort from the XS/S/M/L/XL task label.
 - Recover a timed-out meeting-note chunk at progressively smaller scope while keeping the overall extraction bounded and creating no partial Linear issues.
 - For every resolved project, estimate remaining effort in bounded batches and apply exactly one compatible XS/S/M/L/XL label to each new non-terminal issue.
