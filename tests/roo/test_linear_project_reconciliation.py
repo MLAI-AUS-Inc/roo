@@ -137,6 +137,19 @@ def test_large_meeting_fits_by_shortening_issue_descriptions_before_touching_evi
     assert result["issues"][-1]["description"] == ""
 
 
+def test_large_reconciliations_have_enough_time_to_return_each_disposition():
+    large = inference.choose_linear_reasoning(inference.LinearReasoningSignals(
+        stage="project_reconciliation", source_chars=151_235, candidate_count=37, ambiguity=True,
+    ))
+    ordinary = inference.choose_linear_reasoning(inference.LinearReasoningSignals(
+        stage="project_reconciliation", source_chars=15_000, candidate_count=10, ambiguity=True,
+    ))
+    assert large.effort == ordinary.effort == "high"
+    assert ordinary.timeout_seconds == 75.0
+    assert large.timeout_seconds == 180.0
+    assert inference.escalate_linear_reasoning(large).timeout_seconds == 180.0
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status,accepted", [("atRisk", True), ("onTrack", False)])
 async def test_published_health_must_agree_with_extracted_health(monkeypatch, meeting, status, accepted):
