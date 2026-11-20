@@ -9,7 +9,8 @@ are labelled as such.
 - Combined update requests recognize “extract and assign” as a request for
   proposals with suggested owners. Large meeting reconciliations preserve
   source evidence and all shortlisted issue IDs while shortening issue
-  descriptions to fit the context budget.
+  descriptions to fit the context budget. Large reconciliations have a
+  bounded three-minute inference deadline, including structured retries.
 - Preserved grounded new commitments when the project inventory only has
   non-exact keyword matches. Exact-title matches, explicit issue relationships
   and backend write checks still apply. The extended offline repeat-meeting

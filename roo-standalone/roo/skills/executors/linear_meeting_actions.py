@@ -372,6 +372,10 @@ class LinearMeetingActionsExecutor(SkillExecutorInterface):
                         allow_astra="*" in astra_projects or project_id in astra_projects,
                         safety_identifier=linear_safety_identifier(params.get("requester_slack_id")),
                     )
+                except LinearInferenceTimeoutError:
+                    return {
+                        "message": "I timed out checking these notes against Linear. No Linear changes were made.",
+                    }
                 except (APIError, RuntimeError, ValueError, TimeoutError):
                     return {
                         "message": "I couldn't reconcile these notes with Linear. Please retry. No Linear changes were made.",

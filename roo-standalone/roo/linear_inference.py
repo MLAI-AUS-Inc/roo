@@ -292,10 +292,13 @@ def choose_linear_reasoning(signals: LinearReasoningSignals) -> LinearReasoningD
     base_index = _EFFORT_ORDER.index(_STAGE_BASE_EFFORT[signals.stage])
     cap_index = _EFFORT_ORDER.index(_STAGE_MAX_INITIAL_EFFORT[signals.stage])
     effort = _EFFORT_ORDER[min(base_index + bump, cap_index)]
+    timeout_seconds = _linear_timeout_seconds(signals.stage, effort)
+    if signals.stage == "project_reconciliation" and (signals.candidate_count >= 25 or signals.source_chars >= 100_000):
+        timeout_seconds = max(timeout_seconds, 180.0)
     return LinearReasoningDecision(
         stage=signals.stage,
         effort=effort,
-        timeout_seconds=_linear_timeout_seconds(signals.stage, effort),
+        timeout_seconds=timeout_seconds,
         complexity_score=score,
         reasons=tuple(reasons) or ("stage_baseline",),
         model=(
@@ -315,7 +318,7 @@ def escalate_linear_reasoning(
     return replace(
         decision,
         effort=effort,
-        timeout_seconds=_linear_timeout_seconds(decision.stage, effort),
+        timeout_seconds=max(decision.timeout_seconds, _linear_timeout_seconds(decision.stage, effort)),
         reasons=(*decision.reasons, "structured_validation_retry"),
         retry=True,
     )
