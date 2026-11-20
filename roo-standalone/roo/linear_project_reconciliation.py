@@ -60,11 +60,14 @@ class ProjectAction(_ActionChoice):
         return self.semantic_issue_id
 
 
-class _ProjectStatus(BaseModel):
+class _StatusSelection(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     changes: list[ProjectFact] = Field(max_length=6)
     decisions: list[ProjectFact] = Field(max_length=3)
+
+
+class _ProjectStatus(_StatusSelection):
     health: ProjectHealth | None
     health_evidence_ids: list[str] = Field(max_length=6)
 
@@ -147,8 +150,7 @@ Use changes for material decisions already made, progress, new requirements and 
 Prioritize the delivery stage, owner and next step for material work. A mostly drafted guide that still needs review or publication is progress. Prefer that over incidental metrics.
 Use decisions only for new or materially changed unresolved questions that someone must answer to move work forward. Leave out unaccepted policy ideas and optional discussion topics.
 Combine questions about the same outcome. Omit questions already answered, routine to-dos and optional ideas.
-Empty changes and decisions are valid. Never repeat a sentence between them. Use only supplied evidence IDs.
-Set health only when the current meeting explicitly supports that overall project health. Otherwise return null."""
+Empty changes and decisions are valid. Never repeat a sentence between them. Use only supplied evidence IDs."""
 _ACTIONS = """
 Return exactly one action for each entry in candidates. Use its supplied index as candidate_index. Ignore all other indexes except when comparing duplicate outcomes.
 Choose 'new' only for genuinely new, explicitly committed work with a concrete outcome; leave unsupported work for review.
@@ -163,7 +165,9 @@ Use 'duplicate' only for the same promised outcome as an earlier candidate and s
 Use 'closed' for already completed/cancelled work. A later explicit cancellation or correction wins over earlier enthusiasm.
 Use 'ignore' for FYIs, wishes and historical statements. Never infer a commitment or owner from the speaker alone."""
 
-_RECONCILE = _CONTEXT + _STATUS + _ACTIONS + "\nEach action must cite its own commitment or status evidence."
+_RECONCILE = _CONTEXT + _STATUS + _ACTIONS + """
+Each action must cite its own commitment or status evidence.
+Set health only when the current meeting explicitly supports that overall project health. Otherwise return null."""
 _ACTION_BATCH = _CONTEXT + _ACTIONS + """
 meeting_candidates is the meeting-wide catalogue for cross-batch duplicate checks. Return decisions only for candidates.
 Read the provided evidence and related claims. Roo attaches each action's original quote in code."""
@@ -243,6 +247,7 @@ async def _reconcile_in_batches(payload: dict, claim_issues: dict, health_eviden
     # the same snapshot and validate links against each candidate's shortlist.
     issue_keys = {issue_id: issue.get("identifier") or issue_id for issue_id, issue in issues.items()}
     issue_ids = {key: issue_id for issue_id, key in issue_keys.items()}
+    status_evidence_complete = True
 
     def context(batch_claims: list[dict], batch_candidates: list[dict], *, action_batch: bool = False) -> dict:
         refs = {ref for claim in batch_claims for ref in claim["evidence_ids"]}
@@ -265,13 +270,42 @@ async def _reconcile_in_batches(payload: dict, claim_issues: dict, health_eviden
             ],
         }
 
-    async def summarize(batch_claims: list[dict], prompt: str) -> _ProjectStatus:
+    async def summarize(batch_claims: list[dict], prompt: str) -> _StatusSelection:
+        nonlocal status_evidence_complete
         scoped = context(batch_claims, [])
-        return await run(
-            prompt, scoped, _ProjectStatus,
-            lambda result: _validate_status(result, scoped["quotes"], health_evidence),
-            max_chars=_BATCH_CONTEXT_CHARS,
+        # Keep model-facing evidence labels short and resolve them in this
+        # slice before passing any findings to the next phase.
+        aliases = {ref: f"e{i}" for i, ref in enumerate(scoped["quotes"], start=1)}
+        originals = {alias: ref for ref, alias in aliases.items()}
+        scoped["claims"] = [
+            {**{k: value for k, value in row.items() if k != "evidence_id"},
+             "evidence_ids": [aliases[ref] for ref in row["evidence_ids"]]}
+            for row in scoped["claims"]
+        ]
+        for key in ("quotes", "quote_context"):
+            scoped[key] = {aliases[ref]: value for ref, value in scoped[key].items()}
+        result = await run(
+            prompt, scoped, _StatusSelection, None, max_chars=_BATCH_CONTEXT_CHARS,
+            source_count=len({ref.partition(":")[0] for ref in aliases}),
         )
+        seen = set()
+
+        def anchored(facts: list[ProjectFact], *, agenda: bool = False) -> list[ProjectFact]:
+            nonlocal status_evidence_complete
+            selected = []
+            for fact in facts:
+                key = " ".join(fact.text.casefold().split()).strip(".?! ")
+                if (not key or any(ref not in originals for ref in fact.evidence_ids)
+                        or (agenda and fact.kind not in {"question", "blocker"})):
+                    status_evidence_complete = False
+                    continue
+                if key in seen:
+                    continue
+                seen.add(key)
+                selected.append(fact.model_copy(update={"evidence_ids": [originals[ref] for ref in fact.evidence_ids]}))
+            return selected
+
+        return _StatusSelection(changes=anchored(result.changes), decisions=anchored(result.decisions, agenda=True))
 
     async def resolve_actions(batch: list[dict]) -> list[ProjectAction]:
         scoped = context(_related_claims(batch, claim_rows), batch, action_batch=True)
@@ -321,14 +355,19 @@ async def _reconcile_in_batches(payload: dict, claim_issues: dict, health_eviden
         combined = [
             fact.model_dump() for update in updates for fact in [*update.changes, *update.decisions]
         ]
-        combined.extend(claim for claim in claim_rows if claim["evidence_id"] in health_evidence)
         if combined:
             combined.sort(key=lambda row: _source_position(row["evidence_ids"][0]))
             updates = [await summarize(combined, _FINAL_STATUS)]
         else:
             updates = []
-    status = updates[0] if updates else _ProjectStatus(changes=[], decisions=[], health=None, health_evidence_ids=[])
-    return _ProjectDecision(**status.model_dump(), actions=actions)
+    status = updates[0] if updates else _StatusSelection(changes=[], decisions=[])
+    # Publish only when verified transcript evidence agrees on overall health.
+    reported_health = {health for values in health_evidence.values() for health in values}
+    health = next(iter(reported_health)) if status_evidence_complete and len(reported_health) == 1 else None
+    return _ProjectDecision(
+        **status.model_dump(), actions=actions, health=health,
+        health_evidence_ids=list(health_evidence)[:6] if health else [],
+    )
 
 
 async def reconcile_project_meeting(
@@ -415,7 +454,8 @@ async def reconcile_project_meeting(
     slots = asyncio.Semaphore(_RECONCILIATION_CONCURRENCY)
 
     async def run(
-        prompt: str, scoped: dict, model: type[_Response], validate: Callable[[_Response], None], *, max_chars: int,
+        prompt: str, scoped: dict, model: type[_Response], validate: Callable[[_Response], None] | None, *,
+        max_chars: int, source_count: int | None = None,
     ) -> _Response:
         data = _serialize_project_context(scoped, max_chars=max_chars)
         async with slots:
@@ -424,7 +464,9 @@ async def reconcile_project_meeting(
                 response_format=model,
                 signals=LinearReasoningSignals(
                     stage="project_reconciliation",
-                    source_count=len({ref.partition(":")[0] for ref in scoped["quotes"]}),
+                    source_count=source_count if source_count is not None else len({
+                        ref.partition(":")[0] for ref in scoped["quotes"]
+                    }),
                     source_chars=len(data),
                     candidate_count=len(scoped["candidates"]),
                     ambiguity=bool(scoped["issues"] or (last_update and scoped["claims"]) or len(scoped["candidates"]) > 1),

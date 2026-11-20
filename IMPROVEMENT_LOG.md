@@ -8,7 +8,8 @@ are labelled as such.
 
 - Large meeting requests reconcile tasks and update evidence in separate
   bounded groups. Roo attaches the original action evidence in code, keeps
-  duplicate checks across groups, and combines the status into one update.
+  duplicate checks across groups, and combines anchored facts into one update.
+  Publication requires consistent, explicitly reported project health.
 - Combined update requests recognize “extract and assign” as a request for
   proposals with suggested owners. Large meeting reconciliations preserve
   source evidence and all shortlisted issue IDs while shortening issue
