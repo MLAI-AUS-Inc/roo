@@ -66,6 +66,17 @@ def test_tasks_need_an_independent_request(text, expected):
     assert meeting_update_task_intent(text) == expected
 
 
+def test_numbered_update_and_assigned_action_request_keeps_tasks_in_review():
+    text = (
+        "<@UROO> please use this transcript to:\n"
+        "1. make a project update in linear\n"
+        "2. extract and assign the to-do items as linear tickets to the correct people"
+    )
+    assert project_update_intent(text, {}) == "publish"
+    assert meeting_update_task_intent(text) == "review"
+    assert meeting_update_task_intent(f"{text}\nDo not create any tasks.") == "none"
+
+
 def fact(text, *ids):
     return SimpleNamespace(text=text, evidence_ids=list(ids))
 

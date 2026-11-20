@@ -57,7 +57,7 @@ _TASK_NOUN = (
     r"(?:tasks?|issues?|tickets?|to[- ]?dos?|action items?)\b"
 )
 _TASK_REQUEST = re.compile(
-    rf"{_REQUEST_PREFIX}(?P<verb>extract|draft|preview|review|suggest|list|show|identify|find|"
+    rf"{_REQUEST_PREFIX}(?P<verb>extract(?:\s+and\s+assign)?|draft|preview|review|suggest|list|show|identify|find|"
     rf"create|add|file|open|log)\s+{_TASK_NOUN}"
 )
 _NO_TASKS = re.compile(
