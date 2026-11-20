@@ -1,6 +1,6 @@
 ---
 name: linear-meeting-actions
-description: Create Linear tasks/updates from Slack or size tasks across a named Linear project
+description: Draft or publish Linear updates, extract tasks, or size project issues
 requires_auth: true
 parameters:
   - action: One of extract, create, approve, reject, or size_project_issues. Defaults to create for transcript-to-Linear requests.
@@ -19,9 +19,7 @@ routing:
     Linear destination.
   examples:
     - {text: "add a task to linear to fix the login bug", action: create}
-    - {text: "send this attached PDF to Linear as tasks", action: create}
-    - {text: "draft a Linear project update for Aaron AI from these notes"}
-    - {text: "publish a project update in Linear and extract action items from these notes"}
+    - {text: "draft a Linear project update from these notes"}
     - {text: "size all unsized tasks in Linear project Aaron AI", action: size_project_issues}
   negative_examples:
     - {text: "create a task called fix docs worth 5 points", instead: mlai-points}
