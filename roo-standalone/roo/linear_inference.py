@@ -146,11 +146,19 @@ class LinearMeetingActionBatch(BaseModel):
     project_facts: list[LinearMeetingFact] = Field(default_factory=list, max_length=40)
 
 
+_MEETING_QUOTE_TYPOGRAPHY = str.maketrans({"\u2018": "'", "\u2019": "'", "\u201c": '"', "\u201d": '"'})
+
+
+def normalize_meeting_quote(text: str) -> str:
+    """Compare verbatim quotes without requiring identical line wraps or smart quotes."""
+    return " ".join(text.translate(_MEETING_QUOTE_TYPOGRAPHY).split())
+
+
 def validate_meeting_fact_quotes(batch: LinearMeetingActionBatch, text: str) -> None:
     """Reject invented quotes while tolerating line wraps from PDFs and Slack."""
-    source = " ".join(text.split())
+    source = normalize_meeting_quote(text)
     for finding in [*batch.action_items, *batch.project_facts]:
-        quote = " ".join(finding.evidence.split())
+        quote = normalize_meeting_quote(finding.evidence)
         if not quote or quote not in source:
             raise LinearInferenceValidationError("Meeting finding is missing its original quote.")
 

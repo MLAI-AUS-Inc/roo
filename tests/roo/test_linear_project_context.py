@@ -78,6 +78,7 @@ async def test_a_different_title_match_cannot_mask_a_second_exact_match():
     inventory = await load_project_issue_inventory(client, "p")
     candidate = {"title": "Build data export"}
     assert match_project_issue(candidate, inventory).disposition == "needs_review"
+    assert match_project_issue(candidate, inventory, semantic_relation="distinct").disposition == "needs_review"
     matched = match_project_issue(candidate, inventory, semantic_issue_id="P-11", semantic_relation="distinct")
     assert matched.issue["identifier"] == "P-12" and matched.disposition == "already_tracked"
 
