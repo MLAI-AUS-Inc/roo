@@ -154,7 +154,8 @@ class LinearMeetingActionsClient:
         page_size: int = 50,
         max_issues: int = 500,
     ) -> dict[str, Any]:
-        encoded_project_id = quote(str(project_id or "").strip(), safe="")
+        project_id = str(project_id or "").strip()
+        encoded_project_id = quote(project_id, safe="")
         if not encoded_project_id:
             raise ValueError("project_id is required")
         nodes: list[dict[str, Any]] = []
@@ -173,18 +174,18 @@ class LinearMeetingActionsClient:
                 params=params,
                 timeout=45.0,
             )
-            if not project and isinstance(page.get("project"), dict):
-                project = dict(page["project"])
+            page_project, page_nodes, page_info = _project_inventory_page(page, project_id)
+            if not project:
+                project = page_project
             if not snapshot_at:
                 snapshot_at = str(page.get("snapshotAt") or "")
             if not terminal_types and isinstance(page.get("terminalStateTypes"), list):
                 terminal_types = [str(value) for value in page["terminalStateTypes"]]
-            nodes.extend(_dict_list(page.get("nodes")))
+            nodes.extend(page_nodes)
             if len(nodes) > max(1, int(max_issues)):
                 raise RuntimeError(
                     f"Project has more than the configured {max_issues} issue safety limit; nothing was changed."
                 )
-            page_info = page.get("pageInfo") if isinstance(page.get("pageInfo"), dict) else {}
             if not page_info.get("hasNextPage"):
                 break
             next_cursor = str(page_info.get("endCursor") or "").strip()
@@ -211,7 +212,8 @@ class LinearMeetingActionsClient:
         page_size: int = 25,
         max_updates: int = 500,
     ) -> dict[str, Any]:
-        encoded_project_id = quote(str(project_id or "").strip(), safe="")
+        project_id = str(project_id or "").strip()
+        encoded_project_id = quote(project_id, safe="")
         if not encoded_project_id:
             raise ValueError("project_id is required")
         nodes: list[dict[str, Any]] = []
@@ -229,16 +231,16 @@ class LinearMeetingActionsClient:
                 params=params,
                 timeout=45.0,
             )
-            if not project and isinstance(page.get("project"), dict):
-                project = dict(page["project"])
+            page_project, page_nodes, page_info = _project_inventory_page(page, project_id)
+            if not project:
+                project = page_project
             if not snapshot_at:
                 snapshot_at = str(page.get("snapshotAt") or "")
-            nodes.extend(_dict_list(page.get("nodes")))
+            nodes.extend(page_nodes)
             if len(nodes) > max(1, int(max_updates)):
                 raise RuntimeError(
                     f"Project has more than the configured {max_updates} update safety limit; nothing was changed."
                 )
-            page_info = page.get("pageInfo") if isinstance(page.get("pageInfo"), dict) else {}
             if not page_info.get("hasNextPage"):
                 break
             next_cursor = str(page_info.get("endCursor") or "").strip()
@@ -343,6 +345,10 @@ class LinearMeetingActionsClient:
         label_ids: Optional[list[str]] = None,
         idempotency_key: Optional[str] = None,
         sizing_metadata: Optional[dict[str, Any]] = None,
+        recheck_project_work: bool = False,
+        project_work_snapshot_at: Optional[str] = None,
+        project_work_outcome: Optional[str] = None,
+        project_work_distinct_issue_id: Optional[str] = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "title": title,
@@ -364,6 +370,14 @@ class LinearMeetingActionsClient:
             payload["idempotency_key"] = idempotency_key
         if sizing_metadata:
             payload["sizing_metadata"] = sizing_metadata
+        if recheck_project_work:
+            payload["recheck_project_work"] = True
+            if project_work_snapshot_at:
+                payload["project_work_snapshot_at"] = project_work_snapshot_at
+            if project_work_outcome:
+                payload["project_work_outcome"] = project_work_outcome
+            if project_work_distinct_issue_id:
+                payload["project_work_distinct_issue_id"] = project_work_distinct_issue_id
 
         try:
             return await self._request_json(
@@ -459,16 +473,18 @@ class LinearMeetingActionsClient:
         *,
         project_id: str,
         body: str,
-        health: str = "onTrack",
+        health: str,
+        idempotency_key: Optional[str] = None,
     ) -> dict[str, Any]:
+        if health not in {"onTrack", "atRisk", "offTrack"}:
+            raise ValueError("A supported project health value is required")
+        payload = {"project_id": project_id, "body": body, "health": health}
+        if idempotency_key:
+            payload["idempotency_key"] = idempotency_key
         return await self._request_json(
             "POST",
             LINEAR_MEETING_PROJECT_UPDATES_ENDPOINT,
-            payload={
-                "project_id": project_id,
-                "body": body,
-                "health": health,
-            },
+            payload=payload,
             timeout=30.0,
         )
 
@@ -497,6 +513,24 @@ class LinearMeetingActionsClient:
             text = str(getattr(response, "text", "") or "").strip()
             return text[:1000]
         return repr(payload)[:1000]
+
+
+def _project_inventory_page(
+    page: dict[str, Any], project_id: str,
+) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
+    project = page.get("project")
+    nodes = page.get("nodes")
+    info = page.get("pageInfo")
+    if (
+        not isinstance(project, dict)
+        or project.get("id") != project_id
+        or not isinstance(nodes, list)
+        or not all(isinstance(node, dict) and node.get("id") for node in nodes)
+        or not isinstance(info, dict)
+        or not isinstance(info.get("hasNextPage"), bool)
+    ):
+        raise RuntimeError("Linear returned an incomplete project inventory page.")
+    return project, nodes, info
 
 
 def _dict_list(value: Any) -> list[dict[str, Any]]:

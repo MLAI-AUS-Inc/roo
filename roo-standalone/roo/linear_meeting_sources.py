@@ -132,9 +132,11 @@ async def parse_linear_meeting_sources(
                 vision_budget=vision_budget,
                 max_pdf_pages=max_pdf_pages,
             )
-            if parsed:
+            if any(source.text.strip() for source in parsed):
                 result.sources.extend(parsed)
                 result.files_parsed += 1
+                for source in parsed:
+                    result.warnings.extend(source.metadata.get("parse_warnings", []))
             else:
                 result.files_skipped += 1
                 result.warnings.append(f"No readable text was found in `{label}`.")
@@ -330,6 +332,7 @@ async def _parse_pdf(
     try:
         page_count = min(len(document), max_pdf_pages)
         parts: list[str] = []
+        warnings: list[str] = []
 
         for page_index in range(page_count):
             page = document.load_page(page_index)
@@ -351,16 +354,20 @@ async def _parse_pdf(
                 )
                 if image_text.strip():
                     parts.append(f"[{page_label}]\n{image_text.strip()}")
+                else:
+                    warnings.append(f"No readable text was found on {page_label}.")
+            else:
+                warnings.append(f"No readable text was found on {page_label}.")
 
         if len(document) > max_pdf_pages:
-            parts.append(f"[Parser note] Remaining pages after page {max_pdf_pages} were not processed.")
+            warnings.append(f"{label}: pages after {max_pdf_pages} were not processed.")
     finally:
         close = getattr(document, "close", None)
         if callable(close):
             close()
 
     text = "\n\n".join(parts).strip()
-    return [ParsedSource(label=label, text=text, kind="pdf")] if text else []
+    return [ParsedSource(label=label, text=text, kind="pdf", metadata={"parse_warnings": warnings})] if text else []
 
 
 async def _parse_image(

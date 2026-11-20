@@ -1,6 +1,6 @@
 ---
 name: linear-meeting-actions
-description: Create Linear tasks/updates from Slack or size tasks across a named Linear project
+description: Draft or publish Linear updates, extract tasks, or size project issues
 requires_auth: true
 parameters:
   - action: One of extract, create, approve, reject, or size_project_issues. Defaults to create for transcript-to-Linear requests.
@@ -19,7 +19,7 @@ routing:
     Linear destination.
   examples:
     - {text: "add a task to linear to fix the login bug", action: create}
-    - {text: "send this attached PDF to Linear as tasks", action: create}
+    - {text: "draft a Linear project update from these notes"}
     - {text: "size all unsized tasks in Linear project Aaron AI", action: size_project_issues}
   negative_examples:
     - {text: "create a task called fix docs worth 5 points", instead: mlai-points}
@@ -55,8 +55,8 @@ This skill turns pasted Slack meeting transcripts, summaries, supported Slack fi
 - For top-level commands such as "add this as a task", read a bounded slice of the preceding channel conversation on demand.
 - Create a Linear issue directly from an explicit Slack command such as "create a to do item in Linear project X and assign to Y".
 - Create explicit, high-confidence direct or bulk assignments in one step; keep preview-only, ambiguous, and discussion-derived follow-ups review-only.
-- Create a Linear project update only when the request affirmatively asks for one and Roo can confidently match the project; honor explicit instructions to skip, omit, or not write an update.
-- Use the latest Linear project update and recent project issues as context for concise PDF/transcript-derived project updates.
+- Draft a short project update in Slack. Publish to Linear when the request explicitly asks Roo to publish and the meeting supports a project health assessment.
+- Compare notes with the matched project’s brief, last update and paged issue inventory, including older and closed work. Show changed progress, decisions and blockers in plain language.
 - Download and parse `.pdf`, `.docx`, `.txt`, `.md`, `.csv`, `.png`, `.jpg`, `.jpeg`, `.webp`, and non-animated `.gif` files from the current Slack thread.
 - Inspect Linear teams, users, active projects, project members, labels, and recent open issues.
 - Treat the complete accessible team catalogue as an authorization boundary; the production Linear API key must use **All teams you have access to** so newly created teams are included automatically.
@@ -64,7 +64,7 @@ This skill turns pasted Slack meeting transcripts, summaries, supported Slack fi
 - Assign new issues to the best matching Linear user.
 - Attach new issues to the best matching Linear project and team.
 - Consolidate paraphrased action items that produce the same deliverable, preserve genuinely separate work, avoid likely duplicate open issues, and make retries idempotent from Slack source evidence.
-- Use the exact `gpt-6.2-sol` model through the OpenAI Responses API for every Linear inference stage.
+- Use `gpt-6.2-sol` via the OpenAI Responses API for one evidence extraction pass, direct requests, sizing and routine reconciliation. For complex reconciliation, opt in by setting `LINEAR_MEETING_ASTRA_PROJECTS` to comma-separated Linear project IDs or `*` for all projects. The eligible stage uses `gpt-6.2-astra`. Public Roo reads the production scope from the `LINEAR_MEETING_ASTRA_PROJECTS` repository variable on deploy.
 - Select model reasoning effort from source length, source count, ambiguity, partial work, dependencies, artifacts, and conflicting context; never derive model effort from the XS/S/M/L/XL task label.
 - Recover a timed-out meeting-note chunk at progressively smaller scope while keeping the overall extraction bounded and creating no partial Linear issues.
 - For every resolved project, estimate remaining effort in bounded batches and apply exactly one compatible XS/S/M/L/XL label to each new non-terminal issue.
@@ -98,7 +98,7 @@ This skill turns pasted Slack meeting transcripts, summaries, supported Slack fi
 3. For explicit direct issue commands, parse the command itself as the issue source, including project and assignee hints.
 4. Otherwise, extract concrete action items into structured candidates with title, description, owner hint, project terms, due expression/date, explicit-commitment flag, evidence message timestamp, source label, and confidence.
 5. Resolve the request-level project once and reuse that canonical match for both the project update and every extracted item. Compare namespace-independent names so a source such as `Project Acquire` can match `[Studio] Project Acquire`; never let the update and its tasks silently diverge to different projects.
-6. If a project update was affirmatively requested and not explicitly negated, summarize all parsed source chunks, compare against the latest project update context, and create a concise Linear project update for the canonical matched project.
+6. Reconcile extracted claims and commitments against the matched project's brief, prior update and paged issue inventory before drafting. Link tracked work and highlight at most one decision or blocker in the update. Publish only material changes with explicit intent and supported health. Keep a draft in Slack if health is unclear. A publication-only request leaves tasks alone.
 7. If no concrete action item is found but the user asked to add the thread context to Linear, draft one contextual issue and require Slack approval before creation.
 8. Match owners by explicit requester/self-reference and Slack mention/email first, then unique Linear name/email-prefix match, then display/name similarity.
 9. Match projects by explicit project hint, exact full or namespace-independent name/slug, linked Slack channel, project description/content/update/recent issues, and true project membership as a tie-breaker. If an explicit name is not an exact active-snapshot match, resolve it against the full live project catalogue before extraction; use a unique exact/strong match and fail closed on ambiguity or absence.
@@ -107,7 +107,7 @@ This skill turns pasted Slack meeting transcripts, summaries, supported Slack fi
 12. Suppress candidates that are already completed or cancelled. Consolidate candidates that share the same action family, object, owner, project, and outcome before effort sizing; do not merge distinct setup, evaluation, implementation, documentation, outreach, or scheduling deliverables merely because their wording overlaps.
 13. For each resolved project, read its bounded project updates, active work, terminal references, related issues, label registry, and labelled precedents. Estimate candidates in bounded groups of three with structured `gpt-6.2-sol` Responses API calls.
 14. Estimate remaining work rather than original scope: XS is up to 15 minutes, S is up to 1 hour, M is up to 2 hours, L is up to 3 hours, and XL is up to 5 hours or has substantial uncertainty. Work over 5 hours is XL and should be split.
-15. Start direct cleanup at `low`, ordinary extraction and source summaries at `medium`, and contextual inference, project synthesis, and effort sizing at `high`. Increase to `xhigh` when deterministic complexity signals warrant it.
+15. Start direct cleanup at `low`, ordinary extraction at `medium`, and contextual inference, project reconciliation, and effort sizing at `high`. Increase to `xhigh` when deterministic complexity signals warrant it.
 16. Treat each extracted source chunk as one inference source; track total batch chunks separately so a long PDF does not artificially increase every chunk's reasoning effort.
 17. Retry a structured parsing or workflow-contract failure at most once. For a missing effort-sizing structured response, lower reasoning effort and increase the output allowance so the model can emit the full schema; for other validation failures, use the next reasoning level.
 18. If meeting-action inference times out, keep that worker slot and retry only the failed chunk at progressively smaller paragraph/page-aligned scope. Cancel queued work immediately when bounded recovery is exhausted. Finish extraction and deduplication before any issue write; if recovery or the total extraction deadline fails, create nothing and say so explicitly.
@@ -132,7 +132,7 @@ This skill turns pasted Slack meeting transcripts, summaries, supported Slack fi
 - A contextual command can auto-create only when its source contains an explicit assignment/commitment and the assignee, project, team, and due date are unambiguous.
 - Do not auto-create contextual discussion-thread issues; always request Slack approval first. Explicit bulk create commands over attached notes may auto-create only candidates whose source records an explicit commitment.
 - Honor an explicit fallback such as "if you can't find the right person or are unsure, assign them to Dr Sam" for otherwise unresolved action-item owners.
-- Project updates are created immediately only when affirmatively requested, not when the request says not to write one, and the project match is confident.
+- Project updates require an explicit request to publish, a confident project match, material new facts and supported health. Repeated publication requests reuse the backend receipt. An approval checks current project work again before creating the issue.
 - Never substitute a merely similar active project for an unresolved explicit destination. A full-catalogue lookup may use an inactive project only when the user's explicit title uniquely matches it.
 - Never turn a Linear catalogue, permission, or required-team access failure into `not found`; distinguish an unavailable/incomplete connection from a genuine completed full-catalogue search.
 - Apply the compatible `meeting-action` label if it already exists.

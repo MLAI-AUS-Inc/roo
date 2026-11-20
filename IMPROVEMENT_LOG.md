@@ -4,6 +4,16 @@ A short record of repository cleanup, testing, security, and delivery changes.
 Each entry states what changed and how it was checked. Findings without fixes
 are labelled as such.
 
+## 2026-11-20
+
+- Roo reconciles transcript commitments with paged Linear project history before
+  drafting an update or suggesting tasks. Sol reads each source once. Opted-in
+  projects use Astra for complex reconciliation. Linear publication requires
+  explicit intent and evidence of project health. The backend rechecks meeting
+  proposals at approval and uses durable receipts to recover uncertain writes.
+  Offline replay covered a first meeting, a paraphrased repeat with one new
+  deliverable, and an unchanged resubmission.
+
 ## 2026-11-19
 
 - Roo always answers an explicit @Roo mention again. Once #327 fixed the
