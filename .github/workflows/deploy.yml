@@ -55,6 +55,14 @@ jobs:
           # surface boundary gate isolated so collection order cannot weaken it.
           python -m pytest ../tests/roo/test_surface_security.py -q
           python -m pytest ../tests/roo/test_deployment_checks.py -q
+          python -m pytest \
+            ../tests/roo/test_linear_meeting_actions.py \
+            ../tests/roo/test_linear_meeting_sources.py \
+            ../tests/roo/test_linear_project_context.py \
+            ../tests/roo/test_linear_project_reconciliation.py \
+            ../tests/roo/test_linear_project_update.py \
+            ../tests/roo/test_linear_repeat_meetings.py \
+            -q
           python -m pytest ../tests/roo/test_bridge_mentions.py -q
           python -m pytest ../tests/roo/test_chat_dm_routing.py -q
           python -m pytest ../tests/roo/test_chat_link_love.py ../tests/roo/test_link_love.py -q
