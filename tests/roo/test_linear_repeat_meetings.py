@@ -74,7 +74,7 @@ async def test_repeat_meetings_link_old_work_and_publish_only_a_material_change(
     runs = [
         (f"{build} {health}", [(build, "Build email invitations")], [(build, "requirement")]),
         (f"{repeat} {staging} {test} {question} {health}",
-         [(repeat, "Implement guest invite emails"), (test, "Test expired guest invite links")],
+         [(repeat, "Implement guest invite emails"), (test, "Test expired guest email links")],
          [(staging, "progress"), (test, "next_step"), (question, "question")]),
     ]
     meeting = 0
@@ -102,6 +102,7 @@ async def test_repeat_meetings_link_old_work_and_publish_only_a_material_change(
             claim_ids = {row["text"]: row["evidence_id"] for row in context["claims"]}
             if meeting > 0:
                 assert "ENG-1" in context["candidates"][0]["issue_ids"]
+                assert "ENG-1" in context["candidates"][1]["issue_ids"]
                 assert context["previous_update"]["body"] == updates[-1]["body"]
             if meeting > 1:
                 assert "ENG-2" in context["candidates"][1]["issue_ids"]
@@ -155,7 +156,7 @@ async def test_repeat_meetings_link_old_work_and_publish_only_a_material_change(
     assert second["data"]["review_count"] == 0
     assert "Already tracked in Linear" in second["message"]
     assert "ENG-1" in second["message"]
-    assert [issue["title"] for issue in issues] == ["Build email invitations", "Test expired guest invite links"]
+    assert [issue["title"] for issue in issues] == ["Build email invitations", "Test expired guest email links"]
     assert updates[-1]["body"] == (
         "Email invites work in staging. Priya will test expired links on Thursday.\n\n"
         "Sam, should admins approve guests before release?"

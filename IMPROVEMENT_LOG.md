@@ -6,6 +6,10 @@ are labelled as such.
 
 ## 2026-11-20
 
+- Preserved grounded new commitments when the project inventory only has
+  non-exact keyword matches. Exact-title matches, explicit issue relationships
+  and backend write checks still apply. The extended offline repeat-meeting
+  replay fails before the fix and passes with all 157 meeting checks.
 - Roo reconciles transcript commitments with paged Linear project history before
   drafting an update or suggesting tasks. Sol reads each source once. Opted-in
   projects use Astra for complex reconciliation. Linear publication requires

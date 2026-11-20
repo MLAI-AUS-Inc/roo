@@ -476,6 +476,11 @@ class LinearMeetingActionsExecutor(SkillExecutorInterface):
             matched_project = project_match.get("project") or {}
             candidate_project_id = str(matched_project.get("id") or "")
             action_match = action_by_index.get(candidate_index) if candidate_project_id == project_id else None
+            semantic_relation = action_match.semantic_relation if action_match else None
+            if action_match and action_match.disposition == "new" and semantic_relation is None:
+                # Reconciliation found no relevant issue. Keep exact-title checks,
+                # but don't treat the retrieval shortlist as an outcome match.
+                semantic_relation = "distinct"
             finding = None
             if not use_direct_issue_path and candidate_project_id and team_match.get("team"):
                 if candidate_project_id not in project_inventories:
@@ -486,7 +491,7 @@ class LinearMeetingActionsExecutor(SkillExecutorInterface):
                     candidate,
                     project_inventories[candidate_project_id],
                     semantic_issue_id=(action_match.semantic_issue_id or "") if action_match else "",
-                    semantic_relation=(action_match.semantic_relation or "") if action_match else "",
+                    semantic_relation=semantic_relation or "",
                 )
                 duplicate = finding.issue if finding.disposition in {"already_tracked", "already_closed"} else None
             else:
