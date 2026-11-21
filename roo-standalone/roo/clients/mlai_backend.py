@@ -3941,6 +3941,16 @@ class MLAIBackendClient:
         )
         return response.json()
 
+    async def record_points_confirmation(self, request_id: int, channel_id: str, message_id: str) -> None:
+        """Identify the confirmation which must reach the original Chat thread first."""
+        response = await self._request(
+            "POST",
+            f"{self._points_base}/requests/{request_id}/slack-confirmation/",
+            json={"channel_id": channel_id, "message_id": message_id},
+            timeout=10.0,
+        )
+        response.raise_for_status()
+
     async def approve_reward(self, admin_slack_id: str, redemption_id: str) -> dict:
         """Approve a reward redemption request (admin only)."""
         payload = {

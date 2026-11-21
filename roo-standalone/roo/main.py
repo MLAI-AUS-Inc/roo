@@ -3861,7 +3861,7 @@ async def _handle_reaction_added(event: dict):
                     f"exc_type={exc.__class__.__name__}"
                 )
 
-        post_message(
+        confirmation = post_message(
             channel=channel_id,
             text=(
                 f"✅ Points request approved by <@{reactor_user_id}>.\n\n"
@@ -3870,6 +3870,18 @@ async def _handle_reaction_added(event: dict):
             ),
             thread_ts=thread_ts,
         )
+        if result.get("chat_level_up_pending") and confirmation and confirmation.get("ok"):
+            for attempt in range(3):
+                try:
+                    await client.record_points_confirmation(
+                        int(request_id), channel_id, confirmation["ts"],
+                    )
+                    break
+                except Exception as exc:
+                    if attempt == 2:
+                        print(f"Roo points confirmation receipt failed: {type(exc).__name__}")
+                    else:
+                        await asyncio.sleep(0.2 * (2 ** attempt))
         forget_points_request_summary(channel_id, message_ts)
 
     except Exception as exc:
