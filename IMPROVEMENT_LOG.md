@@ -6,6 +6,10 @@ are labelled as such.
 
 ## 2026-11-21
 
+- Roo accepts volunteer-time requests and direct awards through native Slack
+  forms. Tests cover duration presets, exact credits, draft identity and
+  recovery of private review messages.
+
 - Public Roo recovers Slack approval confirmations from the backend queue after
   a restart. Retries check the original thread and bridge receipt before
   posting again. Offline points tests cover the missing-message and lost-receipt
