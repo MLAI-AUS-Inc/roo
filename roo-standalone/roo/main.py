@@ -26,6 +26,7 @@ from .config import get_settings, Settings, validate_runtime_security
 from .timesheet_commands import enqueue as enqueue_timesheet, enqueue_event as enqueue_timesheet_event
 from .invoice_commands import enqueue as enqueue_invoice, enqueue_event as enqueue_invoice_event
 from .agent import RooAgent, get_agent
+from .points_confirmation_delivery import points_confirmation_retry_loop
 from .addressing import (
     candidate_reason_for_message,
     contains_bot_mention,
@@ -2846,6 +2847,7 @@ async def lifespan(app: FastAPI):
     start_here_intro_task: Optional[asyncio.Task] = None
     meeting_room_action_retry_task: Optional[asyncio.Task] = None
     jobs_scheduler_task: Optional[asyncio.Task] = None
+    points_confirmation_task: Optional[asyncio.Task] = None
     print(f"🦘 Roo Standalone starting...")
     print(f"   Surface: {settings.ROO_SURFACE}")
     print(f"   LLM Provider: {settings.default_llm_provider}")
@@ -2872,6 +2874,10 @@ async def lifespan(app: FastAPI):
             )
         )
         app.state.coworking_retry_task = coworking_retry_task
+        if _points_confirmation_recovery_enabled(settings):
+            points_confirmation_task = asyncio.create_task(
+                points_confirmation_retry_loop(_make_mlai_backend_client())
+            )
         if settings.MEETING_ROOM_BOOKING_ENABLED:
             meeting_room_action_store = get_meeting_room_action_store(
                 settings.SLACK_RECEIPTS_DB_PATH
@@ -2918,6 +2924,10 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        if points_confirmation_task:
+            points_confirmation_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await points_confirmation_task
         if meeting_room_action_retry_task:
             meeting_room_action_retry_task.cancel()
             with suppress(asyncio.CancelledError):
@@ -3763,6 +3773,14 @@ async def _resolve_points_request_for_reaction(
     return None
 
 
+def _points_confirmation_recovery_enabled(settings: Settings) -> bool:
+    return bool(
+        getattr(settings, "ROO_POINTS_SLACK_APPROVAL_RECOVERY_ENABLED", False)
+        and settings.ROO_SURFACE == "public"
+        and settings.ROO_API_KEY
+    )
+
+
 async def _handle_reaction_added(event: dict):
     """Handle Slack emoji approvals for pending points requests."""
     reactor_user_id = event.get("user")
@@ -3810,7 +3828,12 @@ async def _handle_reaction_added(event: dict):
             return
 
         try:
-            result = await client.approve_points_request(int(request_id), reactor_user_id)
+            if _points_confirmation_recovery_enabled(settings):
+                result = await client.approve_points_request(
+                    int(request_id), reactor_user_id, recover_slack_confirmation=True,
+                )
+            else:
+                result = await client.approve_points_request(int(request_id), reactor_user_id)
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code in (404, 409):
                 forget_points_request_summary(channel_id, message_ts)
@@ -3861,7 +3884,11 @@ async def _handle_reaction_added(event: dict):
                     f"exc_type={exc.__class__.__name__}"
                 )
 
-        post_message(
+        if result.get("slack_confirmation_queued"):
+            forget_points_request_summary(channel_id, message_ts)
+            return
+
+        confirmation = post_message(
             channel=channel_id,
             text=(
                 f"✅ Points request approved by <@{reactor_user_id}>.\n\n"
@@ -3870,6 +3897,18 @@ async def _handle_reaction_added(event: dict):
             ),
             thread_ts=thread_ts,
         )
+        if result.get("chat_level_up_pending") and confirmation and confirmation.get("ok"):
+            for attempt in range(3):
+                try:
+                    await client.record_points_confirmation(
+                        int(request_id), channel_id, confirmation["ts"],
+                    )
+                    break
+                except Exception as exc:
+                    if attempt == 2:
+                        print(f"Roo points confirmation receipt failed: {type(exc).__name__}")
+                    else:
+                        await asyncio.sleep(0.2 * (2 ** attempt))
         forget_points_request_summary(channel_id, message_ts)
 
     except Exception as exc:

@@ -187,7 +187,9 @@ async def test_reaction_approval_uses_event_actor_and_backend_result(sandbox,mon
         sandbox.backend.approve_points_request.side_effect=httpx.HTTPStatusError('Denied',request=response.request,response=response)
     await main._handle_reaction_added({'user':'USMOKEADMIN','reaction':'white_check_mark',
         'item':{'type':'message','channel':CHANNEL,'ts':'1792700000.002'}})
-    sandbox.backend.approve_points_request.assert_awaited_once_with(7,'USMOKEADMIN')
+    sandbox.backend.approve_points_request.assert_awaited_once_with(
+        7, 'USMOKEADMIN', recover_slack_confirmation=True,
+    )
     if denied:
         sandbox.post.assert_not_called()
         assert sandbox.dm.call_args.args[0]=='USMOKEADMIN'

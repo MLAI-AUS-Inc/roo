@@ -310,6 +310,7 @@ def get_thread_messages(
     thread_ts: str,
     *,
     max_pages: int = 10,
+    include_metadata: bool = False,
 ) -> list[dict]:
     """
     Retrieve all messages in a Slack thread for context.
@@ -333,6 +334,8 @@ def get_thread_messages(
                 "ts": thread_ts,
                 "limit": 50,
             }
+            if include_metadata:
+                request["include_all_metadata"] = True
             if cursor:
                 request["cursor"] = cursor
             response = {}
@@ -360,6 +363,10 @@ def get_thread_messages(
                     "bot_id": msg.get("bot_id"),
                     "is_bot": bool(msg.get("bot_id")),
                     "files": msg.get("files", []),
+                    **({
+                        "client_msg_id": msg.get("client_msg_id"),
+                        "metadata": msg.get("metadata"),
+                    } if include_metadata else {}),
                 })
             response_metadata = response.get("response_metadata")
             next_cursor = str(

@@ -3902,18 +3902,24 @@ class MLAIBackendClient:
         )
         return response.json()
 
-    async def approve_points_request(self, request_id: int, admin_slack_id: str) -> dict:
+    async def approve_points_request(
+        self, request_id: int, admin_slack_id: str, *, recover_slack_confirmation: bool = False,
+    ) -> dict:
         """Approve a pending points request."""
         endpoint = f"{self._points_base}/requests/{request_id}/approve/"
+
+        payload = {"admin_slack_id": admin_slack_id}
+        if recover_slack_confirmation:
+            payload["recover_slack_confirmation"] = True
 
         try:
             response = await self._request(
                 "POST",
                 endpoint,
-                json={"admin_slack_id": admin_slack_id},
+                json=payload,
                 timeout=15.0,
                 circuit_breaker=True,
-                use_admin_headers=True,
+                use_admin_headers=not recover_slack_confirmation,
             )
         except Exception as exc:
             self._log_points_request_transport_error(
@@ -3940,6 +3946,27 @@ class MLAIBackendClient:
             status=response.status_code,
         )
         return response.json()
+
+    async def claim_points_confirmation(self) -> dict | None:
+        response = await self._request(
+            "POST", f"{self._points_base}/requests/claim-slack-confirmation/",
+            timeout=10.0,
+        )
+        # Roo may boot during a backend rollback or a rolling release.
+        if response.status_code in (204, 404):
+            return None
+        response.raise_for_status()
+        return response.json()
+
+    async def record_points_confirmation(self, request_id: int, channel_id: str, message_id: str) -> None:
+        """Identify the confirmation which must reach the original Chat thread first."""
+        response = await self._request(
+            "POST",
+            f"{self._points_base}/requests/{request_id}/slack-confirmation/",
+            json={"channel_id": channel_id, "message_id": message_id},
+            timeout=10.0,
+        )
+        response.raise_for_status()
 
     async def approve_reward(self, admin_slack_id: str, redemption_id: str) -> dict:
         """Approve a reward redemption request (admin only)."""

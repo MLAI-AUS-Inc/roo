@@ -73,6 +73,7 @@ jobs:
           # Chart rendering and binary uploads run offline, isolated from legacy stubs.
           python -m pytest ../tests/roo/test_coworking_charts.py ../tests/roo/test_slack_file_upload.py -q
           python -m pytest ../tests/roo/test_points_requests.py -k coworking -q
+          python -m pytest ../tests/roo/test_points_confirmation_delivery.py -q
           # Meeting-room schema tests need the real skill parser, so keep them
           # isolated from legacy suites that stub the frontmatter module.
           python -m pytest \

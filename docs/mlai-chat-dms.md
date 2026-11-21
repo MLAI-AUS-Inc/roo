@@ -26,3 +26,15 @@ SLACK_BOT_TOKEN=test SLACK_SIGNING_SECRET=test OPENAI_API_KEY=test \
   FOUNDER_TOOLS_LINK_ORIGINS=https://mlai.au \
   .venv/bin/python -m pytest ../tests/roo/test_chat_dm_routing.py -q
 ```
+
+
+## Public points approvals
+
+Public Roo negotiates durable approval confirmation delivery with the MLAI
+Backend. Deploy the backend contract before enabling the feature there.
+The public worker uses Roo's own service key, receives only approved
+confirmations from publicly mirrored channels, and verifies earlier sends
+from the Slack thread and bridge receipt. The user still receives the ordinary
+private approval receipt. Set `ROO_POINTS_SLACK_APPROVAL_RECOVERY_ENABLED=false`
+to stop the worker during a rollback. Keeping the setting enabled lets queued
+messages finish after a restart.

@@ -4,6 +4,13 @@ A short record of repository cleanup, testing, security, and delivery changes.
 Each entry states what changed and how it was checked. Findings without fixes
 are labelled as such.
 
+## 2026-11-21
+
+- Public Roo recovers Slack approval confirmations from the backend queue after
+  a restart. Retries check the original thread and bridge receipt before
+  posting again. Offline points tests cover the missing-message and lost-receipt
+  cases alongside the existing reaction approvals.
+
 ## 2026-11-20
 
 - Large meeting requests reconcile tasks and update evidence in separate
