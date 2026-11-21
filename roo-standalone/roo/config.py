@@ -77,6 +77,8 @@ class Settings(BaseSettings):
     # Slack
     SLACK_BOT_TOKEN: Optional[str] = None
     SLACK_SIGNING_SECRET: Optional[str] = None
+    ROO_MANUAL_TIME_SLACK_WORKSPACE_ID: str = ""
+    ROO_MANUAL_TIME_SLACK_REVIEW_CHANNEL_ID: str = ""
     SLACK_REQUEST_MAX_AGE_SECONDS: int = 300
     SLACK_RECEIPT_TTL_SECONDS: int = 10 * 60
     SLACK_EVENT_PROCESSING_LEASE_SECONDS: int = 45

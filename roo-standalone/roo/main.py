@@ -26,6 +26,7 @@ from .config import get_settings, Settings, validate_runtime_security
 from .timesheet_commands import enqueue as enqueue_timesheet, enqueue_event as enqueue_timesheet_event
 from .invoice_commands import enqueue as enqueue_invoice, enqueue_event as enqueue_invoice_event
 from .agent import RooAgent, get_agent
+from . import manual_time
 from .points_confirmation_delivery import points_confirmation_retry_loop
 from .addressing import (
     candidate_reason_for_message,
@@ -2848,6 +2849,7 @@ async def lifespan(app: FastAPI):
     meeting_room_action_retry_task: Optional[asyncio.Task] = None
     jobs_scheduler_task: Optional[asyncio.Task] = None
     points_confirmation_task: Optional[asyncio.Task] = None
+    manual_time_task: Optional[asyncio.Task] = None
     print(f"🦘 Roo Standalone starting...")
     print(f"   Surface: {settings.ROO_SURFACE}")
     print(f"   LLM Provider: {settings.default_llm_provider}")
@@ -2874,6 +2876,8 @@ async def lifespan(app: FastAPI):
             )
         )
         app.state.coworking_retry_task = coworking_retry_task
+        if manual_time.enabled(settings):
+            manual_time_task = asyncio.create_task(manual_time.delivery_loop(settings))
         if _points_confirmation_recovery_enabled(settings):
             points_confirmation_task = asyncio.create_task(
                 points_confirmation_retry_loop(_make_mlai_backend_client())
@@ -2924,6 +2928,10 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        if manual_time_task:
+            manual_time_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await manual_time_task
         if points_confirmation_task:
             points_confirmation_task.cancel()
             with suppress(asyncio.CancelledError):
@@ -3797,6 +3805,11 @@ async def _handle_reaction_added(event: dict):
     print(f"✅ Reaction approval attempt from {reactor_user_id} on {channel_id}:{message_ts}")
 
     try:
+        current_settings = get_settings()
+        if (manual_time.enabled(current_settings)
+                and channel_id == current_settings.ROO_MANUAL_TIME_SLACK_REVIEW_CHANNEL_ID):
+            if await manual_time.approve_reaction(current_settings, event):
+                return
         boost_recheck = await handle_boost_recheck_reaction(event)
         if boost_recheck.get("handled"):
             return
@@ -3959,6 +3972,10 @@ async def slack_commands(
             "response_type": "ephemeral",
             "text": "This Roo deployment is not available in this context.",
         }
+    if command in {"/roo", "/roo-dev"} and manual_time.enabled(settings):
+        manual_mode = {"request points": "member", "award points": "admin"}.get(text.strip().lower())
+        if manual_mode:
+            return await manual_time.open_modal(settings, form, manual_mode)
     if command == "/coworking-today":
         return {
             "response_type": "ephemeral",
@@ -6736,6 +6753,12 @@ async def slack_actions(
 
 
 async def _handle_slack_action_payload(request: Request, payload: dict):
+    view = payload.get("view") or {}
+    if str(view.get("callback_id", "")).startswith(manual_time.CALLBACK_PREFIX):
+        settings = _request_settings(request)
+        if not manual_time.enabled(settings):
+            return JSONResponse(content={})
+        return JSONResponse(content=await manual_time.modal_action(settings, payload))
     interactive_actions = payload.get("actions", [])
     early_interactive_action = (
         interactive_actions[0]
