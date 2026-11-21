@@ -171,10 +171,15 @@ def deliver(settings, delivery):
         if not info.get("is_private") or info.get("is_shared") or info.get("is_ext_shared"):
             raise ValueError("Review requires a private workspace channel")
         text = f"{row['display_name']} requested {row['roo']} Roo for {row['volunteer_minutes']} minutes.\n{row['activity']}\nPoints Admins can approve with ✅."
-        link = f"https://chat.mlai.au/volunteer?rooRequest={row['id']}"
-        blocks = [{"type": "section", "text": {"type": "plain_text", "text": text},
-                   "accessory": {"type": "button", "text": {"type": "plain_text", "text": "Review in Chat"},
-                                 "action_id": "roo_manual_time_review_link", "url": link}}]
+        block = {"type": "section", "text": {"type": "plain_text", "text": text}}
+        origin = settings.ROO_MANUAL_TIME_CHAT_ORIGIN.rstrip("/")
+        if origin:
+            block["accessory"] = {
+                "type": "button", "text": {"type": "plain_text", "text": "Review in Chat"},
+                "action_id": "roo_manual_time_review_link",
+                "url": f"{origin}/volunteer?rooRequest={row['id']}",
+            }
+        blocks = [block]
     else:
         blocks = []
         channel = slack.conversations_open(users=delivery["target"])["channel"]["id"]

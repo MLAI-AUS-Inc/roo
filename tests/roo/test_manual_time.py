@@ -70,7 +70,9 @@ def test_submit_binds_actor_and_reuses_draft_key():
 
 
 def test_retry_recovers_existing_private_message():
-    settings = SimpleNamespace(ROO_MANUAL_TIME_SLACK_REVIEW_CHANNEL_ID="CREVIEW")
+    settings = SimpleNamespace(
+        ROO_MANUAL_TIME_SLACK_REVIEW_CHANNEL_ID="CREVIEW", ROO_MANUAL_TIME_CHAT_ORIGIN="",
+    )
     delivery = {
         "id": 1, "stage": "time_slack_review", "attempts": 2, "created": 100,
         "request": {"id": 2, "display_name": "Alex", "roo": "9", "volunteer_minutes": 90, "activity": "Staffed the door"},
@@ -86,3 +88,13 @@ def test_retry_recovers_existing_private_message():
     with patch.object(manual_time, "get_slack_client", return_value=client):
         assert manual_time.deliver(settings, delivery) == ("CREVIEW", "101.1")
         client.chat_postMessage.assert_not_called()
+
+        delivery["attempts"] = 1
+        client.chat_postMessage.return_value = {"ts": "101.1"}
+        manual_time.deliver(settings, delivery)
+        assert "accessory" not in client.chat_postMessage.call_args.kwargs["blocks"][0]
+
+        settings.ROO_MANUAL_TIME_CHAT_ORIGIN = "https://staging.example.test/"
+        manual_time.deliver(settings, delivery)
+        accessory = client.chat_postMessage.call_args.kwargs["blocks"][0]["accessory"]
+        assert accessory["url"] == "https://staging.example.test/volunteer?rooRequest=2"

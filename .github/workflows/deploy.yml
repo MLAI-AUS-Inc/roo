@@ -447,6 +447,7 @@ jobs:
             upsert_env "FOUNDER_ACCOUNT_LINK_ENABLED" "$FOUNDER_ACCOUNT_LINK_ENABLED"
             upsert_env "ROO_MANUAL_TIME_SLACK_WORKSPACE_ID" "${ROO_MANUAL_TIME_SLACK_WORKSPACE_ID:-}"
             upsert_env "ROO_MANUAL_TIME_SLACK_REVIEW_CHANNEL_ID" "${ROO_MANUAL_TIME_SLACK_REVIEW_CHANNEL_ID:-}"
+            upsert_env "ROO_MANUAL_TIME_CHAT_ORIGIN" "https://chat.mlai.au"
             upsert_env "COWORKING_REPORT_SLACK_TEAM_ID" "$COWORKING_REPORT_SLACK_TEAM_ID"
             upsert_env "COWORKING_REPORT_SLACK_CHANNEL_ID" "$COWORKING_REPORT_SLACK_CHANNEL_ID"
             implicit_actions="respond_in_chat,mlai-points:balance,mlai-points:topup_points"
