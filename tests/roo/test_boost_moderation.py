@@ -348,6 +348,48 @@ async def test_confirmed_slack_delete_wins_when_delete_response_is_lost(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_slack_removal_reaches_chat_after_roo_restart_without_a_callback(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        module, "get_settings", lambda: moderation_settings(BOOST_POST_AUTO_DELETE_ENABLED=True)
+    )
+    now = 1800000000.0
+    monkeypatch.setattr(module, "_now", lambda: now)
+    path = tmp_path / "admissions.db"
+    reports = []
+    deletes = []
+
+    class Backend(InsufficientClient):
+        async def admit_boost_post(self, **payload):
+            return {**await super().admit_boost_post(**payload), "admission_id": 13}
+
+        async def confirm_boost_mirror_removal(self, admission_id, submission_key):
+            reports.append((admission_id, submission_key))
+            if len(reports) == 1:
+                raise httpx.ReadTimeout("Lost bridge acknowledgement")
+
+    def delete_fn(**kwargs):
+        deletes.append(kwargs)
+        return successful_delete(**kwargs)
+
+    client = Backend()
+    outcome = await handle_boost_root_post(
+        root_event(), workspace_id="TTEAM123", store=BoostPostAdmissionStore(path),
+        client=client, post_message_fn=lambda **kwargs: None,
+        send_dm_fn=lambda *args: None, delete_fn=delete_fn,
+    )
+    assert outcome["status"] == "mirror_removal_pending"
+    assert outcome["admission"]["deleted_at"] is not None
+
+    now += module.DELETE_RETRY_SECONDS
+    [result] = await process_due_boost_posts_once(
+        store=BoostPostAdmissionStore(path), client=client, delete_fn=delete_fn
+    )
+    assert result["status"] == "deleted"
+    assert reports == [(13, outcome["admission"]["submission_key"])] * 2
+    assert len(deletes) == len(client.calls) == 1
+
+
+@pytest.mark.asyncio
 async def test_founder_check_reaction_rechecks_charges_and_restores_post(
     tmp_path,
     monkeypatch,

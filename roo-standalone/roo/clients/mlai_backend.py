@@ -4056,6 +4056,19 @@ class MLAIBackendClient:
         self._raise_for_status_or_backend_unavailable(response)
         return response.json()
 
+    async def confirm_boost_mirror_removal(self, admission_id: int, submission_key: str) -> None:
+        """Request durable Chat cleanup after Slack confirms a rejected root is gone."""
+        response = await self._request(
+            "POST",
+            f"{self._points_base}/boost-posts/admissions/{admission_id}/mirror-removal/",
+            json={"submission_key": submission_key},
+            timeout=10.0,
+            circuit_breaker=True,
+        )
+        self._raise_for_status_or_backend_unavailable(response)
+        if response.json().get("status") not in {"enqueued", "duplicate", "no_active_mirror"}:
+            raise ValueError("Unexpected boost mirror removal acknowledgement")
+
     async def award_first_channel_post(
         self,
         slack_user_id: str,
