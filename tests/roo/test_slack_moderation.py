@@ -77,6 +77,27 @@ def test_delete_uses_moderator_client_only_after_root_is_verified():
     assert client.calls == [{"channel": "CBOOST123", "ts": "1800000000.123456"}]
 
 
+def test_delete_distinguishes_absent_message_from_failed_lookup():
+    client = DeleteClient()
+    kwargs = {
+        "channel_id": "CBOOST123",
+        "message_ts": "1800000000.123456",
+        "reason_code": "delete_failed",
+        "settings": settings(),
+        "client": client,
+    }
+
+    def failed_lookup(*args):
+        raise TimeoutError()
+
+    absent = delete_boost_root_as_moderator(**kwargs, get_message_fn=lambda *args: None)
+    unknown = delete_boost_root_as_moderator(**kwargs, get_message_fn=failed_lookup)
+
+    assert absent.ok and absent.status == "already_deleted"
+    assert not unknown.ok and unknown.status == "failed"
+    assert client.calls == []
+
+
 def test_startup_validation_proves_workspace_user_and_admin_role():
     class BotClient:
         def auth_test(self):

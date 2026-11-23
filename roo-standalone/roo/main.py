@@ -3398,9 +3398,12 @@ async def slack_events(
             if boost_channel_id and event.get("channel") == boost_channel_id:
                 thread_ts = str(event.get("thread_ts") or "")
                 message_ts = str(event.get("ts") or "")
-                if thread_ts and message_ts and thread_ts != message_ts:
+                if not message_ts:
+                    await _complete_slack_event_receipt(request)
+                    return JSONResponse(status_code=200, content={})
+                if thread_ts and thread_ts != message_ts:
                     _start_slack_event_task(request, handle_link_love_reply(event))
-                elif not thread_ts:
+                else:
                     _start_slack_event_task(
                         request,
                         handle_boost_root_post(
@@ -3410,10 +3413,7 @@ async def slack_events(
                             ),
                         )
                     )
-                if (thread_ts and message_ts and thread_ts != message_ts) or not thread_ts:
-                    return _slack_event_response(request, work_pending=True)
-                await _complete_slack_event_receipt(request)
-                return JSONResponse(status_code=200, content={})
+                return _slack_event_response(request, work_pending=True)
         
         is_dm = event.get("channel_type") == "im"
         if is_dm:
