@@ -470,7 +470,9 @@ def _slack_retry_after(exc: Exception) -> Optional[str]:
     return None
 
 
-def get_message(channel: str, message_ts: str) -> Optional[Dict[str, Any]]:
+def get_message(
+    channel: str, message_ts: str, *, raise_on_error: bool = False
+) -> Optional[Dict[str, Any]]:
     """Retrieve a single Slack message by timestamp."""
     client = get_slack_client()
 
@@ -489,9 +491,13 @@ def get_message(channel: str, message_ts: str) -> Optional[Dict[str, Any]]:
             if messages:
                 return messages[0]
 
+        elif raise_on_error:
+            raise RuntimeError("Slack message history request failed")
         return None
 
     except Exception as e:
+        if raise_on_error:
+            raise
         print(f"❌ Slack message lookup failed error_type={e.__class__.__name__}")
         return None
 

@@ -25,12 +25,17 @@ from .config import get_settings
 from .link_love import extract_boost_url
 
 DEFAULT_PROCESSING_LEASE_SECONDS = 90.0
-TERMINAL_REJECTION_STATUSES = {
+DELETE_RETRY_SECONDS = 60.0
+DELETE_PENDING_STATUSES = (
     "rejected_insufficient_points",
     "rejected_member_unlinked",
     "rejected_invalid",
-    "deleted",
     "delete_failed",
+)
+TERMINAL_REJECTION_STATUSES = {
+    *DELETE_PENDING_STATUSES,
+    "deleted",
+    "mirror_removal_pending",
     "removed_by_author",
     "blocked",
 }
@@ -62,6 +67,11 @@ def boost_post_submission_key(
 
 def _retry_delay(attempt_count: int) -> float:
     return min(15 * 60, 15 * (2 ** max(0, int(attempt_count or 1) - 1)))
+
+
+def _slack_removed_status(admission: dict[str, Any]) -> str:
+    admission_id = _json_object(admission.get("backend_result_json")).get("admission_id")
+    return "mirror_removal_pending" if type(admission_id) is int and admission_id > 0 else "deleted"
 
 
 class BoostPostAdmissionStore:
@@ -343,6 +353,11 @@ class BoostPostAdmissionStore:
                 status == "recheck_processing"
                 and float(current.get("locked_until") or 0) <= now
             )
+            if (
+                status in DELETE_PENDING_STATUSES
+                and float(current.get("locked_until") or 0) > now
+            ):
+                claimable = False
             backend_result = _json_object(current.get("backend_result_json"))
             backend_status = str(
                 backend_result.get("status") or backend_result.get("code") or ""
@@ -383,25 +398,20 @@ class BoostPostAdmissionStore:
         """Return a completed recheck to its removed or rejected state."""
 
         self._ensure_schema()
-        current = self.get_by_id(admission_id)
-        status = (
-            "deleted"
-            if current.get("deleted_at") is not None
-            else "rejected_insufficient_points"
-        )
         now = _now()
         with self._connect() as conn:
             conn.execute(
                 """
                 UPDATE boost_post_admissions
-                SET status = ?, locked_by = NULL, locked_until = NULL,
+                SET status = CASE WHEN deleted_at IS NOT NULL THEN 'deleted'
+                                  ELSE 'rejected_insufficient_points' END,
+                    locked_by = NULL, locked_until = NULL,
                     base_cost_points = ?, charged_points = ?, discount_applied = ?,
                     new_balance = ?, backend_result_json = ?, rejection_reason = ?,
                     last_error = NULL, updated_at = ?
                 WHERE id = ?
                 """,
                 (
-                    status,
                     int(result.get("base_cost_points") or 8),
                     result.get("charged_points"),
                     1 if bool(result.get("discount_applied")) else 0,
@@ -416,21 +426,17 @@ class BoostPostAdmissionStore:
 
     def mark_recheck_failed(self, admission_id: int, *, error: str) -> dict[str, Any]:
         self._ensure_schema()
-        current = self.get_by_id(admission_id)
-        status = (
-            "deleted"
-            if current.get("deleted_at") is not None
-            else "rejected_insufficient_points"
-        )
         with self._connect() as conn:
             conn.execute(
                 """
                 UPDATE boost_post_admissions
-                SET status = ?, locked_by = NULL, locked_until = NULL,
+                SET status = CASE WHEN deleted_at IS NOT NULL THEN 'deleted'
+                                  ELSE 'rejected_insufficient_points' END,
+                    locked_by = NULL, locked_until = NULL,
                     last_error = ?, updated_at = ?
                 WHERE id = ?
                 """,
-                (status, error[:1000], _now(), int(admission_id)),
+                (error[:1000], _now(), int(admission_id)),
             )
         return self.get_by_id(admission_id)
 
@@ -641,20 +647,22 @@ class BoostPostAdmissionStore:
         }:
             raise ValueError("Invalid boost rejection status")
         self._ensure_schema()
+        now = _now()
         with self._connect() as conn:
             conn.execute(
                 """
                 UPDATE boost_post_admissions
                 SET status = ?, locked_by = NULL, locked_until = NULL,
-                    rejection_reason = ?, backend_result_json = ?, updated_at = ?
-                    , decision_notified_at = NULL, dm_notified_at = NULL
+                    rejection_reason = ?, backend_result_json = ?, updated_at = ?,
+                    next_attempt_at = ?, decision_notified_at = NULL, dm_notified_at = NULL
                 WHERE id = ?
                 """,
                 (
                     status,
                     reason,
                     json.dumps(result, sort_keys=True, default=str) if result else None,
-                    _now(),
+                    now,
+                    now,
                     int(admission_id),
                 ),
             )
@@ -726,39 +734,156 @@ class BoostPostAdmissionStore:
                 (_now(), _now(), int(admission_id)),
             )
 
+    def due_deletions(self, channel_id: str, *, limit: int) -> list[dict[str, Any]]:
+        """Read rejected roots due for another removal attempt."""
+        self._ensure_schema()
+        now = _now()
+        with self._connect() as conn:
+            return [
+                dict(row)
+                for row in conn.execute(
+                    """
+                    SELECT * FROM boost_post_admissions
+                    WHERE channel_id = ? AND status IN (?, ?, ?, ?)
+                      AND next_attempt_at <= ? AND COALESCE(locked_until, 0) <= ?
+                    ORDER BY next_attempt_at, id LIMIT ?
+                    """,
+                    (channel_id, *DELETE_PENDING_STATUSES, now, now, limit),
+                )
+            ]
+
+    def claim_deletion(self, admission_id: int, *, owner: str) -> bool:
+        """Serialize removal with other workers and with an explicit balance recheck."""
+        self._ensure_schema()
+        now = _now()
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE boost_post_admissions SET locked_by = ?, locked_until = ?
+                WHERE id = ? AND status IN (?, ?, ?, ?)
+                  AND next_attempt_at <= ? AND COALESCE(locked_until, 0) <= ?
+                """,
+                (
+                    owner, now + DEFAULT_PROCESSING_LEASE_SECONDS, admission_id,
+                    *DELETE_PENDING_STATUSES, now, now,
+                ),
+            )
+            return cursor.rowcount == 1
+
     def mark_deleted(
         self,
         admission_id: int,
         *,
+        owner: str,
         ok: bool,
         error: str | None = None,
     ) -> dict[str, Any]:
         self._ensure_schema()
-        status = "deleted" if ok else "delete_failed"
+        status = _slack_removed_status(self.get_by_id(admission_id)) if ok else "delete_failed"
         now = _now()
         with self._connect() as conn:
             conn.execute(
                 """
                 UPDATE boost_post_admissions
-                SET status = ?, deleted_at = ?, last_error = COALESCE(?, last_error), updated_at = ?
-                WHERE id = ?
+                SET status = ?, deleted_at = ?, last_error = ?, updated_at = ?,
+                    next_attempt_at = ?, locked_by = NULL, locked_until = NULL
+                WHERE id = ? AND locked_by = ? AND status IN (?, ?, ?, ?)
                 """,
-                (status, now if ok else None, error, now, int(admission_id)),
+                (
+                    status, now if ok else None, error, now,
+                    now if ok else now + DELETE_RETRY_SECONDS,
+                    int(admission_id), owner, *DELETE_PENDING_STATUSES,
+                ),
+            )
+        return self.get_by_id(admission_id)
+
+    def due_mirror_removals(self, channel_id: str, *, limit: int) -> list[dict[str, Any]]:
+        """Read Slack-confirmed removals whose bridge receipt is still pending."""
+        self._ensure_schema()
+        with self._connect() as conn:
+            return [
+                dict(row)
+                for row in conn.execute(
+                    """
+                    SELECT * FROM boost_post_admissions
+                    WHERE channel_id = ? AND status = 'mirror_removal_pending'
+                      AND next_attempt_at <= ?
+                    ORDER BY next_attempt_at, id LIMIT ?
+                    """,
+                    (channel_id, _now(), limit),
+                )
+            ]
+
+    def reserve_mirror_removal(self, admission_id: int) -> bool:
+        """Rate-limit durable report attempts, including across Roo restarts."""
+        self._ensure_schema()
+        now = _now()
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE boost_post_admissions SET next_attempt_at = ?
+                WHERE id = ? AND status = 'mirror_removal_pending' AND next_attempt_at <= ?
+                """,
+                (now + DELETE_RETRY_SECONDS, admission_id, now),
+            )
+        return cursor.rowcount == 1
+
+    def complete_mirror_removal(self, admission_id: int) -> dict[str, Any]:
+        """Record that the backend has durably accepted the removal."""
+        self._ensure_schema()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE boost_post_admissions SET status = 'deleted', updated_at = ?
+                WHERE id = ? AND status = 'mirror_removal_pending'
+                """,
+                (_now(), admission_id),
             )
         return self.get_by_id(admission_id)
 
     def mark_removed(self, channel_id: str, root_message_ts: str) -> dict[str, Any] | None:
         self._ensure_schema()
-        with self._connect() as conn:
+        now = _now()
+        with self._lock, self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            current = conn.execute(
+                """
+                SELECT backend_result_json FROM boost_post_admissions
+                WHERE channel_id = ? AND root_message_ts = ?
+                """,
+                (channel_id, root_message_ts),
+            ).fetchone()
+            conn.execute(
+                """
+                UPDATE boost_post_admissions
+                SET status = ?, deleted_at = COALESCE(deleted_at, ?),
+                    locked_by = NULL, locked_until = NULL, last_error = NULL,
+                    updated_at = ?, next_attempt_at = ?
+                WHERE channel_id = ? AND root_message_ts = ? AND status IN (?, ?, ?, ?)
+                """,
+                (_slack_removed_status(dict(current)) if current else "deleted",
+                 now, now, now, channel_id, root_message_ts, *DELETE_PENDING_STATUSES),
+            )
+            conn.execute(
+                """
+                UPDATE boost_post_admissions
+                SET deleted_at = COALESCE(deleted_at, ?)
+                WHERE channel_id = ? AND root_message_ts = ? AND status = 'recheck_processing'
+                """,
+                (now, channel_id, root_message_ts),
+            )
             conn.execute(
                 """
                 UPDATE boost_post_admissions
                 SET status = 'removed_by_author', locked_by = NULL, locked_until = NULL,
                     updated_at = ?
-                WHERE channel_id = ? AND root_message_ts = ? AND status != 'deleted'
+                WHERE channel_id = ? AND root_message_ts = ?
+                  AND status IN ('pending', 'retry', 'processing', 'approved', 'blocked')
+                  AND restore_requested_at IS NULL
                 """,
-                (_now(), channel_id, root_message_ts),
+                (now, channel_id, root_message_ts),
             )
+            conn.execute("COMMIT")
         return self.get(channel_id, root_message_ts)
 
     def get_by_id(self, admission_id: int) -> dict[str, Any]:
@@ -1025,20 +1150,45 @@ def _moderate_rejected_root(
     settings = get_settings()
     if not bool(getattr(settings, "BOOST_POST_AUTO_DELETE_ENABLED", False)):
         return admission
+    admission_id = int(admission["id"])
+    owner = f"roo-boost-delete-{uuid4().hex}"
+    if not store.claim_deletion(admission_id, owner=owner):
+        return store.get_by_id(admission_id)
     if delete_fn is None:
         from .slack_moderation import delete_boost_root_as_moderator
 
         delete_fn = delete_boost_root_as_moderator
-    result = delete_fn(
-        channel_id=str(admission["channel_id"]),
-        message_ts=str(admission["root_message_ts"]),
-        reason_code=str(admission["status"]),
-    )
+    try:
+        result = delete_fn(
+            channel_id=str(admission["channel_id"]),
+            message_ts=str(admission["root_message_ts"]),
+            reason_code=str(admission["status"]),
+        )
+    except Exception as exc:
+        return store.mark_deleted(admission_id, owner=owner, ok=False, error=type(exc).__name__)
     return store.mark_deleted(
-        int(admission["id"]),
+        admission_id,
+        owner=owner,
         ok=bool(getattr(result, "ok", False)),
         error=getattr(result, "error_code", None),
     )
+
+
+async def _report_boost_mirror_removal(
+    admission: dict[str, Any], *, store: BoostPostAdmissionStore, client: Any = None,
+) -> dict[str, Any]:
+    admission_id = int(admission["id"])
+    if not store.reserve_mirror_removal(admission_id):
+        return store.get_by_id(admission_id)
+    backend = client or MLAIBackendClient()
+    try:
+        await backend.confirm_boost_mirror_removal(
+            int(_backend_result(admission)["admission_id"]), str(admission["submission_key"])
+        )
+    except Exception as exc:  # A lost acknowledgement leaves the outbox item due for retry.
+        print(f"BOOST_POST_MIRROR_REMOVAL_RETRY admission_id={admission_id} error_type={type(exc).__name__}")
+        return store.get_by_id(admission_id)
+    return store.complete_mirror_removal(admission_id)
 
 
 def _post_recheck_feedback(
@@ -1173,6 +1323,11 @@ async def handle_boost_recheck_reaction(
         return {"handled": False, "status": "ignored"}
     if reactor_user_id != str(admission.get("poster_slack_id") or ""):
         return {"handled": True, "status": "ignored_not_poster"}
+
+    if admission["status"] == "mirror_removal_pending":
+        admission = await _report_boost_mirror_removal(admission, store=store, client=client)
+        if admission["status"] == "mirror_removal_pending":
+            return {"handled": True, "status": "mirror_removal_pending", "admission": admission}
 
     claimed = store.claim_recheck(
         int(admission["id"]),
@@ -1361,7 +1516,11 @@ async def process_boost_post_admission(
     refreshed = store.get_by_id(int(rejected["id"]))
     _dm_rejection(refreshed, store=store, text=notice, send_dm_fn=send_dm_fn)
     refreshed = store.get_by_id(int(rejected["id"]))
-    moderated = _moderate_rejected_root(refreshed, store=store, delete_fn=delete_fn)
+    moderated = await asyncio.to_thread(
+        _moderate_rejected_root, refreshed, store=store, delete_fn=delete_fn
+    )
+    if moderated["status"] == "mirror_removal_pending":
+        moderated = await _report_boost_mirror_removal(moderated, store=store, client=client)
     return {"status": str(moderated["status"]), "admission": moderated}
 
 
@@ -1376,7 +1535,11 @@ async def handle_boost_root_post(
     settings = get_settings()
     if not bool(getattr(settings, "BOOST_POST_MODERATION_ENABLED", False)):
         return {"status": "ignored", "reason": "moderation_disabled"}
-    if event.get("thread_ts") or event.get("bot_id") or event.get("subtype"):
+    if (
+        event.get("thread_ts") not in (None, "", event.get("ts"))
+        or event.get("bot_id")
+        or event.get("subtype") not in (None, "", "file_share")
+    ):
         return {"status": "ignored", "reason": "not_human_root"}
     channel_id = str(event.get("channel") or "").strip()
     root_message_ts = str(event.get("ts") or "").strip()
@@ -1420,13 +1583,15 @@ async def handle_boost_root_edit(
     message = event.get("message") or {}
     channel_id = str(event.get("channel") or "")
     root_ts = str(message.get("ts") or "")
-    if not channel_id or not root_ts or message.get("thread_ts"):
+    if not channel_id or not root_ts or message.get("thread_ts") not in (None, "", root_ts):
         return {"status": "ignored"}
     text = str(message.get("text") or "")
     store = store or get_boost_post_store()
     admission = store.get(channel_id, root_ts)
     if admission is None:
         return {"status": "ignored", "reason": "unknown_root"}
+    if message.get("user") and message["user"] != admission["poster_slack_id"]:
+        return {"status": "ignored", "reason": "author_mismatch"}
     new_url = extract_boost_url(text) or ""
     updated = store.update_root_text(
         channel_id=channel_id,
@@ -1434,6 +1599,11 @@ async def handle_boost_root_edit(
         root_text=text,
         social_post_url=new_url,
     )
+    if updated is not None and updated["status"] in DELETE_PENDING_STATUSES:
+        moderated = await asyncio.to_thread(
+            _moderate_rejected_root, updated, store=store, delete_fn=delete_fn
+        )
+        return {"status": str(moderated["status"]), "admission": moderated}
     return {"status": "updated", "admission": updated}
 
 
@@ -1468,6 +1638,18 @@ async def process_due_boost_posts_once(
                 **process_kwargs,
             )
         )
+    settings = get_settings()
+    if getattr(settings, "BOOST_POST_AUTO_DELETE_ENABLED", False):
+        due = store.due_deletions(settings.BOOST_LINK_LOVE_CHANNEL_ID, limit=limit)
+        for admission in due:
+            moderated = await asyncio.to_thread(
+                _moderate_rejected_root, admission, store=store,
+                delete_fn=process_kwargs.get("delete_fn"),
+            )
+            results.append({"status": str(moderated["status"]), "admission": moderated})
+        for admission in store.due_mirror_removals(settings.BOOST_LINK_LOVE_CHANNEL_ID, limit=limit):
+            moderated = await _report_boost_mirror_removal(admission, store=store, client=client)
+            results.append({"status": str(moderated["status"]), "admission": moderated})
     return results
 
 

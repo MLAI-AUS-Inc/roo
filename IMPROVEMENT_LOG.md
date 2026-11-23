@@ -4,6 +4,14 @@ A short record of repository cleanup, testing, security, and delivery changes.
 Each entry states what changed and how it was checked. Findings without fixes
 are labelled as such.
 
+## 2026-11-23
+
+- Roo retries rejected Boost My Startup deletions from its durable admission
+  store and checks for due removals when the same post is edited. Offline
+  moderation tests cover Slack timeouts, restarts, file shares and edits
+  without a second points charge. After Slack confirms removal, Roo retries
+  handing it to the Chat bridge until the backend acknowledges the receipt.
+
 ## 2026-11-21
 
 - Roo accepts volunteer-time requests and direct awards through native Slack

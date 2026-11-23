@@ -17,6 +17,7 @@ from roo.boost_moderation import (
     handle_boost_recheck_reaction,
     handle_boost_root_edit,
     handle_boost_root_post,
+    process_due_boost_posts_once,
     process_due_boost_restores_once,
 )
 from roo.slack_moderation import ModeratorDeleteResult
@@ -267,6 +268,125 @@ async def test_insufficient_points_is_committed_before_root_is_deleted(tmp_path,
     assert boost_reward_admission_decision(
         "CBOOST123", "1800000000.123456", store=store
     ) == "rejected"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("retry_from_edit", [True, False])
+async def test_rejected_file_share_is_removed_after_transient_slack_failure(
+    tmp_path, monkeypatch, retry_from_edit
+):
+    settings = moderation_settings(BOOST_POST_AUTO_DELETE_ENABLED=True)
+    monkeypatch.setattr(module, "get_settings", lambda: settings)
+    now = 1800000000.0
+    monkeypatch.setattr(module, "_now", lambda: now)
+    path = tmp_path / "admissions.db"
+    client = InsufficientClient()
+    event = root_event(subtype="file_share")
+    attempts = []
+
+    def delete_fn(**kwargs):
+        attempts.append((kwargs["channel_id"], kwargs["message_ts"]))
+        if len(attempts) == 1:
+            raise TimeoutError("Slack response lost")
+        return successful_delete(**kwargs)
+
+    initial = await handle_boost_root_post(
+        event,
+        workspace_id="TTEAM123",
+        store=BoostPostAdmissionStore(path),
+        client=client,
+        post_message_fn=lambda **kwargs: None,
+        send_dm_fn=lambda *args: None,
+        delete_fn=delete_fn,
+    )
+    assert initial["status"] == "delete_failed"
+    assert await process_due_boost_posts_once(
+        store=BoostPostAdmissionStore(path), client=client, delete_fn=delete_fn
+    ) == []
+
+    now += module.DELETE_RETRY_SECONDS
+    store = BoostPostAdmissionStore(path)
+    if retry_from_edit:
+        result = await handle_boost_root_edit(
+            {"channel": event["channel"], "message": {
+                **event, "thread_ts": event["ts"], "text": "Edited after rejection",
+            }},
+            store=store,
+            delete_fn=delete_fn,
+        )
+    else:
+        [result] = await process_due_boost_posts_once(
+            store=store, client=client, delete_fn=delete_fn
+        )
+    assert result["status"] == "deleted"
+    assert len(client.calls) == 1
+    assert attempts == [(event["channel"], event["ts"])] * 2
+
+
+@pytest.mark.asyncio
+async def test_confirmed_slack_delete_wins_when_delete_response_is_lost(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        module, "get_settings", lambda: moderation_settings(BOOST_POST_AUTO_DELETE_ENABLED=True)
+    )
+    store = BoostPostAdmissionStore(tmp_path / "admissions.db")
+
+    def delete_fn(*, channel_id, message_ts, reason_code):
+        store.mark_removed(channel_id, message_ts)
+        raise TimeoutError("Slack delivered the event but lost the response")
+
+    result = await handle_boost_root_post(
+        root_event(),
+        workspace_id="TTEAM123",
+        store=store,
+        client=InsufficientClient(),
+        post_message_fn=lambda **kwargs: None,
+        send_dm_fn=lambda *args: None,
+        delete_fn=delete_fn,
+    )
+    assert result["status"] == "deleted"
+    assert result["admission"]["deleted_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_slack_removal_reaches_chat_after_roo_restart_without_a_callback(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        module, "get_settings", lambda: moderation_settings(BOOST_POST_AUTO_DELETE_ENABLED=True)
+    )
+    now = 1800000000.0
+    monkeypatch.setattr(module, "_now", lambda: now)
+    path = tmp_path / "admissions.db"
+    reports = []
+    deletes = []
+
+    class Backend(InsufficientClient):
+        async def admit_boost_post(self, **payload):
+            return {**await super().admit_boost_post(**payload), "admission_id": 13}
+
+        async def confirm_boost_mirror_removal(self, admission_id, submission_key):
+            reports.append((admission_id, submission_key))
+            if len(reports) == 1:
+                raise httpx.ReadTimeout("Lost bridge acknowledgement")
+
+    def delete_fn(**kwargs):
+        deletes.append(kwargs)
+        return successful_delete(**kwargs)
+
+    client = Backend()
+    outcome = await handle_boost_root_post(
+        root_event(), workspace_id="TTEAM123", store=BoostPostAdmissionStore(path),
+        client=client, post_message_fn=lambda **kwargs: None,
+        send_dm_fn=lambda *args: None, delete_fn=delete_fn,
+    )
+    assert outcome["status"] == "mirror_removal_pending"
+    assert outcome["admission"]["deleted_at"] is not None
+
+    now += module.DELETE_RETRY_SECONDS
+    [result] = await process_due_boost_posts_once(
+        store=BoostPostAdmissionStore(path), client=client, delete_fn=delete_fn
+    )
+    assert result["status"] == "deleted"
+    assert reports == [(13, outcome["admission"]["submission_key"])] * 2
+    assert len(deletes) == len(client.calls) == 1
 
 
 @pytest.mark.asyncio

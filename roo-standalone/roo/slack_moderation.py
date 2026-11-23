@@ -12,6 +12,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from slack_sdk.errors import SlackApiError
+
 from .config import Settings, get_settings
 
 _moderator_client: Any = None
@@ -134,18 +136,18 @@ def delete_boost_root_as_moderator(
     if get_message_fn is None:
         from .slack_client import get_message
 
-        get_message_fn = get_message
-    message = get_message_fn(channel_id, message_ts)
-    if not message:
-        return ModeratorDeleteResult(
-            False,
-            "refused",
-            channel_id,
-            message_ts,
-            "message_not_found",
+    try:
+        message = (
+            get_message(channel_id, message_ts, raise_on_error=True)
+            if get_message_fn is None
+            else get_message_fn(channel_id, message_ts)
         )
+    except Exception as exc:  # A failed lookup is not proof of removal.
+        return ModeratorDeleteResult(False, "failed", channel_id, message_ts, type(exc).__name__)
+    if message is None:
+        return ModeratorDeleteResult(True, "already_deleted", channel_id, message_ts)
     thread_ts = str(message.get("thread_ts") or "").strip()
-    if thread_ts and thread_ts != message_ts:
+    if message.get("ts") != message_ts or (thread_ts and thread_ts != message_ts):
         return ModeratorDeleteResult(
             False,
             "refused",
@@ -159,6 +161,8 @@ def delete_boost_root_as_moderator(
         response = moderator_client.chat_delete(channel=channel_id, ts=message_ts)
         if not response.get("ok"):
             error_code = str(response.get("error") or "delete_failed")
+            if error_code == "message_not_found":
+                return ModeratorDeleteResult(True, "already_deleted", channel_id, message_ts)
             print(
                 "BOOST_POST_DELETE_FAILED "
                 f"channel_id={channel_id} message_ts={message_ts} "
@@ -177,11 +181,17 @@ def delete_boost_root_as_moderator(
         )
         return ModeratorDeleteResult(True, "deleted", channel_id, message_ts)
     except Exception as exc:  # noqa: BLE001 - Slack SDK errors vary by transport.
-        error_code = exc.__class__.__name__
+        error_code = (
+            str(exc.response.get("error") or "delete_failed")
+            if isinstance(exc, SlackApiError)
+            else type(exc).__name__
+        )
+        if error_code == "message_not_found":
+            return ModeratorDeleteResult(True, "already_deleted", channel_id, message_ts)
         print(
             "BOOST_POST_DELETE_FAILED "
             f"channel_id={channel_id} message_ts={message_ts} "
-            f"reason={reason_code} error_type={error_code}"
+            f"reason={reason_code} error_code={error_code}"
         )
         return ModeratorDeleteResult(
             False,
