@@ -70,3 +70,47 @@ def select_client(clients, actor, selector):
     aggregate = {key: value for key, value in requester.items() if key != 'contract_terms'}
     return {**aggregate, 'name': 'All accessible clients', 'monthly_hours': None,
             'monthly_allowances': {}}, groups, selected
+
+
+def _project_name_key(value):
+    # Studio display names may carry a literal "[Studio]" prefix. Clients
+    # use both "Study Nash" and "Studynash" for the same configured name.
+    label = value.strip().casefold().removeprefix('[studio]')
+    return ''.join(label.split())
+
+
+def select_project(client, groups, selector, projects):
+    """Restrict an already-authorized client selection to one known project."""
+    if 'project' not in selector:
+        return client, groups
+    value = selector['project']
+    if not isinstance(value, str) or len(value) > 200 or any(ord(char) < 32 for char in value):
+        raise TimesheetError('report_project_unavailable')
+    labels = [value]
+    words = value.split(maxsplit=1)
+    if len(words) == 2 and words[0].casefold() == 'project':
+        # Some names, such as Project Acquire, include the word "Project".
+        # Try the full name first, then the user's "Project Study Nash" form.
+        labels.append(words[1])
+    for label in labels:
+        name = _project_name_key(label)
+        matches = [key for key in client['project_ids']
+                   if key in projects and (key == label.strip().casefold()
+                                           or (name and name == _project_name_key(projects[key])))]
+        if matches:
+            break
+    if len(matches) != 1:
+        raise TimesheetError('report_project_unavailable')
+    project_id = matches[0]
+    selected = client
+    if len(client['project_ids']) > 1:
+        # A shared allowance and its rollover cannot be assigned to one
+        # project. Keep the original owner configuration intact for access
+        # checks and source selection.
+        selected = {**client, 'project_ids': [project_id],
+                    'monthly_hours': None, 'monthly_allowances': {}}
+        selected.pop('contract_terms', None)
+        selected.pop('contract_cash', None)
+    groups = [{**group, 'project_ids': [project_id]} for group in groups
+              if project_id in group['project_ids']]
+    return selected, groups

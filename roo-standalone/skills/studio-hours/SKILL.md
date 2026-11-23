@@ -1,30 +1,33 @@
 ---
 name: studio-hours
-description: Private Studio hours by client, project and builder, with monthly charts
+description: Private Studio hours by project and person.
 requires_auth: true
 routing:
-  use_when: Studio usage, task-allowance burndowns, named-client project hours, per-client/project/builder totals, charts and detail follow-ups.
-  avoid_when: Builder payroll timesheets, coworking attendance, ticket creation, or effort sizing.
+  use_when: Studio usage by client/project/builder, allowance burndowns, hours burnt by person, contributor charts.
+  avoid_when: Payroll, purchased-hour credits, coworking or effort sizing.
   examples:
     - {text: "How many of my 40 Studio hours have we used this month?", action: summary}
-    - {text: "Show Devashi Desai's Study Nash hours and charts for the last three months", action: summary}
-    - {text: "Show hours per client and project for the last three months", action: summary}
-    - {text: "Give me the in-depth report on what those hours were spent on", action: detailed}
+    - {text: "Chart Mark Ghiasy's Master App hours by person", action: summary}
+    - {text: "Give me the work behind those hours", action: detailed}
   negative_examples:
     - {text: "How many people used coworking?", instead: mlai-points}
 actions:
   - name: summary
-    description: Hours and charts by month, client and project. Default current month.
+    description: Hours and charts. Default current month.
     params:
-      month: {type: string, description: "Start YYYY-MM/current/last/recent/last_complete/previous; all for project-to-date."}
-      months: {type: integer, description: "Number of consecutive months from month, 1–12; default 1."}
-      client: {type: string, description: "Client name/email/mention; all for per-client totals, self/omitted for own projects. Never grants access."}
+      month: {type: string, description: "YYYY-MM/current/last/recent/last_complete; all for project-to-date; previous for follow-ups like 'plot that'."}
+      months: {type: integer, description: "1–12 consecutive months."}
+      client: {type: string, description: "Client name/email/mention, all, or self (default)."}
+      project: {type: string, description: "Requested project name or ID; all resets a prior filter."}
+      chart: {type: string, enum: [stacked, cumulative, both], description: "By person: stacked bars for composition, cumulative lines over time, both for general contributor charts."}
   - name: detailed
-    description: Dated work and CSV. Inherits last period and client unless specified.
+    description: Dated work and CSV. Inherits prior filters and charts.
     params:
       month: {type: string, description: "Start YYYY-MM/current/last/recent/last_complete/previous/all. Omit to reuse prior period."}
       months: {type: integer, description: "Number of consecutive months, 1–12."}
       client: {type: string, description: "Client name/email/mention or all/self; omit to retain prior filter."}
+      project: {type: string}
+      chart: {type: string, enum: [stacked, cumulative, both]}
 ---
 
 # Studio client hours
@@ -46,7 +49,7 @@ that client's monthly allowance and project totals, with monthly and project
 charts. An all-clients overview groups projects under their verified client and
 shows unmapped projects separately, with no invented client allocations.
 
-For “Devashi Desai's Study Nash hours”, set client="Devashi Desai" and use the
+For “Devashi Desai's Study Nash hours”, set client="Devashi Desai", project="Study Nash", and use the
 same summary/detail actions. The worker must verify the configured single
 Study Nash project grant. Project names in a message never add access. A Study
 Nash task-usage burndown uses this skill and the configured base monthly allowance.
@@ -59,9 +62,24 @@ start, change effort labels, or add invoice quantities to completed-ticket hours
 
 Default to a clear summary: hours used out of the shared monthly allowance,
 remaining or overage, each project's total and builders within each project.
-Use detailed only when the client asks for the work-level breakdown. Follow-ups
-inherit the last requested period and client filter for this requester; explicit
-periods and client filters override them. An explicit self resets the filter.
+Use detailed when the client asks for the work-level breakdown. Copy a requested
+project name or ID into project. For all projects, omit project on a new summary
+or use project="all" to clear a previous project filter.
+
+For a stacked breakdown of hours per person on each project, use chart="stacked".
+For lines showing each person's cumulative hours over time, use chart="cumulative".
+For both views or an unspecific request to chart hours by person, use chart="both".
+For example, “chart who burnt hours on Mark Ghiasy's Master App over the last couple
+of months” uses client="Mark Ghiasy", project="Master App", chart="both",
+month="recent", months=2. For project-only requests, omit client.
+People named as contributors belong in the breakdown; their names do not select
+the client. Hours reflect the project's configured source. Future sprint estimates
+and dollar costs require separate data.
+
+For “plot that by person” after an hours report, use summary with month="previous"
+and chart="both". Detail and previous-period follow-ups retain the prior period,
+client, project and chart unless overridden. Changing client clears the previous
+project restriction. An explicit self selects the requester's own projects.
 
 For “last three months”, use summary with month=recent and months=3. This includes
 the current month to date and the previous two calendar months, resolved by the
@@ -78,6 +96,7 @@ hours. The private worker may apply reviewed month estimates when explicitly
 requested; these are labelled in charts and detail. Never invent allocations
 from the conversation or change source dates yourself.
 Do not silently narrow an ambiguous date request; ask which period is wanted.
-The report labels its sources. Invoice-first projects use reviewed invoices and
-additional recorded work for reviewed history; later ticket estimates are labelled separately.
+The report labels its sources. Invoice-first projects use invoice quantities
+and recorded work. Projects configured for completed-ticket estimates use
+the task size at first completion.
 Do not invent hourly activities, billable hours, source access or project ownership.

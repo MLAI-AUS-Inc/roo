@@ -4,24 +4,58 @@ No ticket estimates or contractor money conversions enter this projection.
 Every microhour is allocated by the shared balance calculation exactly once.
 """
 from collections import defaultdict
-from copy import deepcopy
 from datetime import date
 
 from .studio_client_balance import HOUR_UNITS, allocated_days_for_cutoff, build_balance_report
 from .studio_reports import month_offset
-from .timesheets import timestamp
+from .timesheets import TimesheetError, timestamp
 
 
-def build_recorded_report(config, client, selector, dataset, now):
+def _select_recorded_projects(client, dataset, project_ids):
+    """Project a validated owner dataset without assigning shared finance records."""
+    allowed = set(client['project_ids'])
+    requested = set(project_ids)
+    if not requested or not requested <= allowed or set(dataset['project_ids']) != allowed:
+        raise TimesheetError('client_balance_scope_mismatch')
+    if requested == allowed:
+        return client, dataset
+    ids = [key for key in client['project_ids'] if key in requested]
+    hours = [row for row in dataset['hours'] if row['project_id'] in requested]
+    invoice_ids = {row.get('invoice_id') for row in hours}
+    qualifications = [note for note in dataset.get('qualifications', []) if note['project_id'] in requested]
+    # Pending sources have no verified project allocation. Preserve the gap
+    # without disclosing the owner-wide count, descriptions or amounts.
+    if dataset.get('pending_work') or any(row['unresolved_hour_units'] for row in dataset['contractor_invoices']):
+        for key in ids:
+            qualifications.append({'project_id': key, 'reference': 'Project allocation',
+                                   'reason': 'Some client work is awaiting allocation. '
+                                             'The total includes only hours assigned to this project.'})
+    scoped = {**dataset, 'project_ids': ids, 'hours': hours, 'invoices': [], 'payments': [],
+              'contractor_invoices': [row for row in dataset['contractor_invoices'] if row['id'] in invoice_ids],
+              'qualifications': qualifications, 'pending_work': [], 'limitations': []}
+    if dataset.get('source_freshness'):
+        latest = max((row['work_end'] for row in hours), default=None)
+        scoped['source_freshness'] = {**dataset['source_freshness'], 'latest_work_date': latest}
+        scoped['coverage'] = {**dataset['coverage'], 'through': latest or dataset['coverage']['start']}
+    return {**client, 'project_ids': ids}, scoped
+
+
+def build_recorded_report(config, client, selector, dataset, now, *, project_ids=None):
+    owner_dataset = dataset
+    if project_ids is not None:
+        client, dataset = _select_recorded_projects(client, dataset, project_ids)
     if selector.get('period') == 'weekly':
         from .studio_recorded_hours_weekly import build_weekly_recorded_report
-        return build_weekly_recorded_report(config, client, selector, dataset, now)
+        report = build_weekly_recorded_report(config, client, selector, dataset, now)
+        if dataset is not owner_dataset and dataset.get('source_freshness') and not dataset['hours']:
+            report.update(weekly_has_coverage=False, period_has_coverage=False, partial=True)
+        return report
     # A new cash sync must never create zero-usage months after submitted work.
     work_dataset = dataset
     fresh = dataset.get('source_freshness')
     if fresh:
-        work_dataset = deepcopy(dataset)
-        work_dataset['coverage']['through'] = fresh['latest_work_date'] or dataset['coverage']['start']
+        work_dataset = {**dataset, 'coverage': {**dataset['coverage'],
+                        'through': fresh['latest_work_date'] or dataset['coverage']['start']}}
     balance = build_balance_report(client, selector, work_dataset, now)
     if fresh and not fresh['latest_work_date']:
         balance['period_has_coverage'] = False
@@ -90,7 +124,8 @@ def build_recorded_report(config, client, selector, dataset, now):
             'estimated_month_units': sum(m.get('estimated_units', 0) for m in monthly),
             'recorded_snapshot': True, 'source_as_of': fresh['hours_reviewed_at'] if fresh else dataset['as_of'],
             'period_has_coverage': balance['period_has_coverage'],
-            'coverage_through': balance['coverage_through'], 'partial': balance['partial'] or bool(exceptions),
+            'coverage_start': balance['coverage_start'], 'coverage_through': balance['coverage_through'],
+            'partial': balance['partial'] or bool(exceptions),
             'limitations': balance['limitations'], 'pending_work_count': balance['pending_work_count']}
 
 
@@ -137,7 +172,10 @@ def overlay_recorded_reports(report, reviewed):
                   partial=any(item['partial'] for item in reviewed),
                   limitations=list(dict.fromkeys(note for item in reviewed for note in item['limitations'])),
                   pending_work_count=sum(item['pending_work_count'] for item in reviewed))
+    if len({(item['coverage_start'], item['coverage_through']) for item in reviewed}) > 1:
+        report['reviewed_coverage_varies'] = True
     if report.get('canonical_only') or covered == set(report['projects']):
+        report['coverage_start'] = min(item['coverage_start'] for item in reviewed)
         for month in report['monthly']:
             sources = [source_month for item in reviewed for source_month in item['monthly']
                        if source_month['month'] == month['month']]

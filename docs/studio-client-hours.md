@@ -115,6 +115,32 @@ Shared monthly allowance across all your projects.
   Alice 2.5h · Bob 8h
 ```
 
+### Contributor charts
+
+- `@Roo show both contributor charts for Master App for the last two months.`
+- `@Roo show a stacked bar of hours by person across all my projects this month.`
+- `@Roo plot cumulative hours by person for Devashi Desai’s Study Nash project for the last three months.`
+- `@Roo show the work behind those hours.`
+
+Each stacked bar represents one project. Its segments show the hours attributed
+to each contributor over the requested period. The cumulative chart shows one
+line per contributor, starting with hours counted in that period. Across several
+projects, each line adds that person's hours across the selected projects.
+Contributor colours match between the two charts in a report.
+
+Roo uses the same counted rows as the private hours breakdown and detailed CSV.
+Linear task charts label completed-ticket size estimates. Invoice and recorded
+work charts label their source quantities and any estimated monthly allocations.
+Rows with an unknown month contribute to the project bars and are identified
+separately on the cumulative chart. The charts describe historical usage.
+
+A client or event lead with a verified Studio reporting mapping can ask about
+their own projects. Staff can name a client within their existing reporting
+grants. The private worker matches a project name or ID inside that scope and
+sends the results to the requester’s DM. For a single project from a shared
+allowance, it reports usage without assigning the whole allowance to that project.
+If a name matches several accessible projects, use the project ID.
+
 ## Hours and freshness
 
 The existing Studio source provides **completed-ticket size hours**, not timer
@@ -299,6 +325,9 @@ python -m roo.studio_report_worker --env-file .env.studio-reports \
 # Authorized staff preview for a named client:
 python -m roo.studio_report_worker --env-file .env.studio-reports \
   --preview recent --months 3 --actor VERIFIED_STAFF_SLACK_ID --client 'Example Client'
+# Owner preview of contributor charts for one mapped project:
+python -m roo.studio_report_worker --env-file .env.studio-reports \
+  --preview recent --months 2 --actor VERIFIED_CLIENT_SLACK_ID --project 'Master App' --chart both
 ```
 
 Preview verifies Slack/source identities and reads Linear. It writes local

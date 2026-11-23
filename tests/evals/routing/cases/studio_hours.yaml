@@ -51,3 +51,20 @@
   text: "Show all completed-task hours and a task burndown for Devarshi Desai's Project Study Nash"
   expect: {skill: studio-hours, action: summary, params: {month: all, client: "Devarshi Desai"}}
   tags: [studio-hours, client-scope]
+- id: studio-hours-master-app-contributor-charts
+  text: "Show me both a stacked bar and cumulative lines for hours by person on Mark Ghiasy's Master App over the last couple of months"
+  expect: {skill: studio-hours, action: summary, params_subset: {project: Master App, chart: both, client: Mark Ghiasy, month: recent, months: 2}}
+  tags: [studio-hours, client-scope]
+- id: studio-hours-project-composition
+  text: "Stack everyone's hours in one bar per project for my projects this month"
+  expect: {skill: studio-hours, action: summary, params_subset: {chart: stacked}}
+  tags: [studio-hours]
+- id: studio-hours-study-nash-cumulative
+  text: "Plot cumulative hours for each contributor on Devashi Desai's Study Nash for the last two months"
+  expect: {skill: studio-hours, action: summary, params_subset: {project: Study Nash, chart: cumulative, client: Devashi Desai, month: recent, months: 2}}
+  tags: [studio-hours, client-scope]
+- id: studio-hours-contributor-chart-followup
+  text: "Can you graph those hours by person?"
+  thread: {last_skill: studio-hours}
+  expect: {skill: studio-hours, action: summary, params_subset: {chart: both, month: previous}}
+  tags: [studio-hours, follow-up]
