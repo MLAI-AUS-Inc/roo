@@ -20,6 +20,17 @@ are labelled as such.
 - Contributor chart footers show the complete review cutoff and latest
   included work date from the signed report. Tests cover both exports.
 
+## 2026-11-25
+
+- Points Admin promotion, revocation and allowance changes require a configured
+  member/workspace pair and verified Slack actor context. Roo forwards that
+  context with its dedicated service key; missing or invalid configuration
+  denies access. Environment examples, production deployment wiring and rollout
+  guidance cover matching backend settings. Focused offline authorization,
+  client and existing command tests cover both allowed and denied requests.
+  Validation: 146 authorization/client/identity tests and 11 management-command
+  tests passed; deployment YAML/shell syntax and `git diff --check` passed.
+
 ## 2026-11-23
 
 - Roo retries rejected Boost My Startup deletions from its durable admission

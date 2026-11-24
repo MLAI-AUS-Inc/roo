@@ -3322,6 +3322,22 @@ class MLAIBackendClient:
             print(f"❌ Failed to fetch admin allowance: {e}")
             return {'error': str(e)}
 
+    def _points_admin_actor_payload(self, requester_slack_id: str) -> dict:
+        """Assert only identity from verified ingress, never model parameters."""
+        actor = self.actor_context
+        if (
+            not actor
+            or actor.acting_slack_user_id != requester_slack_id
+            or not re.fullmatch(r"[UW][A-Z0-9]+", requester_slack_id)
+            or not re.fullmatch(r"T[A-Z0-9]+", actor.slack_team_id)
+            or not self.roo_api_key
+        ):
+            raise BackendIdentityError("Verified Slack identity and a Roo API key are required")
+        return {
+            "requester_slack_id": actor.acting_slack_user_id,
+            "slack_team_id": actor.slack_team_id,
+        }
+
     async def promote_points_admin(
         self,
         requester_slack_id: str,
@@ -3330,7 +3346,7 @@ class MLAIBackendClient:
         """Promote a user to Points Admin using the privileged admin API."""
         cleaned_target = self._clean_slack_id(target_slack_id)
         payload = {
-            "requester_slack_id": requester_slack_id,
+            **self._points_admin_actor_payload(requester_slack_id),
             "target_slack_id": cleaned_target,
         }
 
@@ -3340,7 +3356,7 @@ class MLAIBackendClient:
             json=payload,
             timeout=10.0,
             circuit_breaker=True,
-            use_admin_headers=True,
+            headers={"Content-Type": "application/json", "X-API-Key": self.roo_api_key},
         )
         if response.status_code == 409:
             return response.json()
@@ -3359,7 +3375,7 @@ class MLAIBackendClient:
         """Update a specific Points Admin's weekly allowance."""
         cleaned_target = self._clean_slack_id(target_slack_id)
         payload = {
-            "requester_slack_id": requester_slack_id,
+            **self._points_admin_actor_payload(requester_slack_id),
             "weekly_allowance": weekly_allowance,
         }
 
@@ -3369,7 +3385,7 @@ class MLAIBackendClient:
             json=payload,
             timeout=10.0,
             circuit_breaker=True,
-            use_admin_headers=True,
+            headers={"Content-Type": "application/json", "X-API-Key": self.roo_api_key},
         )
         if response.status_code == 404:
             return response.json()
@@ -3384,7 +3400,7 @@ class MLAIBackendClient:
     ) -> dict:
         """Revoke a user's Points Admin access using the privileged admin API."""
         cleaned_target = self._clean_slack_id(target_slack_id)
-        payload = {"requester_slack_id": requester_slack_id}
+        payload = self._points_admin_actor_payload(requester_slack_id)
 
         response = await self._request(
             "DELETE",
@@ -3392,7 +3408,7 @@ class MLAIBackendClient:
             json=payload,
             timeout=10.0,
             circuit_breaker=True,
-            use_admin_headers=True,
+            headers={"Content-Type": "application/json", "X-API-Key": self.roo_api_key},
         )
         if response.status_code == 404:
             return response.json()
