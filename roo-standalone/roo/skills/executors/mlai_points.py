@@ -3625,6 +3625,21 @@ class MlaiPointsExecutor(BackendErrors, PromptExecutor):
                 tasks_command="tasks",
                 admin_allowance=admin_allowance,
             )
+            # Acknowledge the request before attempting private delivery. Keep
+            # this balance-only and never include personal points data here.
+            if channel_id and channel_id.startswith(("C", "G")) and thread_ts:
+                try:
+                    post_message(
+                        channel=channel_id,
+                        thread_ts=thread_ts,
+                        text="I'll DM your Roo Points balance to you.",
+                    )
+                except Exception as exc:
+                    # A failed acknowledgement must not prevent the DM.
+                    print(
+                        "⚠️ Points balance thread acknowledgement failed "
+                        f"exc_type={exc.__class__.__name__}"
+                    )
             return self._deliver_personal_points_message(
                 recipient_user_id=user_id,
                 requester_user_id=user_id,

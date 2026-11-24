@@ -83,11 +83,16 @@ class PersonalPointsClient:
         ]
 
 
-def _capture_private_delivery(monkeypatch, *, dm_ok=True, ephemeral_ok=True):
+def _capture_private_delivery(
+    monkeypatch, *, dm_ok=True, ephemeral_ok=True, thread_messages=None,
+    delivery_events=None, thread_ok=True,
+):
     direct_messages = []
     ephemeral_messages = []
 
     def fake_send_dm(user_id, text, **kwargs):
+        if delivery_events is not None:
+            delivery_events.append("dm")
         direct_messages.append({"user": user_id, "text": text, **kwargs})
         if isinstance(dm_ok, Exception):
             raise dm_ok
@@ -99,14 +104,32 @@ def _capture_private_delivery(monkeypatch, *, dm_ok=True, ephemeral_ok=True):
             raise ephemeral_ok
         return {"ok": ephemeral_ok}
 
+    def fake_post_message(**kwargs):
+        if delivery_events is not None:
+            delivery_events.append("thread")
+        if thread_messages is not None:
+            thread_messages.append(kwargs)
+        if isinstance(thread_ok, Exception):
+            raise thread_ok
+        return {"ok": thread_ok}
+
     patch_skill_dependency(monkeypatch, 'send_dm', fake_send_dm)
     patch_skill_dependency(monkeypatch, 'post_ephemeral', fake_post_ephemeral)
+    monkeypatch.setattr(
+        "roo.skills.executors.mlai_points.post_message", fake_post_message,
+    )
     return direct_messages, ephemeral_messages
 
 
 @pytest.mark.asyncio
-async def test_routed_balance_in_channel_uses_verified_actor_and_private_delivery(monkeypatch):
-    direct_messages, ephemeral_messages = _capture_private_delivery(monkeypatch)
+@pytest.mark.parametrize("channel_id", ["CPOINTS", "GPRIVATE"])
+async def test_routed_balance_in_channel_uses_verified_actor_and_private_delivery(
+    monkeypatch, channel_id,
+):
+    thread_messages, delivery_events = [], []
+    direct_messages, ephemeral_messages = _capture_private_delivery(
+        monkeypatch, thread_messages=thread_messages, delivery_events=delivery_events,
+    )
     client = PersonalPointsClient()
 
     result = await SkillExecutor()._handle_points_action(
@@ -115,19 +138,25 @@ async def test_routed_balance_in_channel_uses_verified_actor_and_private_deliver
         params={"target_slack_id": "UFORGED"},
         text="show <@UFORGED>'s balance",
         user_id="UVERIFIED",
-        channel_id="CPOINTS",
+        channel_id=channel_id,
         thread_ts="111.222",
         skill=SimpleNamespace(name="mlai-points"),
     )
 
     assert client.balance_users == ["UVERIFIED"]
+    assert delivery_events == ["thread", "dm"]
+    assert thread_messages == [{
+        "channel": channel_id,
+        "thread_ts": "111.222",
+        "text": "I'll DM your Roo Points balance to you.",
+    }]
     assert result["message"] == ""
     assert result["suppress_post"] is True
     assert direct_messages[0]["user"] == "UVERIFIED"
     assert "Current Balance:** 37 points" in direct_messages[0]["text"]
     assert ephemeral_messages == [
         {
-            "channel": "CPOINTS",
+            "channel": channel_id,
             "user": "UVERIFIED",
             "text": "I've sent your Roo Points summary privately.",
             "thread_ts": "111.222",
@@ -137,7 +166,10 @@ async def test_routed_balance_in_channel_uses_verified_actor_and_private_deliver
 
 @pytest.mark.asyncio
 async def test_routed_balance_in_roo_dm_replies_without_opening_another_dm(monkeypatch):
-    direct_messages, ephemeral_messages = _capture_private_delivery(monkeypatch)
+    thread_messages = []
+    direct_messages, ephemeral_messages = _capture_private_delivery(
+        monkeypatch, thread_messages=thread_messages,
+    )
 
     result = await SkillExecutor()._handle_points_action(
         client=PersonalPointsClient(),
@@ -155,6 +187,7 @@ async def test_routed_balance_in_roo_dm_replies_without_opening_another_dm(monke
     assert result["data"]["delivery"] == "current_direct_message"
     assert direct_messages == []
     assert ephemeral_messages == []
+    assert thread_messages == []
 
 
 @pytest.mark.asyncio
@@ -170,10 +203,12 @@ async def test_balance_delivery_failures_never_fall_back_to_public_message(
     dm_outcome,
     ephemeral_outcome,
 ):
+    thread_messages = []
     _, ephemeral_messages = _capture_private_delivery(
         monkeypatch,
         dm_ok=dm_outcome,
         ephemeral_ok=ephemeral_outcome,
+        thread_messages=thread_messages,
     )
 
     result = await SkillExecutor()._handle_points_action(
@@ -190,9 +225,50 @@ async def test_balance_delivery_failures_never_fall_back_to_public_message(
     assert result["message"] == ""
     assert result["suppress_post"] is True
     assert result["data"]["delivery_failed"] is True
+    assert [message["text"] for message in thread_messages] == [
+        "I'll DM your Roo Points balance to you.",
+    ]
     if ephemeral_messages:
         assert "DM Roo `points`" in ephemeral_messages[0]["text"]
         assert "37" not in ephemeral_messages[0]["text"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("thread_outcome", [False, RuntimeError("thread unavailable")])
+async def test_balance_thread_ack_failure_still_sends_dm(monkeypatch, thread_outcome):
+    direct_messages, _ = _capture_private_delivery(monkeypatch, thread_ok=thread_outcome)
+
+    result = await SkillExecutor()._handle_points_action(
+        client=PersonalPointsClient(), action="balance", params={}, text="points",
+        user_id="UVERIFIED", channel_id="GPRIVATE", thread_ts="111.222",
+        skill=SimpleNamespace(name="mlai-points"),
+    )
+
+    assert direct_messages[0]["user"] == "UVERIFIED"
+    assert "Current Balance:** 37 points" in direct_messages[0]["text"]
+    assert result["data"]["dm_delivered"] is True
+    assert result["message"] == ""
+    assert result["suppress_post"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("channel_id,thread_ts", [(None, None), ("CPOINTS", None)])
+async def test_balance_without_thread_context_does_not_post_channel_ack(
+    monkeypatch, channel_id, thread_ts,
+):
+    thread_messages = []
+    direct_messages, _ = _capture_private_delivery(
+        monkeypatch, thread_messages=thread_messages,
+    )
+
+    await SkillExecutor()._handle_points_action(
+        client=PersonalPointsClient(), action="balance", params={}, text="points",
+        user_id="UVERIFIED", channel_id=channel_id, thread_ts=thread_ts,
+        skill=SimpleNamespace(name="mlai-points"),
+    )
+
+    assert thread_messages == []
+    assert direct_messages[0]["user"] == "UVERIFIED"
 
 
 @pytest.mark.asyncio
@@ -208,7 +284,10 @@ async def test_history_and_personalised_rewards_are_private(
     action,
     private_fragment,
 ):
-    direct_messages, ephemeral_messages = _capture_private_delivery(monkeypatch)
+    thread_messages = []
+    direct_messages, ephemeral_messages = _capture_private_delivery(
+        monkeypatch, thread_messages=thread_messages,
+    )
 
     result = await SkillExecutor()._handle_points_action(
         client=PersonalPointsClient(),
@@ -225,6 +304,7 @@ async def test_history_and_personalised_rewards_are_private(
     assert result["suppress_post"] is True
     assert private_fragment in direct_messages[0]["text"]
     assert ephemeral_messages[0]["user"] == "UVERIFIED"
+    assert thread_messages == []
 
 
 @pytest.mark.asyncio
@@ -312,6 +392,47 @@ async def test_fast_executor_keeps_private_delivery_metadata(monkeypatch):
     assert result["message"] == ""
     assert result["suppress_post"] is True
     assert result["data"] == {"delivery": "direct_message", "action": "balance"}
+
+
+@pytest.mark.asyncio
+async def test_fast_balance_announces_dm_before_private_delivery(monkeypatch):
+    thread_messages, delivery_events = [], []
+    direct_messages, _ = _capture_private_delivery(
+        monkeypatch, thread_messages=thread_messages, delivery_events=delivery_events,
+    )
+
+    class FakeClient(PersonalPointsClient):
+        def __init__(self, **kwargs):
+            super().__init__()
+
+    class FakeSkill:
+        name = "mlai-points"
+
+        @staticmethod
+        def get_client_class(name):
+            return FakeClient
+
+    agent = object.__new__(RooAgent)
+    agent.skills = [FakeSkill()]
+    agent.skill_executor = SkillExecutor()
+    monkeypatch.setattr(agent_module, "get_settings", lambda: SimpleNamespace(
+        MLAI_BACKEND_URL="https://backend.test", MLAI_API_KEY="test",
+        ROO_API_KEY="test", INTERNAL_API_KEY="test",
+    ))
+
+    result = await agent._execute_fast_points(
+        "UVERIFIED", "balance", channel_id="CPOINTS", thread_ts="111.222",
+    )
+
+    assert delivery_events == ["thread", "dm"]
+    assert thread_messages == [{
+        "channel": "CPOINTS", "thread_ts": "111.222",
+        "text": "I'll DM your Roo Points balance to you.",
+    }]
+    assert direct_messages[0]["user"] == "UVERIFIED"
+    assert "Current Balance:** 37 points" in direct_messages[0]["text"]
+    assert result["message"] == ""
+    assert result["suppress_post"] is True
 
 
 @pytest.mark.asyncio
