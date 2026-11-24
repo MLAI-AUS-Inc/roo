@@ -165,7 +165,10 @@ async def test_routed_balance_in_channel_uses_verified_actor_and_private_deliver
 
 
 @pytest.mark.asyncio
-async def test_routed_balance_in_roo_dm_replies_without_opening_another_dm(monkeypatch):
+@pytest.mark.parametrize("thread_ts", [None, "111.222"])
+async def test_routed_balance_in_roo_dm_replies_without_opening_another_dm(
+    monkeypatch, thread_ts,
+):
     thread_messages = []
     direct_messages, ephemeral_messages = _capture_private_delivery(
         monkeypatch, thread_messages=thread_messages,
@@ -178,7 +181,7 @@ async def test_routed_balance_in_roo_dm_replies_without_opening_another_dm(monke
         text="points",
         user_id="UVERIFIED",
         channel_id="DPRIVATE",
-        thread_ts="111.222",
+        thread_ts=thread_ts,
         skill=SimpleNamespace(name="mlai-points"),
     )
 
