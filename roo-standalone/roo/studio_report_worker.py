@@ -172,6 +172,7 @@ class StudioReportService(TimesheetService):
         preparation_key, source_checks = None, None
         source_preparations, owner_checks = {}, {}
         source_stale = False
+        source_mode = None
         if selector.get('period') == 'weekly' and self.refresh and not task_only:
             # Source preparation is private and shared by owner + frozen cutoff,
             # not repeated independently for Mark and Sam.
@@ -188,8 +189,9 @@ class StudioReportService(TimesheetService):
                         and not set(owner_client['project_ids']) & owner_task_projects):
                     finance_owners.append(owner)
             if finance_owners and self.refresh and selector.get('period') != 'weekly':
+                source_mode = self.refresh.hours_mode(request)
                 snapshot, source_preparations, owner_checks = self.refresh.prepare_owners(
-                    finance_owners, request, freshness_at)
+                    finance_owners, request, freshness_at, mode=source_mode)
             for owner in finance_owners:
                 expired = validate_snapshot_age(snapshot['clients'][owner], freshness_at,
                     max_age_days=self.balance_max_age_days,
@@ -244,7 +246,8 @@ class StudioReportService(TimesheetService):
             from .studio_recorded_hours import overlay_recorded_reports
             requested_projects = project_ids if 'project' in selector else None
             reviewed = [build_recorded_report(self.config, self.clients[owner], selector,
-                        snapshot['clients'][owner], now, project_ids=requested_projects) for owner in finance_owners]
+                        snapshot['clients'][owner], now, project_ids=requested_projects,
+                        work_only=source_mode == 'work') for owner in finance_owners]
             report = overlay_recorded_reports(report, reviewed)
             report.update(finance_digest=fingerprint(snapshot), finance_owners=finance_owners,
                           canonical_only=not legacy_projects, source_stale=source_stale)
@@ -259,7 +262,8 @@ class StudioReportService(TimesheetService):
                       backfill_source_used=bool(backfill_projects),
                       linear_project_ids=sorted(task_projects))
         if source_preparations:
-            report.update(source_preparations=source_preparations, owner_source_checks=owner_checks)
+            report.update(source_preparations=source_preparations, owner_source_checks=owner_checks,
+                          source_mode=source_mode)
         if task_only:
             report['hours_source'] = 'linear'
         if month_report is not None:
@@ -277,7 +281,7 @@ class StudioReportService(TimesheetService):
         # even when font versions or optional chart availability change.
         parts = [{'kind': 'message', 'content': chunk, 'status': 'pending'} for chunk in split_messages(summary(report))]
         if owner_checks:
-            parts.insert(0, self.source_notice(owner_checks, request))
+            parts.insert(0, self.source_notice(owner_checks, request, report=report))
         if (task_only and not report.get('contract_allowance')
                 and client['project_ids'] == selected['project_ids']):
             parts.append({'kind': 'message', 'content':
@@ -438,7 +442,23 @@ class StudioReportService(TimesheetService):
         report['parts'] = parts
         return report
 
-    def source_notice(self, checks, request):
+    def source_notice(self, checks, request, *, report=None):
+        if report and report.get('source_mode') == 'work':
+            work_checks = [streams['hours'] for streams in checks.values()]
+            reviewed = min(timestamp(check['complete_through']) for check in work_checks)
+            checked = min(timestamp(check['checked_at']) for check in work_checks)
+            latest = max((row['work_end'] for row in report['rows']
+                          if row.get('work_end') and row.get('source') != 'completed_ticket_size'), default=None)
+            unresolved = (any(streams['contractor_invoices']['unreviewed_count']
+                              or streams['hours'].get('submission_exceptions') for streams in checks.values())
+                          or report.get('pending_work_count') or report.get('qualifications'))
+            return {'kind': 'message', 'status': 'pending', 'content':
+                f'Work sources checked {checked.astimezone(self.config.tz).isoformat()}. '
+                f'Complete reviewed coverage through {reviewed.astimezone(self.config.tz).date()}. '
+                f'Latest included work period ends {latest or "unavailable"}. '
+                + ('Some contractor submissions or allocations are still under review. ' if unresolved else '')
+                + ('The hours subtotal is partial. ' if report.get('partial') else '')
+                + 'Later unsubmitted work is unknown.'}
         if request['selector'].get('project') or request['selector'].get('chart'):
             work_checks = [streams['hours'] for streams in checks.values()]
             checked = min(check['checked_at'] for check in work_checks)
@@ -472,7 +492,7 @@ class StudioReportService(TimesheetService):
             owners = report.get('finance_owners') or [report.get('finance_owner')]
             if set(preparations) != set(owners):
                 raise TimesheetError('studio_source_scope_mismatch')
-            return self.refresh.frozen_owners(preparations, request, now)
+            return self.refresh.frozen_owners(preparations, request, now, mode=report.get('source_mode'))
         return load_balance_snapshot(self.balance_path, self.config, self.clients)
 
     def deliver_request(self, report, request, key, now):
@@ -562,7 +582,7 @@ class StudioReportService(TimesheetService):
                         owners = [owner for owner in owners if project_id in self.clients[owner]['project_ids']]
                     prepared = [self.refresh.store.read(self.refresh.identity(owner, self.refresh.cutoff(request),
                         'contract_cash' if request.get('report_kind') == 'client_balance' and self.clients[owner].get('contract_cash')
-                        else self.refresh.mode(request)))
+                        else self.refresh.hours_mode(request)))
                                 for owner in owners] if self.refresh else []
                     results = [value['result'] for value in prepared if value and value.get('result')]
                     gaps = {code for result in results for code in result.get('missing', [])}

@@ -1,5 +1,9 @@
 # Studio hours and purchased-hours
 
+Verified Xero credit notes reduce the unpaid invoice amount. Detailed reports
+show cash paid and credits applied separately at the reporting cutoff. Only
+eligible reconciled cash payments purchase hours.
+
 The opt-in `studio-client-balance` skill shows one client's accumulated hours used
 minus purchased-hour credits. The y-axis is hours. Its curve rises as work hours
 are allocated to work dates and drops vertically when actual client payments buy

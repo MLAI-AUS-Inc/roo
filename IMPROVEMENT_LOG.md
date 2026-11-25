@@ -4,6 +4,19 @@ A short record of repository cleanup, testing, security, and delivery changes.
 Each entry states what changed and how it was checked. Findings without fixes
 are labelled as such.
 
+## 2026-11-26
+
+- Audited draft Roo PR #341 against the contributor report waiting notice.
+  Its 59 contributor, refresh and daily-worker tests passed. A separate
+  offline queue check reproduced the three simultaneous review gaps and zero
+  chart uploads. The [source fix plan](plans/2026-11-26-studio-contributor-report-source.md)
+  records the remaining backend, worker and private review work.
+
+- On-demand contributor charts use a signed hours source independent of
+  customer payment verification. The worker verifies scope, review coverage
+  and the frozen cutoff. Client balance reports now account for verified
+  credit notes without converting their value to purchased hours.
+
 ## 2026-11-23
 
 - Roo retries rejected Boost My Startup deletions from its durable admission

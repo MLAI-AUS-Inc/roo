@@ -202,6 +202,84 @@ def on_demand(kind='hours', actor='USAM', at=FRIDAY):
             'report_kind': kind, 'selector': {'month': 'all', 'action': 'summary', 'client': 'Mark'}}
 
 
+def test_queued_contributor_charts_use_work_mode_and_retry_only_the_unsent_chart(setup, clock):
+    from base64 import b64decode
+    import csv
+    from io import StringIO
+
+    from roo.payment_reminders import DeliveryNotSent
+    from roo.studio_reports import total_units
+
+    refresh, http, template = configure(setup)
+    refresh.latest_enabled = True
+    setup.path.write_text(json.dumps(template['snapshot']))
+    data = template['snapshot']['clients']['UMARK']
+    data.update(invoices=[], payments=[])
+    checked = (FRIDAY + timedelta(minutes=6)).isoformat()
+    reviewed = (FRIDAY - timedelta(days=14)).isoformat()
+    data['as_of'] = checked
+    data['hours'] += [{**data['hours'][-1], 'id': 'after-cutoff', 'work_start': '2026-10-16',
+                      'work_end': '2026-10-16', 'hour_units': 4000000}]
+    data['source_freshness'] = {
+        'hours_reviewed_at': reviewed, 'hours_complete_through': reviewed,
+        'unreviewed_invoice_count': 1, 'latest_work_date': '2026-10-16', 'submissions_checked_at': checked,
+        'missing': ['hours_coverage_missing', 'new_invoices_require_review'],
+    }
+    data['hours'][1]['submission_source'] = 'invoice'
+    data['hours'][2]['submission_source'] = 'invoice'
+    template.update(mode='work', status='partial', checked_at=checked, missing=data['source_freshness']['missing'],
+                    checks={'hours': {'checked_at': checked, 'reviewed_at': reviewed, 'complete_through': reviewed},
+                            'contractor_invoices': {'checked_at': checked, 'unreviewed_count': 1}})
+    request = on_demand()
+    request['selector'].update(project=P1, chart='both', month='recent', months=2, action='detailed')
+    key = 'd' * 64
+    with setup.service.queue.locked(key):
+        setup.service.queue.write(key, {**request, 'status': 'waiting_data'})
+    with refresh.store.locked(refresh.identity('UMARK', FRIDAY, 'latest')):
+        refresh.store.write(refresh.identity('UMARK', FRIDAY, 'latest'), {
+            'status': 'waiting_data', 'retry_at': FRIDAY.timestamp() + 3600,
+            'result': {'missing': ['cash_allocation_requires_review', *template['missing']]},
+        })
+    stacked = 'studio-hours-contributors-stacked.png'
+    cumulative = 'studio-hours-contributors-cumulative.png'
+    setup.api.upload_csv.side_effect = ['FSTACKED', DeliveryNotSent(), 'FCUMULATIVE', 'FCSV', 'FEXCEPTIONS']
+    clock.value = FRIDAY + timedelta(minutes=6)
+    outcome, = setup.service.commands(clock.value)
+    assert outcome['status'] == 'pending'
+    assert http.post.call_args.kwargs['json']['mode'] == 'work'
+    assert http.post.call_args.kwargs['json']['cutoff'] == FRIDAY.isoformat()
+    assert 'credit_notes' not in http.post.call_args.kwargs['json']
+    report = setup.service.requests.read(key)
+    assert total_units(report) == 5_000_000
+    assert report['partial'] is True
+    assert 'unavailable hours are not zero' in report['exceptions'][0]['reason']
+    pngs = [part for part in report['parts'] if part.get('filename', '').endswith('.png')]
+    assert [part['filename'] for part in pngs] == [stacked, cumulative]
+    assert all(b64decode(part['content']).startswith(b'\x89PNG') for part in pngs)
+    assert 'Complete reviewed coverage through 2026-10-02.' in report['parts'][0]['content']
+    assert 'Latest included work period ends 2026-10-12.' in report['parts'][0]['content']
+    assert 'Some contractor submissions or allocations are still under review.' in report['parts'][0]['content']
+    csv_part = next(p for p in report['parts'] if p.get('filename') == 'studio-hours-work.csv')
+    csv_rows = list(csv.DictReader(StringIO(csv_part['content'])))
+    assert len(csv_rows) == 1 and float(csv_rows[0]['hours']) == 5
+
+    clock.value += timedelta(minutes=6)
+    outcome, = setup.service.commands(clock.value)
+    assert outcome['status'] == 'sent'
+    assert http.post.call_count == 1
+    assert [call.args[1] for call in setup.api.upload_csv.call_args_list][:3] == [stacked, cumulative, cumulative]
+    assert setup.service.commands(clock.value + timedelta(minutes=6)) == []
+
+
+def test_work_snapshot_with_payment_records_fails_closed(setup):
+    refresh, _, template = configure(setup)
+    data = template['snapshot']['clients']['UMARK']
+    data['source_freshness'] = {'hours_reviewed_at': FRIDAY.isoformat()}
+    with pytest.raises(TimesheetError, match='invalid_client_balance_snapshot'):
+        from roo.studio_client_balance_source import validate_balance_snapshot
+        validate_balance_snapshot(template['snapshot'], refresh.config, refresh.clients, work_only=True)
+
+
 @pytest.mark.parametrize('kind', ['hours', 'client_balance'])
 def test_on_demand_reads_current_sources_and_freezes_retry_without_reusing_old_file(setup, kind):
     _, http, _ = configure(setup)

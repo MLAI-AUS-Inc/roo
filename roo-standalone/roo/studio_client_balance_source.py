@@ -41,7 +41,11 @@ def _records(value, *, maximum=10000):
     return result
 
 
-def validate_balance_snapshot(value, config, clients):
+WORK_SOURCE_GAPS = frozenset({'hours_coverage_missing', 'new_invoices_require_review',
+                              'work_allocation_requires_review', 'submitted_work_requires_review'})
+
+
+def validate_balance_snapshot(value, config, clients, *, work_only=False):
     """Conserve reviewed hours and paid cents; contractor pay rates are irrelevant."""
     try:
         if (type(value['version']) is not int or value['version'] != 1
@@ -50,7 +54,7 @@ def validate_balance_snapshot(value, config, clients):
                 or not isinstance(value['clients'], dict) or not value['clients']):
             raise ValueError
         evidence = value['evidence']
-        if not isinstance(evidence, dict) or not evidence:
+        if not isinstance(evidence, dict) or (not work_only and not evidence):
             raise ValueError
         for key, source in evidence.items():
             _text(key, 200)
@@ -72,14 +76,22 @@ def validate_balance_snapshot(value, config, clients):
             if start > through or through > as_of.astimezone(config.tz).date():
                 raise ValueError
             fresh = dataset.get('source_freshness')
+            if work_only and (not fresh or 'finance_checked_at' in fresh
+                              or dataset.get('hours_reporting') is not True
+                              or dataset['invoices'] != [] or dataset['payments'] != []):
+                raise ValueError
             if fresh is not None:
                 submissions = fresh.get('submissions_checked_at')
                 allowed_gaps = {'hours_coverage_missing', 'new_invoices_require_review'}
-                if submissions:
+                if work_only:
+                    allowed_gaps = WORK_SOURCE_GAPS
+                    if submissions and timestamp(submissions) != as_of:
+                        raise ValueError
+                elif submissions:
                     if timestamp(submissions) != as_of or not as_of - timedelta(days=7) <= timestamp(fresh['finance_checked_at']) <= as_of:
                         raise ValueError
                     allowed_gaps.update({'submitted_work_requires_review', 'finance_rate_limited'})
-                if ((not submissions and timestamp(fresh['finance_checked_at']) != as_of)
+                if ((not work_only and not submissions and timestamp(fresh['finance_checked_at']) != as_of)
                         or not timestamp(fresh['hours_complete_through']) <= timestamp(fresh['hours_reviewed_at']) <= as_of
                         or type(fresh['unreviewed_invoice_count']) is not int or fresh['unreviewed_invoice_count'] < 0
                         or not set(fresh['missing']) <= allowed_gaps
@@ -130,15 +142,32 @@ def validate_balance_snapshot(value, config, clients):
                 numbers.add(number)
                 _cents(invoice['amount_cents'], positive=True)
                 paid = _cents(invoice['paid_cents'])
-                if paid > invoice['amount_cents']:
+                credited = _cents(invoice.get('credited_cents', 0))
+                credit_allocations = invoice.get('credit_allocations', [])
+                if not isinstance(credit_allocations, list) or bool(credit_allocations) != bool(credited):
+                    raise ValueError
+                seen_credits = set()
+                applied = 0
+                for credit in credit_allocations:
+                    source_date(credit)
+                    note_id = _text(credit['credit_note_id'], 200)
+                    identity = (note_id, credit['date'])
+                    if (identity in seen_credits or credit['date'] < invoice['date']
+                            or credit['evidence_id'] != 'xero-credit-note-' + note_id
+                            or credit['evidence_id'] not in evidence):
+                        raise ValueError
+                    seen_credits.add(identity)
+                    applied += _cents(credit['amount_cents'], positive=True)
+                if applied != credited or paid + credited > invoice['amount_cents']:
                     raise ValueError
                 status = invoice['status']
                 if 'credit_eligible' in invoice and type(invoice['credit_eligible']) is not bool:
                     raise ValueError
                 if status not in {'paid', 'authorised', 'voided', 'draft'}:
                     raise ValueError
-                if ((status == 'paid' and paid != invoice['amount_cents'])
-                        or (status in {'voided', 'draft'} and paid)):
+                if ((status == 'paid' and paid + credited != invoice['amount_cents'])
+                        or (status == 'authorised' and credited and paid + credited == invoice['amount_cents'])
+                        or (status in {'voided', 'draft'} and (paid or credited))):
                     raise ValueError
             allocations = {key: 0 for key in invoices}
             bank_ids = set()

@@ -42,6 +42,12 @@ class SourceRefresh:
     def mode(self, request):
         return 'latest' if self.latest_enabled and request['selector'].get('period') != 'weekly' else 'strict'
 
+    def hours_mode(self, request):
+        if request.get('report_kind', 'hours') == 'hours' and request['selector'].get('chart'):
+            if request['selector'].get('period') != 'weekly':
+                return 'work'
+        return self.mode(request)
+
     @staticmethod
     def cutoff(request):
         # Every new Slack event gets a new live read. Delivery retries retain
@@ -67,16 +73,16 @@ class SourceRefresh:
             raise TimesheetError('studio_source_not_ready')
         return combined
 
-    def prepare_owners(self, owners, request, now):
+    def prepare_owners(self, owners, request, now, *, mode=None):
         snapshots, preparations, checks = [], {}, {}
         for owner in sorted(owners):
-            key, snapshot, checked = self.prepare(owner, self.cutoff(request), now, mode=self.mode(request))
+            key, snapshot, checked = self.prepare(owner, self.cutoff(request), now, mode=mode or self.mode(request))
             snapshots.append(snapshot)
             preparations[owner], checks[owner] = key, checked
         return self.combine(snapshots), preparations, checks
 
-    def frozen_owners(self, preparations, request, now):
-        return self.combine([self.frozen(key, owner, self.cutoff(request), now, mode=self.mode(request))
+    def frozen_owners(self, preparations, request, now, *, mode=None):
+        return self.combine([self.frozen(key, owner, self.cutoff(request), now, mode=mode or self.mode(request))
                              for owner, key in sorted(preparations.items())])
 
     def validate(self, result, owner, cutoff, now, mode='strict'):
@@ -85,7 +91,7 @@ class SourceRefresh:
                 or result.get('organization') != self.config.organization
                 or result.get('project_ids') != sorted(self.clients[owner]['project_ids'])
                 or result.get('mode', 'strict') != mode
-                or mode not in {'strict', 'latest', 'contract_cash'}
+                or mode not in {'strict', 'latest', 'contract_cash', 'work'}
                 or timestamp(result['cutoff']) != timestamp(cutoff)
                 or timestamp(result['checked_at']) > timestamp(now) + timedelta(minutes=5)):
             raise TimesheetError('studio_source_scope_mismatch')
@@ -95,7 +101,36 @@ class SourceRefresh:
             if not policy:
                 raise TimesheetError('client_balance_access_unavailable')
             return validate_cash_result(result, policy, cutoff)
-        if result.get('status') == 'ready' or (mode == 'latest' and result.get('status') == 'partial'):
+        if mode == 'work' and result.get('status') in {'ready', 'partial'}:
+            from .studio_client_balance_source import WORK_SOURCE_GAPS, validate_balance_snapshot
+
+            checked = timestamp(result['checked_at'])
+            checks = result['checks']
+            missing = set(result['missing'])
+            if (checked < timestamp(cutoff) or set(checks) != {'hours', 'contractor_invoices'}
+                    or any(not timestamp(cutoff) <= timestamp(check['checked_at']) <= checked
+                           for check in checks.values())
+                    or not missing <= WORK_SOURCE_GAPS
+                    or (result['status'] == 'partial') != bool(missing)):
+                raise TimesheetError('studio_source_coverage_invalid')
+            snapshot = validate_balance_snapshot(result['snapshot'], self.config, self.clients, work_only=True)
+            if set(snapshot['clients']) != {owner}:
+                raise TimesheetError('studio_source_scope_mismatch')
+            data = snapshot['clients'][owner]
+            fresh = data['source_freshness']
+            pending = checks['contractor_invoices']['unreviewed_count']
+            if (timestamp(data['as_of']) != checked
+                    or data['coverage']['through'] < timestamp(cutoff).astimezone(TZ).date().isoformat()
+                    or fresh['hours_reviewed_at'] != checks['hours']['reviewed_at']
+                    or fresh['hours_complete_through'] != checks['hours']['complete_through']
+                    or ('hours_coverage_missing' in missing) != (timestamp(fresh['hours_complete_through']) < timestamp(cutoff))
+                    or fresh['unreviewed_invoice_count'] != pending
+                    or ('new_invoices_require_review' in missing) != bool(pending)
+                    or fresh['missing'] != result['missing']):
+                raise TimesheetError('studio_source_coverage_invalid')
+            return snapshot
+        if (mode in {'strict', 'latest'} and
+                (result.get('status') == 'ready' or (mode == 'latest' and result.get('status') == 'partial'))):
             checks = result['checks']
             live_submissions = (mode == 'latest' and result.get('snapshot', {}).get('clients', {})
                                 .get(owner, {}).get('source_freshness', {}).get('submissions_checked_at'))
@@ -160,7 +195,8 @@ class SourceRefresh:
                 nonce = fingerprint({'random': uuid4().hex})
                 response = self.http.post(self.url, headers={'X-Studio-Source-Key': self.key},
                     json={'owner': owner, 'team': self.config.team, 'cutoff': timestamp(cutoff).isoformat(),
-                          'nonce': nonce, **({'mode': mode} if mode != 'strict' else {})}, timeout=180)
+                          'nonce': nonce, **({'mode': mode} if mode != 'strict' else {}),
+                          **({'credit_notes': 'verified'} if mode in {'strict', 'latest'} else {})}, timeout=180)
                 response.raise_for_status()
                 envelope = response.json()
                 result = envelope['result']
@@ -193,7 +229,7 @@ class SourceRefresh:
         if key != self.identity(owner, cutoff, mode):
             raise TimesheetError('studio_source_scope_mismatch')
         cached = self.store.read(key)
-        if not cached or cached.get('status') not in ({'ready', 'partial'} if mode in {'latest', 'contract_cash'} else {'ready'}):
+        if not cached or cached.get('status') not in ({'ready', 'partial'} if mode in {'latest', 'contract_cash', 'work'} else {'ready'}):
             raise TimesheetError('studio_source_not_ready')
         snapshot = self.validate(cached['result'], owner, cutoff, now, mode)
         if snapshot is None:

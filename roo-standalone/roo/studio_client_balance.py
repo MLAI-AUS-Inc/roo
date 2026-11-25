@@ -57,9 +57,9 @@ def _allocated_days(work):
             for index in range(count)]
 
 
-def allocated_days_for_cutoff(work, end=None):
+def allocated_days_for_cutoff(work, end=None, *, strict=False):
     days = _allocated_days(work)
-    if end is None or end.time() == datetime.min.time():
+    if end is None or (end.time() == datetime.min.time() and not strict):
         return days
     # A date alone cannot put Friday's work before 17:00. Retain supported
     # earlier days for labelled monthly estimates; never invent clock times.
@@ -68,7 +68,7 @@ def allocated_days_for_cutoff(work, end=None):
     return [(day, units) for day, units in days if day < end.date() or (day == end.date() and precise)]
 
 
-def build_balance_report(client, selector, dataset, now):
+def build_balance_report(client, selector, dataset, now, *, work_cutoff=None):
     """Compute recorded work less purchased hours, including historical carry-in.
 
     The caller verifies snapshot provenance and receipt attribution. This
@@ -101,7 +101,10 @@ def build_balance_report(client, selector, dataset, now):
             raise TimesheetError('duplicate_client_balance_hours')
         work_ids.add(original['id'])
         work = dict(original)
-        allocated = allocated_days_for_cutoff(work, requested_end if bounded else None)
+        allocation_end = requested_end if bounded else None
+        if work_cutoff is not None:
+            allocation_end = min(allocation_end, work_cutoff) if allocation_end else work_cutoff
+        allocated = allocated_days_for_cutoff(work, allocation_end, strict=allocation_end == work_cutoff)
         estimated = work['date_basis'] != 'work_dates' or len(allocated) > 1
         period_units = included_units = 0
         for day, units in allocated:
@@ -191,7 +194,13 @@ def build_balance_report(client, selector, dataset, now):
             invoice['snapshot_status'] = invoice['status']
             if invoice['status'] not in {'voided', 'draft'}:
                 invoice['paid_cents'] = paid_by_invoice[invoice['id']]
-                invoice['status'] = 'paid' if invoice['paid_cents'] >= invoice['amount_cents'] else 'authorised'
+                if 'credit_allocations' in invoice:
+                    invoice['credited_cents'] = sum(credit['amount_cents'] for credit in invoice['credit_allocations']
+                                                   if _day(credit['date']) <= observed_end)
+                settled = invoice['paid_cents'] + invoice.get('credited_cents', 0)
+                invoice['status'] = 'paid' if settled >= invoice['amount_cents'] else 'authorised'
+    for invoice in invoices:
+        invoice['due_cents'] = max(0, invoice['amount_cents'] - invoice['paid_cents'] - invoice.get('credited_cents', 0))
     invoices.sort(key=lambda invoice: (invoice['date'], invoice['number'], invoice['id']))
     limitations = list(dataset['limitations'])
     partial = (requested_start.date() < coverage_start or
@@ -205,9 +214,10 @@ def build_balance_report(client, selector, dataset, now):
     fresh = dataset.get('source_freshness')
     if fresh:
         partial = partial or bool(fresh['missing'])
-        limitations.append('Only Studio subscription receipts buy hour credits; other receipts remain cash only.')
-        limitations.append(f"Latest submitted work: {fresh['latest_work_date'] or 'unavailable'}. "
-                           'Later work is unknown; the balance uses recorded units only.')
+        if 'finance_checked_at' in fresh:
+            limitations.append('Only Studio subscription receipts buy hour credits; other receipts remain cash only.')
+            limitations.append(f"Latest submitted work: {fresh['latest_work_date'] or 'unavailable'}. "
+                               'Later work is unknown; the balance uses recorded units only.')
     contractor_invoices = [dict(invoice) for invoice in dataset.get('contractor_invoices', [])]
     pending_work = [dict(item) for item in dataset.get('pending_work', [])]
     return {
@@ -215,7 +225,8 @@ def build_balance_report(client, selector, dataset, now):
         'currency': dataset['currency'], 'basis': dataset['basis'], 'unit_scale': HOUR_UNITS,
         'allocation_rate_cents_per_hour': rate, 'scope_label': dataset.get('scope_label', ''),
         'invoice_status_as_of': min(observed_end, timestamp(fresh['finance_checked_at']).astimezone(TZ).date()).isoformat()
-            if fresh else observed_end.isoformat() if invoice_status_historical else source_day.isoformat(),
+            if fresh and 'finance_checked_at' in fresh
+            else observed_end.isoformat() if invoice_status_historical else source_day.isoformat(),
         'invoice_status_historical': invoice_status_historical,
         'start': start.isoformat(), 'end': end.isoformat(),
         'requested_start': requested_start.date().isoformat(),
@@ -302,13 +313,15 @@ def summary(report):
         parts.append('Invoice payment totals and status as of ' + report['invoice_status_as_of'] +
                      ('.' if report['invoice_status_historical'] else ' (snapshot status).'))
         parts.extend(f"• {invoice['date']} · {_escape(invoice['number'])} · {money(invoice['amount_cents'])} · "
-                     f"paid {money(invoice['paid_cents'])} · {invoice['status']}" for invoice in visible_invoices)
+                     f"paid {money(invoice['paid_cents'])}"
+                     + (f" · credited {money(invoice['credited_cents'])}" if invoice.get('credited_cents') else "")
+                     + f" · {invoice['status']}" for invoice in visible_invoices)
     outstanding = [invoice for invoice in report['invoices'] if invoice['status'] == 'authorised'
-                   and invoice['amount_cents'] > invoice['paid_cents']]
+                   and invoice['due_cents']]
     if outstanding:
         parts.append('\n*Unpaid invoice amounts · excluded from purchased hours · as of ' + report['invoice_status_as_of'] + '*'
                      + ('' if report['invoice_status_historical'] else ' (snapshot status)'))
-        parts.extend(f"• {_escape(invoice['number'])} · {money(invoice['amount_cents'] - invoice['paid_cents'])} unpaid"
+        parts.extend(f"• {_escape(invoice['number'])} · {money(invoice['due_cents'])} unpaid"
                      for invoice in outstanding)
     if report['unresolved_hour_units']:
         parts.append('\n*' + display_hours(report['unresolved_hour_units']) + 'h pending confirmation* · excluded from the chart.')
@@ -348,11 +361,11 @@ def artifacts(report):
               decimal_hours(report['opening_hour_units']), report['coverage_through']] for event in report['events']]),
         'studio-client-invoices.csv': csv_file(
             ['invoice_id', 'invoice_number', 'issue_date', 'gross_amount_AUD', 'paid_to_date_AUD',
-             'status', 'unpaid_authorised_amount_AUD', 'invoice_status_as_of'],
+             'status', 'unpaid_authorised_amount_AUD', 'invoice_status_as_of', 'credited_to_date_AUD'],
             [[invoice['id'], invoice['number'], invoice['date'], decimal_money(invoice['amount_cents']),
               decimal_money(invoice['paid_cents']), invoice['status'],
-              decimal_money(max(0, invoice['amount_cents'] - invoice['paid_cents']))
-              if invoice['status'] == 'authorised' else Decimal(0), report['invoice_status_as_of']]
+              decimal_money(invoice['due_cents']) if invoice['status'] == 'authorised' else Decimal(0),
+              report['invoice_status_as_of'], decimal_money(invoice.get('credited_cents', 0))]
              for invoice in report['invoices']]),
         'studio-work-hours-assumptions.csv': csv_file(
             ['work_id', 'contractor_invoice_id', 'project_id', 'recorded_hours',
