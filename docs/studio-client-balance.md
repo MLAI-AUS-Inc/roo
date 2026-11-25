@@ -94,9 +94,14 @@ No placeholder chart is marked as a completed current report. Historical fallbac
 is available only when automatic refresh is disabled. Private
 `source-preparations/*.json` receipts contain gap
 codes and stream times; backend review receipts identify unreviewed invoices.
-The notice identifies missing hours, invoice reviews and Xero rate limits.
-Retrying cannot approve missing work, infer invoice allocations or shorten a
-provider's rate limit. These remain explicit source dependencies, not zero usage.
+The notice distinguishes blockers requiring Studio review from provider
+rechecks, and only promises a provider retry time when Xero reports a rate
+limit. Retrying cannot approve missing work, infer invoice allocations or
+shorten a provider's rate limit. These remain explicit source dependencies,
+not zero usage. For repeated waits, match the owner, mode and original cutoff
+in private preparation receipts, then inspect the exact gap codes before
+classifying a failure as a connection problem or a review task. Do not treat
+a successfully delivered latest partial view as proof a later cutoff is ready.
 
 ## Ask Roo
 

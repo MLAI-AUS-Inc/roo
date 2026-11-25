@@ -247,6 +247,43 @@ def test_on_demand_missing_sources_never_fall_back_to_october_snapshot(setup, ki
     assert setup.service.requests.read('a' * 64) is None
 
 
+@pytest.mark.parametrize('gaps,labels,review,xero,recheck', [
+    (['new_invoices_require_review', 'hours_coverage_missing'],
+     ['new contractor invoices awaiting review', 'hours coverage'], True, False, False),
+    (['payment_cutoff_time_unknown'],
+     ['payment timing at the reporting cutoff'], True, False, False),
+    (['finance_rate_limited'], ['Xero rate limit'], False, True, False),
+    (['finance_sync_failed'], ['invoice/payment connection'], False, False, True),
+    (['hours_coverage_missing', 'finance_rate_limited'], ['hours coverage', 'Xero rate limit'],
+     True, True, False),
+    (['hours_coverage_missing', 'finance_changed_during_refresh'],
+     ['hours coverage', 'invoice/payment verification'], True, False, True),
+])
+def test_waiting_notice_distinguishes_review_from_automatic_rechecks(
+        setup, gaps, labels, review, xero, recheck):
+    refresh, _, template = configure(setup, missing=True)
+    template['missing'] = gaps
+    template['checks']['hours']['complete_through'] = (FRIDAY - timedelta(days=5)).isoformat()
+    with pytest.raises(SourcePending):
+        refresh.prepare('UMARK', FRIDAY, FRIDAY)
+    request = {**on_demand('client_balance'), 'error': 'studio_source_waiting_data'}
+    terminal, notice = setup.service.failure_notice(request)
+    assert terminal is False
+    assert all(label in notice for label in labels)
+    assert 'Reviewed hours currently cover through 2026-10-11' in notice
+    assert 'Unavailable data has not been counted as zero' in notice
+    assert ('need Studio review' in notice) is review
+    assert ('after its retry time' in notice) is xero
+    assert ('recheck the unavailable sources' in notice) is recheck
+    assert 'original request cutoff' in notice
+    # Changed source receipts cannot change a previously issued private notice.
+    key = refresh.identity('UMARK', FRIDAY)
+    receipt = refresh.store.read(key)
+    receipt['result']['missing'] = ['work_dates_require_review']
+    refresh.store.write(key, receipt)
+    assert setup.service.failure_notice(request) == (False, notice)
+
+
 def test_new_slack_request_for_same_period_performs_new_source_read(setup, clock):
     _, http, template = configure(setup)
     setup.service.report_for_request(on_demand('client_balance'))

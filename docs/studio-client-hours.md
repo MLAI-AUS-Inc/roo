@@ -124,14 +124,20 @@ Shared monthly allowance across all your projects.
 
 Each stacked bar represents one project. Its segments show the hours attributed
 to each contributor over the requested period. The cumulative chart shows one
-line per contributor, starting with hours counted in that period. Across several
-projects, each line adds that person's hours across the selected projects.
+step line per contributor when the counted work has a supported day. It steps
+on a single recorded work day, or on first completion for counted Linear ticket
+estimates. A ticket closure or GitHub commit does not date an invoice quantity.
+Across several projects, the chart adds that person's hours in the selected scope.
 Contributor colours match between the two charts in a report.
 
 Roo uses the same counted rows as the private hours breakdown and detailed CSV.
 Linear task charts label completed-ticket size estimates. Invoice and recorded
 work charts label their source quantities and any estimated monthly allocations.
-Rows with an unknown month contribute to the project bars and are identified
+When some counted hours have only month-level evidence, the chart keeps the
+daily steps for the supported subset and includes a separate reporting-month
+view of all month-assigned hours. These month markers are not work dates. When
+no safe daily series is available, only the reporting-month view is shown. Rows
+with an unknown month contribute to the project bars and are identified
 separately on the cumulative chart. The charts describe historical usage.
 
 A client or event lead with a verified Studio reporting mapping can ask about

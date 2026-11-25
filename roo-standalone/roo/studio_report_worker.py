@@ -574,6 +574,9 @@ class StudioReportService(TimesheetService):
                         'finance_sync_failed': 'invoice/payment connection',
                         'work_allocation_requires_review': 'work allocations',
                         'work_dates_require_review': 'precise work dates',
+                        'submitted_work_requires_review': 'submitted work awaiting review',
+                        'payment_cutoff_time_unknown': 'payment timing at the reporting cutoff',
+                        'closing_refresh_required': 'closing source check',
                         'source_connection_unavailable': 'source connection'}
                     missing = ', '.join(sorted({labels.get(code, 'invoice/payment verification') for code in gaps}))
                     weekly = request['selector'].get('period') == 'weekly'
@@ -583,10 +586,25 @@ class StudioReportService(TimesheetService):
                                 if result.get('checks', {}).get('hours', {}).get('complete_through')]
                     review_note = (f" Reviewed hours currently cover through {timestamp(min(coverage)).astimezone(self.config.tz).date()}."
                                    if coverage else '')
+                    review_gaps = {'hours_coverage_missing', 'new_invoices_require_review',
+                        'work_allocation_requires_review', 'work_dates_require_review',
+                        'submitted_work_requires_review', 'cash_allocation_requires_review',
+                        'payment_receipt_requires_review', 'payment_after_cutoff_requires_review',
+                        'payment_cutoff_time_unknown', 'batch_payment_ambiguous', 'mixed_legacy_payment',
+                        'legacy_receipt_missing', 'legacy_receipt_changed'}
+                    next_steps = []
+                    if gaps & review_gaps:
+                        next_steps.append('Missing or unresolved records need Studio review. '
+                                          'Retrying does not approve them.')
+                    if 'finance_rate_limited' in gaps:
+                        next_steps.append('Xero is rate-limited; I’ll recheck after its retry time.')
+                    if gaps - review_gaps - {'finance_rate_limited'}:
+                        next_steps.append('I’ll recheck the unavailable sources. '
+                                          'If verification keeps failing, the Studio team needs to check the source.')
+                    next_steps.append(f'The request stays queued for {cutoff_note}; '
+                                      'I’ll send the charts only once the required checks pass.')
                     saved = {'text': f'{title} waiting for: {missing}.{review_note} '
-                        'Unavailable data has not been counted as zero. I’ll retry after the source’s retry time '
-                        f'and send the charts when the checks pass, using {cutoff_note}. '
-                        'Missing hours or invoice allocations need Studio review; retrying alone cannot approve them.'}
+                        'Unavailable data has not been counted as zero. ' + ' '.join(next_steps)}
                     notices.write(key, saved)
                 return False, saved['text']
         if request.get('report_kind') == 'client_balance':

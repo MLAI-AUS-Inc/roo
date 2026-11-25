@@ -4,6 +4,13 @@ A short record of repository cleanup, testing, security, and delivery changes.
 Each entry states what changed and how it was checked. Findings without fixes
 are labelled as such.
 
+## 2026-11-26
+
+- Studio contributor charts keep dated steps even when the same report contains
+  month-only allocations. Reporting-month totals remain visible separately
+  without invented daily timing. Offline chart and private-delivery tests cover
+  mixed sources, missing coverage, and a single-month no-date fallback.
+
 ## 2026-11-23
 
 - Roo retries rejected Boost My Startup deletions from its durable admission
@@ -314,3 +321,10 @@ are labelled as such.
 - 2026-11-14. Private Studio reports validate submitted work and cached finance
   independently, preserve strict weekly checks and display the last verified
   receipt. Synthetic source, daily refresh and chart tests cover the new path.
+
+## 2026-11-26
+
+- Studio waiting notices distinguish source rechecks and Xero cooldowns from
+  work or invoice records requiring a reviewer. The original cutoff, private
+  delivery deduplication and complete-report checks are unchanged. Offline
+  refresh and daily-worker suites cover the new wording and queue recovery.
