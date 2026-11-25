@@ -81,29 +81,38 @@ def _unavailable_months(monthly):
             or (month.get('unresolved') and not month['units'])}
 
 
-def _trend(axes, report, people, colors, start, end):
+def _daily_evidence(report, start, end):
+    # Do not draw a continuous running total across unavailable periods or
+    # sources with different reviewed cutoffs.
+    if _unavailable_months(report['monthly']) or report.get('reviewed_coverage_varies'):
+        return {}, start, end
+    if report.get('recorded_snapshot') and _only_reviewed_projects(report):
+        end = min(end, date.fromisoformat(report['coverage_through']))
+        if report.get('coverage_start'):
+            start = max(start, date.fromisoformat(report['coverage_start']))
+    days = {}
+    for index, row in enumerate(report['rows']):
+        if row['month'] and (day := _work_day(row)) is not None and start <= day <= end:
+            days[index] = day
+    return days, start, end
+
+
+def _trend(axes, report, people, colors, start, end, *, days=None, subset=False):
     from matplotlib.dates import AutoDateLocator, ConciseDateFormatter
     from matplotlib.ticker import MaxNLocator
 
     scale = report.get('unit_scale', 4)
-    dated = [row for row in report['rows'] if row['month']]
-    if not dated:
+    counts = defaultdict(Counter)
+    for index, row in enumerate(report['rows']):
+        key = days.get(index) if days is not None else row['month']
+        if key:
+            counts[row['builder_id']][key] += row['units']
+    if not counts:
         axes.set_axis_off()
         axes.text(.5, .5, 'No dated hours to plot for this period.', transform=axes.transAxes, ha='center')
         return
-    gaps = _unavailable_months(report['monthly'])
-    days = [_work_day(row) for row in dated]
-    if report.get('recorded_snapshot') and _only_reviewed_projects(report) and not report.get('reviewed_coverage_varies'):
-        end = min(end, date.fromisoformat(report['coverage_through']))
-        if report.get('coverage_start'):
-            start = max(start, date.fromisoformat(report['coverage_start']))
-    daily = (not gaps and not report.get('reviewed_coverage_varies')
-             and all(day is not None and start <= day <= end for day in days))
-    counts = defaultdict(Counter)
-    for row, day in zip(dated, days):
-        counts[row['builder_id']][day if daily else row['month']] += row['units']
 
-    if daily:
+    if days is not None:
         axes.set_xlabel('Work or task completion date · Melbourne')
         locator = AutoDateLocator(minticks=3, maxticks=8)
         axes.xaxis.set_major_locator(locator)
@@ -113,13 +122,14 @@ def _trend(axes, report, people, colors, start, end):
         else:
             axes.set_xlim(start - timedelta(days=1), end + timedelta(days=1))
     else:
+        gaps = _unavailable_months(report['monthly'])
         months = [month['month'] for month in report['monthly']]
-        positions = range(1, len(months) + 1)
-        labels = ['Start'] + [month_offset(key, 0).strftime('%b %y') for key in months]
+        positions = range(len(months))
+        labels = [month_offset(key, 0).strftime('%b %y') for key in months]
         stride = max(1, (len(months) + 6) // 7)
-        shown = sorted({0, *range(1, len(labels), stride), len(months)})
+        shown = sorted({*range(0, len(months), stride), len(months) - 1})
         axes.set_xticks(shown, [labels[i] for i in shown])
-        axes.set_xlim(-.05, len(months) + .05)
+        axes.set_xlim(-.5, len(months) - .5)
         axes.set_xlabel('Cumulative hours by reporting month')
         for index, key in zip(positions, months):
             if key in gaps:
@@ -128,24 +138,31 @@ def _trend(axes, report, people, colors, start, end):
 
     for person, name in people.items():
         if person not in counts:
-            continue  # No dated quantity for this contributor.
+            continue
         amounts = counts[person]
-        label = f'{name} · {display_hours(sum(amounts.values()), scale)}h'
-        if daily:
+        if days is not None:
             keys = sorted(amounts)
             x = [start, *keys, end]
             y = [0, *accumulate(amounts[key] for key in keys), sum(amounts.values())]
             axes.step(x, [n / scale for n in y], where='post', color=colors[person],
-                      linewidth=2.1, marker='.', markersize=5, label=label)
+                      linewidth=2.1, marker='.', markersize=5,
+                      label=f'{name} · {display_hours(sum(amounts.values()), scale)}h')
         else:
-            y = [0 if months[0] not in gaps else float('nan')]
-            for key, total in zip(months, accumulate(amounts[key] for key in months)):
-                y.append(total / scale if key not in gaps else float('nan'))
-            axes.plot(range(len(y)), y, color=colors[person], linewidth=2.1, marker='o',
-                      markersize=4, label=label)
+            # Each mark is a reporting bucket, not a point on a work-date axis.
+            # Show no synthetic zero or slope that implies time worked in between.
+            visible = [total if key not in gaps else None
+                       for key, total in zip(months, accumulate(amounts[key] for key in months))]
+            last_visible = next((value for value in reversed(visible) if value is not None), None)
+            if last_visible is not None:
+                axes.plot(positions, [v / scale if v is not None else float('nan') for v in visible],
+                          color=colors[person], linestyle='None', marker='o', markersize=5,
+                          label=f'{name} · {display_hours(last_visible, scale)}h')
     axes.set_ylim(bottom=0)
     axes.yaxis.set_major_locator(MaxNLocator(nbins=6, steps=[1, 2, 2.5, 5, 10]))
-    axes.set_ylabel('Cumulative hours counted')
+    if subset:
+        axes.set_ylabel('Dated hours only')
+    else:
+        axes.set_ylabel('Cumulative hours counted')
 
 
 def _notes(report, breakdown):
@@ -200,8 +217,19 @@ def render_contributor_chart(report, breakdown):
     scope = projects[0] if len(projects) == 1 else f'{len(projects)} projects'
     subtitle = f'{start:%d %b %Y} – {end:%d %b %Y} · {report["client"]} · {scope}'
     notes = _notes(report, breakdown)
-    if breakdown == 'cumulative' and _unavailable_months(monthly) and any(row['month'] for row in report['rows']):
-        notes.append('Shaded months have no supported subtotal.')
+    mixed_timing = False
+    if breakdown == 'cumulative':
+        days, daily_start, daily_end = _daily_evidence(report, start, end)
+        dated_by_month = [index for index, row in enumerate(report['rows']) if row['month']]
+        mixed_timing = bool(days and len(days) < len(dated_by_month))
+        if mixed_timing:
+            month_only = sum(report['rows'][index]['units'] for index in dated_by_month if index not in days)
+            notes.append(f'{display_hours(month_only, report.get("unit_scale", 4))}h lack a supported single day. '
+                         'They appear only in the reporting-month totals, which include the dated hours.')
+        elif dated_by_month and not days:
+            notes.append('Reporting-month markers show totals, not dates worked.')
+        if _unavailable_months(monthly) and dated_by_month:
+            notes.append('Shaded months have no supported subtotal.')
     with _chart_lock:
         footer = .38 + .20 * len(notes)
         legend_rows = (len(people) + 2) // 3
@@ -210,12 +238,12 @@ def render_contributor_chart(report, breakdown):
         header = 1.25 + legend_space
         project_lines = max((len(textwrap.wrap(name, width=30)) for name in projects), default=1)
         plot_height = max(2, len(projects) * max(.64, .19 * project_lines)) if breakdown == 'stacked' else 3.3
-        height = header + plot_height + footer + .55
+        height = header + plot_height + footer + .55 + (2.9 if mixed_timing else 0)
         figure = Figure(figsize=(11, height), dpi=135)
         canvas = FigureCanvasAgg(figure)
-        axes = figure.add_subplot(111)
+        axes = figure.add_subplot(211 if mixed_timing else 111)
         figure.subplots_adjust(left=.28 if breakdown == 'stacked' else .11, right=.95,
-                               top=1 - header / height, bottom=(footer + .55) / height)
+                               top=1 - header / height, bottom=(footer + .55) / height, hspace=.38)
         title = 'Project hours by contributor' if breakdown == 'stacked' else 'Cumulative hours by contributor'
         figure.text(.06, 1 - .43 / height, title, fontsize=21, weight='bold', color='#142c3a')
         figure.text(.06, 1 - .73 / height, textwrap.shorten(subtitle, width=115, placeholder='…'),
@@ -226,12 +254,16 @@ def render_contributor_chart(report, breakdown):
         elif breakdown == 'stacked':
             _composition(axes, report, people, colors)
         else:
-            _trend(axes, report, people, colors, start, end)
-        axes.set_axisbelow(True)
-        axes.grid(axis='x' if breakdown == 'stacked' else 'y', color='#e5eaed')
-        axes.tick_params(length=0, labelsize=9, pad=6)
-        for spine in axes.spines.values():
-            spine.set_visible(False)
+            _trend(axes, report, people, colors, daily_start, daily_end, days=days or None, subset=mixed_timing)
+            if mixed_timing:
+                axes = figure.add_subplot(212)
+                _trend(axes, report, people, colors, start, end)
+        for panel in figure.axes:
+            panel.set_axisbelow(True)
+            panel.grid(axis='x' if breakdown == 'stacked' else 'y', color='#e5eaed')
+            panel.tick_params(length=0, labelsize=9, pad=6)
+            for spine in panel.spines.values():
+                spine.set_visible(False)
         handles, labels = axes.get_legend_handles_labels()
         if handles:
             legend = figure.legend(handles, [textwrap.fill(name, width=32) for name in labels],
