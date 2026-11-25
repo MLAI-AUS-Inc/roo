@@ -89,6 +89,20 @@ def test_monthly_claims_use_allocated_month_and_skip_gaps_and_undated_work(draw)
         assert phrase in notes
 
 
+@pytest.mark.parametrize('view', ['stacked', 'cumulative'])
+def test_reviewed_cutoff_is_distinct_from_latest_included_work_on_chart(draw, view):
+    data = report()
+    data.update(basis='invoice_first_recorded_hours', recorded_snapshot=True, complete=False,
+                coverage_through='2026-10-12', work_reviewed_through='2026-10-02',
+                latest_included_work_date='2026-10-12', estimated_month_units=8)
+    chart = draw(data, view)
+    notes = chart.texts[-1].get_text()
+    assert 'Recorded work review complete through 2026-10-02.' in notes
+    assert 'Latest included work period ends 2026-10-12.' in notes
+    assert 'reviewed work coverage through 2026-10-12' not in notes.casefold()
+    assert 'estimated dates or month allocations' in notes
+
+
 def test_single_month_single_day_recorded_rows_use_dated_steps_up_to_coverage(draw):
     data = report()
     data.update(basis='invoice_first_recorded_hours', recorded_snapshot=True,

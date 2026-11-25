@@ -17,6 +17,9 @@ are labelled as such.
   and the frozen cutoff. Client balance reports now account for verified
   credit notes without converting their value to purchased hours.
 
+- Contributor chart footers show the complete review cutoff and latest
+  included work date from the signed report. Tests cover both exports.
+
 ## 2026-11-23
 
 - Roo retries rejected Boost My Startup deletions from its durable admission

@@ -360,7 +360,8 @@ def summary(report):
         parts.append('*' + reviewed_cutoff_notice(report) + '*')
     if report.get('period_has_coverage') is False:
         parts.append('Hours are unavailable for the requested period; reviewed coverage ends '
-                     + report['coverage_through'] + '. Missing activity has not been counted as zero.')
+                     + report.get('work_reviewed_through', report['coverage_through'])
+                     + '. Missing activity has not been counted as zero.')
         return '\n'.join(parts)
     many = len(report['monthly']) > 1
     current = timestamp(report['generated_at']).astimezone(TZ).strftime('%Y-%m')
@@ -378,7 +379,9 @@ def summary(report):
         parts.append(f"*{hours(report['unallocated_units'])}h included in this total have no confirmed monthly split.* "
                      'They are shown separately from monthly usage, not assigned to invoice/payment dates.')
     if report.get('estimated_month_units'):
-        parts.append(f"*{hours(report['estimated_month_units'])}h have estimated month assignments.* "
+        estimate_basis = ('use estimated dates or month allocations' if report.get('work_reviewed_through')
+                          else 'have estimated month assignments')
+        parts.append(f"*{hours(report['estimated_month_units'])}h {estimate_basis}.* "
                      'These redistribute existing hours; the detailed report explains each invoice/work-date assumption.')
     for month in report['monthly']:
         if month.get('coverage_available') is False:
@@ -394,10 +397,13 @@ def summary(report):
             usage += f' · {hours(allowance)}h allowance' if allowance is not None else ''
         parts.append(f"\n*{month_label(month['month'])} — {usage}*"
                      + (f" · through {report['coverage_through']}" if report.get('recorded_snapshot') and not mixed
-                        and month['month'] == report['coverage_through'][:7] and report.get('partial') else
+                        and month['month'] == report['coverage_through'][:7] and report.get('partial')
+                        and not report.get('work_reviewed_through') else
                         ' · month to date' if many and month['month'] == current else ''))
         if month.get('estimated_units'):
-            parts.append(f"Includes {hours(month['estimated_units'])}h assigned using estimated work months."
+            month_basis = ('estimated dates or month allocations' if report.get('work_reviewed_through')
+                           else 'estimated work months')
+            parts.append(f"Includes {hours(month['estimated_units'])}h assigned using {month_basis}."
                          + (" Remaining hours and overages aren't confirmed."
                             if allowance is not None and not month['unresolved'] else ''))
         if month['unresolved']:
@@ -428,7 +434,12 @@ def summary(report):
     from .studio_contract_cycles import cycle_summary
     parts.extend(cycle_summary(report))
     if report.get('recorded_snapshot'):
-        if mixed:
+        if report.get('work_reviewed_through'):
+            parts.append('Recorded project totals use invoice and submitted work quantities.')
+            if mixed:
+                parts.append(f'Linear task projects ({_escape(mixed[1])}) use completed-ticket size estimates read fresh through '
+                             + task_source_timestamp(report) + '.')
+        elif mixed:
             parts.append(f'\nReviewed projects ({_escape(mixed[0])}) use the same reviewed work records as the paid-credit chart. '
                          'These amounts are invoice/recorded hour-units, not verified clock time or confirmed billable entitlement.')
             parts.append('Reviewed project source: ' + report['source_as_of'][:10] +
