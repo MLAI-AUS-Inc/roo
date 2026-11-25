@@ -7,7 +7,7 @@ from collections import defaultdict
 from datetime import date
 
 from .studio_client_balance import HOUR_UNITS, allocated_days_for_cutoff, build_balance_report
-from .studio_reports import month_offset
+from .studio_reports import TZ, month_offset
 from .timesheets import TimesheetError, timestamp
 
 
@@ -40,7 +40,7 @@ def _select_recorded_projects(client, dataset, project_ids):
     return {**client, 'project_ids': ids}, scoped
 
 
-def build_recorded_report(config, client, selector, dataset, now, *, project_ids=None):
+def build_recorded_report(config, client, selector, dataset, now, *, project_ids=None, work_only=False):
     owner_dataset = dataset
     if project_ids is not None:
         client, dataset = _select_recorded_projects(client, dataset, project_ids)
@@ -53,11 +53,15 @@ def build_recorded_report(config, client, selector, dataset, now, *, project_ids
     # A new cash sync must never create zero-usage months after submitted work.
     work_dataset = dataset
     fresh = dataset.get('source_freshness')
+    work_cutoff = timestamp(now).astimezone(TZ) if work_only else None
     if fresh:
-        work_dataset = {**dataset, 'coverage': {**dataset['coverage'],
-                        'through': fresh['latest_work_date'] or dataset['coverage']['start']}}
-    balance = build_balance_report(client, selector, work_dataset, now)
-    if fresh and not fresh['latest_work_date']:
+        through = fresh['latest_work_date'] or dataset['coverage']['start']
+        if work_only:
+            reviewed_day = timestamp(fresh['hours_complete_through']).astimezone(TZ).date().isoformat()
+            through = max(through, reviewed_day)
+        work_dataset = {**dataset, 'coverage': {**dataset['coverage'], 'through': through}}
+    balance = build_balance_report(client, selector, work_dataset, now, work_cutoff=work_cutoff)
+    if fresh and not fresh['latest_work_date'] and not work_only:
         balance['period_has_coverage'] = False
     resolved = balance['selector']
     monthly = [{'month': month_offset(resolved['month'], i).strftime('%Y-%m'),
@@ -70,19 +74,21 @@ def build_recorded_report(config, client, selector, dataset, now, *, project_ids
     by_month = {row['month']: row for row in monthly}
     invoices = {row['id']: row for row in dataset['contractor_invoices']}
     rows, exceptions = [], []
-    if resolved.get('period') == 'month_to_date':
-        cutoff = timestamp(resolved['end'])
+    cutoff = timestamp(resolved['end']).astimezone(TZ) if resolved.get('period') == 'month_to_date' else None
+    if work_cutoff is not None:
+        cutoff = min(cutoff, work_cutoff) if cutoff else work_cutoff
+    cutoff_day = cutoff.date().isoformat() if cutoff else None
+    cutoff_month = cutoff.strftime('%Y-%m') if cutoff else None
+    if cutoff_month in by_month:
         for work in dataset['hours']:
-            if (work['work_start'] <= cutoff.date().isoformat() <= work['work_end']
+            if (work['work_start'] <= cutoff_day <= work['work_end']
                     and (not work.get('work_end_at') or timestamp(work['work_end_at']) > cutoff)):
-                month = cutoff.strftime('%Y-%m')
-                exceptions.append({'month': month, 'project': config.projects[work['project_id']],
+                exceptions.append({'month': cutoff_month, 'project': config.projects[work['project_id']],
                     'identifier': work['id'], 'reason': 'Cutoff-day work lacks supported times before the reporting cutoff; unavailable hours are not zero.'})
-                by_month[month]['unresolved'] += 1
+                by_month[cutoff_month]['unresolved'] += 1
     for work in balance['hours']:
         units_by_month = defaultdict(int)
-        cutoff = timestamp(resolved['end']) if resolved.get('period') == 'month_to_date' else None
-        for day, units in allocated_days_for_cutoff(work, cutoff):
+        for day, units in allocated_days_for_cutoff(work, cutoff, strict=cutoff == work_cutoff):
             if balance['period_has_coverage'] and balance['start'] <= day.isoformat() <= balance['end']:
                 units_by_month[day.strftime('%Y-%m')] += units
         estimated = (work['date_basis'] != 'work_dates'

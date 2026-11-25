@@ -388,3 +388,31 @@ def test_failed_companion_chart_cannot_send_a_partial_report_bundle(setup, monke
         setup.service.report_for_request({**request(), 'requested_at': (NOW + timedelta(days=10)).isoformat()})
     setup.api.upload_csv.assert_not_called()
     setup.api.post_message.assert_not_called()
+
+
+
+def test_credit_note_reduces_invoice_due_without_purchasing_hours(setup):
+    from roo.studio_client_balance import build_balance_report, summary
+
+    data = setup.value['clients']['UMARK']
+    note = 'xero-credit-note-CN1'
+    setup.value['evidence'][note] = {'reference': 'Verified credit note', 'sha256': 'a' * 64}
+    invoice = data['invoices'][0]
+    invoice.update(amount_cents=15000, credited_cents=5000, credit_allocations=[
+        {'credit_note_id': 'CN1', 'date': '2026-09-15', 'amount_cents': 5000, 'evidence_id': note}])
+    validate_balance_snapshot(setup.value, setup.config, setup.clients)
+    report = build_balance_report(setup.clients['UMARK'], {'month': '2026-10', 'action': 'detailed'}, data, NOW)
+    assert report['lifetime_credited_hour_units'] == 800000
+    assert report['invoices'][0]['due_cents'] == 0
+    assert report['invoices'][0]['paid_cents'] == 10000
+    assert report['invoices'][0]['credited_cents'] == 5000
+    assert 'credited A$50.00' in summary(report)
+
+    prior = build_balance_report(setup.clients['UMARK'], {'month': '2026-08'}, data, NOW)
+    assert prior['invoices'][0]['credited_cents'] == 0
+    assert prior['invoices'][0]['due_cents'] == 5000
+    assert prior['invoices'][0]['status'] == 'authorised'
+
+    invoice['credit_allocations'][0]['amount_cents'] = 4999
+    with pytest.raises(TimesheetError, match='invalid_client_balance_snapshot'):
+        validate_balance_snapshot(setup.value, setup.config, setup.clients)

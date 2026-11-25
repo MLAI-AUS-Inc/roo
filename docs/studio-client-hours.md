@@ -141,6 +141,14 @@ sends the results to the requester’s DM. For a single project from a shared
 allowance, it reports usage without assigning the whole allowance to that project.
 If a name matches several accessible projects, use the project ID.
 
+On-demand contributor charts for recorded-hours projects use the private
+signed work source. The report shows the complete reviewed coverage date, the
+latest included work period and any gaps that qualify the subtotal. This
+source uses hours and contractor evidence independently of Xero payments. Work
+with insufficient evidence stays out of the charts and CSV. The backend
+source mode must be deployed before the private report worker.
+See the [implementation and verification plan](../plans/2026-11-26-studio-contributor-report-source.md).
+
 ## Hours and freshness
 
 The existing Studio source provides **completed-ticket size hours**, not timer
