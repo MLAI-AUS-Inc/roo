@@ -1536,11 +1536,6 @@ class MlaiPointsExecutor(BackendErrors, PromptExecutor):
                 "data": {**result_data, "delivery": "current_direct_message"},
             }
 
-        if thread_ack:
-            self._post_points_dm_notice(
-                channel_id=channel_id, thread_ts=thread_ts, text=thread_ack,
-            )
-
         try:
             delivery_options = {}
             if client_msg_id:
@@ -1573,6 +1568,11 @@ class MlaiPointsExecutor(BackendErrors, PromptExecutor):
                 )
                 dm_delivered = False
         result_data["dm_delivered"] = dm_delivered
+
+        if dm_delivered and thread_ack:
+            self._post_points_dm_notice(
+                channel_id=channel_id, thread_ts=thread_ts, text=thread_ack,
+            )
 
         if public_message is not None:
             if not dm_delivered and recipient_user_id == requester_user_id:

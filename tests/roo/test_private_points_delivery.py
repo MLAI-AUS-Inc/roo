@@ -154,16 +154,18 @@ async def test_routed_balance_in_channel_uses_verified_actor_and_private_deliver
     )
 
     assert client.balance_users == ["UVERIFIED"]
-    assert delivery_events == ["thread", "dm"]
+    assert delivery_events == ["dm", "thread"]
     assert thread_messages == [{
         "channel": channel_id,
         "thread_ts": "111.222",
         "text": "I'll DM your Roo Points balance to you.",
     }]
+    assert "37" not in thread_messages[0]["text"]
     assert result["message"] == ""
     assert result["suppress_post"] is True
     assert direct_messages[0]["user"] == "UVERIFIED"
     assert "Current Balance:** 37 points" in direct_messages[0]["text"]
+    assert "37" not in ephemeral_messages[0]["text"]
     assert ephemeral_messages == [
         {
             "channel": channel_id,
@@ -218,7 +220,7 @@ async def test_personal_points_delivery_failures_never_expose_details(
     ephemeral_outcome,
     personal_points_case,
 ):
-    action, _, notice = personal_points_case
+    action, _, _ = personal_points_case
     thread_messages = []
     _, ephemeral_messages = _capture_private_delivery(
         monkeypatch,
@@ -241,7 +243,7 @@ async def test_personal_points_delivery_failures_never_expose_details(
     assert result["message"] == ""
     assert result["suppress_post"] is True
     assert result["data"]["delivery_failed"] is True
-    assert [message["text"] for message in thread_messages] == [notice]
+    assert thread_messages == []
     if ephemeral_messages:
         assert "DM Roo `points`" in ephemeral_messages[0]["text"]
         assert "37" not in ephemeral_messages[0]["text"]
@@ -317,11 +319,15 @@ async def test_personal_points_announces_dm_without_exposing_details(
     assert result["suppress_post"] is True
     assert private_fragment in direct_messages[0]["text"]
     assert ephemeral_messages[0]["user"] == "UVERIFIED"
-    assert delivery_events == ["thread", "dm"]
+    assert delivery_events == ["dm", "thread"]
     assert thread_messages == [{
         "channel": channel_id, "thread_ts": "111.222", "text": notice,
     }]
     assert direct_messages[0]["user"] == "UVERIFIED"
+    assert "37" not in thread_messages[0]["text"]
+    assert private_fragment not in thread_messages[0]["text"]
+    assert "37" not in ephemeral_messages[0]["text"]
+    assert private_fragment not in ephemeral_messages[0]["text"]
 
 
 def test_other_private_points_deliveries_do_not_announce_dm(monkeypatch):
@@ -433,7 +439,7 @@ async def test_fast_executor_keeps_private_delivery_metadata(monkeypatch):
     ("balance", "Current Balance:** 37 points", "I'll DM your Roo Points balance to you."),
     ("list_rewards", "Your balance: **37 points**", "I'll DM your personalised Roo Rewards list to you."),
 ])
-async def test_fast_personal_points_announces_dm_before_private_delivery(
+async def test_fast_personal_points_announces_dm_after_private_delivery(
     monkeypatch, action, private_fragment, notice,
 ):
     thread_messages, delivery_events = [], []
@@ -464,11 +470,13 @@ async def test_fast_personal_points_announces_dm_before_private_delivery(
         "UVERIFIED", action, channel_id="CPOINTS", thread_ts="111.222",
     )
 
-    assert delivery_events == ["thread", "dm"]
+    assert delivery_events == ["dm", "thread"]
     assert thread_messages == [{
         "channel": "CPOINTS", "thread_ts": "111.222",
         "text": notice,
     }]
+    assert "37" not in thread_messages[0]["text"]
+    assert private_fragment not in thread_messages[0]["text"]
     assert direct_messages[0]["user"] == "UVERIFIED"
     assert private_fragment in direct_messages[0]["text"]
     assert result["message"] == ""
