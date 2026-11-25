@@ -264,6 +264,11 @@ class StudioReportService(TimesheetService):
         if source_preparations:
             report.update(source_preparations=source_preparations, owner_source_checks=owner_checks,
                           source_mode=source_mode)
+        if source_mode == 'work':
+            reviewed = min(timestamp(checks['hours']['complete_through']) for checks in owner_checks.values())
+            report['work_reviewed_through'] = reviewed.astimezone(self.config.tz).date().isoformat()
+            report['latest_included_work_date'] = max((row['work_end'] for row in report['rows']
+                if row.get('work_end') and row.get('source') != 'completed_ticket_size'), default=None)
         if task_only:
             report['hours_source'] = 'linear'
         if month_report is not None:
@@ -445,16 +450,14 @@ class StudioReportService(TimesheetService):
     def source_notice(self, checks, request, *, report=None):
         if report and report.get('source_mode') == 'work':
             work_checks = [streams['hours'] for streams in checks.values()]
-            reviewed = min(timestamp(check['complete_through']) for check in work_checks)
             checked = min(timestamp(check['checked_at']) for check in work_checks)
-            latest = max((row['work_end'] for row in report['rows']
-                          if row.get('work_end') and row.get('source') != 'completed_ticket_size'), default=None)
+            latest = report['latest_included_work_date']
             unresolved = (any(streams['contractor_invoices']['unreviewed_count']
                               or streams['hours'].get('submission_exceptions') for streams in checks.values())
                           or report.get('pending_work_count') or report.get('qualifications'))
             return {'kind': 'message', 'status': 'pending', 'content':
                 f'Work sources checked {checked.astimezone(self.config.tz).isoformat()}. '
-                f'Complete reviewed coverage through {reviewed.astimezone(self.config.tz).date()}. '
+                f"Complete reviewed coverage through {report['work_reviewed_through']}. "
                 f'Latest included work period ends {latest or "unavailable"}. '
                 + ('Some contractor submissions or allocations are still under review. ' if unresolved else '')
                 + ('The hours subtotal is partial. ' if report.get('partial') else '')

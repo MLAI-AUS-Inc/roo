@@ -156,7 +156,11 @@ def _notes(report, breakdown):
         notes = ['Invoice and recorded work quantities. Clock time and billable entitlement are unverified.']
     else:
         notes = ['Includes invoice and recorded work quantities and completed-ticket size estimates.']
-    if report.get('recorded_snapshot'):
+    if report.get('work_reviewed_through'):
+        notes.append(f"Recorded work review complete through {report['work_reviewed_through']}.")
+        if report.get('latest_included_work_date'):
+            notes.append(f"Latest included work period ends {report['latest_included_work_date']}.")
+    elif report.get('recorded_snapshot'):
         prefix = 'Historical snapshot. ' if report.get('source_stale') else ''
         if report.get('reviewed_coverage_varies'):
             line = prefix + 'Reviewed coverage varies by project. Earliest cutoff ' + report['coverage_through'] + '.'
@@ -173,7 +177,9 @@ def _notes(report, breakdown):
         treatment = 'included in project totals' if breakdown == 'stacked' else 'omitted from the lines'
         notes.append(f'{display_hours(unallocated, scale)}h have no assigned month and are {treatment}.')
     if report.get('estimated_month_units'):
-        notes.append(f'{display_hours(report["estimated_month_units"], scale)}h use estimated month assignments.')
+        label = ('estimated dates or month allocations' if report.get('work_reviewed_through')
+                 else 'estimated month assignments')
+        notes.append(f'{display_hours(report["estimated_month_units"], scale)}h use {label}.')
     return notes
 
 

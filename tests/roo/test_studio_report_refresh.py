@@ -252,6 +252,10 @@ def test_queued_contributor_charts_use_work_mode_and_retry_only_the_unsent_chart
     report = setup.service.requests.read(key)
     assert total_units(report) == 5_000_000
     assert report['partial'] is True
+    assert report['work_reviewed_through'] == '2026-10-02'
+    assert report['latest_included_work_date'] == '2026-10-12'
+    assert 'paid-credit chart' not in '\n'.join(
+        part['content'] for part in report['parts'] if part['kind'] == 'message')
     assert 'unavailable hours are not zero' in report['exceptions'][0]['reason']
     pngs = [part for part in report['parts'] if part.get('filename', '').endswith('.png')]
     assert [part['filename'] for part in pngs] == [stacked, cumulative]
