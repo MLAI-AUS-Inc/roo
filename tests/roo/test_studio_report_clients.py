@@ -4,6 +4,7 @@ import json
 
 import pytest
 
+from roo.studio_report_clients import select_client, select_project
 from roo.studio_report_worker import StudioReportService, configuration
 from roo.studio_reports import render_chart, summary
 from roo.timesheets import TimesheetError
@@ -165,3 +166,52 @@ def test_unavailable_selection_gets_terminal_private_notice_without_zero_report(
     setup.api.upload_csv.assert_not_called()
     assert 'couldn’t match that client' in setup.api.post_message.call_args.args[1]
     assert setup.api.open_dm.call_args.args == ('USTAFF',)
+
+
+@pytest.mark.parametrize('selector', ['[Studio] Master App', 'Master App', 'MASTERAPP', P1])
+def test_project_within_mark_grant_omits_shared_allowance_and_other_groups(setup, selector):
+    service = staff(setup)
+    projects = {**service.config.projects, P1: '[Studio] Master App'}
+    owner, _, _ = select_client(service.clients, 'USTAFF', {'client': 'Mark Ghiasy'})
+    owner = {**owner, 'monthly_allowances': {'2026-09': 55}, 'contract_terms': {'project_ids': [P1, P2]}}
+    selected, groups = select_project(owner, [], {'project': selector}, projects)
+    assert selected['project_ids'] == [P1] and groups == []
+    assert selected['monthly_hours'] is None and selected['monthly_allowances'] == {}
+    assert 'contract_terms' not in selected
+    assert owner['project_ids'] == [P1, P2] and 'contract_terms' in owner
+
+    aggregate, groups, _ = select_client(service.clients, 'USTAFF', {'client': 'all'})
+    _, scoped_groups = select_project(aggregate, groups, {'project': selector}, projects)
+    assert scoped_groups == [{'name': 'Mark Ghiasy', 'project_ids': [P1]}]
+
+
+@pytest.mark.parametrize('query', ['Study Nash', 'Project Study Nash'])
+def test_study_nash_retains_single_project_terms_with_ordinary_spacing(query):
+    terms = {'project_ids': [P3]}
+    lead = {'name': 'Devarshi Desai', 'project_ids': [P3], 'contract_terms': terms}
+    selected, _ = select_project(lead, [], {'project': query}, {P3: '[Studio] Studynash'})
+    assert selected['contract_terms'] == terms
+
+
+@pytest.mark.parametrize('query', ['Master App', 'Project Master App', 'Unknown', 'Project Unknown',
+                                   'Mas', P3, None, [], '', '[Studio]', 'a\nb', 'x' * 201])
+def test_project_never_matches_ungranted_ids_names_or_ambiguous_labels(setup, query):
+    service = staff(setup)
+    owner, groups, _ = select_client(service.clients, 'USTAFF', {'client': 'Mark Ghiasy'})
+    projects = {P1: '[Studio] Master App', P2: 'Masterapp', P3: 'Unknown'}
+    with pytest.raises(TimesheetError, match='^report_project_unavailable$'):
+        select_project(owner, groups, {'project': query}, projects)
+
+
+def test_duplicate_label_outside_grant_does_not_invalidate_allowed_project(setup):
+    owner = setup.clients['UOTHER']
+    projects = {P1: 'Build', P2: 'Other', P3: 'Build'}
+    selected, _ = select_project(owner, [], {'project': 'Build'}, projects)
+    assert selected['project_ids'] == [P3]
+
+
+def test_literal_project_prefix_wins_over_generic_prefix(setup):
+    owner = setup.clients['UMARK']
+    projects = {P1: '[Studio] Project Acquire', P2: '[Studio] Acquire'}
+    selected, _ = select_project(owner, [], {'project': 'Project Acquire'}, projects)
+    assert selected['project_ids'] == [P1]

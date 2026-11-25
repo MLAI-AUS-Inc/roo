@@ -4,6 +4,7 @@ from pathlib import Path
 import re
 
 from .payment_reminders import ReceiptStore
+from .studio_report_clients import client_key
 from .studio_reports import resolve_period
 from .timesheets import TimesheetError, fingerprint
 
@@ -41,7 +42,11 @@ def enqueue(settings, context, params, *, user_id, channel_id, thread_ts, now=No
             raise TimesheetError('queue_busy')
         if store.read(key):
             return f'This {report_name} request has already been queued for private delivery.'
-        selected = {k: params[k] for k in ('month', 'months', 'action', 'client') if k in params}
+        fields = ('month', 'months', 'action', 'client')
+        if not balance:
+            fields += ('project', 'chart')
+        selected = {key: params[key] for key in fields if key in params}
+        prior_selector = {}
         if selected.get('month') == 'previous' or selected.get('action') == 'detailed':
             previous = []
             for path in store.directory.glob('*.json'):
@@ -53,16 +58,28 @@ def enqueue(settings, context, params, *, user_id, channel_id, thread_ts, now=No
                         and candidate.get('status') not in {'denied', 'rejected', 'error'}):
                     previous.append(candidate)
             prior = max(previous, key=lambda request: request['requested_at']) if previous else None
+            prior_selector = prior['selector'] if prior else {}
             if not selected.get('month') or selected.get('month') == 'previous':
-                selected['month'] = prior['selector']['month'] if prior else ('all' if balance else 'current')
-                selected.setdefault('months', prior['selector']['months'] if prior else 1)
-            if prior and 'client' in prior['selector']:
-                selected.setdefault('client', prior['selector']['client'])
+                selected['month'] = prior_selector.get('month', 'all' if balance else 'current')
+                selected.setdefault('months', prior_selector.get('months', 1))
+            if 'client' in prior_selector:
+                selected.setdefault('client', prior_selector['client'])
+            if not balance and 'chart' in prior_selector:
+                selected.setdefault('chart', prior_selector['chart'])
         if balance and not selected.get('month') and 'months' not in selected:
             selected['month'] = 'all'
         try:
+            if (not balance and 'project' in prior_selector and 'project' not in selected
+                    and client_key(selected.get('client', 'self')) == client_key(prior_selector.get('client', 'self'))):
+                selected['project'] = prior_selector['project']
+            if selected.get('project') == 'all':
+                del selected['project']
             selector, _, _ = resolve_period(selected, now)
         except (TimesheetError, TypeError, ValueError) as exc:
+            if str(exc) == 'invalid_report_project':
+                return 'Please give one project name or ask for all your projects.'
+            if str(exc) == 'invalid_report_chart':
+                return 'Please choose a stacked hours chart by project, cumulative lines by person, or both.'
             if str(exc) == 'invalid_report_client':
                 if balance:
                     return 'Please provide a client name for the Studio hours and purchased-hours report, or ask for your own report.'

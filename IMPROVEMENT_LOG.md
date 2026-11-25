@@ -12,6 +12,11 @@ are labelled as such.
   without a second points charge. After Slack confirms removal, Roo retries
   handing it to the Chat bridge until the backend acknowledges the receipt.
 
+- Studio hours reports can chart hours by contributor across a client's
+  projects or for one verified project. The bars and cumulative lines use
+  the same work rows as the detailed report. Offline tests cover source
+  attribution, date coverage, project grants and private delivery retries.
+
 ## 2026-11-21
 
 - Roo accepts volunteer-time requests and direct awards through native Slack

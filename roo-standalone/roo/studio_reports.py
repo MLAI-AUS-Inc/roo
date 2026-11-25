@@ -16,6 +16,7 @@ from .timesheets import UNITS, TimesheetError, csv_file, reconstruct, timestamp
 
 TZ = ZoneInfo('Australia/Melbourne')
 _chart_lock = Lock()
+CONTRIBUTOR_CHARTS = ('stacked', 'cumulative', 'both')
 
 
 def month_offset(month, offset):
@@ -68,6 +69,16 @@ def resolve_period(params, now, *, beginning=None):
     if 'client' in params:
         client_key(params['client'])
         selector['client'] = ' '.join(params['client'].split())
+    if 'project' in params:
+        project = params['project']
+        if (not isinstance(project, str) or not project.strip() or len(project) > 200
+                or any(ord(char) < 32 for char in project)):
+            raise TimesheetError('invalid_report_project')
+        selector['project'] = ' '.join(project.split())
+    if 'chart' in params:
+        if params['chart'] not in CONTRIBUTOR_CHARTS:
+            raise TimesheetError('invalid_report_chart')
+        selector['chart'] = params['chart']
     return selector, start, end
 
 

@@ -16,12 +16,12 @@ from uuid import UUID
 
 import httpx
 
-from .studio_reports import (allowance_units, artifacts, build_client_report, detail_messages,
-                             month_offset, render_chart, resolve_period, split_messages, summary)
+from .studio_reports import (CONTRIBUTOR_CHARTS, allowance_units, artifacts, build_client_report,
+                             detail_messages, month_offset, render_chart, resolve_period, split_messages, summary)
 from .timesheet_worker import TimesheetService
 from .studio_report_source import StudioSourceAPI
 from .studio_report_backfill import history_beginning, load_backfill
-from .studio_report_clients import select_client, validate_client_reporting
+from .studio_report_clients import select_client, select_project, validate_client_reporting
 from .studio_report_policy import (filter_backfill, linear_projects, selected_effort_resolutions,
                                    validate_hours_policy)
 from .studio_report_schedule import enqueue_weekly, scheduled_request_authorized, weekly_configuration
@@ -123,9 +123,13 @@ class StudioReportService(TimesheetService):
         if actor not in self.clients:
             raise TimesheetError('client_access_not_configured')
         client = self.clients[actor]
-        _, groups, targets = select_client(self.clients, actor, selector or {})
+        selector = selector or {}
+        selected, groups, targets = select_client(self.clients, actor, selector)
         scope = {'actor': actor, 'team': self.config.team, 'organization': self.config.organization,
                  'client': client, 'projects': {key: self.config.projects[key] for key in client['project_ids']}}
+        if 'project' in selector:
+            project_client, _ = select_project(selected, groups, selector, self.config.projects)
+            scope['selected_project'] = project_client['project_ids'][0]
         if targets:
             scope.update(targets=targets, groups=groups)
         # Staff self-overviews also inherit source policies from their explicit
@@ -143,6 +147,8 @@ class StudioReportService(TimesheetService):
             raise TimesheetError('not_authorized')
         kind = request.get('report_kind', 'hours')
         if kind == 'client_balance':
+            if 'project' in request['selector'] or 'chart' in request['selector']:
+                raise TimesheetError('client_balance_single_client_required')
             return self.balance_for_request(request)
         if kind != 'hours':
             raise TimesheetError('invalid_report_kind')
@@ -153,9 +159,12 @@ class StudioReportService(TimesheetService):
         # is checked at the trusted read time; report bounds remain frozen.
         freshness_at = datetime.now(timezone.utc) if self.refresh or selector.get('period') == 'weekly' else now
         scope = self.scope_fingerprint(actor, selector)
-        client, groups, targets = select_client(self.clients, actor, selector)
-        task_projects = linear_projects(self.clients, actor, selector)
-        task_only = set(client['project_ids']) <= task_projects
+        selected, groups, targets = select_client(self.clients, actor, selector)
+        client, groups = select_project(selected, groups, selector, self.config.projects)
+        project_ids = set(client['project_ids'])
+        owner_task_projects = linear_projects(self.clients, actor, selector)
+        task_projects = owner_task_projects & project_ids
+        task_only = project_ids <= task_projects
         effort_resolutions = selected_effort_resolutions(self.clients, actor, selector)
         owners = targets or {key: self.clients[key] for key in
                               [actor, *self.clients[actor].get('report_client_ids', [])]}
@@ -174,8 +183,9 @@ class StudioReportService(TimesheetService):
             for owner, owner_client in owners.items():
                 data = snapshot['clients'].get(owner)
                 if (data is not None and data.get('hours_reporting')
-                        and set(owner_client['project_ids']) <= set(client['project_ids'])
-                        and not set(owner_client['project_ids']) & task_projects):
+                        and set(owner_client['project_ids']) <= set(selected['project_ids'])
+                        and project_ids.intersection(owner_client['project_ids'])
+                        and not set(owner_client['project_ids']) & owner_task_projects):
                     finance_owners.append(owner)
             if finance_owners and self.refresh and selector.get('period') != 'weekly':
                 snapshot, source_preparations, owner_checks = self.refresh.prepare_owners(
@@ -186,7 +196,7 @@ class StudioReportService(TimesheetService):
                     allow_historical=self.allow_historical_snapshot and not self.refresh)
                 source_stale = source_stale or expired
         covered = {key for owner in finance_owners for key in self.clients[owner]['project_ids']}
-        legacy_projects = set(client['project_ids']) - covered
+        legacy_projects = project_ids - covered
         backfill_projects = legacy_projects - task_projects
         backfill = (filter_backfill(load_backfill(self.backfill_path, self.config), task_projects)
                     if backfill_projects else None)
@@ -232,8 +242,9 @@ class StudioReportService(TimesheetService):
                         if month_selector else None)
         if finance_owners:
             from .studio_recorded_hours import overlay_recorded_reports
+            requested_projects = project_ids if 'project' in selector else None
             reviewed = [build_recorded_report(self.config, self.clients[owner], selector,
-                        snapshot['clients'][owner], now) for owner in finance_owners]
+                        snapshot['clients'][owner], now, project_ids=requested_projects) for owner in finance_owners]
             report = overlay_recorded_reports(report, reviewed)
             report.update(finance_digest=fingerprint(snapshot), finance_owners=finance_owners,
                           canonical_only=not legacy_projects, source_stale=source_stale)
@@ -267,7 +278,8 @@ class StudioReportService(TimesheetService):
         parts = [{'kind': 'message', 'content': chunk, 'status': 'pending'} for chunk in split_messages(summary(report))]
         if owner_checks:
             parts.insert(0, self.source_notice(owner_checks, request))
-        if task_only and not report.get('contract_allowance'):
+        if (task_only and not report.get('contract_allowance')
+                and client['project_ids'] == selected['project_ids']):
             parts.append({'kind': 'message', 'content':
                 'Task-size estimates are compared with the base monthly allowance. '
                 'Contractual rollover is not included; this is not a clock-time ledger or confirmed contractual entitlement.'
@@ -300,6 +312,19 @@ class StudioReportService(TimesheetService):
                     parts.append({'kind': 'file', 'filename': 'studio-client-payment-burndown.png',
                                   'content': base64.b64encode(balance_chart(payment_report)).decode('ascii'),
                                   'status': 'pending'})
+            elif selector.get('chart'):
+                from .studio_contributor_charts import render_contributor_chart
+                views = ('stacked', 'cumulative') if selector['chart'] == 'both' else (selector['chart'],)
+                for view in views:
+                    try:
+                        chart = render_contributor_chart(report, view)
+                    except Exception:
+                        parts.append({'kind': 'message', 'content':
+                            f'The {view} contributor chart could not be rendered. The hours breakdown is above.',
+                            'status': 'pending'})
+                        continue
+                    parts.append({'kind': 'file', 'filename': f'studio-hours-contributors-{view}.png',
+                                  'content': base64.b64encode(chart).decode('ascii'), 'status': 'pending'})
             else:
                 chart = render_chart(report)
                 parts.append({'kind': 'file', 'filename': 'studio-hours.png',
@@ -414,6 +439,13 @@ class StudioReportService(TimesheetService):
         return report
 
     def source_notice(self, checks, request):
+        if request['selector'].get('project') or request['selector'].get('chart'):
+            work_checks = [streams['hours'] for streams in checks.values()]
+            checked = min(check['checked_at'] for check in work_checks)
+            return {'kind': 'message', 'status': 'pending', 'content':
+                f"Work sources checked {timestamp(checked).astimezone(self.config.tz).isoformat()}. "
+                'The report includes the hours attributed to the selected projects. '
+                'Later unsubmitted work is unknown.'}
         checked = min(check['checked_at'] for streams in checks.values() for check in streams.values())
         if self.refresh.mode(request) == 'latest':
             checked = min(streams['payments']['checked_at'] for streams in checks.values())
@@ -520,9 +552,14 @@ class StudioReportService(TimesheetService):
                     raise TimesheetError('report_busy')
                 saved = notices.read(key)
                 if saved is None:
-                    _, _, targets = select_client(self.clients, request['actor'], request['selector'])
+                    selector = request['selector']
+                    selected, groups, targets = select_client(self.clients, request['actor'], selector)
                     owners = list(targets) or [request['actor'],
                         *self.clients[request['actor']].get('report_client_ids', [])]
+                    if 'project' in selector:
+                        project_client, _ = select_project(selected, groups, selector, self.config.projects)
+                        project_id = project_client['project_ids'][0]
+                        owners = [owner for owner in owners if project_id in self.clients[owner]['project_ids']]
                     prepared = [self.refresh.store.read(self.refresh.identity(owner, self.refresh.cutoff(request),
                         'contract_cash' if request.get('report_kind') == 'client_balance' and self.clients[owner].get('contract_cash')
                         else self.refresh.mode(request)))
@@ -572,6 +609,11 @@ class StudioReportService(TimesheetService):
         if error in {'report_client_unavailable', 'invalid_report_client'}:
             return True, ('I couldn’t match that client to your report access. Please use their full configured '
                           'name, or ask the Studio team to check your client reporting access.')
+        if error in {'report_project_unavailable', 'invalid_report_project'}:
+            return True, ('I couldn’t match one project within your report access. '
+                          'Please use its full configured name or project ID.')
+        if error == 'invalid_report_chart':
+            return True, 'Please ask for a stacked hours chart, cumulative hours by person, or both charts.'
         if error == 'invoice_backfill_changed':
             return True, 'Your Studio hours records were updated while this report was being prepared. Please request a new report for the latest totals.'
         if error in {'client_access_not_configured', 'client_access_changed'}:
@@ -593,6 +635,8 @@ def main(argv=None):
     parser.add_argument('--actor', help='Verified client Slack ID for local preview only')
     parser.add_argument('--months', type=int, default=1)
     parser.add_argument('--client', help='Configured client name/alias, or all; never changes the requester')
+    parser.add_argument('--project', help='Project name or ID within the verified hours report scope')
+    parser.add_argument('--chart', choices=CONTRIBUTOR_CHARTS, help='Contributor charts for an hours preview')
     parser.add_argument('--detailed', action='store_true')
     parser.add_argument('--balance', action='store_true', help='Preview the private client hours and purchased-hours report')
     parser.add_argument('--output-dir', default='./studio-report-preview')
@@ -651,7 +695,9 @@ def main(argv=None):
                 report = service.report_for_request({'actor': args.actor, 'team': config.team,
                     **({'report_kind': 'client_balance'} if args.balance else {}),
                     'selector': {'month': args.preview, 'months': args.months, 'action': 'detailed' if args.detailed else 'summary',
-                                 **({'client': args.client} if args.client else {})},
+                                 **({'client': args.client} if args.client else {}),
+                                 **({'project': args.project} if args.project else {}),
+                                 **({'chart': args.chart} if args.chart else {})},
                     'requested_at': datetime.now(timezone.utc).isoformat()})
                 directory = Path(args.output_dir)
                 directory.mkdir(parents=True, exist_ok=True, mode=0o700)

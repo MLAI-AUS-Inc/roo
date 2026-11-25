@@ -1,5 +1,5 @@
 """Exercise the real executor queue boundary and opt-in catalog, no model calls."""
-from tests.roo.skill_test_support import patch_skill_dependency
+from datetime import timedelta
 import importlib
 import sys
 from pathlib import Path
@@ -10,7 +10,10 @@ import pytest
 from roo.backend_identity import BackendActorContext, use_backend_actor_context
 from roo.config import Settings
 from roo.payment_reminders import ReceiptStore
-from roo.skills.loader import Skill
+from roo.router import build_tools
+from roo.skills.loader import Skill, load_skill_from_directory
+from tests.roo.skill_test_support import patch_skill_dependency
+from tests.roo.test_studio_reports import NOW, queue, setup
 
 
 def test_report_skill_is_opt_in_and_never_default_admin():
@@ -22,6 +25,17 @@ def test_report_skill_is_opt_in_and_never_default_admin():
                                         STUDIO_REPORTS_ENABLED=True).enabled_skill_names
 
 
+def test_studio_hours_tool_declares_contributor_chart_options():
+    path = Path(__file__).resolve().parents[2] / 'roo-standalone' / 'skills' / 'studio-hours'
+    skill = load_skill_from_directory(path, import_client=False)
+    tools, _ = build_tools([skill], channel_name=None)
+    function = next(tool['function'] for tool in tools if tool['function']['name'] == 'studio-hours')
+    properties = function['parameters']['properties']
+    assert properties['chart']['enum'] == ['stacked', 'cumulative', 'both']
+    assert properties['project']['type'] == 'string'
+    assert function['parameters']['required'] == ['action']
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize('params', [
     {'action': 'summary'}, {'action': 'summary', 'month': 'recent', 'months': 3},
@@ -31,6 +45,11 @@ def test_report_skill_is_opt_in_and_never_default_admin():
     {'action': 'summary', 'month': 'all', 'client': 'Devashi Desai'},
     {'action': 'summary', 'month': 'all', 'client': 'Devarshi Desai'},
     {'action': 'summary', 'month': 'recent', 'months': 3, 'client': 'Devashi Desai'},
+    {'action': 'summary', 'month': 'recent', 'months': 2, 'client': 'Devashi Desai',
+     'project': 'Study Nash', 'chart': 'cumulative'},
+    {'action': 'summary', 'month': 'all', 'client': 'Mark Ghiasy',
+     'project': 'Master App', 'chart': 'both'},
+    {'action': 'summary', 'chart': 'stacked'},
     {'action': 'summary', 'month': 'recent', 'months': 3, 'client': 'all'}])
 async def test_real_executor_queues_authenticated_request_and_returns_text(tmp_path, monkeypatch, params):
     # Some legacy agent tests register a lightweight executor stub.
@@ -53,8 +72,41 @@ async def test_real_executor_queues_authenticated_request_and_returns_text(tmp_p
     assert request['selector']['months'] == params.get('months', 1)
     assert request['selector']['month'] not in {'recent', 'last_complete'}
     assert request['selector'].get('client') == params.get('client')
+    assert request['selector'].get('project') == params.get('project')
+    assert request['selector'].get('chart') == params.get('chart')
     # Backend/API callers without the verified Slack task context cannot queue.
     result = await executor.SkillExecutor().execute(skill, 'show Mark hours', 'UMARK',
         channel_id='C123', thread_ts='1.0', param_overrides={'action': 'detailed'})
     assert 'could not verify' in result.message
     assert len(list(tmp_path.glob('*.json'))) == 1
+
+
+@pytest.mark.parametrize('followup, expected', [
+    ({'action': 'detailed'}, {'client': 'Mark', 'project': 'Master App', 'chart': 'stacked'}),
+    ({'month': 'previous', 'chart': 'cumulative'},
+     {'client': 'Mark', 'project': 'Master App', 'chart': 'cumulative'}),
+    ({'action': 'detailed', 'project': 'Cybertest'},
+     {'client': 'Mark', 'project': 'Cybertest', 'chart': 'stacked'}),
+    ({'action': 'detailed', 'project': 'all'}, {'client': 'Mark', 'chart': 'stacked'}),
+    ({'action': 'detailed', 'client': 'self'}, {'client': 'self', 'chart': 'stacked'}),
+])
+def test_scoped_contributor_chart_followup(setup, followup, expected):
+    queue(setup, params={'month': 'recent', 'months': 2, 'client': 'Mark',
+                         'project': 'Master App', 'chart': 'stacked'})
+    queue(setup, actor='UOTHER', event='other', now=NOW + timedelta(seconds=1),
+          params={'project': 'Other project', 'chart': 'both'})
+    assert 'DM' in queue(setup, params=followup, event='followup', now=NOW + timedelta(seconds=2))
+    requests = [setup.service.queue.read(p.stem) for p in setup.config.queue.glob('*.json')]
+    last = max(requests, key=lambda item: item['requested_at'])
+    assert last['selector'] == {'action': followup.get('action', 'summary'),
+                                'month': '2026-08', 'months': 2, **expected}
+
+
+@pytest.mark.parametrize('params, prompt', [
+    ({'project': ['Master App', 'Cybertest']}, 'one project name'),
+    ({'project': ''}, 'one project name'),
+    ({'chart': 'payroll'}, 'stacked hours chart'),
+])
+def test_invalid_chart_request_does_not_enter_queue(setup, params, prompt):
+    assert prompt in queue(setup, params=params)
+    assert not list(setup.config.queue.glob('*.json'))

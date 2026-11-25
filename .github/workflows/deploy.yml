@@ -155,6 +155,9 @@ jobs:
             ../tests/roo/test_studio_report_schedule.py \
             ../tests/roo/test_studio_report_weeks.py \
             ../tests/roo/test_studio_report_charts.py \
+            ../tests/roo/test_studio_contributor_charts.py \
+            ../tests/roo/test_studio_contributor_delivery.py \
+            ../tests/roo/test_studio_recorded_projects.py \
             ../tests/roo/test_studio_report_refresh.py \
             ../tests/roo/test_studio_report_daily.py \
             ../tests/roo/test_studio_report_weekly_backfill.py \
