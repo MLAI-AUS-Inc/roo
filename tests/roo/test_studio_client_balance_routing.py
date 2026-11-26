@@ -73,7 +73,7 @@ def test_real_skill_exposes_only_safe_selectors_and_distinct_actions():
     decision = router._validate_tool_call(skill.name, {'action': 'summary', 'client': 'Mark Ghiasy',
         'actor': 'UOTHER', 'source_path': '/private/ledger', 'project_ids': ['secret'],
         'amount': 999999, 'hour_units': 999999, 'allocation_rate_cents_per_hour': 1,
-        'report_kind': 'hours'}, {skill.name: skill}, strict_action=True)
+        'report_kind': 'hours'}, {skill.name: skill})
     assert decision.params == {'client': 'Mark Ghiasy'}
 
 

@@ -28,6 +28,13 @@ from .content_intent import (
     normalize_slack_text,
 )
 from .llm import chat
+from .router import (
+    RouteDecision,
+    classify_router_error,
+    router_error_decision,
+    safe_chat_reason,
+    safe_router_error_code,
+)
 from .logging_safety import (
     redact_log_text,
     sanitize_log_value,
@@ -209,9 +216,42 @@ class RooAgent:
         # (The legacy regex/keyword funnel was deleted in Phase 3 of the
         # routing redesign — see ROUTING_REDESIGN_PLAN.md. Only the exact-match
         # fast path above and delegation parsing remain deterministic.)
-        v2_decision = await self._route_v2(
-            clean_text, thread_history, channel_id, thread_ts, kwargs.get("event_files")
-        )
+        # Contain failures at the routing boundary, before any skill dispatch.
+        # Cancellation still propagates: asyncio.CancelledError is BaseException.
+        try:
+            v2_decision = await self._route_v2(
+                clean_text, thread_history, channel_id, thread_ts, kwargs.get("event_files")
+            )
+        except Exception as exc:
+            v2_decision = router_error_decision(classify_router_error(exc))
+        if not isinstance(v2_decision, RouteDecision) or v2_decision.source not in ("router", "error"):
+            v2_decision = router_error_decision("unexpected_failure")
+        if v2_decision.source == "error":
+            self._log_routing_decision(
+                text=clean_text,
+                channel_id=channel_id,
+                thread_ts=thread_ts,
+                layer="v2-error",
+                skill_name=None,
+                started_at=routing_started_at,
+            )
+            if implicit_addressing and not self._is_implicit_action_allowed(
+                "respond_in_chat",
+                None,
+            ):
+                return self._implicit_action_blocked("respond_in_chat", None)
+            return {
+                "message": (
+                    "Sorry, I couldn't process that request right now. "
+                    "The task hasn't been completed. Please try again later."
+                ),
+                "skill_used": None,
+                "data": {
+                    "router": "v2",
+                    "outcome": "unavailable",
+                    "reason_code": safe_router_error_code(v2_decision.reason),
+                },
+            }
         if v2_decision.is_clarification:
             self._log_routing_decision(
                 text=clean_text,
@@ -384,11 +424,17 @@ class RooAgent:
                 None,
             ):
                 return self._implicit_action_blocked("respond_in_chat", None)
-            response = await self._general_response(clean_text, thread_history)
+            fallback_reason = safe_chat_reason(v2_decision.reason)
+            response = await self._general_response(
+                clean_text, thread_history, fallback_reason=fallback_reason,
+            )
             return {
                 "message": response,
                 "skill_used": None,
-                "data": None
+                "data": (
+                    {"router": "v2", "fallback_reason": fallback_reason}
+                    if fallback_reason == "unsupported_capability" else None
+                ),
             }
 
     def remember_thread_context(
@@ -1203,8 +1249,9 @@ class RooAgent:
         history: List[dict] = None,
         *,
         channel_id: Optional[str] = None,
+        fallback_reason: str = "general_chat",
     ) -> str:
-        """Generate a general conversational response."""
+        """Generate chat using only allowlisted routing context."""
         # Format history
         history_context = ""
         if history:
@@ -1227,6 +1274,13 @@ class RooAgent:
             history_context=history_context,
         )
 
+        if safe_chat_reason(fallback_reason) == "unsupported_capability":
+            prompt += (
+                "\nThe router found no matching available skill for the requested action. "
+                "Explain the capability limit; do not describe this as a temporary outage "
+                "or claim the action was completed. Offer a supported alternative if useful."
+            )
+
         try:
             response = await chat([
                 {"role": "system", "content": prompt},
@@ -1234,7 +1288,7 @@ class RooAgent:
             ])
             return response.content
         except Exception as e:
-            print(f"❌ General response failed: {e}")
+            print(f"❌ General response failed reason_code={classify_router_error(e)}")
             return "G'day! Sorry, I'm having a bit of trouble at the moment. Mind trying again? 🦘"
 
 
