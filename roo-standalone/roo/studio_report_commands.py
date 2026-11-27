@@ -27,15 +27,17 @@ def hours_params(text, params):
     """Recover unambiguous display and trailing-period choices from this Slack turn."""
     selected = dict(params)
     if _CONTRIBUTORS.search(text):
+        cumulative = re.search(r"\bcumulative\b|\brunning totals?\b", text, re.I)
+        bars = re.search(r"\bstacked\b|\bbars?\b", text, re.I)
         if re.search(r"\b(?:no|without) (?:a |any )?(?:charts?|graphs?)\b|\btext only\b", text, re.I):
             selected.pop('chart', None)
-        elif re.search(r"\bboth\b", text, re.I) and re.search(r"\b(?:charts?|views?|lines?)\b", text, re.I):
+        elif (bars and cumulative) or re.search(r"\bboth (?:the )?(?:charts?|views?)\b", text, re.I):
             selected['chart'] = 'both'
-        elif re.search(r"\bcumulative\b|\brunning totals?\b", text, re.I):
+        elif cumulative:
             selected['chart'] = 'cumulative'
         elif re.search(r"\b(?:per|by|each) project\b|\bacross (?:all )?(?:my |our )?projects\b", text, re.I):
-            selected.setdefault('chart', 'stacked')
-        elif selected.get('project') and re.search(r"\bbreakdown\b|\bwho (?:did|has been doing)\b", text, re.I):
+            selected['chart'] = 'stacked'
+        elif selected.get('project') and not bars:
             selected['chart'] = 'monthly'
         else:
             selected.setdefault('chart', 'monthly' if selected.get('project') else 'stacked')

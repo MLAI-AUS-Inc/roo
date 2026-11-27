@@ -72,9 +72,9 @@ It shows each contributor within each requested calendar month, even when no wor
 “Last three months” uses month="recent", months=3.
 For a stacked breakdown of hours per person on each project, use chart="stacked".
 For lines showing each person's cumulative hours over time, use chart="cumulative".
-For both views or an unspecific request to chart hours by person, use chart="both".
+For a request for both project composition and cumulative views, use chart="both".
 For example, “chart who burnt hours on Mark Ghiasy's Master App over the last couple
-of months” uses client="Mark Ghiasy", project="Master App", chart="both",
+of months” uses client="Mark Ghiasy", project="Master App", chart="monthly",
 month="recent", months=2. For project-only requests, omit client.
 People named as contributors belong in the breakdown; their names do not select
 the client. Hours reflect the project's configured source. Future sprint estimates

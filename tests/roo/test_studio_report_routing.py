@@ -143,3 +143,5 @@ def test_worker_breakdown_preserves_explicit_ranges_and_other_views():
         'chart': 'cumulative', 'month': 'last_complete', 'months': 3}
     assert hours_params('worker breakdown per project', {'chart': 'stacked'}) == {'chart': 'stacked'}
     assert hours_params('worker breakdown in text only', {}) == {}
+    assert hours_params('stacked bars and cumulative lines by person', {'chart': 'both'}) == {'chart': 'both'}
+    assert hours_params('hours by person on Master App', {'project': 'Master App', 'chart': 'both'})['chart'] == 'monthly'
