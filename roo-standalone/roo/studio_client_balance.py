@@ -68,7 +68,7 @@ def allocated_days_for_cutoff(work, end=None, *, strict=False):
     return [(day, units) for day, units in days if day < end.date() or (day == end.date() and precise)]
 
 
-def build_balance_report(client, selector, dataset, now, *, work_cutoff=None):
+def build_balance_report(client, selector, dataset, now, *, work_cutoff=None, project_names=None):
     """Compute recorded work less purchased hours, including historical carry-in.
 
     The caller verifies snapshot provenance and receipt attribution. This
@@ -220,6 +220,17 @@ def build_balance_report(client, selector, dataset, now, *, work_cutoff=None):
                                'Later work is unknown; the balance uses recorded units only.')
     contractor_invoices = [dict(invoice) for invoice in dataset.get('contractor_invoices', [])]
     pending_work = [dict(item) for item in dataset.get('pending_work', [])]
+    unresolved_units = sum(invoice['unresolved_hour_units'] for invoice in contractor_invoices)
+    partial = partial or bool(pending_work or unresolved_units)
+    project_hours = {}
+    if project_names is not None:
+        totals = defaultdict(int)
+        for work in rows:
+            totals[work['project_id']] += work['period_hour_units']
+        project_hours = {
+            key: {'name': project_names[key], 'units': totals[key] or (None if partial else 0)}
+            for key in client['project_ids']
+        }
     return {
         'kind': 'client_balance', 'selector': resolved, 'client': client['name'], 'name': client['name'],
         'currency': dataset['currency'], 'basis': dataset['basis'], 'unit_scale': HOUR_UNITS,
@@ -234,13 +245,14 @@ def build_balance_report(client, selector, dataset, now, *, work_cutoff=None):
         'coverage_start': coverage_start.isoformat(), 'coverage_through': cutoff.isoformat(),
         'as_of': dataset['as_of'], 'generated_at': timestamp(now).isoformat(),
         'period_has_coverage': has_coverage, 'partial': partial,
+        'project_hours': project_hours,
         'work_period_has_coverage': not fresh or bool(fresh['latest_work_date'] and fresh['latest_work_date'] >= start.isoformat()),
         'opening_hour_units': opening, 'used_hour_units': period_used,
         'credited_hour_units': period_credit, 'payment_cents': period_paid, 'balance_hour_units': balance,
         'lifetime_used_hour_units': lifetime_used, 'lifetime_credited_hour_units': lifetime_credit,
         'lifetime_payment_cents': lifetime_paid, 'estimated_hour_units': estimated_units,
         'points': points, 'events': events, 'invoices': invoices,
-        'unresolved_hour_units': sum(invoice['unresolved_hour_units'] for invoice in contractor_invoices),
+        'unresolved_hour_units': unresolved_units,
         'contractor_invoices': contractor_invoices, 'pending_work': pending_work,
         'pending_work_count': len(pending_work), 'hours': rows,
         'payments': sorted(payments, key=lambda payment: (payment['date'], payment['id'])),
@@ -252,7 +264,11 @@ def build_balance_report(client, selector, dataset, now, *, work_cutoff=None):
 
 def _balance_text(units, *, recorded_units=False):
     if recorded_units:
-        return f'*Provisional recorded-units minus paid-credits difference: {display_hours(units)}h*'
+        if units > 0:
+            return f'*{display_hours(units)}h of recorded work awaiting paid credits*'
+        if units < 0:
+            return f'*{display_hours(-units)}h of paid credits remaining against recorded work*'
+        return '*Paid credits exactly cover the recorded work.*'
     if units > 0:
         return f'*{display_hours(units)}h used beyond purchased hours*'
     if units < 0:
@@ -284,6 +300,13 @@ def summary(report):
                      'the difference is not an amount owed.')
     if report['scope_label']:
         parts.append(_escape(report['scope_label']))
+    if report.get('project_hours'):
+        parts.append('\n*Projects · recorded work in this period*')
+        for project in report['project_hours'].values():
+            units = project['units']
+            amount = 'hours unavailable' if units is None else f'{display_hours(units)}h'
+            parts.append(f"• {_escape(project['name'])} · {amount}")
+        parts.append('Paid-hour credits are shared across this client’s projects.')
     payments = [event for event in report['events'] if event['kind'] == 'payment']
     names = {invoice['id']: invoice['number'] for invoice in report['invoices']}
     parts.append('\n*Payments received · hours purchased on each date*')
@@ -334,7 +357,10 @@ def summary(report):
     parts.append(f"Purchased hours use {money(report['allocation_rate_cents_per_hour'])}/h from actual receipts.")
     parts.append(f"Source snapshot: {source_date} · coverage through {report['coverage_through']}.")
     if report['partial']:
-        parts.append(f"Reviewed coverage begins {report['coverage_start']}; activity outside that coverage is unavailable.")
+        parts.append('*Partial balance.* The report uses the work and payments supported by the available records.')
+        if report['requested_start'] < report['coverage_start'] or report['requested_end'] > report['coverage_through']:
+            parts.append(f"Review covers {report['coverage_start']} through {report['coverage_through']}; "
+                         'activity outside that coverage is unavailable.')
     if detailed:
         parts.append('\n*Work timing assumptions and source limitations*')
         parts.extend('• ' + _escape(limitation) for limitation in report['limitations'])
@@ -433,6 +459,8 @@ def render_chart(report):
             if latest_work and latest_work < report['end']:
                 axes.axvspan(max(dates[0], datetime.combine(_day(latest_work), datetime.min.time())), dates[-1],
                              color='#b6bdc4', alpha=.25, label='Later work unknown; recorded balance only', zorder=5)
+                tail = max(0, visible - 1)
+                axes.plot(dates[tail:], values[tail:], color='#147d92', linewidth=1.7, linestyle='--', zorder=6)
             axes.fill_between(dates[:visible], values[:visible], 0, where=[value >= 0 for value in values[:visible]], interpolate=True,
                               color='#f3c994', alpha=.65,
                               label='Recorded units above paid credits' if recorded_units else 'Hours used beyond purchased hours')
@@ -482,7 +510,7 @@ def render_chart(report):
         if report['period_has_coverage']:
             balance_label = 'Beyond purchased hours' if report['balance_hour_units'] >= 0 else 'Purchased hours remaining'
             if recorded_units:
-                balance_label = 'Provisional difference'
+                balance_label = 'Awaiting paid credits' if report['balance_hour_units'] >= 0 else 'Paid credits remaining'
             work_label = (f"{'Recorded units' if recorded_units else 'Hours used'} {display_hours(report['used_hour_units'])}h"
                           if report.get('work_period_has_coverage', True) else 'Work hours unavailable')
             figure.text(.06, .775, work_label + '  ·  ' +

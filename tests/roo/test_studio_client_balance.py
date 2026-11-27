@@ -296,6 +296,23 @@ def test_chart_handles_single_day_and_uncovered_period():
     assert render_chart(build(source, month='current')).startswith(b'\x89PNG')
 
 
+def test_project_roster_lists_unavailable_work_and_shared_unpaid_balance():
+    source = dataset(hours=[work(units=10_000_000)], hours_reporting=True,
+        pending_work=[{'note': 'Work allocation is pending.'}])
+    report = build_balance_report(CLIENT, {'month': 'all'}, source, NOW,
+        project_names={'project-a': 'Master App', 'project-b': 'Casino Royale', 'other-client': 'Other'})
+    assert report['project_hours'] == {
+        'project-a': {'name': 'Master App', 'units': 10_000_000},
+        'project-b': {'name': 'Casino Royale', 'units': None},
+    }
+    text = summary(report)
+    assert '*5h of recorded work awaiting paid credits*' in text
+    assert 'Casino Royale · hours unavailable' in text
+    assert 'Paid-hour credits are shared' in text
+    assert '*Partial balance.*' in text
+    assert 'Other' not in text
+
+
 def test_known_pending_invoice_hours_disclosed_and_excluded_from_used_hours():
     source = dataset(contractor_invoices=[{'id': 'pending-invoice', 'number': 'PENDING', 'supplier': 'Builder',
                     'date': '2026-06-01', 'hour_units': 25000000, 'unresolved_hour_units': 25000000,

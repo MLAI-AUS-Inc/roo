@@ -291,7 +291,8 @@ def project_breakdown(report, selected, project_ids=None):
             key = (row['builder_id'], row['builder'])
             builders[key] = builders.get(key, 0) + row['units']
         units = sum(row['units'] for row in rows)
-        uncertain = any(item.get('project') == project_name for item in report.get('exceptions', []))
+        uncertain = (project_id in report.get('unavailable_project_ids', [])
+                     or any(item.get('project') == project_name for item in report.get('exceptions', [])))
         amount = ('Unavailable' if uncertain and not units else
                   display_hours(units, report.get('unit_scale', 4)) + ('h + unverified' if uncertain else 'h'))
         parts.append(f"• *{_escape(project_name)}: {amount}*")
@@ -785,8 +786,10 @@ def render_chart(report, breakdown=None):
                 axes.set_xlabel('Invoice/recorded hour-units by project' if report.get('recorded_snapshot') else 'Recorded hours by project')
             axes.set_xlim(0, max([1, *values]) * 1.23)
             for index, value in enumerate(values):
-                uncertain = any(item.get('project') in {report['projects'][key] for key in groups[index]['project_ids']}
-                                for item in report.get('exceptions', []))
+                group_ids = set(groups[index]['project_ids'])
+                uncertain = (bool(group_ids.intersection(report.get('unavailable_project_ids', [])))
+                             or any(item.get('project') in {report['projects'][key] for key in group_ids}
+                                    for item in report.get('exceptions', [])))
                 label = ('Unavailable' if uncertain and not value else
                          display_hours(round(value * scale), scale) + ('h + unverified' if uncertain else 'h'))
                 axes.text(value + max([1, *values]) * .025, index, label, va='center', weight='bold')
