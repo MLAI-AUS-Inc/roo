@@ -19,6 +19,14 @@ describes the cutoff labels, unavailable periods and remaining source checks.
 
 ## Client experience
 
+“Who did what hours on Mark Ghiasy’s Master App from August through November 2026?”
+returns a monthly stacked contributor chart in the requester’s DM. “Worker
+breakdown on Study Nash over the last three months” uses the same chart and the
+project’s own hours source. A chart request in a DM thread gets its result in
+that thread. Months without attributable work stay visible. The chart uses the
+available verified work and carries its coverage dates. A private worker picks
+up these requests while scheduled reports and finance checks run separately.
+
 - “How many of my 40 Studio hours have we used this month?”
 - “Break down my Studio hours by project and builder.”
 - “Studio hours for August 2026.”
@@ -122,7 +130,7 @@ Shared monthly allowance across all your projects.
 - `@Roo plot cumulative hours by person for Devashi Desai’s Study Nash project for the last three months.`
 - `@Roo show the work behind those hours.`
 
-Each stacked bar represents one project. Its segments show the hours attributed
+In the project composition chart, each stacked bar represents one project. Its segments show the hours attributed
 to each contributor over the requested period. The cumulative chart shows one
 line per contributor, starting with hours counted in that period. Across several
 projects, each line adds that person's hours across the selected projects.

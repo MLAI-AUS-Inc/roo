@@ -68,3 +68,7 @@
   thread: {last_skill: studio-hours}
   expect: {skill: studio-hours, action: summary, params_subset: {chart: both, month: previous}}
   tags: [studio-hours, follow-up]
+- id: studio-hours-worker-breakdown
+  text: "Give me the worker breakdown for who has been doing hours on the Master App project for Mark Ghiasy over the last 3 months"
+  expect: {skill: studio-hours, action: summary, params_subset: {client: Mark Ghiasy, project: Master App, month: recent, months: 3, chart: monthly}}
+  tags: [studio-hours, client-scope]

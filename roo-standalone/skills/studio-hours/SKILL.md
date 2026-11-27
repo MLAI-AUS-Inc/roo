@@ -3,10 +3,11 @@ name: studio-hours
 description: Private Studio hours by project and person.
 requires_auth: true
 routing:
-  use_when: Studio usage by client/project/builder, allowance burndowns, hours burnt by person, contributor charts.
+  use_when: Studio usage by client/project/builder, allowance burndowns, hours burnt by person, worker breakdowns, contributor charts.
   avoid_when: Payroll, purchased-hour credits, coworking or effort sizing.
   examples:
     - {text: "How many of my 40 Studio hours have we used this month?", action: summary}
+    - {text: "Who did what hours on Master App over the last three months?", action: summary}
     - {text: "Chart Mark Ghiasy's Master App hours by person", action: summary}
     - {text: "Give me the work behind those hours", action: detailed}
   negative_examples:
@@ -19,7 +20,7 @@ actions:
       months: {type: integer, description: "1–12 consecutive months."}
       client: {type: string, description: "Client name/email/mention, all, or self (default)."}
       project: {type: string, description: "Requested project name or ID; all resets a prior filter."}
-      chart: {type: string, enum: [stacked, cumulative, both], description: "By person: stacked bars for composition, cumulative lines over time, both for general contributor charts."}
+      chart: {type: string, enum: [stacked, cumulative, both, monthly], description: "Worker breakdown / who did what hours: monthly (one bar per month). One bar per project: stacked. Running totals: cumulative. Both original views: both."}
   - name: detailed
     description: Dated work and CSV. Inherits prior filters and charts.
     params:
@@ -27,7 +28,7 @@ actions:
       months: {type: integer, description: "Number of consecutive months, 1–12."}
       client: {type: string, description: "Client name/email/mention or all/self; omit to retain prior filter."}
       project: {type: string}
-      chart: {type: string, enum: [stacked, cumulative, both]}
+      chart: {type: string, enum: [stacked, cumulative, both, monthly]}
 ---
 
 # Studio client hours
@@ -66,6 +67,9 @@ Use detailed when the client asks for the work-level breakdown. Copy a requested
 project name or ID into project. For all projects, omit project on a new summary
 or use project="all" to clear a previous project filter.
 
+For “worker breakdown” or “who did what hours” on a project, use chart="monthly".
+It shows each contributor within each requested calendar month, even when no work was attributed.
+“Last three months” uses month="recent", months=3.
 For a stacked breakdown of hours per person on each project, use chart="stacked".
 For lines showing each person's cumulative hours over time, use chart="cumulative".
 For both views or an unspecific request to chart hours by person, use chart="both".

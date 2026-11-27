@@ -16,7 +16,7 @@ from .timesheets import UNITS, TimesheetError, csv_file, reconstruct, timestamp
 
 TZ = ZoneInfo('Australia/Melbourne')
 _chart_lock = Lock()
-CONTRIBUTOR_CHARTS = ('stacked', 'cumulative', 'both')
+CONTRIBUTOR_CHARTS = ('stacked', 'cumulative', 'both', 'monthly')
 
 
 def month_offset(month, offset):

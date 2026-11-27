@@ -161,3 +161,15 @@ def test_legacy_projects_retain_later_activity_in_a_mixed_portfolio(draw):
     assert all(line.get_xdata()[-1] == date(2026, 10, 16) for line in figure.axes[0].lines)
     assert [line.get_ydata()[-1] for line in figure.axes[0].lines] == [4.5, 3]
     assert 'Other project sources use the report cutoff' in figure.texts[-1].get_text()
+
+
+def test_monthly_bars_show_empty_months_and_assign_each_unit_once(draw):
+    data = report()
+    data['monthly'].insert(0, {'month': '2026-08', 'units': 0})
+    data['rows'].append(dict(builder_id='tom', builder='Tom', project_id='a', month='', units=3))
+    fig = draw(data, 'monthly')
+    ax, = fig.axes
+    assert [item.get_text() for item in ax.get_yticklabels()] == ['Aug 2026', 'Sep 2026', 'Oct 2026', 'Month unallocated']
+    assert [[bar.get_width() for bar in bars] for bars in ax.containers] == [[0, 3.5, 1, 0], [0, 1, 2, .75]]
+    assert 'No hours attributed' in [item.get_text() for item in ax.texts]
+    assert '0.75h have no assigned month and are shown separately' in fig.texts[-1].get_text()
