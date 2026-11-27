@@ -136,9 +136,8 @@ def test_private_command_requires_public_surface_and_service_identity(
     from fastapi.testclient import TestClient
     from roo.main import app, get_settings
 
-    settings = get_settings()
-    monkeypatch.setattr(settings, "ROO_SURFACE", surface)
-    monkeypatch.setattr(settings, "INTERNAL_MENTION_API_KEY", key)
+    settings = get_settings().model_copy(update={"ROO_SURFACE": surface, "INTERNAL_MENTION_API_KEY": key})
+    monkeypatch.setitem(app.dependency_overrides, get_settings, lambda: settings)
     with patch("roo.main.get_agent") as agent:
         result = TestClient(app).post(
             "/api/chat-command", headers={"Authorization": authorization}, json={}
