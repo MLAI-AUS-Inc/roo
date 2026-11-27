@@ -40,10 +40,10 @@ class ReportAPI(TimesheetAPI):
             raise TimesheetError('unconfirmed_invoice_ack')
         return result['ts']
 
-    def upload_csv(self, channel, filename, content, *, before_send=None):
+    def upload_csv(self, channel, filename, content, *, before_send=None, thread_ts=None):
         if not re.fullmatch(r'D[A-Z0-9]+', channel):
             raise TimesheetError('private_destination_required')
-        return self._upload_csv(channel, filename, content, before_send=before_send)
+        return self._upload_csv(channel, filename, content, before_send=before_send, thread_ts=thread_ts)
 
     def _upload_csv(self, channel, filename, content, *, thread_ts=None, before_send=None):
         def check_deadline():
@@ -316,7 +316,7 @@ class TimesheetService:
     def request_error_status(self, request, code):
         return 'error'
 
-    def commands(self, now, *, queue=None):
+    def commands(self, now, *, queue=None, accept=None):
         store = self.queue if queue is None else queue
         results = []
         if not store.directory.exists():
@@ -326,8 +326,13 @@ class TimesheetService:
             key = path.stem
             # A damaged request must not stop all other requests or the schedule.
             try:
-                if not re.fullmatch(r'[a-f0-9]{64}', key) or not isinstance(store.read(key), dict):
+                if not re.fullmatch(r'[a-f0-9]{64}', key):
                     raise TimesheetError('invalid_request')
+                candidate = store.read(key)
+                if not isinstance(candidate, dict):
+                    raise TimesheetError('invalid_request')
+                if accept is not None and not accept(candidate):
+                    continue
             except Exception:
                 results.append({'status': 'error', 'reason': 'invalid_request'})
                 continue

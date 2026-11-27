@@ -116,3 +116,52 @@ def test_narrowed_reviewed_owner_preserves_microhours_and_excludes_sibling(finan
     with pytest.raises(TimesheetError, match='client_access_changed'):
         data.service.deliver_request(report, req, 'changed-project', NOW)
     data.api.open_dm.assert_not_called()
+
+
+@pytest.mark.parametrize('origin,expected_thread', [('DUMARK', '123.456'), ('DOTHER', None), ('C123', None)])
+def test_monthly_chart_is_first_private_result_and_bound_to_own_dm(setup, origin, expected_thread):
+    from roo.backend_identity import BackendActorContext
+    from roo.studio_report_commands import enqueue
+    from roo.studio_report_worker import _interactive_chart
+    from roo.timesheet_worker import TimesheetService
+
+    setup.api.collect.return_value = [ticket()]
+    context = BackendActorContext('T123', 'UMARK', origin, '123.456', 'EvChart')
+    enqueue(setup.settings, context, {'chart': 'monthly', 'project': 'Master App', 'months': 2},
+            user_id='UMARK', channel_id=origin, thread_ts='123.456', now=NOW)
+    assert setup.service.commands(NOW, background_only=True) == []
+    result, = TimesheetService.commands(setup.service, NOW, accept=_interactive_chart)
+    assert result['status'] == 'sent'
+    assert setup.api.upload_csv.call_args.args[:2] == ('DUMARK', 'studio-hours-contributors-monthly.png')
+    assert setup.api.upload_csv.call_args.kwargs.get('thread_ts') == expected_thread
+    setup.api.post_message.assert_not_called()
+    assert setup.service.commands(NOW) == [] and setup.api.upload_csv.call_count == 1
+
+
+def test_chart_worker_wakes_on_new_queue_file_between_retry_scans(setup, monkeypatch):
+    from threading import Event, Thread
+    from roo.studio_report_worker import _watch_charts
+    from roo.timesheet_worker import TimesheetService
+
+    ready, handled, stop = Event(), Event(), Event()
+    original = TimesheetService.commands
+
+    def observed(service, now, **options):
+        results = original(service, now, **options)
+        ready.set()
+        if results:
+            handled.set()
+        return results
+
+    monkeypatch.setattr(TimesheetService, 'commands', observed)
+    thread = Thread(target=_watch_charts, args=(setup.service, stop))
+    thread.start()
+    try:
+        assert ready.wait(3)
+        queue(setup, params={'project': P1, 'chart': 'monthly'})
+        assert handled.wait(4)
+        assert setup.api.upload_csv.call_count == 1
+    finally:
+        stop.set()
+        thread.join(5)
+    assert not thread.is_alive()

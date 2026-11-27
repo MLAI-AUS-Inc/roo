@@ -178,10 +178,11 @@ class ReminderAPI:
             raise ValueError("Slack did not return a private DM")
         return channel
 
-    def post_message(self, channel, text):
+    def post_message(self, channel, text, *, thread_ts=None):
         try:
             result = self.slack("chat.postMessage", {
                 "channel": channel, "text": text, "parse": "none",
+                **({"thread_ts": thread_ts} if thread_ts else {}),
                 "unfurl_links": False, "unfurl_media": False,
             })
         except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout) as exc:

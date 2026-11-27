@@ -4,6 +4,16 @@ A short record of repository cleanup, testing, security, and delivery changes.
 Each entry states what changed and how it was checked. Findings without fixes
 are labelled as such.
 
+## 2026-11-27
+
+- Studio worker-breakdown requests render a monthly contributor chart from scoped
+  report rows. A private worker watches new chart requests while finance and
+  scheduled reports run. DM requests receive the chart in their originating
+  private thread after recipient verification. Tested the original Slack wording,
+  trailing months, partial and unallocated hours, queue wakeup and delivery retries.
+  The Studio, timesheet, invoice worker and payment reminder suites passed 926
+  tests. The skill executor suites passed 34 tests and the skill linter passed.
+
 ## 2026-11-26
 
 - Audited draft Roo PR #341 against the contributor report waiting notice.

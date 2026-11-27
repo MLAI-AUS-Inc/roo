@@ -31,7 +31,7 @@ def test_studio_hours_tool_declares_contributor_chart_options():
     tools, _ = build_tools([skill], channel_name=None)
     function = next(tool['function'] for tool in tools if tool['function']['name'] == 'studio-hours')
     properties = function['parameters']['properties']
-    assert properties['chart']['enum'] == ['stacked', 'cumulative', 'both']
+    assert properties['chart']['enum'] == ['stacked', 'cumulative', 'both', 'monthly']
     assert properties['project']['type'] == 'string'
     assert function['parameters']['required'] == ['action']
 
@@ -110,3 +110,38 @@ def test_scoped_contributor_chart_followup(setup, followup, expected):
 def test_invalid_chart_request_does_not_enter_queue(setup, params, prompt):
     assert prompt in queue(setup, params=params)
     assert not list(setup.config.queue.glob('*.json'))
+
+
+@pytest.mark.asyncio
+async def test_worker_breakdown_dm_queues_monthly_chart_without_placeholder(setup, monkeypatch):
+    from roo.skills.contracts import SkillRequest
+    from roo.skills.executors.studio_hours import StudioHoursExecutor
+
+    patch_skill_dependency(monkeypatch, 'get_settings', lambda: setup.settings)
+    context = BackendActorContext('T123', 'UMARK', 'DUMARK', '123.45', 'EvBreakdown')
+    text = 'Give me the worker breakdown for who has been doing hours on the master app project over the last 3 months'
+    req = SkillRequest(skill=None, text=text, user_id='UMARK', channel_id='DUMARK', thread_ts='123.45',
+                       params={'month': 'current', 'months': 3, 'project': 'master app', 'action': 'summary'})
+    with use_backend_actor_context(context):
+        for _ in range(2):
+            assert (await StudioHoursExecutor().execute(req))['suppress_post']
+    saved, = [setup.service.queue.read(p.stem) for p in setup.config.queue.glob('*.json')]
+    from roo.studio_reports import month_offset, TZ
+    from roo.timesheets import timestamp
+    current = timestamp(saved['requested_at']).astimezone(TZ).strftime('%Y-%m')
+    assert saved['selector'] == {'action': 'summary', 'month': month_offset(current, -2).strftime('%Y-%m'),
+                                 'months': 3, 'chart': 'monthly', 'project': 'master app'}
+    assert saved['actor'] == 'UMARK' and saved['thread_ts'] == '123.45'
+
+
+def test_worker_breakdown_preserves_explicit_ranges_and_other_views():
+    from roo.studio_report_commands import hours_params
+    original = {'month': '2026-08', 'months': 5, 'project': 'Master App'}
+    assert hours_params('worker breakdown last 3 months from August to December 2026', original) == {
+        **original, 'chart': 'monthly'}
+    assert hours_params('hours by person over the last three full months', {'chart': 'cumulative'}) == {
+        'chart': 'cumulative', 'month': 'last_complete', 'months': 3}
+    assert hours_params('worker breakdown per project', {'chart': 'stacked'}) == {'chart': 'stacked'}
+    assert hours_params('worker breakdown in text only', {}) == {}
+    assert hours_params('stacked bars and cumulative lines by person', {'chart': 'both'}) == {'chart': 'both'}
+    assert hours_params('hours by person on Master App', {'project': 'Master App', 'chart': 'both'})['chart'] == 'monthly'

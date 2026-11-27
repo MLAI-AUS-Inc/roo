@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import base64
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -11,6 +12,7 @@ from pathlib import Path
 import re
 import signal
 import threading
+import time
 from types import SimpleNamespace
 from uuid import UUID
 
@@ -72,10 +74,16 @@ def configuration(env):
 
 
 class StudioReportAPI(StudioSourceAPI):
-    def upload_csv(self, channel, filename, content):
+    def upload_csv(self, channel, filename, content, *, thread_ts=None):
         if filename.endswith('.png'):
             content = base64.b64decode(content, validate=True)
-        return super().upload_csv(channel, filename, content)
+        return super().upload_csv(channel, filename, content, thread_ts=thread_ts)
+
+
+def _interactive_chart(request):
+    selector = request.get('selector')
+    return (request.get('report_kind', 'hours') == 'hours' and isinstance(selector, dict)
+            and bool(selector.get('chart')) and 'scheduled' not in request and selector.get('period') != 'weekly')
 
 
 class StudioReportService(TimesheetService):
@@ -111,8 +119,8 @@ class StudioReportService(TimesheetService):
                     and request['scheduled'].get('request_key') == key)
         return True
 
-    def commands(self, now):
-        results = super().commands(now)
+    def commands(self, now, *, background_only=False):
+        results = super().commands(now, accept=(lambda r: not _interactive_chart(r)) if background_only else None)
         results.extend(super().commands(now, queue=self.weekly_queue))
         return results
 
@@ -324,6 +332,7 @@ class StudioReportService(TimesheetService):
             elif selector.get('chart'):
                 from .studio_contributor_charts import render_contributor_chart
                 views = ('stacked', 'cumulative') if selector['chart'] == 'both' else (selector['chart'],)
+                charts = []
                 for view in views:
                     try:
                         chart = render_contributor_chart(report, view)
@@ -332,8 +341,12 @@ class StudioReportService(TimesheetService):
                             f'The {view} contributor chart could not be rendered. The hours breakdown is above.',
                             'status': 'pending'})
                         continue
-                    parts.append({'kind': 'file', 'filename': f'studio-hours-contributors-{view}.png',
+                    charts.append({'kind': 'file', 'filename': f'studio-hours-contributors-{view}.png',
                                   'content': base64.b64encode(chart).decode('ascii'), 'status': 'pending'})
+                if charts and selector['chart'] == 'monthly' and selector['action'] == 'summary':
+                    parts = charts
+                else:
+                    parts = charts + parts
             else:
                 chart = render_chart(report)
                 parts.append({'kind': 'file', 'filename': 'studio-hours.png',
@@ -547,9 +560,13 @@ class StudioReportService(TimesheetService):
                 report.get('backfill_digest', fingerprint(None)) != fingerprint(filter_backfill(
                     load_backfill(self.backfill_path, self.config), set(report.get('linear_project_ids', []))))):
             raise TimesheetError('invoice_backfill_changed')
+        if _interactive_chart(request) and re.fullmatch(r'D[A-Z0-9]+', request.get('channel', '')) and re.fullmatch(
+                r'\d+\.\d+', str(request.get('thread_ts') or '')):
+            return self.deliver_parts(report['parts'], request['actor'], key, now,
+                                      origin_dm=request['channel'], thread_ts=request['thread_ts'])
         return self.deliver_parts(report['parts'], request['actor'], key, now)
 
-    def deliver_parts(self, parts, recipient, delivery_key, now):
+    def deliver_parts(self, parts, recipient, delivery_key, now, *, origin_dm=None, thread_ts=None):
         # Report delivery requires a current ownership check above. The only
         # other caller sends fixed failure/setup text, never another client's data.
         self.api.verify_recipient(recipient, self.config.team)
@@ -560,8 +577,17 @@ class StudioReportService(TimesheetService):
                 raise TimesheetError('private_destination_required')
             return channel
 
-        return self._deliver_transport(parts, recipient, delivery_key, now, destination,
-                                       self.api.post_message, self.api.upload_csv)
+        def post(channel, text):
+            if thread_ts and channel == origin_dm:
+                return self.api.post_message(channel, text, thread_ts=thread_ts)
+            return self.api.post_message(channel, text)
+
+        def upload(channel, name, content):
+            if thread_ts and channel == origin_dm:
+                return self.api.upload_csv(channel, name, content, thread_ts=thread_ts)
+            return self.api.upload_csv(channel, name, content)
+
+        return self._deliver_transport(parts, recipient, delivery_key, now, destination, post, upload)
 
     def failure_notice(self, request):
         error = request.get('error')
@@ -648,6 +674,29 @@ class StudioReportService(TimesheetService):
                        'Safe failures will be retried; an uncertain delivery needs the Studio team to review it.')
 
 
+def _watch_charts(service, stop):
+    """Notice atomic queue inserts promptly, even while a scheduled source read is busy."""
+    service.config.queue.mkdir(parents=True, exist_ok=True, mode=0o700)
+    stamp, next_retry_scan = None, 0
+    known = set()
+    try:
+        while not stop.is_set():
+            modified = service.config.queue.stat().st_mtime_ns
+            inserted = False
+            if modified != stamp:
+                current = {path.name for path in service.config.queue.glob('*.json')}
+                inserted = bool(current - known)
+                known, stamp = current, modified
+            if inserted or time.monotonic() >= next_retry_scan:
+                results = TimesheetService.commands(service, datetime.now(timezone.utc), accept=_interactive_chart)
+                if results:
+                    print(json.dumps({'chart_results': results}), flush=True)
+                next_retry_scan = time.monotonic() + 10
+            stop.wait(.25)
+    finally:
+        stop.set()
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--env-file')
@@ -681,15 +730,18 @@ def main(argv=None):
         schedules = weekly_configuration(env, clients)
         with httpx.Client(timeout=30, follow_redirects=False) as client:
             from .studio_report_refresh import SourceRefresh
-            api = StudioReportAPI(client, linear_key=env.get('TIMESHEET_LINEAR_READ_API_KEY'),
-                                  slack_token=env.get('TIMESHEET_SLACK_BOT_TOKEN'))
-            service = StudioReportService(config, api, clients, env.get('STUDIO_REPORTS_BACKFILL_FILE'),
-                balance_path=env.get('STUDIO_CLIENT_BALANCE_FILE'),
-                balance_enabled=flag(env, 'STUDIO_CLIENT_BALANCE_WORKER_ENABLED'),
-                balance_max_age_days=int(env.get('STUDIO_CLIENT_BALANCE_MAX_AGE_DAYS', '7')),
-                schedules=schedules,
-                allow_historical_snapshot=flag(env, 'STUDIO_REPORTS_HISTORICAL_FALLBACK_ENABLED'),
-                refresh=SourceRefresh.from_env(env, config, clients, client))
+            def make_service():
+                api = StudioReportAPI(client, linear_key=env.get('TIMESHEET_LINEAR_READ_API_KEY'),
+                                      slack_token=env.get('TIMESHEET_SLACK_BOT_TOKEN'))
+                return StudioReportService(config, api, clients, env.get('STUDIO_REPORTS_BACKFILL_FILE'),
+                    balance_path=env.get('STUDIO_CLIENT_BALANCE_FILE'),
+                    balance_enabled=flag(env, 'STUDIO_CLIENT_BALANCE_WORKER_ENABLED'),
+                    balance_max_age_days=int(env.get('STUDIO_CLIENT_BALANCE_MAX_AGE_DAYS', '7')),
+                    schedules=schedules,
+                    allow_historical_snapshot=flag(env, 'STUDIO_REPORTS_HISTORICAL_FALLBACK_ENABLED'),
+                    refresh=SourceRefresh.from_env(env, config, clients, client))
+
+            service = make_service()
             from .studio_report_daily import DailyRefresh
             daily = DailyRefresh.from_env(service, env)
             if args.refresh_daily:
@@ -736,18 +788,26 @@ def main(argv=None):
             stop = threading.Event()
             for signum in (signal.SIGTERM, signal.SIGINT):
                 signal.signal(signum, lambda *_: stop.set())
-            while not stop.is_set():
-                now = datetime.now(timezone.utc)
-                if service.refresh:
-                    service.refresh.prewarm(schedules, now)
-                results = daily.tick(now) if daily else []
-                results.extend(enqueue_weekly(service, schedules, now))
-                results.extend(service.commands(now))
-                if results or args.once:
-                    print(json.dumps({'results': results}), flush=True)
-                if args.once:
-                    return int(any(item['status'] not in {'sent', 'done', 'queued'} for item in results))
-                stop.wait(10)
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                # Each service owns its mutable Linear collection state.
+                watcher = None if args.once else pool.submit(_watch_charts, make_service(), stop)
+                try:
+                    while not stop.is_set():
+                        now = datetime.now(timezone.utc)
+                        if service.refresh:
+                            service.refresh.prewarm(schedules, now)
+                        results = daily.tick(now) if daily else []
+                        results.extend(enqueue_weekly(service, schedules, now))
+                        results.extend(service.commands(now, background_only=not args.once))
+                        if results or args.once:
+                            print(json.dumps({'results': results}), flush=True)
+                        if args.once:
+                            return int(any(item['status'] not in {'sent', 'done', 'queued'} for item in results))
+                        stop.wait(10)
+                finally:
+                    stop.set()
+                    if watcher:
+                        watcher.result()
     except Exception as exc:
         print(json.dumps({'status': 'error', 'reason': str(exc) if isinstance(exc, TimesheetError) else type(exc).__name__}))
         return 1

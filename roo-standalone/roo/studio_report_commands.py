@@ -9,6 +9,52 @@ from .studio_reports import resolve_period
 from .timesheets import TimesheetError, fingerprint
 
 
+_MONTH_COUNTS = "one two three four five six seven eight nine ten eleven twelve".split()
+_RELATIVE_MONTHS = re.compile(
+    r"\b(?:last|past|previous)\s+(?:a\s+)?(\d+|couple(?: of)?|" + "|".join(_MONTH_COUNTS)
+    + r")\s+(?:(full|complete|completed|calendar)\s+)?months?\b", re.I)
+_CONTRIBUTORS = re.compile(
+    r"\b(?:worker|builder|contributor|person|team member)[ -](?:hours? )?breakdown\b|"
+    r"\b(?:by|per|each) (?:person|worker|builder|contributor|team member)\b|"
+    r"\bwho (?:did|worked|logged|spent|burnt|has been doing|has worked)\b|"
+    r"\bwhich (?:person|people|workers?) (?:did|worked|logged)\b", re.I)
+_EXPLICIT_PERIOD = re.compile(
+    r"\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|"
+    r"aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?|\d{4}-\d{2})\b", re.I)
+
+
+def hours_params(text, params):
+    """Recover unambiguous display and trailing-period choices from this Slack turn."""
+    selected = dict(params)
+    if _CONTRIBUTORS.search(text):
+        cumulative = re.search(r"\bcumulative\b|\brunning totals?\b", text, re.I)
+        bars = re.search(r"\bstacked\b|\bbars?\b", text, re.I)
+        if re.search(r"\b(?:no|without) (?:a |any )?(?:charts?|graphs?)\b|\btext only\b", text, re.I):
+            selected.pop('chart', None)
+        elif (bars and cumulative) or re.search(r"\bboth (?:the )?(?:charts?|views?)\b", text, re.I):
+            selected['chart'] = 'both'
+        elif cumulative:
+            selected['chart'] = 'cumulative'
+        elif re.search(r"\b(?:per|by|each) project\b|\bacross (?:all )?(?:my |our )?projects\b", text, re.I):
+            selected['chart'] = 'stacked'
+        elif selected.get('project') and not bars:
+            selected['chart'] = 'monthly'
+        else:
+            selected.setdefault('chart', 'monthly' if selected.get('project') else 'stacked')
+    period = _RELATIVE_MONTHS.search(text)
+    if period and not _EXPLICIT_PERIOD.search(text):
+        count = period[1].lower()
+        if count.startswith('couple'):
+            count = 2
+        elif count.isdigit():
+            count = int(count) if len(count) <= 2 else 13
+        else:
+            count = _MONTH_COUNTS.index(count) + 1
+        selected.update(month='last_complete' if period[2] and period[2].lower() != 'calendar'
+                        else 'recent', months=count)
+    return selected
+
+
 def enqueue(settings, context, params, *, user_id, channel_id, thread_ts, now=None,
             report_kind='hours'):
     """The executor selects report_kind; it is never read from model params."""
@@ -40,7 +86,10 @@ def enqueue(settings, context, params, *, user_id, channel_id, thread_ts, now=No
     with store.locked(key) as acquired:
         if not acquired:
             raise TimesheetError('queue_busy')
-        if store.read(key):
+        existing = store.read(key)
+        if existing:
+            if not balance and channel_id.startswith('D') and existing.get('selector', {}).get('chart'):
+                return {'message': 'Your chart request is already queued.', 'suppress_post': True}
             return f'This {report_name} request has already been queued for private delivery.'
         fields = ('month', 'months', 'action', 'client')
         if not balance:
@@ -93,6 +142,10 @@ def enqueue(settings, context, params, *, user_id, channel_id, thread_ts, now=No
                          'selector': selector, 'channel': channel_id,
                          'thread_ts': thread_ts, 'requested_at': now.isoformat(), 'status': 'pending',
                          **({'report_kind': report_kind} if balance else {})})
+    if not balance and selector.get('chart'):
+        if channel_id.startswith('D'):
+            return {'message': 'Your private chart is queued.', 'suppress_post': True}
+        return 'I’ll send the chart to your DM.'
     if balance:
         return ('I’m preparing your Studio hours and purchased-hours report. '
                 'I’ll DM it to you after checking your hours and payment report access.')

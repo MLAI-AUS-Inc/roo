@@ -260,9 +260,12 @@ def test_queued_contributor_charts_use_work_mode_and_retry_only_the_unsent_chart
     pngs = [part for part in report['parts'] if part.get('filename', '').endswith('.png')]
     assert [part['filename'] for part in pngs] == [stacked, cumulative]
     assert all(b64decode(part['content']).startswith(b'\x89PNG') for part in pngs)
-    assert 'Complete reviewed coverage through 2026-10-02.' in report['parts'][0]['content']
-    assert 'Latest included work period ends 2026-10-12.' in report['parts'][0]['content']
-    assert 'Some contractor submissions or allocations are still under review.' in report['parts'][0]['content']
+    assert report['parts'][:2] == pngs
+    notice = report['parts'][2]
+    assert notice['kind'] == 'message'
+    assert 'Complete reviewed coverage through 2026-10-02.' in notice['content']
+    assert 'Latest included work period ends 2026-10-12.' in notice['content']
+    assert 'Some contractor submissions or allocations are still under review.' in notice['content']
     csv_part = next(p for p in report['parts'] if p.get('filename') == 'studio-hours-work.csv')
     csv_rows = list(csv.DictReader(StringIO(csv_part['content'])))
     assert len(csv_rows) == 1 and float(csv_rows[0]['hours']) == 5

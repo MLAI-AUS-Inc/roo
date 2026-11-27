@@ -31,20 +31,29 @@ def _contributors(rows):
     return labels
 
 
-def _composition(axes, report, people, colors):
+def _composition(axes, report, people, colors, *, monthly=False):
     from matplotlib.colors import to_rgb
 
     scale = report.get('unit_scale', 4)
-    projects = report['projects']
+    if monthly:
+        labels = {m['month']: month_offset(m['month'], 0).strftime('%b %Y') for m in report['monthly']}
+        if any(not row['month'] for row in report['rows']):
+            labels[''] = 'Month unallocated'
+        uncertain = _unavailable_months(report['monthly'])
+    else:
+        labels = report['projects']
+        uncertain_names = {entry['project'] for entry in report.get('exceptions', [])}
+        uncertain = {key for key, name in labels.items() if name in uncertain_names}
     counts = defaultdict(Counter)
     totals = Counter()
     for row in report['rows']:
-        counts[row['builder_id']][row['project_id']] += row['units']
-        totals[row['project_id']] += row['units']
-    order = sorted(projects, key=lambda key: (-totals[key], projects[key].casefold(), key))
+        key = (row['month'] or '') if monthly else row['project_id']
+        counts[row['builder_id']][key] += row['units']
+        totals[key] += row['units']
+    order = list(labels) if monthly else sorted(labels, key=lambda key: (-totals[key], labels[key].casefold(), key))
     positions = range(len(order))
     left = [0] * len(order)
-    longest = max([1, *totals.values()]) / scale
+    longest = max([scale, *totals.values()]) / scale
     for person, name in people.items():
         units = [counts[person][key] for key in order]
         bars = axes.barh(positions, [n / scale for n in units], left=[n / scale for n in left],
@@ -57,13 +66,14 @@ def _composition(axes, report, people, colors):
                 axes.text(bar.get_x() + bar.get_width() / 2, bar.get_y() + bar.get_height() / 2,
                           label, ha='center', va='center', color=ink, fontsize=9)
         left = [prior + value for prior, value in zip(left, units)]
-    uncertain = {entry['project'] for entry in report.get('exceptions', [])}
-    axes.set_yticks(positions, [textwrap.fill(projects[key], width=30) for key in order], parse_math=False)
+    axes.set_yticks(positions, [textwrap.fill(labels[key], width=30) for key in order], parse_math=False)
     for y, key in enumerate(order):
         units = totals[key]
         label = display_hours(units, scale) + 'h'
-        if projects[key] in uncertain or report.get('complete') is False:
+        if key in uncertain or report.get('complete') is False:
             label = label + ' counted' if units else 'No counted hours'
+        if monthly and not units:
+            label = 'No hours attributed' if key not in uncertain else 'Hours unavailable'
         axes.annotate(label, (units / scale, y), xytext=(5, 0), textcoords='offset points',
                       va='center', fontsize=9, weight='bold', color='#334b58')
     axes.set_xlim(0, longest * 1.3)
@@ -170,11 +180,13 @@ def _notes(report, breakdown):
             line += ' Other project sources use the report cutoff.'
         notes.append(line)
     if report.get('complete') is False:
-        notes.append('Only counted work is shown. See the report for coverage and unresolved work.')
+        notes.append('Some work is unresolved. Only attributable hours are shown.' if breakdown == 'monthly'
+                     else 'Only counted work is shown. See the report for coverage and unresolved work.')
     scale = report.get('unit_scale', 4)
     unallocated = sum(row['units'] for row in report['rows'] if not row['month'])
     if unallocated:
-        treatment = 'included in project totals' if breakdown == 'stacked' else 'omitted from the lines'
+        treatment = {'stacked': 'included in project totals', 'monthly': 'shown separately',
+                     'cumulative': 'omitted from the lines'}[breakdown]
         notes.append(f'{display_hours(unallocated, scale)}h have no assigned month and are {treatment}.')
     if report.get('estimated_month_units'):
         label = ('estimated dates or month allocations' if report.get('work_reviewed_through')
@@ -189,7 +201,7 @@ def render_contributor_chart(report, breakdown):
     from matplotlib.backends.backend_agg import FigureCanvasAgg
     from matplotlib.figure import Figure
 
-    if breakdown not in {'stacked', 'cumulative'}:
+    if breakdown not in {'stacked', 'cumulative', 'monthly'}:
         raise ValueError('Unknown contributor chart')
     if any(row['project_id'] not in report['projects'] for row in report['rows']):
         raise TimesheetError('contributor_report_scope_mismatch')
@@ -205,6 +217,10 @@ def render_contributor_chart(report, breakdown):
     projects = list(report['projects'].values())
     scope = projects[0] if len(projects) == 1 else f'{len(projects)} projects'
     subtitle = f'{start:%d %b %Y} – {end:%d %b %Y} · {report["client"]} · {scope}'
+    if breakdown == 'monthly':
+        subtotal = display_hours(sum(row['units'] for row in report['rows']), report.get('unit_scale', 4))
+        if report['rows'] or report.get('complete') is True:
+            subtitle += f' · {subtotal}h counted'
     notes = _notes(report, breakdown)
     if breakdown == 'cumulative' and _unavailable_months(monthly) and any(row['month'] for row in report['rows']):
         notes.append('Shaded months have no supported subtotal.')
@@ -216,25 +232,29 @@ def render_contributor_chart(report, breakdown):
         header = 1.25 + legend_space
         project_lines = max((len(textwrap.wrap(name, width=30)) for name in projects), default=1)
         plot_height = max(2, len(projects) * max(.64, .19 * project_lines)) if breakdown == 'stacked' else 3.3
+        if breakdown == 'monthly':
+            plot_height = max(2, .46 * (len(monthly) + int(any(not row['month'] for row in report['rows']))))
         height = header + plot_height + footer + .55
         figure = Figure(figsize=(11, height), dpi=135)
         canvas = FigureCanvasAgg(figure)
         axes = figure.add_subplot(111)
-        figure.subplots_adjust(left=.28 if breakdown == 'stacked' else .11, right=.95,
+        figure.subplots_adjust(left={'stacked': .28, 'monthly': .17, 'cumulative': .11}[breakdown], right=.95,
                                top=1 - header / height, bottom=(footer + .55) / height)
         title = 'Project hours by contributor' if breakdown == 'stacked' else 'Cumulative hours by contributor'
+        if breakdown == 'monthly':
+            title = 'Monthly hours by contributor'
         figure.text(.06, 1 - .43 / height, title, fontsize=21, weight='bold', color='#142c3a')
         figure.text(.06, 1 - .73 / height, textwrap.shorten(subtitle, width=115, placeholder='…'),
                     fontsize=11, color='#334b58', parse_math=False)
         if report.get('period_has_coverage') is False:
             axes.set_axis_off()
             axes.text(.5, .5, 'Hours unavailable for this period.', transform=axes.transAxes, ha='center')
-        elif breakdown == 'stacked':
-            _composition(axes, report, people, colors)
+        elif breakdown in {'stacked', 'monthly'}:
+            _composition(axes, report, people, colors, monthly=breakdown == 'monthly')
         else:
             _trend(axes, report, people, colors, start, end)
         axes.set_axisbelow(True)
-        axes.grid(axis='x' if breakdown == 'stacked' else 'y', color='#e5eaed')
+        axes.grid(axis='y' if breakdown == 'cumulative' else 'x', color='#e5eaed')
         axes.tick_params(length=0, labelsize=9, pad=6)
         for spine in axes.spines.values():
             spine.set_visible(False)
