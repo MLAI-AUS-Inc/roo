@@ -3,12 +3,11 @@ name: studio-hours
 description: Private Studio hours by project and person.
 requires_auth: true
 routing:
-  use_when: Studio usage by client/project/builder, allowance burndowns, hours burnt by person, worker breakdowns, contributor charts.
+  use_when: Studio hours, worker breakdowns, allowance burndowns and contributor charts.
   avoid_when: Payroll, purchased-hour credits, coworking or effort sizing.
   examples:
     - {text: "How many of my 40 Studio hours have we used this month?", action: summary}
-    - {text: "Who did what hours on Master App over the last three months?", action: summary}
-    - {text: "Chart Mark Ghiasy's Master App hours by person", action: summary}
+    - {text: "Who did what hours on Mark Ghiasy's Master App?", action: summary}
     - {text: "Give me the work behind those hours", action: detailed}
   negative_examples:
     - {text: "How many people used coworking?", instead: mlai-points}
@@ -16,17 +15,17 @@ actions:
   - name: summary
     description: Hours and charts. Default current month.
     params:
-      month: {type: string, description: "YYYY-MM/current/last/recent/last_complete; all for project-to-date; previous for follow-ups like 'plot that'."}
+      month: {type: string, description: "Start YYYY-MM/current/last; last N months=recent; full months=last_complete; all/previous."}
       months: {type: integer, description: "1–12 consecutive months."}
       client: {type: string, description: "Client name/email/mention, all, or self (default)."}
       project: {type: string, description: "Requested project name or ID; all resets a prior filter."}
-      chart: {type: string, enum: [stacked, cumulative, both, monthly], description: "Worker breakdown / who did what hours: monthly (one bar per month). One bar per project: stacked. Running totals: cumulative. Both original views: both."}
+      chart: {type: string, enum: [stacked, cumulative, both, monthly], description: "Worker breakdown=monthly; per project=stacked; running totals=cumulative; both project and trend=both."}
   - name: detailed
     description: Dated work and CSV. Inherits prior filters and charts.
     params:
       month: {type: string, description: "Start YYYY-MM/current/last/recent/last_complete/previous/all. Omit to reuse prior period."}
       months: {type: integer, description: "Number of consecutive months, 1–12."}
-      client: {type: string, description: "Client name/email/mention or all/self; omit to retain prior filter."}
+      client: {type: string, description: "Client name/email/mention or all/self."}
       project: {type: string}
       chart: {type: string, enum: [stacked, cumulative, both, monthly]}
 ---
