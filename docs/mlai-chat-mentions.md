@@ -41,3 +41,10 @@ or spend points.
 The actor-resolution change must be merged into each repository's release branch
 before deployment. A temporary branch deployment can otherwise be overwritten by
 the next main release. The backend endpoint must be present before updating Roo.
+
+A selected Public Roo command in a member DM uses the authenticated
+`/api/chat-command` service route. The backend supplies the verified human,
+selected recipients and one source ID. The agent receives no channel or thread
+identifier and returns a text reply to the invoking composer. Its existing
+points permissions and per-recipient award keys apply. Duplicate dispatch is
+suppressed by the worker-shared receipt store.

@@ -340,3 +340,7 @@ are labelled as such.
 - 2026-11-14. Private Studio reports validate submitted work and cached finance
   independently, preserve strict weekly checks and display the last verified
   receipt. Synthetic source, daily refresh and chart tests cover the new path.
+
+- Added explicit composer commands to Public Roo with a conversation-free payload,
+  verified award recipients and duplicate suppression. The internal mention and
+  Chat award suites passed with synthetic accounts.
