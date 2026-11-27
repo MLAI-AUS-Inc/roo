@@ -106,6 +106,7 @@ provider's rate limit. These remain explicit source dependencies, not zero usage
 
 ```text
 @Roo show Mark Ghiasy's used hours minus purchased hours as a chart
+@Roo show a burndown of all Mark Ghiasy's projects and the hours that haven't been paid yet
 @Roo show my project-to-date hours used and paid-hour credits
 @Roo chart Mark Ghiasy's used hours and purchased hours for the last three months
 @Roo give me the detailed hours and payments behind that balance chart
@@ -121,7 +122,10 @@ prior period and client, independently of hours-only requests.
 
 Reports select one client at a time. `client=all` is rejected. The summary includes
 actual receipt dates and amounts with purchased-hour credits, client invoices and
-their payment status, used and purchased hours and the running hour balance.
+their payment status, each project in the verified scope and the running hour
+balance. Verified paid-hour credits apply across the client. Project rows show
+recorded work, and projects without supported hours in a partial report show
+that hours are unavailable.
 Detailed reports add the event ledger, client invoice list, contractor invoice
 hour allocations and work-date assumptions.
 
@@ -142,11 +146,10 @@ access. A name, email, model parameter or new snapshot record cannot create a
 grant. An unknown identity, changed project scope, changed source, or stale source
 blocks delivery. Delivery is private to the verified requester.
 
-Mark's permitted work hours cover `[Studio] Master App`, `[Studio] Aaron AI`,
-`[Studio] Project Acquire` and `[Studio] Project Ironman`. Shared package receipts
-may fund work beyond these four projects. The report must disclose that scope
-difference rather than imply the chart is a complete package account. Work outside
-the permitted project scope is excluded and accounted for in invoice allocations.
+The private worker configuration determines each client's permitted projects.
+Shared package receipts may also fund work outside the reporting scope. The
+report discloses that scope difference. Invoice allocations account for work
+outside the permitted projects.
 
 ## Reviewed hours, payment and date rules
 

@@ -6,6 +6,11 @@ are labelled as such.
 
 ## 2026-11-27
 
+- Studio payment burndowns list all verified projects and show recorded work
+  awaiting paid-hour credits or the remaining credits. Unavailable project
+  hours are labelled in partial reports. Routing coverage includes requests
+  for unpaid hours across all of a client's projects.
+
 - Studio worker-breakdown requests render a monthly contributor chart from scoped
   report rows. A private worker watches new chart requests while finance and
   scheduled reports run. DM requests receive the chart in their originating

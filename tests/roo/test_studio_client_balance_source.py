@@ -193,7 +193,7 @@ def test_project_monthly_and_paid_credit_views_use_identical_work_source(setup):
     assert all(row['source'] == 'reviewed_invoice' for row in hours['rows'])
     assert all(month['allowance_units'] is None for month in hours['monthly'])
     assert 'not verified clock time' in summary(hours)
-    assert 'Provisional recorded-units' in balance['parts'][0]['content']
+    assert 'of recorded work awaiting paid credits' in balance['parts'][0]['content']
     setup.api.collect.assert_not_called()
     setup.api.verify.assert_not_called()
     setup.api.post_message.assert_not_called()

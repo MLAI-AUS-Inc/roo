@@ -322,7 +322,7 @@ class StudioReportService(TimesheetService):
                     from .studio_client_balance import build_balance_report, render_chart as balance_chart, summary as balance_summary
                     owner = finance_owners[0]
                     payment_report = build_balance_report(self.clients[owner], month_selector,
-                        snapshot['clients'][owner], request['requested_at'])
+                        snapshot['clients'][owner], request['requested_at'], project_names=self.config.projects)
                     report['payment_report'] = payment_report
                     parts.extend({'kind': 'message', 'content': chunk, 'status': 'pending'}
                                  for chunk in split_messages(balance_summary(payment_report)))
@@ -427,7 +427,8 @@ class StudioReportService(TimesheetService):
             actor, selector, freshness_at, max_age_days=self.balance_max_age_days,
             allow_historical=self.allow_historical_snapshot and not self.refresh)
         self.api.verify_recipient(actor, self.config.team)
-        report = build_balance_report(client, selector, dataset, request['requested_at'])
+        report = build_balance_report(client, selector, dataset, request['requested_at'],
+                                      project_names=self.config.projects)
         report.update(actor=actor, scope=scope, finance_owner=owner,
                       finance_digest=fingerprint(snapshot),
                       source_stale=validate_snapshot_age(dataset, freshness_at,
@@ -448,6 +449,8 @@ class StudioReportService(TimesheetService):
             from .studio_recorded_hours import build_recorded_report
             hours = build_recorded_report(self.config, client, selector, dataset, request['requested_at'])
             hours['source_stale'] = report['source_stale']
+            hours['unavailable_project_ids'] = [key for key, item in report['project_hours'].items()
+                                                if item['units'] is None]
             report['hours_report'] = hours
             parts.extend({'kind': 'message', 'content': chunk, 'status': 'pending'}
                          for chunk in split_messages(summary(hours)))
@@ -632,10 +635,16 @@ class StudioReportService(TimesheetService):
                                 if result.get('checks', {}).get('hours', {}).get('complete_through')]
                     review_note = (f" Reviewed hours currently cover through {timestamp(min(coverage)).astimezone(self.config.tz).date()}."
                                    if coverage else '')
+                    balance_note = ''
+                    if request.get('report_kind') == 'client_balance':
+                        from .studio_reports import _escape
+                        projects = ', '.join(_escape(self.config.projects[key]) for key in selected['project_ids'])
+                        balance_note = f'\nProjects in this burndown: {projects}. Hours awaiting paid credits are unavailable.'
                     saved = {'text': f'{title} waiting for: {missing}.{review_note} '
                         'Unavailable data has not been counted as zero. I’ll retry after the source’s retry time '
                         f'and send the charts when the checks pass, using {cutoff_note}. '
-                        'Missing hours or invoice allocations need Studio review; retrying alone cannot approve them.'}
+                        'Missing hours or invoice allocations need Studio review; retrying alone cannot approve them.'
+                        + balance_note}
                     notices.write(key, saved)
                 return False, saved['text']
         if request.get('report_kind') == 'client_balance':

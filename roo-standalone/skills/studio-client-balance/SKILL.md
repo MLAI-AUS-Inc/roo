@@ -3,10 +3,10 @@ name: studio-client-balance
 description: Studio hours used minus paid-hour credits.
 requires_auth: true
 routing:
-  use_when: Used vs purchased Studio hours; charts and follow-ups.
+  use_when: Used vs purchased or unpaid Studio hours; payment burndown and follow-ups.
   avoid_when: Hours-only, bank reconciliation, Roo Points.
   examples:
-    - {text: "Chart Mark Ghiasy's used vs purchased hours", action: summary}
+    - {text: "Show a burndown of all Mark Ghiasy's projects and how many hours are unpaid", action: summary}
     - {text: "Chart Devashi Desai's Study Nash hours used vs purchased", action: summary}
     - {text: "Detail the hours/payment chart", action: detailed}
   negative_examples:
@@ -44,7 +44,9 @@ is hours. Do not interpret it as money owed, profit or a contractor cost balance
 Invoice issue dates and unpaid invoice face values do not add hour credits.
 Contractor pay amounts and contractor rates never determine used hours or credits.
 
-Default to summary and month=all for project-to-date. For a named client, copy the
+Default to summary and month=all for project-to-date. Requests for unpaid work
+hours, or hours that haven't been paid yet, use this report. "All projects" for
+one client includes their full verified project list. For a named client, copy the
 requested name into client, such as client="Mark Ghiasy". Use self or omit client
 for the requester's own client. This report selects one client at a time;
 client="all" is unsupported.
