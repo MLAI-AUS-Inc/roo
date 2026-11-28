@@ -75,6 +75,9 @@ class Settings(BaseSettings):
     )
     
     # Slack
+    # Shared with mlai-backend; empty configuration disables Points Admin management.
+    POINTS_SUPER_ADMIN_SLACK_ID: str = ""
+    POINTS_SUPER_ADMIN_SLACK_TEAM_ID: str = ""
     SLACK_BOT_TOKEN: Optional[str] = None
     SLACK_SIGNING_SECRET: Optional[str] = None
     ROO_MANUAL_TIME_SLACK_WORKSPACE_ID: str = ""

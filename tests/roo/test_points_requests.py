@@ -1,4 +1,3 @@
-from roo.skills.executors.constants import POINTS_SUPER_ADMIN_SLACK_ID as skill_points_super_admin_slack_id
 from tests.roo.skill_test_support import patch_skill_dependency
 import asyncio
 import importlib
@@ -22,6 +21,7 @@ approval_module = importlib.import_module("roo.points_request_approval")
 slack_client_module = importlib.import_module("roo.slack_client")
 executor_module = importlib.import_module("roo.skills.executor")
 SkillExecutor = executor_module.SkillExecutor
+skill_points_super_admin_slack_id = "UDEVADMIN"
 
 
 def coworking_intent_store(db_path):
@@ -1160,6 +1160,7 @@ async def test_execute_mlai_points_prefers_roo_api_key(monkeypatch):
     }
 
 
+@pytest.mark.usefixtures("configured_points_manager")
 @pytest.mark.asyncio
 async def test_promote_points_admin_authorized(monkeypatch):
     executor = SkillExecutor()
@@ -1191,6 +1192,7 @@ async def test_promote_points_admin_authorized(monkeypatch):
     assert "<@UTARGET> is now a Roo Points Admin" in result
 
 
+@pytest.mark.usefixtures("configured_points_manager")
 @pytest.mark.asyncio
 async def test_promote_points_admin_denies_unauthorized_user(monkeypatch):
     executor = SkillExecutor()
@@ -1214,11 +1216,12 @@ async def test_promote_points_admin_denies_unauthorized_user(monkeypatch):
         skill=None,
     )
 
-    assert "only <@U05QPB483K9> can manage Points Admin access and weekly allowances" in result
+    assert "only the configured Points Admin manager in the authorized Slack workspace can manage Points Admin access and weekly allowances" in result
     assert client.promote_args is None
     assert ensured_users == []
 
 
+@pytest.mark.usefixtures("configured_points_manager")
 @pytest.mark.asyncio
 async def test_promote_points_admin_requires_exactly_one_tagged_user(monkeypatch):
     executor = SkillExecutor()
@@ -1251,6 +1254,7 @@ async def test_promote_points_admin_requires_exactly_one_tagged_user(monkeypatch
     assert "I found multiple mentions there" in multiple_result
 
 
+@pytest.mark.usefixtures("configured_points_manager")
 @pytest.mark.asyncio
 async def test_promote_points_admin_handles_already_admin_idempotently(monkeypatch):
     executor = SkillExecutor()
@@ -1280,6 +1284,7 @@ async def test_promote_points_admin_handles_already_admin_idempotently(monkeypat
     assert "<@UTARGET> is already a Roo Points Admin." == result
 
 
+@pytest.mark.usefixtures("configured_points_manager")
 @pytest.mark.asyncio
 async def test_revoke_points_admin_authorized(monkeypatch):
     executor = SkillExecutor()
@@ -1305,6 +1310,7 @@ async def test_revoke_points_admin_authorized(monkeypatch):
     assert "✅ Removed Roo Points Admin access from <@UTARGET>." == result
 
 
+@pytest.mark.usefixtures("configured_points_manager")
 @pytest.mark.asyncio
 async def test_revoke_points_admin_denies_unauthorized_user(monkeypatch):
     executor = SkillExecutor()
@@ -1323,10 +1329,11 @@ async def test_revoke_points_admin_denies_unauthorized_user(monkeypatch):
         skill=None,
     )
 
-    assert "only <@U05QPB483K9> can manage Points Admin access and weekly allowances" in result
+    assert "only the configured Points Admin manager in the authorized Slack workspace can manage Points Admin access and weekly allowances" in result
     assert client.revoke_args is None
 
 
+@pytest.mark.usefixtures("configured_points_manager")
 @pytest.mark.asyncio
 async def test_revoke_points_admin_handles_already_revoked_idempotently(monkeypatch):
     executor = SkillExecutor()
@@ -1352,6 +1359,7 @@ async def test_revoke_points_admin_handles_already_revoked_idempotently(monkeypa
     assert "<@UTARGET> already doesn't have Roo Points Admin access." == result
 
 
+@pytest.mark.usefixtures("configured_points_manager")
 @pytest.mark.asyncio
 async def test_set_points_admin_allowance_authorized(monkeypatch):
     executor = SkillExecutor()
@@ -1378,6 +1386,7 @@ async def test_set_points_admin_allowance_authorized(monkeypatch):
     assert "✅ Set <@UTARGET>'s weekly points allowance to 150 points." == result
 
 
+@pytest.mark.usefixtures("configured_points_manager")
 @pytest.mark.asyncio
 async def test_set_points_admin_allowance_denies_unauthorized_user(monkeypatch):
     executor = SkillExecutor()
@@ -1396,10 +1405,11 @@ async def test_set_points_admin_allowance_denies_unauthorized_user(monkeypatch):
         skill=None,
     )
 
-    assert "only <@U05QPB483K9> can manage Points Admin access and weekly allowances" in result
+    assert "only the configured Points Admin manager in the authorized Slack workspace can manage Points Admin access and weekly allowances" in result
     assert client.allowance_args is None
 
 
+@pytest.mark.usefixtures("configured_points_manager")
 @pytest.mark.asyncio
 async def test_set_points_admin_allowance_requires_numeric_positive_value(monkeypatch):
     executor = SkillExecutor()
@@ -1432,6 +1442,7 @@ async def test_set_points_admin_allowance_requires_numeric_positive_value(monkey
     assert "Weekly points allowance has to be a positive number." == invalid_result
 
 
+@pytest.mark.usefixtures("configured_points_manager")
 @pytest.mark.asyncio
 async def test_set_points_admin_allowance_surfaces_target_not_admin(monkeypatch):
     executor = SkillExecutor()
@@ -4508,3 +4519,18 @@ def test_coworking_checkin_targets_drop_display_names_from_model_params():
         "book Isaak in", {"target_users": ["Isaak Eriksson", "<@ULEE>"]}, bot_id="UROO",
     )
     assert targets == ["ULEE"]
+
+
+@pytest.fixture
+def configured_points_manager(monkeypatch):
+    from roo.backend_identity import BackendActorContext, use_backend_actor_context
+    from roo.skills.executors import mlai_points
+
+    monkeypatch.setattr(mlai_points, "get_settings", lambda: SimpleNamespace(
+        POINTS_SUPER_ADMIN_SLACK_ID=skill_points_super_admin_slack_id,
+        POINTS_SUPER_ADMIN_SLACK_TEAM_ID="TDEV",
+    ))
+    with use_backend_actor_context(BackendActorContext(
+        "TDEV", skill_points_super_admin_slack_id, "C123", "111.222", "Ev-test",
+    )):
+        yield

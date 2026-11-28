@@ -299,6 +299,9 @@ The capability is disabled by default and requires the matching backend feature.
 Manual awards to MLAI Chat members without Slack, verified mention context and
 safe retries are described in [the Chat points guide](docs/chat-points.md).
 
+See [Points Admin management](docs/points-admin-management.md) for environment-specific
+Slack authority, workspace validation and the backend-first rollout.
+
 ## Skills
 
 See [skill development and validation](docs/skill-development.md) for the

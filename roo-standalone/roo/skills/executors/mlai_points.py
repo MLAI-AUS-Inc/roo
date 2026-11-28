@@ -10,7 +10,7 @@ from ...clients.mlai_backend import MLAIBackendClient, MLAIBackendUnavailableErr
 from ...clients.mlai_backend import PointsAwardValidationError
 from uuid import NAMESPACE_URL, uuid4, uuid5
 from ...coworking_messages import NO_FOOD_REMINDER
-from .constants import POINTS_SUPER_ADMIN_SLACK_ID
+from .constants import can_manage_points_admins
 from .constants import ROO_TOPUP_PACKS
 from .constants import ROO_TOPUP_PACK_BY_POINTS
 from difflib import SequenceMatcher
@@ -1147,13 +1147,18 @@ class MlaiPointsExecutor(BackendErrors, PromptExecutor):
 
     def _is_points_super_admin(self, user_id: str) -> bool:
         """Return true when the requester can manage points admins and allowances."""
-        return user_id == POINTS_SUPER_ADMIN_SLACK_ID
+        actor = get_backend_actor_context()
+        return bool(
+            actor
+            and actor.acting_slack_user_id == user_id
+            and can_manage_points_admins(get_settings(), user_id, actor.slack_team_id)
+        )
 
 
     def _points_super_admin_denial(self) -> str:
         """Fixed denial response for restricted points super-admin actions."""
         return (
-            f"Sorry mate, only <@{POINTS_SUPER_ADMIN_SLACK_ID}> can manage "
+            "Sorry mate, only the configured Points Admin manager in the authorized Slack workspace can manage "
             "Points Admin access and weekly allowances. 🔒"
         )
 

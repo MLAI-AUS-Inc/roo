@@ -1,8 +1,21 @@
 """Stable constants shared with existing callers."""
 from __future__ import annotations
 from typing import Any
+import re
 
-POINTS_SUPER_ADMIN_SLACK_ID = "U05QPB483K9"
+
+def can_manage_points_admins(settings: Any, user_id: str, team_id: str) -> bool:
+    """Match one configured Slack identity; missing or malformed settings deny."""
+    expected_user = getattr(settings, "POINTS_SUPER_ADMIN_SLACK_ID", "")
+    expected_team = getattr(settings, "POINTS_SUPER_ADMIN_SLACK_TEAM_ID", "")
+    return bool(
+        isinstance(expected_user, str)
+        and isinstance(expected_team, str)
+        and re.fullmatch(r"[UW][A-Z0-9]+", expected_user)
+        and re.fullmatch(r"T[A-Z0-9]+", expected_team)
+        and user_id == expected_user
+        and team_id == expected_team
+    )
 
 
 FULL_POINTS_ADMIN_ROLES = {"admin", "committee", "portfolio_lead"}
