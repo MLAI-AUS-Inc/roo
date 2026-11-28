@@ -4184,12 +4184,8 @@ def _validated_case_id(value: Any, settings: Settings) -> int:
     return value
 
 
-@app.post("/api/mention")
-async def api_mention(
-    request: Request,
-    settings: Settings = Depends(get_settings),
-):
-    """Authenticated Public Roo entry point for trusted internal services."""
+def require_internal_public_roo(request: Request, settings: Settings = Depends(get_settings)):
+    """Authenticate internal requests to Public Roo."""
     if settings.ROO_SURFACE != "public" or not settings.INTERNAL_MENTION_API_KEY:
         raise HTTPException(status_code=404, detail="Not found")
     authorization = request.headers.get("Authorization", "")
@@ -4200,6 +4196,27 @@ async def api_mention(
             detail="Invalid internal mention credentials",
         )
 
+    return settings
+
+
+@app.post("/api/chat-command")
+async def private_chat_command(
+    request: Request, settings: Settings = Depends(require_internal_public_roo)
+):
+    """Run a single member-authored command and return the reply to the composer."""
+    from .internal_mentions import handle_private_command
+
+    return await handle_private_command(
+        await request.json(),
+        get_agent(),
+        get_slack_receipt_store(str(settings.SLACK_RECEIPTS_DB_PATH)),
+    )
+
+
+@app.post("/api/mention")
+async def api_mention(request: Request, settings: Settings = Depends(get_settings)):
+    """Authenticated Public Roo entry point for trusted internal services."""
+    require_internal_public_roo(request, settings)
     from .internal_mentions import handle_internal_mention
 
     payload = await request.json()
