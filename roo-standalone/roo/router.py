@@ -12,17 +12,21 @@ Trust boundary: the system prompt contains only bot-generated metadata
 (rules, channel, date, thread hint). Everything user-controlled (thread
 history, file names, the message itself) goes in the user role.
 
-Failure posture: invalid/unparsable tool calls are retried once with the
-validation error appended; a second failure (or any transport error) returns
-RouteDecision(skill=None, source="error") and the caller falls back to v1
-behaviour / general chat. The fast path and delegation parsing stay in front
-of this router permanently.
+Failure posture: invalid/unparsable tool calls are retried once with a
+fixed validation reminder appended; a second failure (or any transport error) returns
+RouteDecision(skill=None, source="error") and the caller surfaces an
+unavailable response subject to its response-suppression policy. The fast
+path and delegation parsing stay in front of this router permanently.
 """
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
+
+import httpx
+from openai import APIConnectionError, APITimeoutError
 
 from .llm import ToolCallParseError, chat_tools
 from .skills.loader import Skill
@@ -56,13 +60,51 @@ class RouteDecision:
     skill: Optional[str]                  # None => no skill (chat / clarification / error)
     action: Optional[str] = None
     params: Dict[str, Any] = field(default_factory=dict)
-    reason: str = ""
+    reason: str = ""                     # bounded failure/chat code; not provider text
     source: str = "router"                # "router" | "error"
     clarification: Optional[str] = None   # set when the router asks a question
 
     @property
     def is_clarification(self) -> bool:
         return self.clarification is not None
+
+
+# Public failure contract: never put exception text or provider metadata in reason.
+ROUTER_ERROR_CODES = frozenset({
+    "provider_timeout", "provider_transport_error", "invalid_tool_calls", "unexpected_failure",
+})
+CHAT_REASON_CODES = ("general_chat", "unsupported_capability")
+
+
+def safe_router_error_code(value: Any) -> str:
+    return value if isinstance(value, str) and value in ROUTER_ERROR_CODES else "unexpected_failure"
+
+
+def safe_chat_reason(value: Any) -> str:
+    return value if isinstance(value, str) and value in CHAT_REASON_CODES else "general_chat"
+
+
+def classify_router_error(exc: Exception) -> str:
+    """OpenAI/Gemini-compatible SDK and HTTPX transport types; never match text.
+
+    SDK timeouts inherit from connection errors, so timeout checks come first.
+    Other SDK errors (including authentication/status errors) stay deliberately
+    opaque. Anthropic currently has no router tool-calling implementation.
+    """
+    if isinstance(exc, (APITimeoutError, httpx.TimeoutException, TimeoutError)):
+        return "provider_timeout"
+    if isinstance(exc, (APIConnectionError, httpx.TransportError, ConnectionError)):
+        return "provider_transport_error"
+    return "unexpected_failure"
+
+
+def router_error_decision(reason_code: str, *, attempts: int = 0) -> RouteDecision:
+    """Log only allowlisted diagnostics and discard the original exception."""
+    code = safe_router_error_code(reason_code)
+    print("ROUTER_FAILURE " + json.dumps({
+        "event": "router_failure", "reason_code": code, "attempts": attempts,
+    }))
+    return RouteDecision(skill=None, source="error", reason=code)
 
 
 def skill_available_in_channel(skill: Skill, channel_name: Optional[str]) -> bool:
@@ -173,9 +215,10 @@ def _chat_tool() -> Dict[str, Any]:
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "reason": {
+                    "reason_code": {
                         "type": "string",
-                        "description": "One short phrase: why no skill applies.",
+                        "enum": list(CHAT_REASON_CODES),
+                        "description": "Why no skill applies; a hint, never execution authority.",
                     }
                 },
                 "required": [],
@@ -288,12 +331,10 @@ def _validate_tool_call(
     name: str,
     arguments: Dict[str, Any],
     skills_by_name: Dict[str, Skill],
-    *,
-    strict_action: bool,
 ) -> RouteDecision:
     """Turn a raw tool call into a RouteDecision; raise ValueError to trigger a retry."""
     if name == RESPOND_IN_CHAT:
-        return RouteDecision(skill=None, reason=str(arguments.get("reason") or ""))
+        return RouteDecision(skill=None, reason=safe_chat_reason(arguments.get("reason_code")))
 
     if name == ASK_CLARIFICATION:
         question = str(arguments.get("question") or "").strip()
@@ -312,11 +353,9 @@ def _validate_tool_call(
     action_names = skill.action_names()
     if action_names:
         if action not in action_names:
-            if strict_action:
-                raise ValueError(
-                    f"invalid action {action!r} for {skill.name}; valid: {action_names}"
-                )
-            action = None  # degrade: keep the skill, drop the bad action
+            raise ValueError(
+                f"invalid action {action!r} for {skill.name}; valid: {action_names}"
+            )
     else:
         action = None
 
@@ -349,60 +388,65 @@ async def route(
     model: Optional[str] = None,
     reasoning_effort: str = "medium",
 ) -> RouteDecision:
-    """One routing pass. Never raises — errors come back as source="error"."""
-    tools, skills_by_name = build_tools(skills, channel_name)
+    """Return ordinary failures as source="error"; cancellation propagates."""
+    # This boundary also contains catalog/context preparation failures.
+    try:
+        tools, skills_by_name = build_tools(skills, channel_name)
 
-    context = _context_lines(
-        channel_name=channel_name,
-        skills_by_name=skills_by_name,
-        thread_hint=thread_hint,
-        current_date=_current_date_string(),
-    )
-    system = ROUTER_SYSTEM_PROMPT + ("\n\n" + context if context else "")
-    messages = [
-        {"role": "system", "content": system},
-        {"role": "user", "content": _user_content(text, thread_history, file_names)},
-    ]
+        context = _context_lines(
+            channel_name=channel_name,
+            skills_by_name=skills_by_name,
+            thread_hint=thread_hint,
+            current_date=_current_date_string(),
+        )
+        system = ROUTER_SYSTEM_PROMPT + ("\n\n" + context if context else "")
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": _user_content(text, thread_history, file_names)},
+        ]
 
-    if model is None:
-        try:
-            from .config import get_settings
+        if model is None:
+            try:
+                from .config import get_settings
 
-            model = get_settings().ROUTER_MODEL
-        except Exception:
-            model = None
+                model = get_settings().ROUTER_MODEL
+            except Exception:
+                model = None
 
-    kwargs: Dict[str, Any] = {"tool_choice": "required", "reasoning_effort": reasoning_effort}
-    if model:
-        kwargs["model"] = model
+        kwargs: Dict[str, Any] = {"tool_choice": "required", "reasoning_effort": reasoning_effort}
+        if model:
+            kwargs["model"] = model
 
-    last_error: Optional[Exception] = None
+    except Exception:
+        return router_error_decision("unexpected_failure")
+
     for attempt in (1, 2):
         try:
             call = await chat_tools(messages, tools, **kwargs)
-            return _validate_tool_call(
-                call.name,
-                call.arguments,
-                skills_by_name,
-                strict_action=(attempt == 1),
-            )
-        except (ToolCallParseError, ValueError) as exc:
-            last_error = exc
-            messages = messages + [
-                {
-                    "role": "system",
-                    "content": (
-                        f"Your previous tool call was invalid: {exc}. "
-                        "Answer again with one valid tool call."
-                    ),
-                }
-            ]
-        except Exception as exc:  # transport/provider errors: no retry loop here
-            print(f"❌ Router v2 call failed: {exc}")
-            return RouteDecision(skill=None, source="error", reason=str(exc))
+        except ToolCallParseError:
+            pass  # A malformed provider response gets the same single repair attempt.
+        except Exception as exc:
+            return router_error_decision(classify_router_error(exc), attempts=attempt)
+        else:
+            try:
+                return _validate_tool_call(call.name, call.arguments, skills_by_name)
+            except ValueError:
+                pass
+            except Exception:
+                return router_error_decision("unexpected_failure", attempts=attempt)
 
-    print(f"❌ Router v2 produced no valid tool call after retry: {last_error}")
-    return RouteDecision(skill=None, source="error", reason=str(last_error))
+        # Validation details can contain model text. Never promote them to a
+        # system instruction or copy them into logs/returned data.
+        messages = messages + [{
+            "role": "system",
+            "content": (
+                "Your previous tool call was invalid. Select one offered tool "
+                "with a valid action and object arguments. "
+                "Answer again with one valid tool call."
+            ),
+        }]
+
+    return router_error_decision("invalid_tool_calls", attempts=2)
 
 
 def lint_catalog(skills: List[Skill]) -> List[str]:

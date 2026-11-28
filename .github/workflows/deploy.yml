@@ -127,6 +127,10 @@ jobs:
           # it in a separate process to keep the security suite isolated.
           python -m pytest ../tests/roo/test_start_here_introductions.py -q
           python -m pytest ../tests/roo/test_agent_routing.py -q
+          # Router failure contracts need real SDK imports and isolated agent doubles.
+          python -m pytest ../tests/roo/test_router_v2.py -q
+          python -m pytest ../tests/roo/test_agent_router_v2_wiring.py -q
+          python -m pytest ../tests/roo/test_contextual_addressing.py -q
           python -m pytest ../tests/roo/test_event_discounts.py -q
           python -m pytest ../tests/roo/test_routing_eval_gate.py -q
           python -m compileall -q roo bridge

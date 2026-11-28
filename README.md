@@ -309,6 +309,31 @@ The general chat fallback system prompt lives in
 Roo fills `{skill_list}` and `{history_context}` at request time. Preserve these
 placeholders when editing; escape any other literal braces as `{{` and `}}`.
 
+When response policy allows an outage reply, router failures return
+`data.outcome="unavailable"` with one safe `data.reason_code`: `provider_timeout`, `provider_transport_error`,
+`invalid_tool_calls` (two failed validation attempts), or `unexpected_failure`.
+SDK/HTTPX exception types determine the category; exception messages, bodies,
+request details and provider metadata are discarded. Routine `ROUTER_FAILURE`
+logs contain the event tag, code and attempt count (`0` for preparation/boundary
+failures). Disallowed implicit replies retain the existing suppressed-response
+contract.
+
+Valid `respond_in_chat` calls may supply `reason_code="general_chat"` or
+`"unsupported_capability"`. Missing, unknown and non-string codes become
+`general_chat`; legacy free-text reasons are ignored. The capability hint adds
+fixed renderer guidance and `data.fallback_reason="unsupported_capability"`,
+without marking the task unavailable or enabling any skill. Ordinary chat keeps
+its existing `data=None` contract. The hint cannot bypass Admin routing or
+implicit-response suppression.
+
+This is an interim routing hint, not a verified `unsupported` TaskOutcome.
+A deterministic task disposition needs an agreed capability/applicability
+decision and an F02-compatible outcome contract to distinguish capability limits,
+permissions, missing input and live availability; an outcome enum alone cannot
+verify that distinction. General chat rendering can itself fail and retains its existing
+failure reply. Durable task identity and authorised retry semantics remain
+separate, unfinished F03 work; these error codes do not provide them.
+
 Runtime skills are directories under `roo-standalone/skills`. Inspect the
 selected skill package and its tests before changing routing or permissions.
 The similarly named Python modules under `roo-standalone/roo/skills` implement

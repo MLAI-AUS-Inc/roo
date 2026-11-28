@@ -21,6 +21,30 @@ are labelled as such.
 
 ## 2026-11-26
 
+- F03 Phase 2 returns four allowlisted failure codes based on SDK/HTTPX
+  exception types. Router logs, repair prompts and fallback error logs discard
+  exception details. A bounded chat hint reaches rendering without treating a
+  model-selected capability limit as a verified TaskOutcome or provider outage.
+  Phase 1's strict validation and response suppression remain intact. Added
+  isolated CI invocations and documented the interim contract in README.
+  Regressions reproduced 47 expected failures against the hash-verified Phase 1
+  source; two boundary controls passed. Final isolated checks: 39 router,
+  46 agent wiring, 15 agent plumbing, 19 addressing, 6 Admin routing, 4 catalog,
+  8 LLM adapter and one affected caller test (138 passed). Dummy credentials,
+  disabled dotenv and blocked service connections; no service or POSIX-lock
+  calls. Validation used Windows Python 3.14 and the supported OpenAI 2.54 SDK.
+  Python 3.11/3.12 and full Linux CI remain to validate. Durable task identity,
+  authorised retry and F02's verified unsupported outcome are still outstanding.
+
+- F03 Phase 1 rejects unknown or missing router actions on both attempts,
+  and applies the existing implicit-chat suppression guard to router failures.
+  New regressions first reproduced six expected failures. Offline checks passed:
+  15 router, 21 agent wiring, 15 agent plumbing, 19 addressing and one affected
+  validator-caller test (71 total), with dummy credentials and no service
+  connections. Windows Python 3.14 needed an import-only POSIX locking stand-in;
+  no locking calls occurred. F02, durable retry identity, safe failure codes
+  and fallback-reason rendering remain outside this phase.
+
 - Audited draft Roo PR #341 against the contributor report waiting notice.
   Its 59 contributor, refresh and daily-worker tests passed. A separate
   offline queue check reproduced the three simultaneous review gaps and zero
