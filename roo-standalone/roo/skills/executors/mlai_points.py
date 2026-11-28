@@ -1486,6 +1486,22 @@ class MlaiPointsExecutor(BackendErrors, PromptExecutor):
         return "I couldn't confirm whether this award went through.", True
 
 
+    @staticmethod
+    def _post_points_dm_notice(
+        *, channel_id: Optional[str], thread_ts: Optional[str], text: str,
+    ) -> None:
+        """Announce private delivery in the request thread when available."""
+        if not channel_id or not channel_id.startswith(("C", "G")) or not thread_ts:
+            return
+        try:
+            post_message(channel=channel_id, thread_ts=thread_ts, text=text)
+        except Exception as exc:
+            # A failed acknowledgement must not prevent the DM.
+            print(
+                "⚠️ Points thread acknowledgement failed "
+                f"exc_type={exc.__class__.__name__}"
+            )
+
     def _deliver_personal_points_message(
         self,
         *,
@@ -1495,6 +1511,7 @@ class MlaiPointsExecutor(BackendErrors, PromptExecutor):
         thread_ts: Optional[str],
         private_message: str,
         action: str,
+        thread_ack: Optional[str] = None,
         public_message: Optional[str] = None,
         private_ack: str = "I've sent your Roo Points details privately.",
         private_failure_ack: str = (
@@ -1551,6 +1568,11 @@ class MlaiPointsExecutor(BackendErrors, PromptExecutor):
                 )
                 dm_delivered = False
         result_data["dm_delivered"] = dm_delivered
+
+        if dm_delivered and thread_ack:
+            self._post_points_dm_notice(
+                channel_id=channel_id, thread_ts=thread_ts, text=thread_ack,
+            )
 
         if public_message is not None:
             if not dm_delivered and recipient_user_id == requester_user_id:
@@ -3632,6 +3654,7 @@ class MlaiPointsExecutor(BackendErrors, PromptExecutor):
                 thread_ts=thread_ts,
                 private_message=message,
                 action="balance",
+                thread_ack="I'll DM your Roo Points balance to you.",
                 private_ack="I've sent your Roo Points summary privately.",
             )
 
@@ -3950,6 +3973,7 @@ class MlaiPointsExecutor(BackendErrors, PromptExecutor):
                 thread_ts=thread_ts,
                 private_message=message,
                 action="history",
+                thread_ack="I'll DM your Roo Points history to you.",
                 private_ack="I've sent your Roo Points history privately.",
             )
         
@@ -4357,6 +4381,7 @@ class MlaiPointsExecutor(BackendErrors, PromptExecutor):
                 thread_ts=thread_ts,
                 private_message=message,
                 action="list_rewards",
+                thread_ack="I'll DM your personalised Roo Rewards list to you.",
                 private_ack="I've sent your personalised Roo Rewards list privately.",
             )
         
